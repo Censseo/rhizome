@@ -1,14 +1,15 @@
 package rhizome.core.common;
 
-public class PufferfishConstants {
+/**
+ * Sizing constants for the Pufferfish2 encoded-hash buffer, matching the
+ * reference C macros. Kept for callers that need the buffer length; the actual
+ * algorithm lives in {@link Pufferfish2}.
+ */
+public final class PufferfishConstants {
 
-    private static final int PF_SALTSPACE = 16; // Just an example value.
-    private static final int PF_DIGEST_LENGTH = 32; // Example value for a 256-bit hash.
+    public static final int PF_DIGEST_LENGTH = Pufferfish2.PF_DIGEST_LENGTH;
+    public static final int PF_SALTSPACE = Pufferfish2.PF_SALTSPACE;
+    public static final int PF_HASHSPACE = Pufferfish2.PF_HASHSPACE;
 
-    public static final int PF_HASHSPACE = PF_SALTSPACE + bin2enc_len(PF_DIGEST_LENGTH);
-
-
-    private static int bin2enc_len(int binaryLength) {
-           return (int) Math.ceil(binaryLength * 4 / 3.0); // This is just an example for base64 encoding length.
-    }
+    private PufferfishConstants() {}
 }
