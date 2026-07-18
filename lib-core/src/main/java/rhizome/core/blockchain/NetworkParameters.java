@@ -47,6 +47,13 @@ public final class NetworkParameters {
     private final int minDifficulty;
     private final int maxDifficulty;
 
+    // --- Block validity bounds ---
+    /** Max accepted drift of a block timestamp past the local clock (seconds). */
+    private final int maxFutureBlockTimeSec;
+    /** Window (in blocks) for the median-time-past lower bound. */
+    private final int medianTimeWindow;
+    private final int maxTransactionsPerBlock;
+
     // --- Economics (all amounts are integers scaled by decimalScaleFactor) ---
     private final long decimalScaleFactor;
     /** Reward at height 0, already scaled (e.g. 50 * scale). */
@@ -94,6 +101,9 @@ public final class NetworkParameters {
             .difficultyLookback(100)
             .minDifficulty(6)
             .maxDifficulty(255)
+            .maxFutureBlockTimeSec(120)
+            .medianTimeWindow(11)
+            .maxTransactionsPerBlock(25_000)
             .decimalScaleFactor(scale)
             .initialReward(50L * scale)
             .rewardEpochBlocks(666_666L)

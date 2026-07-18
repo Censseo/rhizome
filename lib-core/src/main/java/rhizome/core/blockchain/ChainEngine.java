@@ -1,0 +1,302 @@
+package rhizome.core.blockchain;
+
+import java.math.BigInteger;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.LongSupplier;
+
+import rhizome.core.block.Block;
+import rhizome.core.block.BlockImpl;
+import rhizome.core.crypto.SHA256Hash;
+import rhizome.core.ledger.Ledger;
+import rhizome.core.ledger.LedgerSnapshot;
+import rhizome.core.mempool.ExecutionStatus;
+import rhizome.core.merkletree.MerkleTree;
+import rhizome.core.transaction.Transaction;
+import rhizome.core.transaction.TransactionImpl;
+
+import static rhizome.core.mempool.ExecutionStatus.*;
+
+/**
+ * The chain engine: accepts blocks, maintains the ledger, account nonces,
+ * cumulative work and difficulty, and can pop blocks for reorgs.
+ *
+ * <p>Validation order for {@link #addBlock} (cheap and structural first, the
+ * expensive proof-of-work last so invalid blocks cannot burn CPU — a Pandanite
+ * DoS lesson):
+ * <ol>
+ *   <li>id continuity, transaction count</li>
+ *   <li>lastBlockHash chains to the tip (checked from block 2 — Pandanite
+ *       skipped this for its first ~8000 blocks; issue #2's fork disaster)</li>
+ *   <li>timestamp above median-time-past, not too far past the local clock</li>
+ *   <li>difficulty equals the value recomputed from chain history (never a
+ *       stored field that can go stale after a pop)</li>
+ *   <li>merkle root matches the transactions</li>
+ *   <li>account nonces strictly sequential per sender</li>
+ *   <li>proof-of-work under the network's algorithm</li>
+ *   <li>{@link Executor} applies transactions transactionally</li>
+ * </ol>
+ *
+ * <p>All public methods are serialised on a single lock: one writer at a time,
+ * and reads see consistent state (Pandanite's unlocked getters produced torn
+ * reads of its Bigint total work).
+ */
+public final class ChainEngine implements Blockchain {
+
+    private final NetworkParameters params;
+    private final Ledger ledger;
+    private final ChainStore store;
+    private final LongSupplier nowMillis;
+    private final ReentrantLock lock = new ReentrantLock();
+
+    /** Next expected account nonce per sender; rebuilt on init, updated on add/pop. */
+    private final Map<rhizome.core.ledger.PublicAddress, Long> nextNonce = new HashMap<>();
+
+    private BigInteger totalWork = BigInteger.ZERO;
+    private int currentDifficulty;
+
+    private ChainEngine(NetworkParameters params, Ledger ledger, ChainStore store, LongSupplier nowMillis) {
+        this.params = params;
+        this.ledger = ledger;
+        this.store = store;
+        this.nowMillis = nowMillis;
+    }
+
+    /**
+     * Boots a chain: on an empty store, verifies the snapshot against
+     * {@code expectedGenesisHash} (null for a brand-new network), seeds the
+     * ledger and appends genesis. On a non-empty store, verifies the stored
+     * genesis matches and rebuilds derived state (difficulty, work, nonces).
+     */
+    public static ChainEngine init(NetworkParameters params, Ledger ledger, ChainStore store,
+                                   LedgerSnapshot snapshot, SHA256Hash expectedGenesisHash,
+                                   LongSupplier nowMillis) {
+        ChainEngine engine = new ChainEngine(params, ledger, store, nowMillis);
+        if (store.height() == 0) {
+            Block genesis = GenesisBlock.initChain(ledger, params, snapshot, expectedGenesisHash);
+            store.append(genesis);
+        } else if (!GenesisBlock.matches(store.blockAt(GenesisBlock.GENESIS_ID), params, snapshot)) {
+            throw new IllegalStateException("Stored genesis does not match network parameters and snapshot");
+        }
+        engine.rebuildDerivedState();
+        return engine;
+    }
+
+    public ExecutionStatus addBlock(Block block) {
+        lock.lock();
+        try {
+            var b = (BlockImpl) block;
+            long height = store.height();
+
+            if (b.id() != height + 1) {
+                return INVALID_BLOCK_ID;
+            }
+            if (block.transactions().size() > params.maxTransactionsPerBlock()) {
+                return INVALID_TRANSACTION_COUNT;
+            }
+            if (!b.lastBlockHash().equals(store.tip().hash())) {
+                return INVALID_LASTBLOCK_HASH;
+            }
+            if (b.timestamp() <= medianTimePast()) {
+                return BLOCK_TIMESTAMP_TOO_OLD;
+            }
+            if (b.timestamp() > nowMillis.getAsLong() + params.maxFutureBlockTimeSec() * 1000L) {
+                return BLOCK_TIMESTAMP_IN_FUTURE;
+            }
+            if (b.difficulty() != currentDifficulty) {
+                return INVALID_DIFFICULTY;
+            }
+            if (!computeMerkleRoot(block).equals(b.merkleRoot())) {
+                return INVALID_MERKLE_ROOT;
+            }
+            ExecutionStatus nonceCheck = checkAccountNonces(block);
+            if (nonceCheck != SUCCESS) {
+                return nonceCheck;
+            }
+            if (!block.verifyNonce(params.powAlgorithm())) {
+                return INVALID_NONCE;
+            }
+
+            ExecutionStatus status = Executor.executeBlock(block, ledger, store::hasTransaction, params);
+            if (status != SUCCESS) {
+                return status;
+            }
+
+            store.append(block);
+            commitAccountNonces(block);
+            totalWork = totalWork.add(BigInteger.TWO.pow(b.difficulty()));
+            currentDifficulty = computeDifficultyFromChain();
+            return SUCCESS;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** Removes the tip block (never genesis), reverting ledger and nonces. */
+    public void popBlock() {
+        lock.lock();
+        try {
+            long height = store.height();
+            if (height <= GenesisBlock.GENESIS_ID) {
+                throw new IllegalStateException("Cannot pop genesis");
+            }
+            Block tip = store.tip();
+            Executor.rollbackBlock(tip, ledger);
+            store.pop();
+            revertAccountNonces(tip);
+            totalWork = totalWork.subtract(BigInteger.TWO.pow(((BlockImpl) tip).difficulty()));
+            currentDifficulty = computeDifficultyFromChain();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    public long height() {
+        lock.lock();
+        try {
+            return store.height();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    public SHA256Hash tipHash() {
+        lock.lock();
+        try {
+            return store.tip().hash();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    public int difficulty() {
+        lock.lock();
+        try {
+            return currentDifficulty;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    public BigInteger totalWork() {
+        lock.lock();
+        try {
+            return totalWork;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** Next expected account nonce for a sender (0 for a fresh account). */
+    public long nextNonce(rhizome.core.ledger.PublicAddress sender) {
+        lock.lock();
+        try {
+            return nextNonce.getOrDefault(sender, 0L);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    public NetworkParameters params() {
+        return params;
+    }
+
+    // ---- derived state ----
+
+    private void rebuildDerivedState() {
+        totalWork = BigInteger.ZERO;
+        nextNonce.clear();
+        long height = store.height();
+        for (long h = GenesisBlock.GENESIS_ID + 1; h <= height; h++) {
+            Block block = store.blockAt(h);
+            commitAccountNonces(block);
+            totalWork = totalWork.add(BigInteger.TWO.pow(((BlockImpl) block).difficulty()));
+        }
+        currentDifficulty = computeDifficultyFromChain();
+    }
+
+    /**
+     * Recomputes the current difficulty purely from stored block timestamps:
+     * genesis difficulty stepped through every completed retarget window. Being
+     * derived (never cached across mutations without recompute) it cannot go
+     * stale after a pop — the flaw behind Pandanite's hardcoded 536100–536200
+     * difficulty exception.
+     */
+    private int computeDifficultyFromChain() {
+        int lookback = params.difficultyLookback();
+        int difficulty = params.genesisDifficulty();
+        long height = store.height();
+        for (long boundary = lookback; boundary <= height; boundary += lookback) {
+            long windowStart = boundary - lookback + 1;
+            long observedMs = ((BlockImpl) store.blockAt(boundary)).timestamp()
+                - ((BlockImpl) store.blockAt(windowStart)).timestamp();
+            difficulty = DifficultyAdjustment.nextDifficulty(
+                params, difficulty, lookback - 1L, observedMs / 1000);
+        }
+        return difficulty;
+    }
+
+    private long medianTimePast() {
+        long height = store.height();
+        int window = (int) Math.min(params.medianTimeWindow(), height);
+        List<Long> timestamps = new ArrayList<>(window);
+        for (long h = height - window + 1; h <= height; h++) {
+            timestamps.add(((BlockImpl) store.blockAt(h)).timestamp());
+        }
+        timestamps.sort(Long::compare);
+        return timestamps.get(timestamps.size() / 2);
+    }
+
+    // ---- account nonces ----
+
+    private ExecutionStatus checkAccountNonces(Block block) {
+        Map<rhizome.core.ledger.PublicAddress, Long> expected = new HashMap<>();
+        for (Transaction t : block.transactions()) {
+            var tx = (TransactionImpl) t;
+            if (tx.isTransactionFee()) {
+                continue;
+            }
+            long want = expected.computeIfAbsent(tx.from(), a -> nextNonce.getOrDefault(a, 0L));
+            if (tx.nonce() != want) {
+                return INVALID_TRANSACTION_NONCE;
+            }
+            expected.put(tx.from(), want + 1);
+        }
+        return SUCCESS;
+    }
+
+    private void commitAccountNonces(Block block) {
+        for (Transaction t : block.transactions()) {
+            var tx = (TransactionImpl) t;
+            if (!tx.isTransactionFee()) {
+                nextNonce.merge(tx.from(), tx.nonce() + 1, Math::max);
+            }
+        }
+    }
+
+    private void revertAccountNonces(Block block) {
+        Map<rhizome.core.ledger.PublicAddress, Long> lowest = new HashMap<>();
+        for (Transaction t : block.transactions()) {
+            var tx = (TransactionImpl) t;
+            if (!tx.isTransactionFee()) {
+                lowest.merge(tx.from(), tx.nonce(), Math::min);
+            }
+        }
+        lowest.forEach((sender, nonce) -> {
+            if (nonce == 0) {
+                nextNonce.remove(sender);
+            } else {
+                nextNonce.put(sender, nonce);
+            }
+        });
+    }
+
+    private static SHA256Hash computeMerkleRoot(Block block) {
+        var tree = new MerkleTree();
+        tree.setItems(block.transactions());
+        return tree.getRootHash();
+    }
+}

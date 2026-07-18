@@ -167,4 +167,32 @@ public final class Executor {
             }
         }
     }
+
+    /**
+     * Undoes a previously applied block: the exact inverse of
+     * {@link #executeBlock}'s mutations, in reverse order. The block must be the
+     * most recently applied one (used by {@code popBlock} during reorgs).
+     */
+    public static void rollbackBlock(Block block, Ledger ledger) {
+        List<Transaction> transactions = block.transactions();
+        Transaction coinbase = transactions.stream()
+            .filter(t -> ((TransactionImpl) t).isTransactionFee())
+            .findFirst()
+            .orElseThrow(() -> new IllegalArgumentException("Block has no coinbase"));
+        PublicAddress miner = ((TransactionImpl) coinbase).to();
+
+        ledger.revertDeposit(miner, ((TransactionImpl) coinbase).amount());
+        for (int i = transactions.size() - 1; i >= 0; i--) {
+            var tx = (TransactionImpl) transactions.get(i);
+            if (tx.isTransactionFee()) {
+                continue;
+            }
+            long fee = tx.fee().amount();
+            if (fee > 0) {
+                ledger.revertDeposit(miner, new TransactionAmount(fee));
+            }
+            ledger.revertDeposit(tx.to(), tx.amount());
+            ledger.revertSend(tx.from(), new TransactionAmount(tx.amount().amount() + fee));
+        }
+    }
 }
