@@ -49,6 +49,17 @@ public final class RhizomeNode implements AutoCloseable {
     private PeerBroadcaster broadcaster;
     private PeerRegistry registry;
     private PeerDiscovery discovery;
+    private PeerBanList banList;
+
+    // Ban-score costs per sync outcome. Serving an invalid chain (bad PoW, broken
+    // continuity, claimed-heavy-proved-light) is an unambiguous protocol violation
+    // and bans on the first strike; a too-deep reorg attempt is suspicious but can
+    // be a legitimately forked peer; a genesis mismatch is usually just a
+    // misconfigured wrong-network node.
+    private static final int BAN_THRESHOLD = 100;
+    private static final int PENALTY_INVALID = 100;
+    private static final int PENALTY_REORG_TOO_DEEP = 25;
+    private static final int PENALTY_INCOMPATIBLE = 10;
 
     public RhizomeNode(NodeConfig config) {
         this.config = config;
@@ -68,7 +79,8 @@ public final class RhizomeNode implements AutoCloseable {
 
         // Every node keeps a live peer set (seeded from config), serves /peers and
         // accepts announcements, so the network can self-organise from a few seeds.
-        registry = new PeerRegistry(config.selfUrl(), 128);
+        banList = new PeerBanList(BAN_THRESHOLD, 60 * 60 * 1000L, 4096);
+        registry = new PeerRegistry(config.selfUrl(), 128, banList);
         registry.addAll(config.peers());
         service.setPeers(registry);
 
@@ -136,16 +148,34 @@ public final class RhizomeNode implements AutoCloseable {
     public void syncRound() {
         var synchronizer = new ChainSynchronizer(engine);
         for (String peerUrl : registry.snapshot()) {
+            if (registry.isBanned(peerUrl)) {
+                continue;
+            }
             try {
                 ChainSynchronizer.Result result = synchronizer.syncFrom(new HttpPeerSource(peerUrl));
-                if (result == ChainSynchronizer.Result.EXTENDED || result == ChainSynchronizer.Result.REORGED) {
-                    log.info("Synced from {}: {} -> height {}", peerUrl, result, engine.height());
+                switch (result) {
+                    case EXTENDED, REORGED ->
+                        log.info("Synced from {}: {} -> height {}", peerUrl, result, engine.height());
+                    case PEER_INVALID -> penalize(peerUrl, PENALTY_INVALID, "served an invalid chain");
+                    case REORG_TOO_DEEP -> penalize(peerUrl, PENALTY_REORG_TOO_DEEP, "reorg past finality");
+                    case INCOMPATIBLE -> penalize(peerUrl, PENALTY_INCOMPATIBLE, "wrong network / genesis");
+                    case NO_CHANGE -> { /* healthy, nothing to do */ }
                 }
             } catch (HttpPeerSource.PeerUnavailableException e) {
+                // Transport failures are not misbehaviour; PeerDiscovery prunes the
+                // persistently unreachable. Only protocol violations earn ban score.
                 log.debug("Peer {} unavailable: {}", peerUrl, e.getMessage());
             } catch (RuntimeException e) {
                 log.warn("Sync from {} failed: {}", peerUrl, e.toString());
             }
+        }
+    }
+
+    private void penalize(String peerUrl, int points, String reason) {
+        if (registry.penalize(peerUrl, points)) {
+            log.warn("Banned peer {} ({})", peerUrl, reason);
+        } else {
+            log.debug("Penalized peer {} +{} ({})", peerUrl, points, reason);
         }
     }
 
@@ -156,6 +186,10 @@ public final class RhizomeNode implements AutoCloseable {
 
     public java.util.List<String> knownPeers() {
         return registry.snapshot();
+    }
+
+    public PeerBanList banList() {
+        return banList;
     }
 
     public NodeService service() {

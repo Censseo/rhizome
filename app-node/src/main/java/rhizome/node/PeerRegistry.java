@@ -12,11 +12,17 @@ public final class PeerRegistry {
 
     private final String self;
     private final int maxPeers;
+    private final PeerBanList banList;
     private final Set<String> peers = ConcurrentHashMap.newKeySet();
 
     public PeerRegistry(String selfUrl, int maxPeers) {
+        this(selfUrl, maxPeers, null);
+    }
+
+    public PeerRegistry(String selfUrl, int maxPeers, PeerBanList banList) {
         this.self = normalize(selfUrl);
         this.maxPeers = maxPeers;
+        this.banList = banList;
     }
 
     static String normalize(String url) {
@@ -30,16 +36,39 @@ public final class PeerRegistry {
         return u;
     }
 
-    /** Adds a peer if it is a well-formed URL, not ourselves, and we're under capacity. */
+    /**
+     * Adds a peer if it is a well-formed URL, not ourselves, not banned, and
+     * we're under capacity. This is the single admission choke point, so a banned
+     * peer cannot be re-introduced via config, /add_peer, or PEX.
+     */
     public boolean add(String url) {
         String u = normalize(url);
         if (u == null || u.isEmpty() || !u.startsWith("http") || u.equals(self)) {
+            return false;
+        }
+        if (banList != null && banList.isBanned(u)) {
             return false;
         }
         if (peers.size() >= maxPeers && !peers.contains(u)) {
             return false;
         }
         return peers.add(u);
+    }
+
+    /** Records misbehaviour; if it tips the peer over the ban threshold, evicts it. */
+    public boolean penalize(String url, int points) {
+        if (banList == null) {
+            return false;
+        }
+        boolean banned = banList.misbehave(url, points);
+        if (banned) {
+            remove(url);
+        }
+        return banned;
+    }
+
+    public boolean isBanned(String url) {
+        return banList != null && banList.isBanned(url);
     }
 
     public void addAll(Iterable<String> urls) {

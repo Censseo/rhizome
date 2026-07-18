@@ -60,8 +60,11 @@ class GossipPropagationTest {
 
                 assertTrue(receiver.engine().height() >= 5, "receiver should get pushed blocks");
                 // The receiver's chain matches the miner's up to the height it received.
+                // Compare the block at a fixed height on both sides rather than the live
+                // tip: the miner keeps producing, so tipHash() can race a just-arrived
+                // block and no longer equal the miner's block at the height we sampled.
                 long h = receiver.engine().height();
-                assertEquals(miner.engine().blockAt(h).hash(), receiver.engine().tipHash());
+                assertEquals(miner.engine().blockAt(h).hash(), receiver.engine().blockAt(h).hash());
             }
         }
     }
