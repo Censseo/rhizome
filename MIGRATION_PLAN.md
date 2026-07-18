@@ -283,15 +283,25 @@ levée, ledger à arithmétique contrôlée. *Voir §3.*
 - **Pour produire le vrai snapshot** : lancer `PandaniteLedgerDumper <data/ledger> out.json
   invalid.json <hauteur> 1` sur un nœud Pandanite synchronisé.
 
-### Phase 2 — Executor & règles de transaction *(cœur du consensus)*
-1. **`Executor`** : valider et exécuter une transaction contre le ledger — solde suffisant
-   (rejet strict, §4.1), frais, unicité (hash de contenu sans signature, §4.6), signature.
-2. **Récompense de minage** déterministe (§4.2) — table entière + tests aux frontières de halving.
-3. **Application/rollback d'un bloc transactionnels** (snapshot + rollback atomique, §4.11),
-   ordre frais-puis-montant.
-4. Nonce de compte + chain-id dans le préimage signé (§4.6) — *décision : rupture de compat
-   assumée pour une nouvelle chaîne, ou conservation du format Pandanite pour l'interop.*
-- **Sortie testable** : exécuter un bloc de N transactions, vérifier les soldes, annuler, revérifier.
+### Phase 2 — Modèle de consensus & Executor (FAIT)
+1. **Modèle figé** (`ConsensusModelTest`) : préimage du hash de bloc complet (id + nb de tx
+   inclus, §4.5) ; `verifyNonce(PowAlgorithm)` piloté par `NetworkParameters` (Pufferfish2
+   dès le genesis, plus de seuil codé en dur) ; **chain-id + nonce de compte dans le préimage
+   signé des transactions** (§4.6), portés dans DTO/JSON/equals ; `compareTo` canonique par
+   hash de contenu.
+2. **Bloc genesis** (`GenesisBlock`) : non miné, entièrement déterminé par
+   `NetworkParameters` + snapshot ; le `merkleRoot` porte le **hash d'engagement du snapshot**
+   (`LedgerSnapshot.commitmentHash`, trié par adresse, insensible à l'ordre d'insertion) ;
+   `initChain` vérifie l'engagement avant de seeder le ledger. Règle : le PoW est vérifié à
+   partir du bloc 2.
+3. **`DifficultyAdjustment`** : retarget pur, entier, par bits entiers, pas borné à ±4 bits
+   par fenêtre, clampé aux bornes réseau (§4.3 réglé par construction).
+4. **`Executor`** : validation en deux passes puis application **transactionnelle** (rollback
+   inverse intégral sur échec) ; coinbase unique dont le montant doit égaler
+   `miningReward(height)` entier (§4.2) ; unicité par hash de contenu sans signature (§4.6) ;
+   chain-id vérifié ; arithmétique contrôlée de bout en bout (§4.1).
+- *Reste (niveau moteur)* : ordonnancement strict du nonce de compte (nécessite un nonce
+  store), bornes de timestamp (§4.7).
 
 ### Phase 3 — Moteur blockchain *(assemblage)*
 1. **Bloc genesis** (difficulté 16, soldes initiaux).
