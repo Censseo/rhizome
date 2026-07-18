@@ -7,6 +7,25 @@
 
 ---
 
+## 0. Décisions verrouillées
+
+L'architecture cible est arrêtée : **chaîne propre, ledger genesis amorcé depuis un
+snapshot des soldes de la chaîne Pandanite actuelle.**
+
+| Décision | Choix retenu |
+|---|---|
+| Type de chaîne | **Nouvelle chaîne** (nouveau genesis, règles corrigées), pas d'interop mainnet historique |
+| État initial | **Snapshot des soldes** de la chaîne Pandanite figé dans le genesis |
+| Soldes | **Assainis** : wallets d'`invalid.json` (bug d'inflation) exclus du snapshot |
+| PoW | **Pufferfish2 dès le genesis** (pas de phase SHA-256, pas de bascule) |
+| Source du snapshot | Outil de dump lisant le LevelDB ledger d'un nœud Pandanite synchronisé |
+
+Comme on repart sur une chaîne propre, **aucun bug C++ historique n'est à reproduire** :
+préimage de hash incomplet, mining fee flottante, Merkle bugué, `invalid.json`,
+`bannedHashes`, hacks de difficulté — tous corrigés d'emblée.
+
+---
+
 ## 1. Résumé exécutif
 
 Rhizome est un **squelette d'architecture solide sur la couche « données », mais sans
@@ -241,17 +260,28 @@ avec le réseau Pandanite.
 Compilation verte, suite de tests verte, dépendances stabilisées, dépendance circulaire
 levée, ledger à arithmétique contrôlée. *Voir §3.*
 
-### Phase 1 — Compléter le cœur crypto & PoW *(déblocage consensus)*
-1. **Implémenter Pufferfish2** (`PufferfishAlgorithm.compute`) — aujourd'hui un stub qui
-   jette, il bloque toute validation > bloc 124500. Option JNI (`external/pufferfish` C) ou
-   portage Java pur ; vérifier par vecteurs de test contre le C++.
-2. Router réellement `concatHashes`/`verifyHash` vers Pufferfish selon le bloc (le flag est
-   aujourd'hui ignoré).
-3. Figer le **préimage du hash de bloc** (décision compat §4.5) et couvrir la transition
-   SHA256→Pufferfish au bloc 124500 par des tests.
-4. Compléter les stubs restants : `RIPEMD160Hash.toBytes`, `BlockSerializer.deserialize`,
-   `UserSerializer`, `Transaction.compareTo`.
-- **Sortie testable** : vérification de nonce d'un vrai bloc mainnet des deux régimes (SHA256 et Pufferfish).
+### Phase 1 — Cœur crypto & PoW Pufferfish2 (FAIT)
+1. **Pufferfish2 porté en Java pur** (`Pufferfish2`, `PufferfishAlgorithm.compute`) sur
+   HMAC-SHA512 de BouncyCastle, **validé au bit près** contre des vecteurs d'or générés
+   depuis le C de référence (`PufferfishTest`). C'est le PoW de la chaîne propre dès le genesis.
+2. `Crypto.PUFFERFISH` produit bien `SHA256(pf_newhash(...))` ; `PufferfishConstants` corrigé.
+- *Reste de Phase 1 à faire* : figer le **préimage du hash de bloc** en incluant `id` et le
+  nombre de transactions (fix §4.5, pas de contrainte de compat puisque chaîne neuve) ;
+  brancher `BlockImpl.verifyNonce` sur `NetworkParameters.powAlgorithm` (Pufferfish dès le
+  genesis) au lieu du seuil `PUFFERFISH_START_BLOCK` ; compléter `RIPEMD160Hash.toBytes`,
+  `BlockSerializer.deserialize`, `UserSerializer`, `Transaction.compareTo`.
+
+### Phase 1b — Genesis amorcé par snapshot (FAIT pour la partie ledger)
+1. **`NetworkParameters`** : config de la chaîne propre (chain-id, PoW Pufferfish2,
+   récompense entière déterministe, params difficulté). Fabriques `cleanMainnet`/`testnet`.
+2. **`LedgerSnapshot`** + **`GenesisLedger.seed`** : format address→solde (uint64 non signé,
+   JSON) et amorçage storage-agnostique d'un ledger.
+3. **`PandaniteLedgerDumper`** : lit le LevelDB ledger C++ (clé 25o → montant uint64 LE),
+   exclut les wallets `invalid.json`, émet un snapshot (+ CLI `main`).
+- *Reste à faire* : construire le **bloc genesis** lui-même (en-tête déterministe depuis
+  `NetworkParameters` + engagement du snapshot), et l'`initChain` qui applique le genesis.
+- **Pour produire le vrai snapshot** : lancer `PandaniteLedgerDumper <data/ledger> out.json
+  invalid.json <hauteur> 1` sur un nœud Pandanite synchronisé.
 
 ### Phase 2 — Executor & règles de transaction *(cœur du consensus)*
 1. **`Executor`** : valider et exécuter une transaction contre le ledger — solde suffisant
@@ -317,23 +347,19 @@ shutdown/repair propres (§4.11), observabilité (logs de progression de sync).
 
 ---
 
-## 6. Décisions à trancher en amont
+## 6. Décisions
 
-Ces choix conditionnent plusieurs phases — à arbitrer avant la Phase 2 :
+**Tranchées (voir §0) :** nouvelle chaîne propre ; genesis amorcé par snapshot ; soldes
+assainis ; PoW **Pufferfish2** (porté en Java pur, §Phase 1) ; snapshot via outil de dump.
 
-1. **Interopérabilité mainnet Pandanite, ou nouvelle chaîne ?**
-   - *Interop* → reproduire à l'identique le préimage de hash incomplet (§4.5), le format de
-     tx sans nonce (§4.6), la mining fee flottante (§4.2), les exceptions historiques (§4),
-     et le comportement Merkle déployé (§4.4). Beaucoup de « bugs » deviennent des contraintes.
-   - *Nouvelle chaîne (recommandé pour un port propre)* → corriger tous ces défauts (nonce de
-     compte, chain-id, hash complet, mining fee entière, Merkle correct), nouveau genesis,
-     pas de bagage historique.
-2. **Pufferfish** : JNI sur la lib C existante (rapide, dépendance native) vs portage Java pur
-   (portable, plus de travail).
-3. **Transport P2P** : HTTP (parité Pandanite, interop directe) vs ActiveJ RPC (plus « moderne »
-   mais les forks ont été retirés et étaient non fonctionnels).
-4. **`lib-crypto`** vide : le remplir (extraire le crypto de lib-core) ou le supprimer de
+**Restant à trancher :**
+1. **Nonce de compte** : ajouter un compteur par compte dans le préimage signé (en plus du
+   chain-id déjà porté dans `NetworkParameters`) pour l'anti-rejeu robuste (§4.6). Recommandé.
+2. **Transport P2P** : HTTP (parité Pandanite, plus simple) vs ActiveJ RPC (les forks retirés
+   étaient non fonctionnels). Recommandation : **HTTP**.
+3. **`lib-crypto`** vide : le remplir (extraire le crypto de lib-core) ou le retirer de
    `settings.gradle`.
+4. **Hauteur du snapshot** : à quelle hauteur de la chaîne Pandanite figer les soldes.
 
 ---
 
