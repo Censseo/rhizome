@@ -50,6 +50,15 @@ public final class NetworkParameters {
     // --- Block validity bounds ---
     /** Max accepted drift of a block timestamp past the local clock (seconds). */
     private final int maxFutureBlockTimeSec;
+    /**
+     * Consensus-enforced minimum time between a block and its parent (seconds).
+     * Every node rejects a block whose timestamp is closer than this to its
+     * parent's, so it caps sustained block production at {@code 1 / minBlockTimeSec}
+     * per second for everyone — a majority miner included — independently of any
+     * local producer pacing (which is only politeness). 0 disables the floor.
+     * See docs/BLOCK_RATE_SECURITY.md.
+     */
+    private final int minBlockTimeSec;
     /** Window (in blocks) for the median-time-past lower bound. */
     private final int medianTimeWindow;
     private final int maxTransactionsPerBlock;
@@ -97,11 +106,17 @@ public final class NetworkParameters {
             .powAlgorithm(PowAlgorithm.PUFFERFISH2)
             .genesisTimestamp(0L)
             .genesisDifficulty(16)
-            .desiredBlockTimeSec(90)
-            .difficultyLookback(100)
-            .minDifficulty(6)
+            // Target one block per second. minBlockTimeSec == the target makes the
+            // consensus floor also the metronome: nobody can go faster, and the
+            // difficulty retarget keeps the average from going slower.
+            .desiredBlockTimeSec(1)
+            .minBlockTimeSec(1)
+            .difficultyLookback(60)
+            .minDifficulty(16)
             .maxDifficulty(255)
-            .maxFutureBlockTimeSec(120)
+            // Tight future bound: at most maxFuture/minBlockTime blocks can ever be
+            // mined "in advance" before real time must catch up (15 here).
+            .maxFutureBlockTimeSec(15)
             .medianTimeWindow(11)
             .maxTransactionsPerBlock(25_000)
             .decimalScaleFactor(scale)
@@ -112,12 +127,22 @@ public final class NetworkParameters {
             .build();
     }
 
-    /** A low-difficulty network for local development and tests. */
+    /**
+     * A low-difficulty network for local development and tests. Keeps a relaxed
+     * timing profile (no min-block-time floor, wide future bound, longer target)
+     * so tests can drive controlled clocks freely; the 1-block/s consensus floor
+     * is a mainnet property, exercised by dedicated tests via explicit params.
+     */
     public static NetworkParameters testnet() {
         return cleanMainnet().toBuilder()
             .chainId(2)
             .networkName("rhizome-testnet")
             .genesisDifficulty(6)
+            .minDifficulty(6)
+            .desiredBlockTimeSec(90)
+            .minBlockTimeSec(0)
+            .difficultyLookback(100)
+            .maxFutureBlockTimeSec(120)
             .build();
     }
 }

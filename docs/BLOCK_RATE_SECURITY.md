@@ -180,6 +180,23 @@ processus de Poisson. Deux options, qui changent le modèle de confiance :
 
 ---
 
+## 4.4 État : §4.1 implémenté
+
+- `NetworkParameters.minBlockTimeSec` (règle de consensus). `cleanMainnet` :
+  `desiredBlockTimeSec=1`, `minBlockTimeSec=1`, `maxFutureBlockTimeSec=15`,
+  `difficultyLookback=60`, `minDifficulty=16`. `testnet` garde un profil relâché
+  (floor 0) pour les tests à horloge contrôlée.
+- `ChainEngine.addBlock` rejette `timestamp < parent.timestamp + minBlockTimeSec`
+  → `ExecutionStatus.BLOCK_TIMESTAMP_TOO_CLOSE`. `nextBlockTimestamp` respecte le
+  floor pour que les blocs d'un producteur honnête soient valides.
+- Le cadencement du producteur est rétrogradé en optimisation (éviter de gâcher
+  de la PoW sur des blocs qui seraient rejetés).
+- `MinBlockTimeTest` prouve : rejet d'un bloc trop rapproché, et plafond dur du
+  nombre de blocs minables « en avance » via la borne future.
+
+Le §4.2 (rythme *régulier* garanti via slots PoA/PoS) reste une évolution
+ouverte.
+
 ## 5. Résumé en une phrase
 
 Le cadencement du producteur ne protège rien ; la protection contre le flood se

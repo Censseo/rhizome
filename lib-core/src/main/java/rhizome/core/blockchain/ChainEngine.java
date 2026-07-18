@@ -108,11 +108,18 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
                 || block.transactions().size() > params.maxTransactionsPerBlock()) {
                 return INVALID_TRANSACTION_COUNT; // must at least carry a coinbase
             }
-            if (!b.lastBlockHash().equals(store.tip().hash())) {
+            Block parent = store.tip();
+            if (!b.lastBlockHash().equals(parent.hash())) {
                 return INVALID_LASTBLOCK_HASH;
             }
             if (b.timestamp() <= medianTimePast()) {
                 return BLOCK_TIMESTAMP_TOO_OLD;
+            }
+            // Consensus rate limit: a block must be at least minBlockTimeSec after its
+            // parent. Enforced by every node, so it caps block production for everyone
+            // (majority miner included), unlike the producer's local pacing.
+            if (b.timestamp() < ((BlockImpl) parent).timestamp() + params.minBlockTimeSec() * 1000L) {
+                return BLOCK_TIMESTAMP_TOO_CLOSE;
             }
             if (b.timestamp() > nowMillis.getAsLong() + params.maxFutureBlockTimeSec() * 1000L) {
                 return BLOCK_TIMESTAMP_IN_FUTURE;
@@ -201,7 +208,8 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
     public long nextBlockTimestamp(long preferred) {
         lock.lock();
         try {
-            return Math.max(preferred, medianTimePast() + 1);
+            long tipFloor = ((BlockImpl) store.tip()).timestamp() + params.minBlockTimeSec() * 1000L;
+            return Math.max(Math.max(preferred, medianTimePast() + 1), tipFloor);
         } finally {
             lock.unlock();
         }
