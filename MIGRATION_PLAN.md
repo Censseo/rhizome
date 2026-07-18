@@ -5,6 +5,16 @@
 > du Pandanite C++, et revue des issues/PR du dépôt d'origine.
 > Dernière mise à jour du projet avant reprise : mi-2024.
 
+> **⚑ État actuel (migration réalisée).** Le cœur de nœud est **fonctionnel et
+> testé de bout en bout** : consensus, exécution, stockage RocksDB, mempool, API
+> HTTP, production de blocs, synchronisation P2P avec reorg, wallet, gossip,
+> découverte et bannissement de pairs, plus une revue de sécurité complète.
+> **Suite : 166 tests, 0 échec.** Le tableau d'avancement du §1 ci-dessous est
+> conservé comme **photographie de l'état initial** (à la reprise) ; les phases du
+> §5 portent le statut réel (la quasi-totalité est **FAIT**). Vue synthétique à
+> jour : [`docs/WHITEPAPER.md`](docs/WHITEPAPER.md). Reste dépendant de
+> l'environnement : build natif GraalVM et snapshot Pandanite réel.
+
 ---
 
 ## 0. Décisions verrouillées
@@ -28,7 +38,11 @@ préimage de hash incomplet, mining fee flottante, Merkle bugué, `invalid.json`
 
 ## 1. Résumé exécutif
 
-Rhizome est un **squelette d'architecture solide sur la couche « données », mais sans
+> *Cette section décrit l'état **à la reprise** du projet (audit initial), conservé
+> comme référence. Pour l'état actuel — cœur de nœud complet, 166 tests — voir le
+> bandeau en tête de document et [`docs/WHITEPAPER.md`](docs/WHITEPAPER.md).*
+
+Rhizome était un **squelette d'architecture solide sur la couche « données », mais sans
 la couche « vivante » d'un nœud** (consensus, exécution, synchronisation, réseau, API,
 minage). Le projet était resté figé au milieu d'une réorganisation de packages qui
 **cassait la compilation**.
@@ -37,11 +51,11 @@ minage). Le projet était resté figé au milieu d'une réorganisation de packag
 (34 tests, 0 échec) sans ajout de logique métier — voir §3. Le travail applicatif
 peut donc repartir d'une base saine.
 
-**Avancement global estimé : ~30–35 %** d'un nœud fonctionnel, concentré sur le modèle
-d'objets, la persistance et la crypto de base (bien testés, compatibles binaire avec
-Pandanite). Tout le reste est absent ou à l'état de stub.
+**Avancement global estimé à la reprise : ~30–35 %** d'un nœud fonctionnel, concentré
+sur le modèle d'objets, la persistance et la crypto de base (bien testés, compatibles
+binaire avec Pandanite). Tout le reste était absent ou à l'état de stub.
 
-| Domaine | Avancement | Commentaire |
+| Domaine | Avancement (à la reprise) | Commentaire |
 |---|---|---|
 | Crypto (signatures ed25519, SHA-256, adresses) | ~65 % | OK + vecteurs de compat legacy testés ; **Pufferfish = stub qui jette** |
 | Modèle bloc/transaction (+ Merkle, sérialisation) | ~85 % | Quasi-parité C++, testé ; quelques stubs mineurs |
@@ -396,13 +410,21 @@ Deux correctifs au passage : genesis lié au chainId ; rejet des blocs sans tran
 vivant. Le réseau **s'auto-organise à partir de quelques seeds** — plus de liste codée en
 dur. Testé : trois nœuds forment un maillage complet depuis un seul seed.
 
-### Phase 8 — Durcissement & interopérabilité (reste, dépend de l'environnement)
-Build natif GraalVM (banc d'essai wallet — `native-image` non installé dans l'env actuel),
-production du **snapshot réel** (`PandaniteLedgerDumper` sur un nœud Pandanite synchronisé),
-et :
-Tests d'intégration multi-nœuds, fuzzing des entrées réseau, vérification de bout en bout
-contre un nœud Pandanite réel (mêmes hashes de blocs, mêmes soldes) si l'interop est retenue,
-shutdown/repair propres (§4.11), observabilité (logs de progression de sync).
+### Phase 8 — Durcissement (FAIT) & interopérabilité (reste, dépend de l'environnement)
+**FAIT :** checkpoints statiques + fenêtre de finalité (`maxReorgDepth`), pré-validation
+sans état avant tout pop (anti-DoS reorg), **rate limiting borné** + tailles de requêtes
+plafonnées, **bannissement de pairs par ban-score** (par hôte, table bornée), **cap
+mempool par expéditeur**, réponses de sync bornées côté client, shutdown propre (drain
+des boucles réseau/producteur avant fermeture du store, §4.11), et une **revue de
+sécurité complète** — [`docs/SECURITY_REVIEW.md`](docs/SECURITY_REVIEW.md). Deux bugs
+consensus trouvés et corrigés à cette occasion (montant/fee négatif = création de
+monnaie ; overflow de dépôt non rollback).
+
+**Reste (dépend de l'environnement) :** build natif GraalVM (`native-image` non installé
+dans l'env actuel), production du **snapshot réel** (`PandaniteLedgerDumper` sur un nœud
+Pandanite synchronisé), tests d'intégration multi-nœuds à grande échelle, fuzzing des
+entrées réseau, et vérification de bout en bout contre un nœud Pandanite réel (mêmes
+hashes de blocs, mêmes soldes) si l'interop est retenue.
 
 ---
 
@@ -411,11 +433,12 @@ shutdown/repair propres (§4.11), observabilité (logs de progression de sync).
 **Tranchées (voir §0) :** nouvelle chaîne propre ; genesis amorcé par snapshot ; soldes
 assainis ; PoW **Pufferfish2** (porté en Java pur, §Phase 1) ; snapshot via outil de dump.
 
+**Tranché depuis :**
+1. **Nonce de compte** — ✅ implémenté : compteur par compte dans le préimage signé (en
+   plus du chain-id), anti-rejeu robuste (§4.6).
+2. **Transport P2P** — ✅ **HTTP** retenu (parité Pandanite, plus simple, compatible native).
+
 **Restant à trancher :**
-1. **Nonce de compte** : ajouter un compteur par compte dans le préimage signé (en plus du
-   chain-id déjà porté dans `NetworkParameters`) pour l'anti-rejeu robuste (§4.6). Recommandé.
-2. **Transport P2P** : HTTP (parité Pandanite, plus simple) vs ActiveJ RPC (les forks retirés
-   étaient non fonctionnels). Recommandation : **HTTP**.
 3. **`lib-crypto`** vide : le remplir (extraire le crypto de lib-core) ou le retirer de
    `settings.gradle`.
 4. **Hauteur du snapshot** : à quelle hauteur de la chaîne Pandanite figer les soldes.
