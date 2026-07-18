@@ -64,9 +64,27 @@ public final class Executor {
     public static ExecutionStatus executeBlock(Block block, Ledger ledger,
                                                Predicate<SHA256Hash> alreadyExecuted,
                                                NetworkParameters params) {
+        return executeBlock(block, ledger, alreadyExecuted, params, null);
+    }
+
+    /**
+     * As {@link #executeBlock(Block, Ledger, Predicate, NetworkParameters)}, but
+     * offloads Ed25519 checks to {@code verifier} (parallel, with a verify-once
+     * cache). Signatures are checked in one batch up front; the structural pass
+     * then trusts that result. Pass {@code null} to verify inline.
+     */
+    public static ExecutionStatus executeBlock(Block block, Ledger ledger,
+                                               Predicate<SHA256Hash> alreadyExecuted,
+                                               NetworkParameters params,
+                                               SignatureVerifier verifier) {
         var blockImpl = (BlockImpl) block;
         long height = blockImpl.id();
         long expectedReward = params.miningReward(height);
+
+        // Batch-verify all signatures in parallel before the structural pass.
+        if (verifier != null && !verifier.verifyAll(block.transactions())) {
+            return INVALID_SIGNATURE;
+        }
 
         // --- Pass 1: structural validation, no state touched ---
         Transaction coinbase = null;
@@ -90,7 +108,7 @@ public final class Executor {
             if (!PublicAddress.of(tx.signingKey()).equals(tx.from())) {
                 return WALLET_SIGNATURE_MISMATCH;
             }
-            if (!t.signatureValid()) {
+            if (verifier == null && !t.signatureValid()) {
                 return INVALID_SIGNATURE;
             }
         }

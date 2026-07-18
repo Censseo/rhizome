@@ -209,6 +209,26 @@ tôt sur une cible simple.** Concrètement :
 | **Native** | GraalVM comme contrainte **dès maintenant** ; 2 profils (JVM full / native léger) ; wallet CLI en banc d'essai | valider tôt, éviter la dette codegen/réflexion/JNI |
 | **Vrai budget perf** | **I/O disque (RocksDB, batch)** + **vérif signatures Ed25519 par lots** | ce sont les goulots réels de la sync, pas le transport |
 
+## 6. Mesures (cible : 1 bloc/seconde)
+
+Banc `ValidationBenchmark` (2000 tx signées, 4 cœurs ; lancer avec
+`-Dbench=on`). Le goulot de validation est la vérification Ed25519 ; le hachage
+et le reste sont négligeables.
+
+| Chemin | µs/tx | blocs/s @2000 tx |
+|---|---|---|
+| `hashContents` (SHA-256 préimage) | ~0,9 | (non limitant) |
+| Vérif signature **séquentielle** | ~75 | ~6,6 |
+| Vérif signature **parallèle** (4 cœurs) | ~44 | ~11 |
+| Vérif signature **cache chaud** (verify-once) | ~3,5 | **~140** |
+
+Enseignement : le levier décisif n'est pas la parallélisation (~1,7× ici) mais le
+**verify-once** — vérifier chaque transaction **une seule fois à l'admission au
+mempool**, puis servir un cache au moment de valider le bloc (`SignatureVerifier`).
+En régime permanent la validation d'un bloc ne repaie plus les signatures (×21),
+ce qui dégage une marge très large au-dessus de 1 bloc/s. La vérif parallèle reste
+le repli pour les transactions jamais vues (sync initiale, blocs reçus « à froid »).
+
 ### Tension centrale à retenir
 On peut avoir **perf maximale** (RocksDB + ActiveJ codegen) **ou** **native
 partout** (iq80 + tout sans codegen), pas les deux dans le même binaire. La sortie

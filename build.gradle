@@ -97,5 +97,11 @@ subprojects {
     tasks.named('test') {
         // Use JUnit Platform for unit tests.
         useJUnitPlatform()
+        // Forward -Dbench* properties to the forked test JVM (benchmarks).
+        System.properties.each { k, v ->
+            if (k.toString().startsWith('bench')) {
+                systemProperty(k.toString(), v.toString())
+            }
+        }
     }
 }

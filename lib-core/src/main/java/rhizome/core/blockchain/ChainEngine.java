@@ -50,6 +50,7 @@ public final class ChainEngine implements Blockchain {
     private final Ledger ledger;
     private final ChainStore store;
     private final LongSupplier nowMillis;
+    private final SignatureVerifier verifier;
     private final ReentrantLock lock = new ReentrantLock();
 
     /** Next expected account nonce per sender; rebuilt on init, updated on add/pop. */
@@ -58,11 +59,13 @@ public final class ChainEngine implements Blockchain {
     private BigInteger totalWork = BigInteger.ZERO;
     private int currentDifficulty;
 
-    private ChainEngine(NetworkParameters params, Ledger ledger, ChainStore store, LongSupplier nowMillis) {
+    private ChainEngine(NetworkParameters params, Ledger ledger, ChainStore store,
+                        LongSupplier nowMillis, SignatureVerifier verifier) {
         this.params = params;
         this.ledger = ledger;
         this.store = store;
         this.nowMillis = nowMillis;
+        this.verifier = verifier;
     }
 
     /**
@@ -74,7 +77,14 @@ public final class ChainEngine implements Blockchain {
     public static ChainEngine init(NetworkParameters params, Ledger ledger, ChainStore store,
                                    LedgerSnapshot snapshot, SHA256Hash expectedGenesisHash,
                                    LongSupplier nowMillis) {
-        ChainEngine engine = new ChainEngine(params, ledger, store, nowMillis);
+        return init(params, ledger, store, snapshot, expectedGenesisHash, nowMillis, null);
+    }
+
+    /** As {@link #init}, with a shared {@link SignatureVerifier} for fast parallel/cached signature checks. */
+    public static ChainEngine init(NetworkParameters params, Ledger ledger, ChainStore store,
+                                   LedgerSnapshot snapshot, SHA256Hash expectedGenesisHash,
+                                   LongSupplier nowMillis, SignatureVerifier verifier) {
+        ChainEngine engine = new ChainEngine(params, ledger, store, nowMillis, verifier);
         if (store.height() == 0) {
             Block genesis = GenesisBlock.initChain(ledger, params, snapshot, expectedGenesisHash);
             store.append(genesis);
@@ -120,7 +130,7 @@ public final class ChainEngine implements Blockchain {
                 return INVALID_NONCE;
             }
 
-            ExecutionStatus status = Executor.executeBlock(block, ledger, store::hasTransaction, params);
+            ExecutionStatus status = Executor.executeBlock(block, ledger, store::hasTransaction, params, verifier);
             if (status != SUCCESS) {
                 return status;
             }
