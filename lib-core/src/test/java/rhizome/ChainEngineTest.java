@@ -23,6 +23,7 @@ import rhizome.core.common.PowAlgorithm;
 import rhizome.core.crypto.PrivateKey;
 import rhizome.core.crypto.PublicKey;
 import rhizome.core.ledger.LedgerSnapshot;
+import rhizome.core.ledger.InMemoryLedger;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.mempool.ExecutionStatus;
 import rhizome.core.merkletree.MerkleTree;

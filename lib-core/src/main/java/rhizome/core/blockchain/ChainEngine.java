@@ -182,6 +182,16 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         }
     }
 
+    /** Block at the given height (1-based). Throws if out of range. */
+    public Block blockAt(long height) {
+        lock.lock();
+        try {
+            return store.blockAt(height);
+        } finally {
+            lock.unlock();
+        }
+    }
+
     public int difficulty() {
         lock.lock();
         try {

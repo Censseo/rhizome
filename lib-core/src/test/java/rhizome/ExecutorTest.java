@@ -14,6 +14,7 @@ import rhizome.core.blockchain.NetworkParameters;
 import rhizome.core.crypto.PrivateKey;
 import rhizome.core.crypto.PublicKey;
 import rhizome.core.crypto.SHA256Hash;
+import rhizome.core.ledger.InMemoryLedger;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.mempool.ExecutionStatus;
 import rhizome.core.transaction.Transaction;
