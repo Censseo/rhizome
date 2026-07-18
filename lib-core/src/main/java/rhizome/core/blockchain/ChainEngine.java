@@ -192,6 +192,20 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         }
     }
 
+    /**
+     * A timestamp acceptable for the next block: the caller's {@code preferred}
+     * time, bumped above the median-time-past floor if a fast cadence would
+     * otherwise put it too early. Used by the block producer.
+     */
+    public long nextBlockTimestamp(long preferred) {
+        lock.lock();
+        try {
+            return Math.max(preferred, medianTimePast() + 1);
+        } finally {
+            lock.unlock();
+        }
+    }
+
     public int difficulty() {
         lock.lock();
         try {
