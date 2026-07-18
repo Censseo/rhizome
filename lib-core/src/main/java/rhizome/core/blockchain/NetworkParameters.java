@@ -56,7 +56,7 @@ public final class NetworkParameters {
      * parent's, so it caps sustained block production at {@code 1 / minBlockTimeSec}
      * per second for everyone — a majority miner included — independently of any
      * local producer pacing (which is only politeness). 0 disables the floor.
-     * See docs/BLOCK_RATE_SECURITY.md.
+     * See WHITEPAPER.md §3.4.
      */
     private final int minBlockTimeSec;
     /** Window (in blocks) for the median-time-past lower bound. */

@@ -26,7 +26,7 @@ import rhizome.core.transaction.TransactionAmount;
  * The consensus minimum-block-time rule: every node rejects a block too close to
  * its parent, so sustained block production is capped for everyone — not by the
  * producer's local pacing (which a modified node could remove). See
- * docs/BLOCK_RATE_SECURITY.md.
+ * WHITEPAPER.md §3.4.
  */
 class MinBlockTimeTest {
 
