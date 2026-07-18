@@ -5,7 +5,7 @@ import java.util.Map;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 
-import org.bouncycastle.util.test.FixedSecureRandom.BigInteger;
+import java.math.BigInteger;
 
 import lombok.Getter;
 import lombok.Setter;

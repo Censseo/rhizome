@@ -8,7 +8,7 @@ import java.net.InetAddress;
 import java.net.UnknownHostException;
 
 import io.activej.eventloop.Eventloop;
-import io.activej.http.AsyncHttpClient;
+import io.activej.http.HttpClient;
 import io.activej.http.HttpRequest;
 import lombok.extern.slf4j.Slf4j;
 
@@ -25,7 +25,7 @@ public class NetworkUtils {
         }
 
         var eventloop = Eventloop.create();
-        var httpClient = AsyncHttpClient.create(eventloop);
+        var httpClient = HttpClient.create(eventloop);
         String address = "";
         
         if (ip.isEmpty()) {
@@ -41,7 +41,7 @@ public class NetworkUtils {
             for (String lookupService : lookupServices) {
                 try {
                     String rawUrl = eventloop.submit(() ->
-				    httpClient.request(HttpRequest.get(lookupService))
+				    httpClient.request(HttpRequest.get(lookupService).build())
 						.then(response -> response.loadBody())
 						.map(body -> body.getString(UTF_8))).get();
                     ip = rawUrl.trim();

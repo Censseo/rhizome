@@ -1,4 +1,4 @@
-package rhizome.services;
+package rhizome.core.services;
 
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -51,9 +51,9 @@ class BaseServiceTest {
         BaseService result = customService.addRoutine(routine);
 
         // Verify the behavior
-        assertEquals(baseService, result);
-        assertEquals(1, baseService.routines().size());
-        assertEquals(routine, baseService.routines().get(0));
+        assertEquals(customService, result);
+        assertEquals(1, customService.routines().size());
+        assertEquals(routine, customService.routines().get(0));
     }
 
     @Test
