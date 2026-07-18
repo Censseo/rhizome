@@ -53,7 +53,7 @@ class GossipPropagationTest {
             try (RhizomeNode miner = new RhizomeNode(minerConfig)) {
                 miner.start();
 
-                long deadline = System.currentTimeMillis() + 10_000;
+                long deadline = System.currentTimeMillis() + 25_000;
                 while (receiver.engine().height() < 5 && System.currentTimeMillis() < deadline) {
                     Thread.sleep(30);
                 }

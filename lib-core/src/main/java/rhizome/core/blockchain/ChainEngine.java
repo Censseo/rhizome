@@ -108,6 +108,11 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
                 || block.transactions().size() > params.maxTransactionsPerBlock()) {
                 return INVALID_TRANSACTION_COUNT; // must at least carry a coinbase
             }
+            // Static checkpoint: at a pinned height, only the published hash passes.
+            SHA256Hash checkpoint = params.checkpoints().get(height + 1);
+            if (checkpoint != null && !block.hash().equals(checkpoint)) {
+                return HEADER_HASH_INVALID;
+            }
             Block parent = store.tip();
             if (!b.lastBlockHash().equals(parent.hash())) {
                 return INVALID_LASTBLOCK_HASH;

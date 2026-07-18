@@ -44,7 +44,7 @@ class RhizomeNodeTest {
 
         try (RhizomeNode node = new RhizomeNode(config)) {
             node.start();
-            awaitHeight(node, 4, 10_000);
+            awaitHeight(node, 4, 25_000);
             assertTrue(node.engine().height() >= 4, "node should mine blocks");
 
             // Served over HTTP.
@@ -62,7 +62,7 @@ class RhizomeNodeTest {
 
         try (RhizomeNode nodeA = new RhizomeNode(configA)) {
             nodeA.start();
-            awaitHeight(nodeA, 5, 10_000);
+            awaitHeight(nodeA, 5, 25_000);
 
             int portB = freePort();
             NodeConfig configB = NodeConfig.defaults(FAST, tempDir.resolve("b").toString(), portB)

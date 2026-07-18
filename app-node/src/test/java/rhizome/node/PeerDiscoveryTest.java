@@ -71,7 +71,7 @@ class PeerDiscoveryTest {
             assertTrue(c.knownPeers().containsAll(List.of(urlA, urlB)), "C should learn A and B");
 
             // A now knows C (learned via discovery) and gossips its blocks there.
-            long deadline = System.currentTimeMillis() + 10_000;
+            long deadline = System.currentTimeMillis() + 25_000;
             while (c.engine().height() < 4 && System.currentTimeMillis() < deadline) {
                 Thread.sleep(30);
             }

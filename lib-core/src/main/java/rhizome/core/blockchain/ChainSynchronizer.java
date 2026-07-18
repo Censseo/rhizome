@@ -1,10 +1,13 @@
 package rhizome.core.blockchain;
 
+import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.List;
 
 import rhizome.core.block.Block;
+import rhizome.core.block.BlockImpl;
 import rhizome.core.common.Constants;
+import rhizome.core.crypto.SHA256Hash;
 import rhizome.core.mempool.ExecutionStatus;
 
 /**
@@ -12,19 +15,29 @@ import rhizome.core.mempool.ExecutionStatus;
  * it has strictly greater cumulative work — the objective fork-choice rule
  * (Pandanite forked repeatedly for lack of one).
  *
- * <p>Handles both cases:
+ * <p>Hardened against hostile peers:
  * <ul>
- *   <li><b>Catch-up</b>: peer extends our tip — apply its new blocks in bounded
- *       batches.</li>
- *   <li><b>Reorg</b>: peer diverges — find the common ancestor, roll back to it,
- *       apply the peer branch. If any peer block fails to validate, the local
- *       chain is restored to exactly its prior state (a lying peer cannot leave
- *       us worse off).</li>
+ *   <li><b>Finality window</b> — a reorg deeper than
+ *       {@code NetworkParameters.maxReorgDepth} is refused outright; buried
+ *       blocks cannot be rewritten no matter the claimed work.</li>
+ *   <li><b>No free rollbacks</b> — before any local state is touched, a bounded
+ *       prefix of the peer branch is fetched and validated statelessly:
+ *       id continuity, hash chaining from the fork point, per-block
+ *       proof-of-work, and total verified work strictly above our own branch.
+ *       A peer that merely <em>claims</em> huge work can therefore cost us a
+ *       bounded download and some hash checks — never a pop/restore cycle.
+ *       Passing this gate requires actually spending more PoW than our chain
+ *       carries.</li>
+ *   <li><b>Restore on failure</b> — if the stateful apply still fails (e.g.
+ *       wrong derived difficulty), the local chain is restored exactly.</li>
  * </ul>
  */
 public final class ChainSynchronizer {
 
-    public enum Result { NO_CHANGE, EXTENDED, REORGED, REJECTED_LIGHTER, INCOMPATIBLE, PEER_INVALID }
+    public enum Result { NO_CHANGE, EXTENDED, REORGED, REORG_TOO_DEEP, INCOMPATIBLE, PEER_INVALID }
+
+    /** Extra blocks fetched beyond the fork depth during pre-validation. */
+    static final int PREFETCH_EXTRA = 2 * Constants.BLOCKS_PER_FETCH;
 
     private final ChainEngine engine;
 
@@ -73,46 +86,97 @@ public final class ChainSynchronizer {
     }
 
     private Result reorg(PeerSource peer, long forkHeight) {
-        // Snapshot the local branch above the fork so we can restore it on failure.
+        long depth = engine.height() - forkHeight;
+        if (depth > engine.params().maxReorgDepth()) {
+            return Result.REORG_TOO_DEEP;
+        }
+
+        // --- Stateless gate: no local mutation until the peer has PROVEN more work ---
+        long prefetchEnd = Math.min(peer.height(), forkHeight + depth + PREFETCH_EXTRA);
+        List<Block> branch = fetchRange(peer, forkHeight + 1, prefetchEnd);
+        if (branch == null || !branchChainsFromFork(branch, forkHeight)) {
+            return Result.PEER_INVALID;
+        }
+        if (verifiedWork(branch).compareTo(localWorkAboveFork(forkHeight)) <= 0) {
+            return Result.PEER_INVALID; // claimed heavy, proved light
+        }
+
+        // --- Stateful apply, with exact restore on failure ---
         List<Block> localBranch = new ArrayList<>();
         for (long h = forkHeight + 1; h <= engine.height(); h++) {
             localBranch.add(engine.blockAt(h));
         }
-
         while (engine.height() > forkHeight) {
             engine.popBlock();
         }
 
-        if (applyRange(peer, forkHeight + 1, peer.height())
-            && engine.totalWork().compareTo(worthBeating(localBranch, forkHeight)) > 0) {
-            return Result.REORGED;
+        for (Block block : branch) {
+            if (engine.addBlock(block) != ExecutionStatus.SUCCESS) {
+                restore(forkHeight, localBranch);
+                return Result.PEER_INVALID;
+            }
         }
+        // Branch prefix applied and (by the gate) already heavier than what it
+        // replaced; keep extending toward the peer tip, best effort.
+        applyRange(peer, prefetchEnd + 1, peer.height());
+        return Result.REORGED;
+    }
 
-        // Peer branch invalid or not actually heavier: roll back to the fork and
-        // restore the original local branch.
+    /** Fetches [from..to] in bounded batches; null on any transport/decode failure. */
+    private List<Block> fetchRange(PeerSource peer, long from, long to) {
+        List<Block> out = new ArrayList<>();
+        try {
+            for (long start = from; start <= to; start += Constants.BLOCKS_PER_FETCH) {
+                long end = Math.min(to, start + Constants.BLOCKS_PER_FETCH - 1);
+                out.addAll(peer.blocks(start, end));
+            }
+        } catch (RuntimeException e) {
+            return null;
+        }
+        return out;
+    }
+
+    /** Stateless: ids contiguous from the fork, hashes chain, every PoW nonce holds. */
+    private boolean branchChainsFromFork(List<Block> branch, long forkHeight) {
+        if (branch.isEmpty()) {
+            return false;
+        }
+        SHA256Hash prevHash = engine.blockAt(forkHeight).hash();
+        long expectedId = forkHeight + 1;
+        for (Block block : branch) {
+            var b = (BlockImpl) block;
+            if (b.id() != expectedId || !b.lastBlockHash().equals(prevHash)
+                || !block.verifyNonce(engine.params().powAlgorithm())) {
+                return false;
+            }
+            prevHash = block.hash();
+            expectedId++;
+        }
+        return true;
+    }
+
+    private static BigInteger verifiedWork(List<Block> branch) {
+        BigInteger work = BigInteger.ZERO;
+        for (Block block : branch) {
+            work = work.add(BigInteger.TWO.pow(((BlockImpl) block).difficulty()));
+        }
+        return work;
+    }
+
+    private BigInteger localWorkAboveFork(long forkHeight) {
+        BigInteger work = BigInteger.ZERO;
+        for (long h = forkHeight + 1; h <= engine.height(); h++) {
+            work = work.add(BigInteger.TWO.pow(((BlockImpl) engine.blockAt(h)).difficulty()));
+        }
+        return work;
+    }
+
+    private void restore(long forkHeight, List<Block> localBranch) {
         while (engine.height() > forkHeight) {
             engine.popBlock();
         }
         for (Block block : localBranch) {
             engine.addBlock(block);
         }
-        return Result.PEER_INVALID;
-    }
-
-    /** Cumulative work the restored local branch would have had (for the sanity check). */
-    private java.math.BigInteger worthBeating(List<Block> localBranch, long forkHeight) {
-        java.math.BigInteger work = engineWorkAt(forkHeight);
-        for (Block block : localBranch) {
-            work = work.add(java.math.BigInteger.TWO.pow(((rhizome.core.block.BlockImpl) block).difficulty()));
-        }
-        return work;
-    }
-
-    private java.math.BigInteger engineWorkAt(long height) {
-        java.math.BigInteger work = java.math.BigInteger.ZERO;
-        for (long h = GenesisBlock.GENESIS_ID + 1; h <= height; h++) {
-            work = work.add(java.math.BigInteger.TWO.pow(((rhizome.core.block.BlockImpl) engine.blockAt(h)).difficulty()));
-        }
-        return work;
     }
 }

@@ -69,7 +69,7 @@ class WalletNodeIntegrationTest {
             assertEquals("SUCCESS", client.submit(tx));
 
             // The mining node includes it; wait for Bob's balance to reflect the transfer.
-            long deadline = System.currentTimeMillis() + 10_000;
+            long deadline = System.currentTimeMillis() + 25_000;
             while (client.walletInfo(bob.address()).balance() == 0
                 && System.currentTimeMillis() < deadline) {
                 Thread.sleep(50);

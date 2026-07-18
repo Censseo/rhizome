@@ -63,6 +63,21 @@ public final class NetworkParameters {
     private final int medianTimeWindow;
     private final int maxTransactionsPerBlock;
 
+    // --- Finality / hardening ---
+    /**
+     * Maximum depth of a chain reorganisation a node will perform. Blocks buried
+     * deeper are final: even a heavier competing chain cannot rewrite them
+     * (weak-subjectivity finality window). At 1 block/s, 600 ≈ 10 minutes.
+     */
+    private final int maxReorgDepth;
+    /**
+     * Static checkpoints: height → required block hash. A block at a
+     * checkpointed height whose hash differs is rejected outright. Published
+     * with releases to pin history against long-range rewrites.
+     */
+    @lombok.Builder.Default
+    private final java.util.Map<Long, rhizome.core.crypto.SHA256Hash> checkpoints = java.util.Map.of();
+
     // --- Economics (all amounts are integers scaled by decimalScaleFactor) ---
     private final long decimalScaleFactor;
     /** Reward at height 0, already scaled (e.g. 50 * scale). */
@@ -119,6 +134,7 @@ public final class NetworkParameters {
             .maxFutureBlockTimeSec(15)
             .medianTimeWindow(11)
             .maxTransactionsPerBlock(25_000)
+            .maxReorgDepth(600)
             .decimalScaleFactor(scale)
             .initialReward(50L * scale)
             .rewardEpochBlocks(666_666L)
