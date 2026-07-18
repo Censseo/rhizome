@@ -112,7 +112,7 @@ public class PeerOLD {
                         break;
                     }
 
-                    if (!block.verifyNonce()) {
+                    if (!block.verifyNonce(rhizome.core.common.PowAlgorithm.PUFFERFISH2)) {
                         failure = true;
                         break;
                     }

@@ -20,17 +20,21 @@ public class TransactionDto implements BinarySerializable {
     @Serialize public final long amount;
     @Serialize public final long fee;
     @Serialize public final boolean isTransactionFee;
+    @Serialize public final int chainId;
+    @Serialize public final long nonce;
 
-    public static final int BUFFER_SIZE = 149;
+    public static final int BUFFER_SIZE = 149 + Integer.BYTES + Long.BYTES;
 
     public TransactionDto(
-        @Deserialize("signature") TransactionSignature signature, 
-        @Deserialize("signingKey") PublicKey signingKey, 
-        @Deserialize("timestamp") long timestamp, 
+        @Deserialize("signature") TransactionSignature signature,
+        @Deserialize("signingKey") PublicKey signingKey,
+        @Deserialize("timestamp") long timestamp,
         @Deserialize("to") PublicAddress to,
-        @Deserialize("amount") long amount, 
-        @Deserialize("fee") long fee, 
-        @Deserialize("isTransactionFee") boolean isTransactionFee) {
+        @Deserialize("amount") long amount,
+        @Deserialize("fee") long fee,
+        @Deserialize("isTransactionFee") boolean isTransactionFee,
+        @Deserialize("chainId") int chainId,
+        @Deserialize("nonce") long nonce) {
 
         this.signature = signature;
         this.signingKey = signingKey;
@@ -39,6 +43,8 @@ public class TransactionDto implements BinarySerializable {
         this.amount = amount;
         this.fee = fee;
         this.isTransactionFee = isTransactionFee;
+        this.chainId = chainId;
+        this.nonce = nonce;
     }
 
     @Override

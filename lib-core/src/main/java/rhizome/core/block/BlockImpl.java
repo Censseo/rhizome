@@ -15,7 +15,7 @@ import org.json.JSONObject;
 import lombok.Builder;
 import lombok.Data;
 import rhizome.core.block.dto.BlockDto;
-import rhizome.core.common.Constants;
+import rhizome.core.common.PowAlgorithm;
 import rhizome.core.crypto.SHA256Hash;
 import rhizome.core.transaction.Transaction;
 
@@ -58,9 +58,13 @@ public final class BlockImpl implements Block {
     }
 
     /**
-     * Cryptographic Hashing
-     * @return
-     * @throws NoSuchAlgorithmException
+     * Block header hash.
+     *
+     * <p>The preimage commits to every header field:
+     * {@code merkleRoot || lastBlockHash || id || difficulty || numTransactions || timestamp}
+     * (integers big-endian). Pandanite's C++ omitted {@code id} and the
+     * transaction count, which left the PoW-algorithm switch keyed on a value
+     * the PoW itself did not commit to; the clean chain closes that hole.
      */
     public SHA256Hash hash() {
         try {
@@ -68,10 +72,11 @@ public final class BlockImpl implements Block {
 
             sha256.update(merkleRoot.hash().getArray());
             sha256.update(lastBlockHash.hash().getArray());
-            
-            // Convert int and long to byte arrays and update hash
-            ByteBuffer buffer = ByteBuffer.allocate(Integer.BYTES + Long.BYTES);
+
+            ByteBuffer buffer = ByteBuffer.allocate(3 * Integer.BYTES + Long.BYTES);
+            buffer.putInt(id);
             buffer.putInt(difficulty);
+            buffer.putInt(transactions.size());
             buffer.putLong(timestamp);
             sha256.update(buffer.array());
 
@@ -81,8 +86,13 @@ public final class BlockImpl implements Block {
         }
     }
 
-    public boolean verifyNonce() {
-        boolean usePufferfish = id() > Constants.PUFFERFISH_START_BLOCK;
+    /**
+     * Checks the proof-of-work nonce under the chain's PoW algorithm (from
+     * {@code NetworkParameters}). The clean chain uses Pufferfish2 from genesis;
+     * there is no height-based algorithm switch.
+     */
+    public boolean verifyNonce(PowAlgorithm powAlgorithm) {
+        boolean usePufferfish = powAlgorithm == PowAlgorithm.PUFFERFISH2;
         return verifyHash(hash(), nonce, difficulty, usePufferfish, true);
     }
 

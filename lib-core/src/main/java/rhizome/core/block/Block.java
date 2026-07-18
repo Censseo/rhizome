@@ -62,7 +62,7 @@ public sealed interface Block permits BlockImpl {
     public Block id(int id);
     public void addTransaction(Transaction t);
     public List<Transaction> transactions();
-    public boolean verifyNonce();
+    public boolean verifyNonce(rhizome.core.common.PowAlgorithm powAlgorithm);
     public SHA256Hash hash();
     public SHA256Hash lastBlockHash();
     public int difficulty();
