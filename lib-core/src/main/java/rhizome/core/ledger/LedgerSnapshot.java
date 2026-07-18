@@ -69,6 +69,29 @@ public final class LedgerSnapshot {
         return total;
     }
 
+    /**
+     * Deterministic commitment to this snapshot's content: SHA-256 over
+     * {@code address || amount} (amount big-endian) for every entry, sorted by
+     * address bytes. Insertion order, source metadata and formatting do not
+     * affect it. The genesis block header commits to this hash, binding the
+     * chain to its seeded state.
+     */
+    public rhizome.core.crypto.SHA256Hash commitmentHash() {
+        var digest = new org.bouncycastle.crypto.digests.SHA256Digest();
+        balances.entrySet().stream()
+            .sorted(Map.Entry.comparingByKey(
+                (a, b) -> java.util.Arrays.compareUnsigned(a.toBytes(), b.toBytes())))
+            .forEach(entry -> {
+                byte[] address = entry.getKey().toBytes();
+                digest.update(address, 0, address.length);
+                byte[] amount = rhizome.core.common.Utils.longToBytes(entry.getValue().amount());
+                digest.update(amount, 0, amount.length);
+            });
+        byte[] out = new byte[rhizome.core.crypto.SHA256Hash.SIZE];
+        digest.doFinal(out, 0);
+        return rhizome.core.crypto.SHA256Hash.of(out);
+    }
+
     public JSONObject toJson() {
         JSONObject balancesJson = new JSONObject();
         for (Map.Entry<PublicAddress, TransactionAmount> entry : balances.entrySet()) {
