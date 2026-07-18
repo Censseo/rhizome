@@ -303,17 +303,25 @@ levée, ledger à arithmétique contrôlée. *Voir §3.*
 - *Reste (niveau moteur)* : ordonnancement strict du nonce de compte (nécessite un nonce
   store), bornes de timestamp (§4.7).
 
-### Phase 3 — Moteur blockchain *(assemblage)*
-1. **Bloc genesis** (difficulté 16, soldes initiaux).
-2. **`addBlockSync`** : validation complète et ordonnée — `lastBlockHash`/`id` dès le bloc 1
-   (§4.8), timestamps bornés (§4.7), difficulté attendue recalculée (§4.3), Merkle sur copie
-   (§4.4), PoW, puis exécution via l'Executor.
-3. **Ajustement de difficulté** pur et déterministe, recalculé après add ET pop (§4.3).
-4. **`popBlock` / reorg** propre ; choix de la meilleure chaîne par **travail cumulé total**.
-5. **Checkpoints** + exceptions historiques (§4, encart) si interop mainnet visée.
-6. **Concurrence** : un unique moniteur d'état de chaîne, ordre de verrouillage global (§4.9).
-- **Sortie testable** : nœud mono-instance qui construit une chaîne, gère un fork simulé à
-  deux chaînes, choisit la bonne, et rejette blocs/tx invalides.
+### Phase 3 — Moteur blockchain (FAIT)
+`ChainEngine` (lib-core) assemble le consensus :
+1. **`addBlock`** : validation ordonnée, bon marché d'abord — continuité d'id, nb de tx,
+   `lastBlockHash` chaîné au tip **dès le bloc 2** (§4.8), timestamp > median-time-past et
+   borné par l'horloge locale (§4.7), difficulté == valeur **recalculée depuis l'historique**
+   (§4.3), racine de Merkle, **nonces de compte séquentiels par émetteur**, puis le PoW
+   coûteux en dernier (leçon DoS §4.10), puis l'Executor transactionnel. Travail cumulé en
+   `BigInteger` (2^difficulté par bloc).
+2. **`popBlock`** : inverse exact via `Executor.rollbackBlock`, désindexe les tx, restaure
+   nonces et travail ; refuse de dépop le genesis. La difficulté étant dérivée, elle ne peut
+   pas être périmée après un pop.
+3. **Concurrence** : toutes les méthodes publiques sérialisées sur un verrou unique (§4.9).
+4. `ChainStore` (interface) + `InMemoryChainStore` ; `Miner.mineNonce` déterministe.
+- Testé de bout en bout : minage Pufferfish2 réel, tous les chemins de rejet, séquence de
+  nonces, pop-puis-rejeu, retarget déclenché par timestamps (cap ±4 bits), reconstruction
+  d'état depuis un store existant.
+- *Reste* : choix de la meilleure chaîne par travail cumulé entre chaînes candidates
+  (logique de reorg multi-branches, avec la couche sync) ; `ChainStore` LevelDB dans
+  lib-persistence.
 
 ### Phase 4 — Mempool
 `MemPool` réel (interface aujourd'hui vide) : admission avec validation du **solde cumulé**
