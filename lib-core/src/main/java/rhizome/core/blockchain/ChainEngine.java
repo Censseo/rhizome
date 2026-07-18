@@ -44,7 +44,7 @@ import static rhizome.core.mempool.ExecutionStatus.*;
  * and reads see consistent state (Pandanite's unlocked getters produced torn
  * reads of its Bigint total work).
  */
-public final class ChainEngine implements Blockchain {
+public final class ChainEngine implements Blockchain, rhizome.core.mempool.AccountView {
 
     private final NetworkParameters params;
     private final Ledger ledger;
@@ -205,6 +205,21 @@ public final class ChainEngine implements Blockchain {
         lock.lock();
         try {
             return nextNonce.getOrDefault(sender, 0L);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    @Override
+    public long confirmedNextNonce(rhizome.core.ledger.PublicAddress sender) {
+        return nextNonce(sender);
+    }
+
+    @Override
+    public long confirmedBalance(rhizome.core.ledger.PublicAddress sender) {
+        lock.lock();
+        try {
+            return ledger.hasWallet(sender) ? ledger.getWalletValue(sender).amount() : 0L;
         } finally {
             lock.unlock();
         }
