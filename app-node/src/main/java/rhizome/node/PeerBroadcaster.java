@@ -5,9 +5,10 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
-import java.util.List;
+import java.util.Collection;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.function.Supplier;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -29,16 +30,15 @@ public final class PeerBroadcaster implements AutoCloseable {
 
     private static final Logger log = LoggerFactory.getLogger(PeerBroadcaster.class);
 
-    private final List<String> peers;
+    private final Supplier<Collection<String>> peers;
     private final HttpClient http;
     private final ExecutorService pool;
 
-    public PeerBroadcaster(List<String> peers) {
-        this.peers = peers.stream()
-            .map(p -> p.endsWith("/") ? p.substring(0, p.length() - 1) : p)
-            .toList();
+    /** {@code peers} is queried on each broadcast, so it can reflect a live peer set. */
+    public PeerBroadcaster(Supplier<Collection<String>> peers) {
+        this.peers = peers;
         this.http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build();
-        this.pool = Executors.newFixedThreadPool(Math.max(1, Math.min(8, peers.size() + 1)), r -> {
+        this.pool = Executors.newFixedThreadPool(4, r -> {
             Thread t = new Thread(r, "peer-broadcast");
             t.setDaemon(true);
             return t;
@@ -56,7 +56,7 @@ public final class PeerBroadcaster implements AutoCloseable {
     }
 
     private void post(String path, byte[] body) {
-        for (String peer : peers) {
+        for (String peer : peers.get()) {
             pool.execute(() -> sendQuietly(peer + path, body));
         }
     }

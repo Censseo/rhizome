@@ -21,6 +21,7 @@ public final class NodeService {
     private final MemPool mempool;
     private volatile java.util.function.Consumer<Block> onBlockAccepted;
     private volatile java.util.function.Consumer<Transaction> onTransactionAccepted;
+    private volatile PeerRegistry peers;
 
     public NodeService(ChainEngine engine, MemPool mempool) {
         this.engine = engine;
@@ -34,6 +35,20 @@ public final class NodeService {
 
     public void setOnTransactionAccepted(java.util.function.Consumer<Transaction> listener) {
         this.onTransactionAccepted = listener;
+    }
+
+    public void setPeers(PeerRegistry registry) {
+        this.peers = registry;
+    }
+
+    /** Peer base URLs this node knows (empty if discovery is not enabled). */
+    public java.util.List<String> knownPeers() {
+        return peers == null ? java.util.List.of() : peers.snapshot();
+    }
+
+    /** Registers a peer that announced itself; returns true if newly added. */
+    public boolean addPeer(String url) {
+        return peers != null && peers.add(url);
     }
 
     public NetworkParameters params() {

@@ -47,6 +47,8 @@ public final class RhizomeNode implements AutoCloseable {
     private BlockProducer producer;
     private ScheduledExecutorService syncScheduler;
     private PeerBroadcaster broadcaster;
+    private PeerRegistry registry;
+    private PeerDiscovery discovery;
 
     public RhizomeNode(NodeConfig config) {
         this.config = config;
@@ -64,12 +66,18 @@ public final class RhizomeNode implements AutoCloseable {
         mempool = new MemPool(config.params(), verifier, engine, config.mempoolSize());
         service = new NodeService(engine, mempool);
 
-        startHttp();
-        startGossipIfConfigured();
-        startProducerIfConfigured();
-        startSyncIfConfigured();
+        // Every node keeps a live peer set (seeded from config), serves /peers and
+        // accepts announcements, so the network can self-organise from a few seeds.
+        registry = new PeerRegistry(config.selfUrl(), 128);
+        registry.addAll(config.peers());
+        service.setPeers(registry);
 
-        log.info("Rhizome node started: network={} height={} apiPort={} mining={} peers={}",
+        startHttp();
+        startGossip();
+        startProducerIfConfigured();
+        startNetworkLoops();
+
+        log.info("Rhizome node started: network={} height={} apiPort={} mining={} seedPeers={}",
             config.params().networkName(), engine.height(), config.apiPort(),
             config.miner().isPresent(), config.peers().size());
     }
@@ -90,11 +98,8 @@ public final class RhizomeNode implements AutoCloseable {
         }
     }
 
-    private void startGossipIfConfigured() {
-        if (config.peers().isEmpty()) {
-            return;
-        }
-        broadcaster = new PeerBroadcaster(config.peers());
+    private void startGossip() {
+        broadcaster = new PeerBroadcaster(registry::snapshot);
         // Re-broadcast blocks/transactions accepted from RPC (flood; loops terminate
         // because a peer that already has an item rejects it and won't gossip on).
         service.setOnBlockAccepted(broadcaster::broadcastBlock);
@@ -105,30 +110,28 @@ public final class RhizomeNode implements AutoCloseable {
         config.miner().ifPresent(miner -> {
             producer = new BlockProducer(engine, mempool, miner, System::currentTimeMillis,
                 config.blockIntervalMs());
-            if (broadcaster != null) {
-                producer.setOnProduced(broadcaster::broadcastBlock);
-            }
+            producer.setOnProduced(broadcaster::broadcastBlock);
             producer.start();
         });
     }
 
-    private void startSyncIfConfigured() {
-        if (config.peers().isEmpty()) {
-            return;
-        }
-        syncScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
-            Thread t = new Thread(r, "rhizome-sync");
+    private void startNetworkLoops() {
+        discovery = new PeerDiscovery(registry, config.selfUrl());
+        syncScheduler = Executors.newScheduledThreadPool(2, r -> {
+            Thread t = new Thread(r, "rhizome-net");
             t.setDaemon(true);
             return t;
         });
         syncScheduler.scheduleWithFixedDelay(this::syncRound,
             config.syncPeriodMs(), config.syncPeriodMs(), TimeUnit.MILLISECONDS);
+        syncScheduler.scheduleWithFixedDelay(discovery::round,
+            config.syncPeriodMs(), config.syncPeriodMs(), TimeUnit.MILLISECONDS);
     }
 
-    /** One sync round across all configured peers; peer failures are isolated. */
+    /** One sync round across all known peers; peer failures are isolated. */
     public void syncRound() {
         var synchronizer = new ChainSynchronizer(engine);
-        for (String peerUrl : config.peers()) {
+        for (String peerUrl : registry.snapshot()) {
             try {
                 ChainSynchronizer.Result result = synchronizer.syncFrom(new HttpPeerSource(peerUrl));
                 if (result == ChainSynchronizer.Result.EXTENDED || result == ChainSynchronizer.Result.REORGED) {
@@ -140,6 +143,15 @@ public final class RhizomeNode implements AutoCloseable {
                 log.warn("Sync from {} failed: {}", peerUrl, e.toString());
             }
         }
+    }
+
+    /** Runs one peer-discovery round now (otherwise it runs on the network schedule). */
+    public void discoverRound() {
+        discovery.round();
+    }
+
+    public java.util.List<String> knownPeers() {
+        return registry.snapshot();
     }
 
     public NodeService service() {
@@ -201,6 +213,10 @@ public final class RhizomeNode implements AutoCloseable {
         if (peers != null && !peers.isBlank()) {
             config = config.withPeers(java.util.Arrays.stream(peers.split(","))
                 .map(String::trim).filter(s -> !s.isEmpty()).toList());
+        }
+        String advertise = System.getenv("RHIZOME_ADVERTISE");
+        if (advertise != null && !advertise.isBlank()) {
+            config = config.withAdvertisedUrl(advertise.trim());
         }
 
         RhizomeNode node = new RhizomeNode(config);

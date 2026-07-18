@@ -49,6 +49,13 @@ public final class NodeApi {
                 .put("height", node.blockCount())
                 .put("difficulty", node.difficulty())
                 .put("mempool", node.mempoolSize()))))
+            .with(GET, "/peers", req -> ok(json(new JSONObject()
+                .put("peers", new org.json.JSONArray(node.knownPeers())))))
+            .with(POST, "/add_peer", req -> req.loadBody().map(body -> guardedResponse(() -> {
+                String url = new JSONObject(body.getString(StandardCharsets.UTF_8)).getString("url");
+                node.addPeer(url);
+                return json(new JSONObject().put("status", "OK"));
+            })))
             .with(GET, "/block", req -> guarded(() -> {
                 long id = parseLong(req.getQueryParameter("blockId"));
                 if (id < 1 || id > node.blockCount()) {
