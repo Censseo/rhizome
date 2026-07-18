@@ -323,19 +323,25 @@ levée, ledger à arithmétique contrôlée. *Voir §3.*
   (logique de reorg multi-branches, avec la couche sync) ; `ChainStore` LevelDB dans
   lib-persistence.
 
-### Phase 4 — Mempool
-`MemPool` réel (interface aujourd'hui vide) : admission avec validation du **solde cumulé**
-(toutes tx en attente comprises, cf. PR #13), compteurs `mempoolOutgoing` contrôlés (§4, 2.4),
-limite anti-DoS (≤ N tx, issue #48), `finishBlock` sans deadlock (§4.9).
-- **Sortie testable** : soumettre des tx concurrentes, en inclure dans un bloc, vérifier la purge.
+### Phase 3b — Performance (cible 1 bloc/s) (FAIT)
+1. **Sérialisation cœur manuelle** (`BinaryIO`, codecs `BlockDto`/`TransactionDto`,
+   `BlockCodec`) : layout fixe big-endian, ActiveJ codegen retiré du chemin critique
+   (déterministe, natif-ready). Voir `docs/PERFORMANCE_STACK.md`.
+2. **Stockage RocksDB** (`RocksDbNodeStore`) : column families, `WriteBatch` atomique
+   par bloc (bloc + index tx) ; LevelDB pur-Java conservé pour natif/tests.
+3. **`SignatureVerifier`** : vérif Ed25519 **parallèle** + **cache verify-once**. Mesuré
+   (4 cœurs, 2000 tx) : séquentiel 6,6 → parallèle 11 → **cache chaud ~140 blocs/s** (×21).
+   Le mempool vérifie à l'admission → validation de bloc quasi gratuite en régime permanent.
 
-### Phase 5 — Serveur HTTP API du nœud (app-node)
-Porter les ~15 endpoints de `server.cpp`/`api.cpp` (`/block_count`, `/sync`, `/block`,
-`/submit`, `/add_transaction`, `/tx_json`, `/mine`, `/total_work`, `/peers`, `/stats`…) sur
-ActiveJ HTTP 6.0. **Impérativement** avec les correctifs robustesse §4.10 (bornes, `return`
-après réponse, division protégée, PoW en dernier, rate limiter borné, tout handler répond).
-Le client `PeerInterface` existe déjà pour le versant sortant.
-- **Sortie testable** : deux nœuds locaux se synchronisent via HTTP.
+### Phase 4 — Mempool (FAIT)
+`MemPool` : admission verify-once, séquence de nonces de compte, **solde cumulé** (#13),
+taille bornée (#52), sélection ordonnée pour bloc, purge. `AccountView` sur `ChainEngine`.
+
+### Phase 5 — API HTTP du nœud (FAIT)
+`NodeService` + `NodeApi` (ActiveJ HTTP) : block_count, total_work, difficulty, block,
+wallet, mempool, sync (binaire bornée), add_transaction (octet-stream + JSON), submit.
+Robustesse §4.10 : tout handler répond (400 sinon), plages bornées avant travail, codec
+binaire. Testé in-process.
 
 ### Phase 6 — Synchronisation & P2P (lib-net + host manager)
 1. **Sync de chaîne résiliente** : téléchargement parallèle d'en-têtes puis de blocs, cache
