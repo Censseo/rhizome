@@ -46,6 +46,7 @@ public final class RhizomeNode implements AutoCloseable {
 
     private BlockProducer producer;
     private ScheduledExecutorService syncScheduler;
+    private PeerBroadcaster broadcaster;
 
     public RhizomeNode(NodeConfig config) {
         this.config = config;
@@ -64,6 +65,7 @@ public final class RhizomeNode implements AutoCloseable {
         service = new NodeService(engine, mempool);
 
         startHttp();
+        startGossipIfConfigured();
         startProducerIfConfigured();
         startSyncIfConfigured();
 
@@ -88,10 +90,24 @@ public final class RhizomeNode implements AutoCloseable {
         }
     }
 
+    private void startGossipIfConfigured() {
+        if (config.peers().isEmpty()) {
+            return;
+        }
+        broadcaster = new PeerBroadcaster(config.peers());
+        // Re-broadcast blocks/transactions accepted from RPC (flood; loops terminate
+        // because a peer that already has an item rejects it and won't gossip on).
+        service.setOnBlockAccepted(broadcaster::broadcastBlock);
+        service.setOnTransactionAccepted(broadcaster::broadcastTransaction);
+    }
+
     private void startProducerIfConfigured() {
         config.miner().ifPresent(miner -> {
             producer = new BlockProducer(engine, mempool, miner, System::currentTimeMillis,
                 config.blockIntervalMs());
+            if (broadcaster != null) {
+                producer.setOnProduced(broadcaster::broadcastBlock);
+            }
             producer.start();
         });
     }
@@ -145,6 +161,9 @@ public final class RhizomeNode implements AutoCloseable {
         }
         if (syncScheduler != null) {
             syncScheduler.shutdownNow();
+        }
+        if (broadcaster != null) {
+            broadcaster.close();
         }
         if (verifier != null) {
             verifier.shutdown();

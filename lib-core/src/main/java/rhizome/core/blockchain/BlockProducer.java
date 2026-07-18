@@ -2,6 +2,7 @@ package rhizome.core.blockchain;
 
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
 import java.util.function.LongSupplier;
 
 import rhizome.core.block.Block;
@@ -27,6 +28,7 @@ public final class BlockProducer {
     private final LongSupplier nowMillis;
     private final long targetIntervalMs;
     private final AtomicBoolean running = new AtomicBoolean(false);
+    private volatile Consumer<Block> onProduced;
     private Thread thread;
 
     public BlockProducer(ChainEngine engine, MemPool mempool, PublicAddress miner, LongSupplier nowMillis) {
@@ -62,7 +64,16 @@ public final class BlockProducer {
             return Optional.empty();
         }
         mempool.onBlockApplied(block);
+        Consumer<Block> listener = onProduced;
+        if (listener != null) {
+            listener.accept(block);
+        }
         return Optional.of(block);
+    }
+
+    /** Sets a listener called with each block this producer mines (e.g. to gossip it). */
+    public void setOnProduced(Consumer<Block> listener) {
+        this.onProduced = listener;
     }
 
     /** Starts a background mining loop. Idempotent. */

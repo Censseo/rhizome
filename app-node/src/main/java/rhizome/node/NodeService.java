@@ -19,10 +19,21 @@ public final class NodeService {
 
     private final ChainEngine engine;
     private final MemPool mempool;
+    private volatile java.util.function.Consumer<Block> onBlockAccepted;
+    private volatile java.util.function.Consumer<Transaction> onTransactionAccepted;
 
     public NodeService(ChainEngine engine, MemPool mempool) {
         this.engine = engine;
         this.mempool = mempool;
+    }
+
+    /** Called when a freshly submitted block/transaction is accepted (for gossip). */
+    public void setOnBlockAccepted(java.util.function.Consumer<Block> listener) {
+        this.onBlockAccepted = listener;
+    }
+
+    public void setOnTransactionAccepted(java.util.function.Consumer<Transaction> listener) {
+        this.onTransactionAccepted = listener;
     }
 
     public NetworkParameters params() {
@@ -72,7 +83,11 @@ public final class NodeService {
 
     /** Admits a transaction to the mempool (signature verified once here). */
     public ExecutionStatus submitTransaction(Transaction transaction) {
-        return mempool.addTransaction(transaction);
+        ExecutionStatus status = mempool.addTransaction(transaction);
+        if (status == ExecutionStatus.SUCCESS) {
+            notify(onTransactionAccepted, transaction);
+        }
+        return status;
     }
 
     /** Accepts a mined block; on success the mempool is purged of its transactions. */
@@ -80,8 +95,15 @@ public final class NodeService {
         ExecutionStatus status = engine.addBlock(block);
         if (status == ExecutionStatus.SUCCESS) {
             mempool.onBlockApplied(block);
+            notify(onBlockAccepted, block);
         }
         return status;
+    }
+
+    private static <T> void notify(java.util.function.Consumer<T> listener, T value) {
+        if (listener != null) {
+            listener.accept(value);
+        }
     }
 
     public int mempoolSize() {
