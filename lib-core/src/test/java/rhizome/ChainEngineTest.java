@@ -147,12 +147,13 @@ class ChainEngineTest {
         ((BlockImpl) badMerkle).merkleRoot(rhizome.core.crypto.SHA256Hash.random());
         assertEquals(ExecutionStatus.INVALID_MERKLE_ROOT, engine.addBlock(badMerkle));
 
-        Block badPow = nextBlock(List.of());
-        ((BlockImpl) badPow).timestamp(badPow.hash() != null ? ((BlockImpl) badPow).timestamp() + 1 : 0);
-        // timestamp changed after mining -> header hash changed -> nonce no longer valid
-        var tree = new MerkleTree();
-        tree.setItems(badPow.transactions());
-        ((BlockImpl) badPow).merkleRoot(tree.getRootHash());
+        BlockImpl badPow = (BlockImpl) nextBlock(List.of());
+        // Perturb the timestamp after mining so the header hash changes and the nonce
+        // no longer satisfies PoW. At low difficulty a single bump can still pass by
+        // luck, so keep bumping until the nonce is provably invalid (deterministic).
+        while (badPow.verifyNonce(params.powAlgorithm())) {
+            badPow.timestamp(badPow.timestamp() + 1);
+        }
         assertEquals(ExecutionStatus.INVALID_NONCE, engine.addBlock(badPow));
     }
 

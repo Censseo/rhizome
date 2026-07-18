@@ -85,10 +85,21 @@ public final class BlockProducer {
         }
     }
 
+    /**
+     * Stops the mining loop and waits for the producer thread to exit, so that no
+     * mining is in flight (i.e. no {@link ChainEngine#addBlock} touching the store)
+     * once this returns — callers may then safely close the underlying storage.
+     */
     public void stop() {
         running.set(false);
-        if (thread != null) {
-            thread.interrupt();
+        Thread t = thread;
+        if (t != null) {
+            t.interrupt();
+            try {
+                t.join(2000);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
         }
     }
 

@@ -90,9 +90,28 @@ class NodeApiTest {
 
     /** Drives one request through the servlet on the eventloop and returns the response with its body loaded. */
     private HttpResponse call(HttpRequest request) throws Exception {
+        return callWith(servlet, request);
+    }
+
+    private HttpResponse callWith(io.activej.http.AsyncServlet s, HttpRequest request) throws Exception {
         return eventloop.<HttpResponse>submit(() ->
-            servlet.serve(request).then(resp -> resp.loadBody().map($ -> resp))
+            s.serve(request).then(resp -> resp.loadBody().map($ -> resp))
         ).get();
+    }
+
+    @Test
+    void rateLimitReturns429OverTheLimit() throws Exception {
+        var limited = NodeApi.servlet(eventloop, new NodeService(engine, mempool),
+            new RateLimiter(2, 60_000, 100));
+        assertEquals(200, callWith(limited, HttpRequest.get("http://x/block_count").build()).getCode());
+        assertEquals(200, callWith(limited, HttpRequest.get("http://x/block_count").build()).getCode());
+        assertEquals(429, callWith(limited, HttpRequest.get("http://x/block_count").build()).getCode());
+    }
+
+    @Test
+    void oversizedBodyIsRejectedNotBuffered() throws Exception {
+        byte[] huge = new byte[64 * 1024]; // well over the /add_transaction cap
+        assertEquals(400, call(HttpRequest.post("http://x/add_transaction").withBody(huge).build()).getCode());
     }
 
     private static String body(HttpResponse r) {

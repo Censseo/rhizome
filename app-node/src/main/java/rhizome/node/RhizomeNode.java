@@ -84,7 +84,11 @@ public final class RhizomeNode implements AutoCloseable {
 
     private void startHttp() throws IOException {
         eventloop = Eventloop.create();
-        httpServer = HttpServer.builder(eventloop, NodeApi.servlet(eventloop, service))
+        // Per-client rate limit (fixed 1s window) with a bounded client table
+        // (the table cap is the memory-leak fix; the per-window count is generous
+        // so honest peers on a shared host are never throttled).
+        RateLimiter limiter = new RateLimiter(1000, 1000, 65_536);
+        httpServer = HttpServer.builder(eventloop, NodeApi.servlet(eventloop, service, limiter))
             .withListenPort(config.apiPort())
             .build();
         eventloop.keepAlive(true);
@@ -171,8 +175,19 @@ public final class RhizomeNode implements AutoCloseable {
         if (producer != null) {
             producer.stop();
         }
+        // Stop and DRAIN the network loops before touching the store: a syncRound()
+        // in flight is mid-append into RocksDB, and closing column-family handles
+        // under a live native call crashes the JVM. shutdownNow() only signals —
+        // awaitTermination() is what guarantees no writer is left running.
         if (syncScheduler != null) {
             syncScheduler.shutdownNow();
+            try {
+                if (!syncScheduler.awaitTermination(5, TimeUnit.SECONDS)) {
+                    log.warn("Network scheduler did not terminate before store close");
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
         }
         if (broadcaster != null) {
             broadcaster.close();

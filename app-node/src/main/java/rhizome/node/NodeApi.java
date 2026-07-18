@@ -15,6 +15,7 @@ import org.json.JSONObject;
 
 import rhizome.core.block.Block;
 import rhizome.core.block.BlockCodec;
+import rhizome.core.block.dto.BlockDto;
 import rhizome.core.common.Constants;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.mempool.ExecutionStatus;
@@ -35,10 +36,26 @@ import static io.activej.http.HttpMethod.POST;
  */
 public final class NodeApi {
 
+    private static final int SMALL_BODY = 8 * 1024;                 // tx / peer announcements
+    private static final int TX_BODY = TransactionDto.BUFFER_SIZE + 1024;
+
     private NodeApi() {}
 
+    /** Servlet with a default, lenient rate limiter (for tests and simple embeds). */
     public static AsyncServlet servlet(Reactor reactor, NodeService node) {
-        return RoutingServlet.builder(reactor)
+        return servlet(reactor, node, new RateLimiter(1000, 1000, 8192));
+    }
+
+    /**
+     * Node servlet wrapped with a per-client rate limiter (429 over the limit)
+     * and per-endpoint request-body size caps (memory-bounded parsing), on top
+     * of the always-responds robustness rules.
+     */
+    public static AsyncServlet servlet(Reactor reactor, NodeService node, RateLimiter limiter) {
+        int maxBlockBody = BlockDto.BUFFER_SIZE
+            + node.params().maxTransactionsPerBlock() * TransactionDto.BUFFER_SIZE + 1024;
+
+        RoutingServlet routing = RoutingServlet.builder(reactor)
             .with(GET, "/block_count", req -> ok(text(String.valueOf(node.blockCount()))))
             .with(GET, "/total_work", req -> ok(json(new JSONObject().put("totalWork", node.totalWork().toString()))))
             .with(GET, "/difficulty", req -> ok(text(String.valueOf(node.difficulty()))))
@@ -51,7 +68,7 @@ public final class NodeApi {
                 .put("mempool", node.mempoolSize()))))
             .with(GET, "/peers", req -> ok(json(new JSONObject()
                 .put("peers", new org.json.JSONArray(node.knownPeers())))))
-            .with(POST, "/add_peer", req -> req.loadBody().map(body -> guardedResponse(() -> {
+            .with(POST, "/add_peer", req -> req.loadBody(SMALL_BODY).map(body -> guardedResponse(() -> {
                 String url = new JSONObject(body.getString(StandardCharsets.UTF_8)).getString("url");
                 node.addPeer(url);
                 return json(new JSONObject().put("status", "OK"));
@@ -71,19 +88,41 @@ public final class NodeApi {
                     .put("nextNonce", node.nextNonce(wallet)));
             }))
             .with(GET, "/sync", req -> guarded(() -> sync(node, req)))
-            .with(POST, "/add_transaction_json", req -> req.loadBody().map(body -> guardedResponse(() -> {
+            .with(POST, "/add_transaction_json", req -> req.loadBody(SMALL_BODY).map(body -> guardedResponse(() -> {
                 Transaction t = Transaction.of(new JSONObject(body.getString(StandardCharsets.UTF_8)));
                 return statusResponse(node.submitTransaction(t));
             })))
-            .with(POST, "/add_transaction", req -> req.loadBody().map(body -> guardedResponse(() -> {
+            .with(POST, "/add_transaction", req -> req.loadBody(TX_BODY).map(body -> guardedResponse(() -> {
                 Transaction t = Transaction.of(BinarySerializable.fromBuffer(body.getArray(), TransactionDto.class));
                 return statusResponse(node.submitTransaction(t));
             })))
-            .with(POST, "/submit", req -> req.loadBody().map(body -> guardedResponse(() -> {
+            .with(POST, "/submit", req -> req.loadBody(maxBlockBody).map(body -> guardedResponse(() -> {
                 Block block = BlockCodec.decode(body.getArray());
                 return statusResponse(node.submitBlock(block));
             })))
             .build();
+
+        return request -> {
+            if (!limiter.allow(clientKey(request))) {
+                return HttpResponse.ofCode(429)
+                    .withJson(new JSONObject().put("error", "rate limited").toString())
+                    .toPromise();
+            }
+            // Convert any handler failure (incl. body-size overflow) into a clean response.
+            return routing.serve(request).map(r -> r, e -> badRequest(e.getClass().getSimpleName()));
+        };
+    }
+
+    private static String clientKey(HttpRequest request) {
+        // getRemoteAddress() runs a checkNotNull under ActiveJ's CHECKS flag, so a
+        // request with no live connection (tests, in-process calls) throws instead
+        // of returning null; treat any such request as a single "local" bucket.
+        try {
+            java.net.InetAddress addr = request.getRemoteAddress();
+            return addr != null ? addr.getHostAddress() : "local";
+        } catch (RuntimeException e) {
+            return "local";
+        }
     }
 
     private static HttpResponse sync(NodeService node, HttpRequest req) {
