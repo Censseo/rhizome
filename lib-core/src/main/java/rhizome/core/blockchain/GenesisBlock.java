@@ -24,6 +24,22 @@ public final class GenesisBlock {
 
     private GenesisBlock() {}
 
+    /**
+     * Genesis commitment: SHA-256 over {@code chainId || snapshotCommitment}. Binding
+     * the chain-id means two networks that happen to share a (possibly empty)
+     * balance snapshot still have distinct, incompatible genesis blocks.
+     */
+    private static SHA256Hash genesisCommitment(NetworkParameters params, LedgerSnapshot snapshot) {
+        var digest = new org.bouncycastle.crypto.digests.SHA256Digest();
+        byte[] chainId = rhizome.core.common.Utils.intToBytes(params.chainId());
+        digest.update(chainId, 0, chainId.length);
+        byte[] commitment = snapshot.commitmentHash().toBytes();
+        digest.update(commitment, 0, commitment.length);
+        byte[] out = new byte[SHA256Hash.SIZE];
+        digest.doFinal(out, 0);
+        return SHA256Hash.of(out);
+    }
+
     /** Builds the deterministic genesis block for the given network and snapshot. */
     public static Block build(NetworkParameters params, LedgerSnapshot snapshot) {
         if (snapshot.chainId() != params.chainId()) {
@@ -34,7 +50,7 @@ public final class GenesisBlock {
             .id(GENESIS_ID)
             .timestamp(params.genesisTimestamp())
             .difficulty(params.genesisDifficulty())
-            .merkleRoot(snapshot.commitmentHash())
+            .merkleRoot(genesisCommitment(params, snapshot))
             .lastBlockHash(SHA256Hash.empty())
             .nonce(SHA256Hash.empty())
             .build();

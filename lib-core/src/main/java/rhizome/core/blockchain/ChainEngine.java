@@ -104,8 +104,9 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             if (b.id() != height + 1) {
                 return INVALID_BLOCK_ID;
             }
-            if (block.transactions().size() > params.maxTransactionsPerBlock()) {
-                return INVALID_TRANSACTION_COUNT;
+            if (block.transactions().isEmpty()
+                || block.transactions().size() > params.maxTransactionsPerBlock()) {
+                return INVALID_TRANSACTION_COUNT; // must at least carry a coinbase
             }
             if (!b.lastBlockHash().equals(store.tip().hash())) {
                 return INVALID_LASTBLOCK_HASH;
