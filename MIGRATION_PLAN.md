@@ -373,15 +373,27 @@ Deux correctifs au passage : genesis lié au chainId ; rejet des blocs sans tran
    **recommandation — s'appuyer sur HTTP comme Pandanite** pour l'interop plutôt que sur RPC ActiveJ.
 - **Sortie testable** : un nœud neuf se synchronise depuis un pair sur plusieurs milliers de blocs.
 
-### Phase 7 — Mineur & Wallet (app-wallet, tooling)
-- **Mineur** : boucle de minage (SHA256/Pufferfish), tolérance aux timeouts et blocs périmés
-  sans crash, calcul du hashrate réseau, minage vers une adresse **sans clé privée chargée**
-  (PR #39).
-- **Wallet / CLI** : `keygen`, `tx`, consultation de solde, envoi — équivalents de `cli.cpp`,
-  `keygen.cpp`, `tx.cpp`.
-- **Sortie testable** : générer une clé, miner un bloc, envoyer une tx, la voir confirmée.
+### Phase 6b — Nœud exécutable, production & gossip (FAIT)
+- **`RhizomeNode`** : assemblage complet (RocksDB + moteur + mempool + API + producteur +
+  sync périodique + gossip), cycle de vie start/stop, `main` configurable par variables
+  d'environnement, sans DI par réflexion (natif-ready). Smoke-testé (le binaire tourne).
+- **`BlockProducer`** cadencé + **débit borné en consensus** (`minBlockTime`, voir
+  `docs/BLOCK_RATE_SECURITY.md`).
+- **Gossip actif** (`PeerBroadcaster`) : blocs/tx produits ou acceptés poussés aux pairs ;
+  la sync périodique reste le filet. Testé (un mineur pousse à un receveur passif).
 
-### Phase 8 — Durcissement & interopérabilité
+### Phase 7 — Wallet / CLI (FAIT)
+- **`Wallet`** (keygen/load/save, `signedSend` avec chain-id + nonce) ; **`WalletClient`**
+  (HTTP vers le nœud) ; **`WalletCli`** (`keygen`/`address`/`balance`/`send`). Endpoint
+  `/info` côté nœud. Testé de bout en bout (wallet financé → envoi → minage → soldes à jour) ;
+  CLI smoke-testée.
+- *Reste* : minage vers une adresse sans clé privée chargée (PR #39) — déjà le cas, le
+  producteur ne prend qu'une adresse ; option de minage multi-thread.
+
+### Phase 8 — Durcissement & interopérabilité (reste)
+Découverte de pairs (dnsseeder), build natif GraalVM (banc d'essai wallet — `native-image`
+non installé dans l'env actuel), production du **snapshot réel** (`PandaniteLedgerDumper` sur
+un nœud Pandanite synchronisé), et :
 Tests d'intégration multi-nœuds, fuzzing des entrées réseau, vérification de bout en bout
 contre un nœud Pandanite réel (mêmes hashes de blocs, mêmes soldes) si l'interop est retenue,
 shutdown/repair propres (§4.11), observabilité (logs de progression de sync).
