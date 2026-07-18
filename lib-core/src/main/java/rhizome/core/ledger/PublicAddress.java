@@ -86,6 +86,11 @@ public record PublicAddress(ByteBuf address) implements SimpleHashType {
         return address.isContentEqual(((PublicAddress) other).address());
     }
 
+    @Override
+    public int hashCode() {
+        return Arrays.hashCode(address.getArray());
+    }
+
     public static final int SIZE = 25;
     @Override
     public int getSize() {
