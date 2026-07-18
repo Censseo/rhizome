@@ -90,6 +90,15 @@ class MemPoolTest {
     }
 
     @Test
+    void rejectsNegativeAmountAndFeeAtAdmission() {
+        // Defence-in-depth: negative-value transactions are refused before pooling,
+        // never mind the consensus-level guard.
+        assertEquals(ExecutionStatus.INVALID_TRANSACTION_AMOUNT, mempool.addTransaction(send(-100, 0, 0)));
+        assertEquals(ExecutionStatus.INVALID_TRANSACTION_AMOUNT, mempool.addTransaction(send(0, -100, 0)));
+        assertEquals(0, mempool.size());
+    }
+
+    @Test
     void rejectsBadSignature() {
         Transaction t = send(100, 1, 0);
         ((TransactionImpl) t).amount(new TransactionAmount(999)); // tamper post-sign

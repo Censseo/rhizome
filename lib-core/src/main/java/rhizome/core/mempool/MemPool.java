@@ -70,6 +70,9 @@ public final class MemPool {
         if (tx.chainId() != params.chainId()) {
             return INVALID_CHAIN_ID;
         }
+        if (tx.amount().amount() < 0 || tx.fee().amount() < 0) {
+            return INVALID_TRANSACTION_AMOUNT; // negative would mint money / force negative balances
+        }
         if (!PublicAddress.of(tx.signingKey()).equals(tx.from())) {
             return WALLET_SIGNATURE_MISMATCH;
         }

@@ -158,6 +158,21 @@ class ChainEngineTest {
     }
 
     @Test
+    void rejectsNegativeAmountThroughFullConsensusPath() {
+        // The mint exploit routed through a fully valid block (correct PoW, merkle,
+        // nonce) — the path a hostile /submit or peer block takes. It must be caught
+        // and leave height, ledger and account state untouched.
+        long balanceBefore = ledger.getWalletValue(sender).amount();
+        assertEquals(ExecutionStatus.INVALID_TRANSACTION_AMOUNT,
+            engine.addBlock(nextBlock(List.of(send(-1_000L, 0, 0)))));
+
+        assertEquals(1, engine.height());
+        assertEquals(balanceBefore, ledger.getWalletValue(sender).amount());
+        assertEquals(0L, engine.nextNonce(sender));
+        assertEquals(false, ledger.hasWallet(recipient));
+    }
+
+    @Test
     void enforcesAccountNonceSequence() {
         // Gap: nonce 5 while 0 expected.
         assertEquals(ExecutionStatus.INVALID_TRANSACTION_NONCE,

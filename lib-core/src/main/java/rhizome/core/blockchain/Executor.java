@@ -101,6 +101,13 @@ public final class Executor {
             if (tx.chainId() != params.chainId()) {
                 return INVALID_CHAIN_ID;
             }
+            // A negative amount or fee would invert the ledger arithmetic: withdrawing
+            // a negative value MINTS money for the sender and deposits drive the
+            // recipient's balance negative. Amounts are conceptually unsigned, so any
+            // negative long (including values with the high bit set) is illegal.
+            if (tx.amount().amount() < 0 || tx.fee().amount() < 0) {
+                return INVALID_TRANSACTION_AMOUNT;
+            }
             SHA256Hash id = t.hashContents();
             if (!seenInBlock.add(id) || alreadyExecuted.test(id)) {
                 return EXPIRED_TRANSACTION;
@@ -158,6 +165,12 @@ public final class Executor {
         } catch (LedgerException e) {
             rollback(ledger, applied);
             return BALANCE_TOO_LOW;
+        } catch (ArithmeticException e) {
+            // A deposit that would overflow a wallet's 64-bit balance (Math.addExact
+            // in the ledger) must be rejected cleanly, not left as a partial mutation.
+            // Underflow is already a LedgerException above; this is the overflow twin.
+            rollback(ledger, applied);
+            return BALANCE_OVERFLOW;
         }
     }
 

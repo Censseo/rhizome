@@ -156,6 +156,44 @@ class ExecutorTest {
     }
 
     @Test
+    void rejectsNegativeAmountThatWouldMintMoney() {
+        // Exploit: a negative amount inverts the ledger math — withdrawing a negative
+        // value credits the sender and the recipient's balance is driven negative.
+        // Must be refused outright, ledger untouched.
+        var status = execute(block(2, coinbase(2), signedSend(-1_000L, 0, 0)));
+
+        assertEquals(ExecutionStatus.INVALID_TRANSACTION_AMOUNT, status);
+        assertEquals(1_000_000L, ledger.getWalletValue(sender).amount());
+        assertEquals(false, ledger.hasWallet(recipient));
+    }
+
+    @Test
+    void rejectsNegativeFeeThatWouldMintMoney() {
+        // Exploit twin: amount 0 but a negative fee also mints for the sender via the
+        // withdraw of (amount + fee).
+        var status = execute(block(2, coinbase(2), signedSend(0L, -1_000L, 0)));
+
+        assertEquals(ExecutionStatus.INVALID_TRANSACTION_AMOUNT, status);
+        assertEquals(1_000_000L, ledger.getWalletValue(sender).amount());
+    }
+
+    @Test
+    void depositOverflowRollsBackCleanlyInsteadOfCorruptingState() {
+        // A recipient near the 64-bit ceiling (reachable via a crafted snapshot seed):
+        // a further deposit overflows. The block must be refused and the ledger left
+        // exactly as before — not partially mutated with the sender already debited.
+        ledger.createWallet(recipient);
+        ledger.deposit(recipient, new TransactionAmount(Long.MAX_VALUE - 100L));
+
+        var status = execute(block(2, coinbase(2), signedSend(500L, 0, 0)));
+
+        assertEquals(ExecutionStatus.BALANCE_OVERFLOW, status);
+        assertEquals(1_000_000L, ledger.getWalletValue(sender).amount());
+        assertEquals(Long.MAX_VALUE - 100L, ledger.getWalletValue(recipient).amount());
+        assertEquals(false, ledger.hasWallet(miner) && ledger.getWalletValue(miner).amount() > 0);
+    }
+
+    @Test
     void unknownSenderRejected() {
         var pair = generateKeyPair();
         var ghostKey = PublicKey.of(pair.getPublic());
