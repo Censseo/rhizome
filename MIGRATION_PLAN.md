@@ -390,10 +390,16 @@ Deux correctifs au passage : genesis lié au chainId ; rejet des blocs sans tran
 - *Reste* : minage vers une adresse sans clé privée chargée (PR #39) — déjà le cas, le
   producteur ne prend qu'une adresse ; option de minage multi-thread.
 
-### Phase 8 — Durcissement & interopérabilité (reste)
-Découverte de pairs (dnsseeder), build natif GraalVM (banc d'essai wallet — `native-image`
-non installé dans l'env actuel), production du **snapshot réel** (`PandaniteLedgerDumper` sur
-un nœud Pandanite synchronisé), et :
+### Phase 7b — Découverte de pairs (FAIT)
+`PeerRegistry` (ensemble vivant de pairs) + endpoints `/peers`, `/add_peer` + `PeerDiscovery`
+(échange de pairs périodique + annonce de soi + pruning). Sync et gossip lisent l'ensemble
+vivant. Le réseau **s'auto-organise à partir de quelques seeds** — plus de liste codée en
+dur. Testé : trois nœuds forment un maillage complet depuis un seul seed.
+
+### Phase 8 — Durcissement & interopérabilité (reste, dépend de l'environnement)
+Build natif GraalVM (banc d'essai wallet — `native-image` non installé dans l'env actuel),
+production du **snapshot réel** (`PandaniteLedgerDumper` sur un nœud Pandanite synchronisé),
+et :
 Tests d'intégration multi-nœuds, fuzzing des entrées réseau, vérification de bout en bout
 contre un nœud Pandanite réel (mêmes hashes de blocs, mêmes soldes) si l'interop est retenue,
 shutdown/repair propres (§4.11), observabilité (logs de progression de sync).
