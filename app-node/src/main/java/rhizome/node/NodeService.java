@@ -29,6 +29,14 @@ public final class NodeService {
         return engine.params();
     }
 
+    public int chainId() {
+        return engine.params().chainId();
+    }
+
+    public String networkName() {
+        return engine.params().networkName();
+    }
+
     public long blockCount() {
         return engine.height();
     }

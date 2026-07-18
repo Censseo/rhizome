@@ -43,6 +43,12 @@ public final class NodeApi {
             .with(GET, "/total_work", req -> ok(json(new JSONObject().put("totalWork", node.totalWork().toString()))))
             .with(GET, "/difficulty", req -> ok(text(String.valueOf(node.difficulty()))))
             .with(GET, "/mempool", req -> ok(json(new JSONObject().put("size", node.mempoolSize()))))
+            .with(GET, "/info", req -> ok(json(new JSONObject()
+                .put("chainId", node.chainId())
+                .put("network", node.networkName())
+                .put("height", node.blockCount())
+                .put("difficulty", node.difficulty())
+                .put("mempool", node.mempoolSize()))))
             .with(GET, "/block", req -> guarded(() -> {
                 long id = parseLong(req.getQueryParameter("blockId"));
                 if (id < 1 || id > node.blockCount()) {
