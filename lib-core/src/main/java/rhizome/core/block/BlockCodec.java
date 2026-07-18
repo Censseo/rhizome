@@ -33,7 +33,10 @@ public final class BlockCodec {
     }
 
     public static Block decode(byte[] bytes) {
-        ByteBuffer buffer = ByteBuffer.wrap(bytes);
+        return decode(ByteBuffer.wrap(bytes));
+    }
+
+    private static Block decode(ByteBuffer buffer) {
         BlockDto header = BlockDto.readFrom(buffer);
 
         List<Transaction> transactions = new ArrayList<>(header.numTransactions());
@@ -41,5 +44,18 @@ public final class BlockCodec {
             transactions.add(Transaction.of(TransactionDto.readFrom(buffer)));
         }
         return Block.of(header, transactions);
+    }
+
+    /**
+     * Decodes a concatenation of blocks (each self-delimiting via its header's
+     * transaction count), as served by the {@code /sync} endpoint.
+     */
+    public static List<Block> decodeAll(byte[] bytes) {
+        ByteBuffer buffer = ByteBuffer.wrap(bytes);
+        List<Block> blocks = new ArrayList<>();
+        while (buffer.hasRemaining()) {
+            blocks.add(decode(buffer));
+        }
+        return blocks;
     }
 }
