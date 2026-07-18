@@ -343,7 +343,24 @@ wallet, mempool, sync (binaire bornée), add_transaction (octet-stream + JSON), 
 Robustesse §4.10 : tout handler répond (400 sinon), plages bornées avant travail, codec
 binaire. Testé in-process.
 
-### Phase 6 — Synchronisation & P2P (lib-net + host manager)
+### Phase 5b — Production de blocs (FAIT)
+`BlockAssembler` (coinbase + tx mempool + Merkle) et `BlockProducer` (assemble → mine →
+`addBlock` → purge ; boucle de fond `start`/`stop` qui relit le tip à chaque tour). Le nœud
+devient producteur autonome. Testé.
+
+### Phase 6 — Synchronisation & choix de chaîne (FAIT pour le cœur)
+`ChainSynchronizer` : adopte la chaîne d'un pair **seulement si travail cumulé strictement
+supérieur** (règle de fork-choice objective absente de Pandanite). Rattrapage linéaire +
+**reorg** (ancêtre commun → rollback → branche pair) avec **restauration intégrale si un bloc
+pair est invalide** (un pair menteur ne peut pas corrompre l'état local). `PeerSource`
+abstrait ; **`HttpPeerSource`** (client JDK bloquant) parle à l'API `/block_count`,
+`/total_work`, `/block`, `/sync`. Test d'intégration : deux nœuds se synchronisent sur HTTP.
+Deux correctifs au passage : genesis lié au chainId ; rejet des blocs sans transaction
+(anti-crash Merkle).
+- *Reste* : gestion multi-pairs (sélection/rotation, persistance de la liste), boucle de sync
+  périodique + gossip de blocs/tx, découverte de pairs (dnsseeder). Voir aussi ci-dessous.
+
+### Phase 6-réseau — P2P complet (lib-net + host manager)
 1. **Sync de chaîne résiliente** : téléchargement parallèle d'en-têtes puis de blocs, cache
    disque, retries + backoff + rotation de pairs, reprise après crash, jamais de conseil
    destructif (issue #126).
