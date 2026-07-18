@@ -62,6 +62,25 @@ class MerkleTreeTest {
     }
 
     @Test
+    void rootCommitsToTransactionOrder() {
+        // Reordering the same set of transactions must change the root, otherwise a
+        // reordered variant of a valid block would share its hash (and PoW) yet be
+        // validated differently — an order-dependent consensus split.
+        User miner = User.create();
+        User receiver = User.create();
+        Transaction a = miner.mine();
+        Transaction b = miner.send(receiver, 50);
+        Transaction c = miner.send(receiver, 60);
+
+        MerkleTree m1 = new MerkleTree();
+        m1.setItems(new ArrayList<>(List.of(a, b, c)));
+        MerkleTree m2 = new MerkleTree();
+        m2.setItems(new ArrayList<>(List.of(a, c, b)));
+
+        assertTrue(!m1.getRootHash().equals(m2.getRootHash()), "root must depend on order");
+    }
+
+    @Test
     void largerTreeWorks() {
         MerkleTree m = new MerkleTree();
         User miner = User.create();

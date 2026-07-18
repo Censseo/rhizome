@@ -45,10 +45,14 @@ import static rhizome.core.mempool.ExecutionStatus.*;
  */
 public final class MemPool {
 
+    /** Default per-sender ceiling: no honest account queues this many pending nonces. */
+    private static final int DEFAULT_MAX_PER_SENDER = 1024;
+
     private final NetworkParameters params;
     private final SignatureVerifier verifier;
     private final AccountView accounts;
     private final int maxSize;
+    private final int maxPerSender;
 
     private final Map<PublicAddress, NavigableMap<Long, Transaction>> bySender = new HashMap<>();
     private final Set<SHA256Hash> contentHashes = new HashSet<>();
@@ -56,10 +60,22 @@ public final class MemPool {
     private int size;
 
     public MemPool(NetworkParameters params, SignatureVerifier verifier, AccountView accounts, int maxSize) {
+        this(params, verifier, accounts, maxSize, Math.min(maxSize, DEFAULT_MAX_PER_SENDER));
+    }
+
+    /**
+     * As above, but with an explicit per-sender cap: one account cannot occupy more
+     * than {@code maxPerSender} pooled transactions, so a single sender cannot flood
+     * the whole pool and crowd out everyone else (the global {@code maxSize} bounds
+     * total memory; this bounds per-account fairness).
+     */
+    public MemPool(NetworkParameters params, SignatureVerifier verifier, AccountView accounts,
+                   int maxSize, int maxPerSender) {
         this.params = params;
         this.verifier = verifier;
         this.accounts = accounts;
         this.maxSize = maxSize;
+        this.maxPerSender = maxPerSender;
     }
 
     public ExecutionStatus addTransaction(Transaction transaction) {
@@ -96,6 +112,9 @@ public final class MemPool {
             NavigableMap<Long, Transaction> pending = bySender.get(from);
             if (pending != null && pending.containsKey(tx.nonce())) {
                 return INVALID_TRANSACTION_NONCE; // duplicate nonce (no replace-by-fee yet)
+            }
+            if (pending != null && pending.size() >= maxPerSender) {
+                return QUEUE_FULL; // one sender cannot monopolise the pool
             }
 
             // Cumulative spend across this sender's pending set + candidate.

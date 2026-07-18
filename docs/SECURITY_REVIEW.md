@@ -64,22 +64,54 @@ propageait l'exception hors de `addBlock`.
 `BALANCE_OVERFLOW`. Le jumeau overflow du garde-fou underflow existant.
 Test : `ExecutorTest.depositOverflowRollsBackCleanlyInsteadOfCorruptingState`.
 
-## Risques résiduels (recommandations, non bloquants)
+## Risques résiduels — traités
 
-- **DoS de parse `/total_work`** : `HttpPeerSource` lit la chaîne `totalWork` du
-  pair sans cap de taille ; un pair malveillant peut renvoyer une chaîne énorme
-  (parse `BigInteger` en O(n²) = DoS CPU) avant d'être banni. → capper la taille
-  de réponse côté client.
-- **Ordre des transactions non authentifié par le merkle** (arbre trié par hash) :
-  le consensus reste cohérent (tous les nœuds voient le même ordre sérialisé),
-  mais la racine n'engage pas l'ordre. Non exploitable pour l'acceptation.
-- **Pas de maturité de coinbase** : la récompense est dépensable immédiatement ;
-  un reorg (borné par la finalité) pourrait invalider une dépense de récompense
-  orpheline. Acceptable vu `maxReorgDepth`.
-- **Flood mempool mono-compte** : borne globale de taille présente ; un cap
-  par-expéditeur limiterait le squat de nonces.
+### 3. DoS de parse `/total_work` (et bodies non bornés) — CORRIGÉ
+
+`HttpPeerSource` lisait la réponse du pair sans cap de taille : un pair
+malveillant pouvait renvoyer une chaîne `totalWork` énorme (parse `BigInteger`
+en O(n²) = DoS CPU) ou un flux `/sync` illimité (DoS mémoire), avant d'être
+banni. Chaque endpoint a désormais un plafond (`readBounded`, lecture en flux
+qui avorte au-delà du cap) : 4 Ko pour les scalaires (hauteur, travail total),
+1 Mo pour un bloc JSON, et pour `/sync` une borne dérivée des maxima de consensus
+(`BLOCKS_PER_FETCH` blocs pleins). Une réponse valide n'est jamais rejetée ; une
+réponse hostile est finie.
+Test : `HttpPeerSourceTest.oversizedTotalWorkIsRejectedNotParsed`.
+
+### 4. Ordre des transactions non authentifié par le merkle — CORRIGÉ
+
+L'arbre de Merkle triait les transactions par hash, donc la racine n'engageait
+que l'*ensemble*, pas l'*ordre*. Deux blocs `[t0,t1]` et `[t1,t0]` partageaient
+racine et hash — donc la même PoW — alors que la validation des nonces dépend de
+l'ordre : un nœud pouvait accepter ou rejeter le même hash selon l'ordre reçu
+(split de consensus / griefing). `MerkleTree.setItems` **préserve désormais
+l'ordre d'insertion** : tout réordonnancement produit un hash différent. La
+duplication de la dernière tx (CVE-2012-2459) reste bloquée par la déduplication
+par content-hash de l'Executor.
+Test : `MerkleTreeTest.rootCommitsToTransactionOrder`.
+
+### 5. Flood mempool mono-compte — CORRIGÉ
+
+Seule une borne globale existait ; un expéditeur unique pouvait squatter tout le
+pool avec des milliers de nonces en attente. Ajout d'un plafond **par
+expéditeur** (`maxPerSender`, défaut 1024) : la borne globale protège la mémoire,
+celle-ci protège l'équité entre comptes.
+Test : `MemPoolTest.enforcesPerSenderCapSoOneAccountCannotFloodThePool`.
+
+### 6. Maturité de coinbase — DÉCISION : non applicable au modèle par soldes
+
+La maturité de coinbase (interdire la dépense d'une récompense avant N blocs)
+est un concept **UTXO** : il suppose de tracer la provenance de chaque pièce.
+Rhizome (comme Pandanite) utilise un ledger **par soldes** où la récompense
+devient immédiatement fongible avec le reste du solde du mineur — il n'existe pas
+de « pièce de coinbase » distincte à faire mûrir. Le risque réel (dépenser une
+récompense qu'un reorg rendrait orpheline) est couvert par la **fenêtre de
+finalité** `maxReorgDepth` : au-delà, l'historique ne peut plus être réécrit.
+Implémenter une maturité imposerait un modèle de provenance étranger à
+l'architecture ; décision de ne pas le faire, protection assurée par la finalité.
 
 ## Résultat
 
-Suite complète : **162 tests verts** (+5 tests de sécurité ajoutés). Les deux
-bugs sont corrigés et prouvés par des tests qui échouent sans le correctif.
+Suite complète : **164 tests verts** (+7 tests de sécurité au total). Les bugs
+sont corrigés et prouvés par des tests qui échouent sans le correctif ; tous les
+risques résiduels identifiés sont traités (corrigés ou décidés).

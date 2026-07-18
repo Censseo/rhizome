@@ -128,6 +128,27 @@ class MemPoolTest {
     }
 
     @Test
+    void enforcesPerSenderCapSoOneAccountCannotFloodThePool() {
+        // Global room for 100, but one sender is capped at 3: its 4th is refused
+        // while a different sender is still admitted.
+        MemPool pool = new MemPool(params, verifier, accounts, 100, 3);
+        for (int i = 0; i < 3; i++) {
+            assertEquals(ExecutionStatus.SUCCESS, pool.addTransaction(send(1, 0, i)));
+        }
+        assertEquals(ExecutionStatus.QUEUE_FULL, pool.addTransaction(send(1, 0, 3)));
+
+        var otherPair = generateKeyPair();
+        var otherKey = PublicKey.of(otherPair.getPublic());
+        var otherPriv = new PrivateKey((Ed25519PrivateKeyParameters) otherPair.getPrivate());
+        var other = PublicAddress.of(otherKey);
+        accounts.balances.put(other, 1_000_000L);
+        Transaction fromOther = Transaction.of(other, PublicAddress.random(), new TransactionAmount(1),
+            otherKey, new TransactionAmount(0), 1000L, params.chainId(), 0);
+        fromOther.sign(otherPriv);
+        assertEquals(ExecutionStatus.SUCCESS, pool.addTransaction(fromOther));
+    }
+
+    @Test
     void selectsContiguousNonceRunInOrder() {
         mempool.addTransaction(send(100, 0, 0));
         mempool.addTransaction(send(100, 0, 1));

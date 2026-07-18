@@ -20,11 +20,14 @@ public class MerkleTree {
     }
 
     public void setItems(List<Transaction> items) {
-        var sortedItems = new ArrayList<>(items);
-        sortedItems.sort(Comparator.comparing(Transaction::hash).reversed());
-
+        // Insertion order is preserved (no sort): the root then commits to the
+        // transaction ORDER, not just the set. Sorting would make [t0,t1] and
+        // [t1,t0] share a root — hence a block hash — so a reordered variant of a
+        // valid block would carry valid PoW yet be accepted or rejected depending on
+        // which order a node received, splitting consensus (order-dependent nonce
+        // checks). Committing to order closes that: any reorder is a different hash.
         var q = new LinkedList<HashTree>();
-        sortedItems.forEach(item -> {
+        items.forEach(item -> {
             var hash = item.hash();
             var node = new HashTree(hash);
             fringeNodes.put(hash, node);
