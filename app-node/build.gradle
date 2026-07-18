@@ -9,8 +9,7 @@ dependencies {
 }
 
 application {
-    // Define the main class for the application.
-    // mainClass = 'rhizome.server.App'
+    mainClass = 'rhizome.node.RhizomeNode'
 }
 
 tasks.named('test') {

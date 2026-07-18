@@ -25,14 +25,26 @@ public final class BlockProducer {
     private final MemPool mempool;
     private final PublicAddress miner;
     private final LongSupplier nowMillis;
+    private final long targetIntervalMs;
     private final AtomicBoolean running = new AtomicBoolean(false);
     private Thread thread;
 
     public BlockProducer(ChainEngine engine, MemPool mempool, PublicAddress miner, LongSupplier nowMillis) {
+        this(engine, mempool, miner, nowMillis, 0L);
+    }
+
+    /**
+     * @param targetIntervalMs minimum wall-clock time between produced blocks. Paces the
+     *     loop so trivial proof-of-work (low difficulty) does not spin out thousands of
+     *     blocks; at real difficulty the PoW itself dominates. 0 disables pacing.
+     */
+    public BlockProducer(ChainEngine engine, MemPool mempool, PublicAddress miner,
+                         LongSupplier nowMillis, long targetIntervalMs) {
         this.engine = engine;
         this.mempool = mempool;
         this.miner = miner;
         this.nowMillis = nowMillis;
+        this.targetIntervalMs = targetIntervalMs;
     }
 
     /**
@@ -75,11 +87,22 @@ public final class BlockProducer {
 
     private void loop() {
         while (running.get()) {
+            long start = nowMillis.getAsLong();
             try {
                 produce();
             } catch (RuntimeException e) {
                 // A produce failure (e.g. transient store error) must not kill the loop.
                 if (!running.get()) {
+                    break;
+                }
+            }
+            long elapsed = nowMillis.getAsLong() - start;
+            long sleep = targetIntervalMs - elapsed;
+            if (sleep > 0) {
+                try {
+                    Thread.sleep(sleep);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
                     break;
                 }
             }

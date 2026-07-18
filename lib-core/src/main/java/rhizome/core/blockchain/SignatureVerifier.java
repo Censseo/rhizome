@@ -75,11 +75,19 @@ public final class SignatureVerifier {
         return ok;
     }
 
+    /** Below this batch size, parallelism costs more than it saves — verify inline. */
+    private static final int PARALLEL_THRESHOLD = 32;
+
     /**
-     * Verifies all transactions, checking the cache-miss set in parallel.
-     * Returns true only if every transaction is valid.
+     * Verifies all transactions (cache-miss set checked in parallel for large
+     * batches) and returns true only if every transaction is valid. Small
+     * batches and the interrupted-thread fallback verify sequentially, so this
+     * is safe to call from a mining loop whose thread may be interrupted.
      */
     public boolean verifyAll(List<Transaction> transactions) {
+        if (transactions.size() < PARALLEL_THRESHOLD) {
+            return verifySequential(transactions);
+        }
         try {
             return pool.submit(() ->
                 IntStream.range(0, transactions.size())
@@ -87,11 +95,21 @@ public final class SignatureVerifier {
                     .allMatch(i -> verify(transactions.get(i)))
             ).get();
         } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException("Interrupted during signature verification", e);
+            // Don't poison the caller: clear the flag and fall back to sequential.
+            Thread.interrupted();
+            return verifySequential(transactions);
         } catch (ExecutionException e) {
             throw new IllegalStateException("Signature verification failed", e.getCause());
         }
+    }
+
+    private boolean verifySequential(List<Transaction> transactions) {
+        for (Transaction t : transactions) {
+            if (!verify(t)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private void remember(CacheKey key) {
