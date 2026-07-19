@@ -71,6 +71,12 @@ public final class NetworkParameters {
      */
     private final int maxBlockSizeBytes;
 
+    /**
+     * Maximum uncle references a block may carry (GHOST). Bounds header growth and
+     * the extra work a single block can credit. 0 disables uncles.
+     */
+    private final int maxUnclesPerBlock;
+
     // --- Finality / hardening ---
     /**
      * Maximum depth of a chain reorganisation a node will perform. Blocks buried
@@ -154,6 +160,7 @@ public final class NetworkParameters {
             .medianTimeWindow(60)
             .maxTransactionsPerBlock(25_000)
             .maxBlockSizeBytes(Constants.MAX_BLOCK_SIZE_BYTES)
+            .maxUnclesPerBlock(2)
             .maxReorgDepth(600)
             .decimalScaleFactor(scale)
             // Emission schedule, recalibrated for the 1-block/second cadence (see

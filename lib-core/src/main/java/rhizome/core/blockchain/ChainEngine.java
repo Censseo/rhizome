@@ -124,6 +124,13 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             if (serializedSize(block) > params.maxBlockSizeBytes()) {
                 return BLOCK_TOO_LARGE;
             }
+            // Structural uncle checks (GHOST): bounded count, distinct, and none is the
+            // parent itself. Ancestry/PoW validation and fork-choice weighting land with
+            // the orphan pool; for now uncles are carried and committed but earn no work.
+            ExecutionStatus uncleCheck = checkUnclesStructure(b, store.tip().hash());
+            if (uncleCheck != SUCCESS) {
+                return uncleCheck;
+            }
             // Static checkpoint: at a pinned height, only the published hash passes.
             SHA256Hash checkpoint = params.checkpoints().get(height + 1);
             if (checkpoint != null && !block.hash().equals(checkpoint)) {
@@ -383,12 +390,31 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         return tree.getRootHash();
     }
 
-    /** Serialized byte size of the block (header + variable-length transactions). */
+    /** Serialized byte size of the block (header + variable-length transactions + uncles). */
     private static long serializedSize(Block block) {
-        long size = rhizome.core.block.dto.BlockDto.BUFFER_SIZE;
+        long size = rhizome.core.block.dto.BlockDto.BUFFER_SIZE + Integer.BYTES;
         for (Transaction t : block.transactions()) {
             size += t.serialize().getSize();
         }
+        size += (long) block.uncles().size() * SHA256Hash.SIZE;
         return size;
+    }
+
+    /** Structural uncle validation: bounded count, distinct hashes, none is the parent. */
+    private ExecutionStatus checkUnclesStructure(Block block, SHA256Hash parentHash) {
+        List<SHA256Hash> uncles = block.uncles();
+        if (uncles.isEmpty()) {
+            return SUCCESS;
+        }
+        if (uncles.size() > params.maxUnclesPerBlock()) {
+            return INVALID_UNCLES;
+        }
+        java.util.Set<SHA256Hash> seen = new java.util.HashSet<>();
+        for (SHA256Hash uncle : uncles) {
+            if (uncle.equals(parentHash) || !seen.add(uncle)) {
+                return INVALID_UNCLES; // no duplicates, and the parent is not its own uncle
+            }
+        }
+        return SUCCESS;
     }
 }

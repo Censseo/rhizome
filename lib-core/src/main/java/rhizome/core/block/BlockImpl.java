@@ -47,6 +47,15 @@ public final class BlockImpl implements Block {
     private SHA256Hash nonce = SHA256Hash.empty();
 
     /**
+     * Hashes of referenced uncle blocks (valid orphans sharing a recent ancestor).
+     * Empty for a plain block; the basis of the GHOST fork choice. Committed in the
+     * header hash only when non-empty, so an uncle-less block hashes exactly as it
+     * did before uncles existed.
+     */
+    @Builder.Default
+    private List<SHA256Hash> uncles = new ArrayList<>();
+
+    /**
      * Serialization
      */
     public BlockDto serialize() {
@@ -79,6 +88,14 @@ public final class BlockImpl implements Block {
             buffer.putInt(transactions.size());
             buffer.putLong(timestamp);
             sha256.update(buffer.array());
+
+            // Commit to referenced uncles only when present, so an uncle-less block's
+            // hash is byte-for-byte what it was before uncles existed.
+            if (uncles != null && !uncles.isEmpty()) {
+                for (SHA256Hash uncle : uncles) {
+                    sha256.update(uncle.hash().getArray());
+                }
+            }
 
             return SHA256Hash.of(sha256.digest());
         } catch (NoSuchAlgorithmException e) {

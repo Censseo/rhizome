@@ -73,22 +73,13 @@ public class LevelDBBlockPersistence extends LevelDBDataStore implements BlockPe
     }
 
     public ByteBuf getRawData(int blockId) {
-        var blockHeader = getBlockHeader(blockId);
-        var transactions = getBlockTransactions(blockHeader);
-        // Transactions are variable length (contract payloads), so sum their sizes.
-        long size = BlockDto.BUFFER_SIZE;
-        for (var transaction : transactions) {
-            size += transaction.getSize();
-        }
-        var buffer = ByteBufPool.allocateExact(MemSize.of(size));
-        buffer.put(blockHeader.toBuffer());
-        transactions.forEach(transaction -> buffer.put(transaction.toBuffer()));
-        return buffer;
+        // Emit the canonical block-codec format (header || txs || uncle section) so it
+        // round-trips through fromRawData; this legacy store keeps no uncles, so the
+        // reconstructed block carries none.
+        return ByteBuf.wrapForReading(rhizome.core.block.BlockCodec.encode(getBlock(blockId)));
     }
 
     public Block fromRawData(byte[] rawData) {
-        // Same header || tx[0] || tx[1] ... layout as the shared block codec, whose
-        // reader handles the variable-length (self-delimiting) transactions.
         return rhizome.core.block.BlockCodec.decode(rawData);
     }
 

@@ -22,6 +22,7 @@ public final class BlockCodec {
     public static byte[] encode(Block block) {
         BlockDto header = block.serialize();
         List<Transaction> transactions = block.transactions();
+        List<rhizome.core.crypto.SHA256Hash> uncles = block.uncles();
         // Transactions are variable length (contract payloads), so sum their sizes.
         int size = BlockDto.BUFFER_SIZE;
         TransactionDto[] dtos = new TransactionDto[transactions.size()];
@@ -29,11 +30,16 @@ public final class BlockCodec {
             dtos[i] = transactions.get(i).serialize();
             size += dtos[i].getSize();
         }
+        size += Integer.BYTES + uncles.size() * rhizome.core.crypto.SHA256Hash.SIZE;
 
         ByteBuffer buffer = ByteBuffer.allocate(size);
         header.writeTo(buffer);
         for (TransactionDto dto : dtos) {
             dto.writeTo(buffer);
+        }
+        buffer.putInt(uncles.size());
+        for (rhizome.core.crypto.SHA256Hash uncle : uncles) {
+            buffer.put(uncle.hash().getArray());
         }
         return buffer.array();
     }
@@ -49,7 +55,14 @@ public final class BlockCodec {
         for (int i = 0; i < header.numTransactions(); i++) {
             transactions.add(Transaction.of(TransactionDto.readFrom(buffer)));
         }
-        return Block.of(header, transactions);
+        List<rhizome.core.crypto.SHA256Hash> uncles = new ArrayList<>();
+        int numUncles = buffer.getInt();
+        for (int i = 0; i < numUncles; i++) {
+            byte[] h = new byte[rhizome.core.crypto.SHA256Hash.SIZE];
+            buffer.get(h);
+            uncles.add(rhizome.core.crypto.SHA256Hash.of(h));
+        }
+        return Block.of(header, transactions, uncles);
     }
 
     /**
