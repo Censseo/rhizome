@@ -109,6 +109,32 @@ public final class NetworkParameters {
     private final long rewardDecayDen;
 
     /**
+     * GHOST uncle economics. An included uncle pays its miner
+     * {@code miningReward * uncleRewardNum / uncleRewardDen}; the including
+     * (nephew) block's miner earns {@code miningReward / nephewRewardDivisor} per
+     * uncle on top of the base reward. Both are fresh issuance, but every uncle is
+     * a real proof-of-work block, so no reward is ever minted without matching work.
+     * A flat fraction (not distance-scaled) keeps the reward derivable from the
+     * committed uncle refs alone, so reorg reversal is exact.
+     */
+    @lombok.Builder.Default
+    private final long uncleRewardNum = 1;
+    @lombok.Builder.Default
+    private final long uncleRewardDen = 2;
+    @lombok.Builder.Default
+    private final long nephewRewardDivisor = 32;
+
+    /** Reward paid to an included uncle's miner at {@code height}. */
+    public long uncleReward(long height) {
+        return miningReward(height) * uncleRewardNum / uncleRewardDen;
+    }
+
+    /** Bonus paid to the nephew (including block) miner per included uncle at {@code height}. */
+    public long nephewReward(long height) {
+        return miningReward(height) / nephewRewardDivisor;
+    }
+
+    /**
      * Deterministic, integer-only mining reward for a block at {@code height}.
      *
      * <p>Every epoch of {@link #rewardEpochBlocks} blocks the reward is scaled by

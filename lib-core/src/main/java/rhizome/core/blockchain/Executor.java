@@ -190,6 +190,11 @@ public final class Executor {
                 }
             }
             deposit(ledger, applied, miner, ((TransactionImpl) coinbase).amount());
+            // GHOST uncle rewards: fresh issuance to each referenced uncle's miner, plus a
+            // nephew bonus to this block's miner. Every uncle is a real PoW block, so no
+            // reward is minted without matching work. Uncle validity (miner address, depth,
+            // no double-crediting) was already enforced by the engine.
+            payUncleRewards(blockImpl, ledger, applied, miner, params);
             if (processor != null) {
                 processor.commit(blockImpl.id());
             }
@@ -201,6 +206,26 @@ public final class Executor {
             // in the ledger) must be rejected cleanly, not left as a partial mutation.
             // Underflow is already a LedgerException above; this is the overflow twin.
             return abort(processor, ledger, applied, BALANCE_OVERFLOW);
+        }
+    }
+
+    /** Mints the GHOST uncle and nephew rewards for a block's referenced uncles. */
+    private static void payUncleRewards(BlockImpl block, Ledger ledger, List<AppliedOp> applied,
+                                        PublicAddress miner, NetworkParameters params) {
+        List<rhizome.core.block.UncleRef> uncles = block.uncles();
+        if (uncles.isEmpty()) {
+            return;
+        }
+        long height = block.id();
+        long uncleReward = params.uncleReward(height);
+        long nephewReward = params.nephewReward(height);
+        for (rhizome.core.block.UncleRef ref : uncles) {
+            if (uncleReward > 0) {
+                deposit(ledger, applied, ref.miner(), new TransactionAmount(uncleReward));
+            }
+            if (nephewReward > 0) {
+                deposit(ledger, applied, miner, new TransactionAmount(nephewReward));
+            }
         }
     }
 
@@ -291,7 +316,8 @@ public final class Executor {
      * {@link #executeBlock}'s mutations, in reverse order. The block must be the
      * most recently applied one (used by {@code popBlock} during reorgs).
      */
-    public static void rollbackBlock(Block block, Ledger ledger, ContractProcessor processor, long height) {
+    public static void rollbackBlock(Block block, Ledger ledger, ContractProcessor processor,
+                                     long height, NetworkParameters params) {
         List<Transaction> transactions = block.transactions();
         Transaction coinbase = transactions.stream()
             .filter(t -> ((TransactionImpl) t).isTransactionFee())
@@ -305,6 +331,20 @@ public final class Executor {
             processor != null ? processor.receipts(height) : List.of();
         int ri = receipts.size() - 1;
 
+        // Inverse of payUncleRewards: same flat amounts, derived from the committed refs.
+        List<rhizome.core.block.UncleRef> uncles = ((BlockImpl) block).uncles();
+        if (!uncles.isEmpty()) {
+            long uncleReward = params.uncleReward(height);
+            long nephewReward = params.nephewReward(height);
+            for (rhizome.core.block.UncleRef ref : uncles) {
+                if (nephewReward > 0) {
+                    ledger.revertDeposit(miner, new TransactionAmount(nephewReward));
+                }
+                if (uncleReward > 0) {
+                    ledger.revertDeposit(ref.miner(), new TransactionAmount(uncleReward));
+                }
+            }
+        }
         ledger.revertDeposit(miner, ((TransactionImpl) coinbase).amount());
         for (int i = transactions.size() - 1; i >= 0; i--) {
             var tx = (TransactionImpl) transactions.get(i);

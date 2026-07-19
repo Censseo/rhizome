@@ -14,6 +14,7 @@ import rhizome.core.block.UncleRef;
 import rhizome.core.crypto.SHA256Hash;
 import rhizome.core.ledger.Ledger;
 import rhizome.core.ledger.LedgerSnapshot;
+import rhizome.core.ledger.PublicAddress;
 import rhizome.core.mempool.ExecutionStatus;
 import rhizome.core.merkletree.MerkleTree;
 import rhizome.core.transaction.Transaction;
@@ -197,7 +198,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
                 throw new IllegalStateException("Cannot pop genesis");
             }
             Block tip = store.tip();
-            Executor.rollbackBlock(tip, ledger, contractProcessor, height);
+            Executor.rollbackBlock(tip, ledger, contractProcessor, height, params);
             if (contractProcessor != null) {
                 contractProcessor.revertBlock(height); // undo this block's contract-state changes
             }
@@ -420,7 +421,8 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         for (Transaction t : block.transactions()) {
             size += t.serialize().getSize();
         }
-        size += (long) block.uncles().size() * (SHA256Hash.SIZE + Integer.BYTES);
+        size += (long) block.uncles().size()
+            * (SHA256Hash.SIZE + Integer.BYTES + rhizome.core.ledger.PublicAddress.SIZE);
         return size;
     }
 
@@ -475,6 +477,10 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             if (((BlockImpl) uncle).difficulty() != ref.difficulty()) {
                 return null; // committed difficulty must match the real orphan (no work inflation)
             }
+            PublicAddress uncleMiner = blockMiner(uncle);
+            if (uncleMiner == null || !uncleMiner.equals(ref.miner())) {
+                return null; // committed miner must match the real orphan (no reward redirection)
+            }
             if (!uncleEligible(uncle, h, depth, tipHeight, ctx)) {
                 return null;
             }
@@ -500,14 +506,26 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
                 if (out.size() >= params.maxUnclesPerBlock()) {
                     break;
                 }
-                if (uncleEligible(orphan, h, depth, tipHeight, ctx)) {
-                    out.add(new UncleRef(orphan.hash(), ((BlockImpl) orphan).difficulty()));
+                PublicAddress orphanMiner = blockMiner(orphan);
+                if (orphanMiner != null && uncleEligible(orphan, h, depth, tipHeight, ctx)) {
+                    out.add(new UncleRef(orphan.hash(), ((BlockImpl) orphan).difficulty(), orphanMiner));
                 }
             }
             return out;
         } finally {
             lock.unlock();
         }
+    }
+
+    /** The coinbase recipient (miner) of a block, or {@code null} if it has no coinbase. */
+    private static PublicAddress blockMiner(Block block) {
+        for (Transaction t : block.transactions()) {
+            var tx = (TransactionImpl) t;
+            if (tx.isTransactionFee()) {
+                return tx.to();
+            }
+        }
+        return null;
     }
 
     /** Recent main-chain hashes an uncle may fork from, and uncle hashes already referenced. */

@@ -28,12 +28,14 @@ import rhizome.core.mempool.ExecutionStatus;
 import rhizome.core.merkletree.MerkleTree;
 import rhizome.core.transaction.Transaction;
 import rhizome.core.transaction.TransactionAmount;
+import rhizome.core.transaction.TransactionImpl;
 
-/** Uncle references (GHOST): block preimage/codec, full uncle validation, and work weighting. */
+/** Uncle references (GHOST): block preimage/codec, full uncle validation, work weighting, rewards. */
 class BlockUnclesTest {
 
     private NetworkParameters params;
     private ChainEngine engine;
+    private InMemoryLedger ledger;
     private AtomicLong clock;
     private PublicAddress miner;
 
@@ -43,26 +45,32 @@ class BlockUnclesTest {
             .powAlgorithm(PowAlgorithm.SHA256).genesisDifficulty(3).minDifficulty(3).build();
         clock = new AtomicLong(1_000_000L);
         miner = PublicAddress.random();
+        ledger = new InMemoryLedger();
         LedgerSnapshot snapshot = new LedgerSnapshot("t", 0, params.chainId());
-        engine = ChainEngine.init(params, new InMemoryLedger(), new InMemoryChainStore(), snapshot, null, clock::get);
+        engine = ChainEngine.init(params, ledger, new InMemoryChainStore(), snapshot, null, clock::get);
     }
 
-    /** A reference to an orphan, committing its real difficulty. */
+    /** The coinbase (mining fee) recipient of a block. */
+    private static PublicAddress minerOf(Block block) {
+        return ((TransactionImpl) block.transactions().get(0)).to();
+    }
+
+    /** A reference to an orphan, committing its real difficulty and miner address. */
     private static UncleRef ref(BlockImpl orphan) {
-        return new UncleRef(orphan.hash(), orphan.difficulty());
+        return new UncleRef(orphan.hash(), orphan.difficulty(), minerOf(orphan));
     }
 
     /** A mined next block on the current tip, carrying the given uncle references. */
     private BlockImpl mineNext(List<UncleRef> uncles) {
-        return mine(engine.height() + 1, engine.tipHash(), uncles, 7);
+        return mine(engine.height() + 1, engine.tipHash(), uncles, 7, PublicAddress.random());
     }
 
     /** A mined block at an arbitrary height/parent with a distinguishing salt (for orphans). */
-    private BlockImpl mine(long height, SHA256Hash parent, List<UncleRef> uncles, int salt) {
+    private BlockImpl mine(long height, SHA256Hash parent, List<UncleRef> uncles, int salt, PublicAddress coinbaseTo) {
         var b = (BlockImpl) BlockImpl.builder().id((int) height)
             .timestamp(clock.addAndGet(1000L + salt)).difficulty(engine.difficulty())
             .lastBlockHash(parent).uncles(new java.util.ArrayList<>(uncles)).build();
-        b.addTransaction(Transaction.of(PublicAddress.random(), new TransactionAmount(params.miningReward(height))));
+        b.addTransaction(Transaction.of(coinbaseTo, new TransactionAmount(params.miningReward(height))));
         var tree = new MerkleTree();
         tree.setItems(b.transactions());
         b.merkleRoot(tree.getRootHash());
@@ -72,16 +80,20 @@ class BlockUnclesTest {
 
     /** Registers an orphan sibling of the current tip (forks from the tip's parent). */
     private BlockImpl registerOrphanSiblingOfTip() {
+        return registerOrphanSiblingOfTip(PublicAddress.random());
+    }
+
+    private BlockImpl registerOrphanSiblingOfTip(PublicAddress orphanMiner) {
         long tipHeight = engine.height();
         SHA256Hash grandparent = engine.blockAt(tipHeight - 1).hash();
-        BlockImpl orphan = mine(tipHeight, grandparent, List.of(), 500);
+        BlockImpl orphan = mine(tipHeight, grandparent, List.of(), 500, orphanMiner);
         engine.registerOrphan(orphan);
         return orphan;
     }
 
     @Test
     void unclesCommitToTheHashAndRoundTripThroughTheCodec() {
-        UncleRef u = new UncleRef(SHA256Hash.random(), 5);
+        UncleRef u = new UncleRef(SHA256Hash.random(), 5, PublicAddress.random());
         BlockImpl withUncle = mineNext(List.of(u));
         BlockImpl without = mineNext(List.of());
         assertNotEquals(without.hash(), withUncle.hash()); // committed to the hash
@@ -97,6 +109,38 @@ class BlockUnclesTest {
         BlockImpl orphan = registerOrphanSiblingOfTip(); // orphan at height 2, forks from genesis
         assertEquals(ExecutionStatus.SUCCESS, engine.addBlock(mineNext(List.of(ref(orphan))))); // height 3
         assertEquals(3, engine.height());
+    }
+
+    @Test
+    void selectUnclesReturnsEligibleOrphansAndAssembledBlockIsAccepted() {
+        engine.addBlock(mineNext(List.of())); // height 2
+        BlockImpl orphan = registerOrphanSiblingOfTip(); // orphan at height 2
+
+        List<UncleRef> picked = engine.selectUncles();
+        assertEquals(1, picked.size());
+        assertEquals(orphan.hash(), picked.get(0).hash());
+        assertEquals(orphan.difficulty(), picked.get(0).difficulty());
+        assertEquals(minerOf(orphan), picked.get(0).miner());
+
+        // A block carrying exactly the selection is accepted.
+        assertEquals(ExecutionStatus.SUCCESS, engine.addBlock(mineNext(picked)));
+        assertEquals(3, engine.height());
+        // Once referenced, the orphan is no longer offered for the next block.
+        assertTrue(engine.selectUncles().isEmpty());
+    }
+
+    @Test
+    void uncleMinerIsPaidAndTheRewardIsReversedOnPop() {
+        engine.addBlock(mineNext(List.of())); // height 2
+        PublicAddress uncleMiner = PublicAddress.random();
+        BlockImpl orphan = registerOrphanSiblingOfTip(uncleMiner); // orphan at height 2
+
+        long before = balance(uncleMiner);
+        assertEquals(ExecutionStatus.SUCCESS, engine.addBlock(mineNext(List.of(ref(orphan))))); // height 3
+        assertEquals(before + params.uncleReward(3), balance(uncleMiner));
+
+        engine.popBlock(); // reversal must return the uncle miner to its prior balance
+        assertEquals(before, balance(uncleMiner));
     }
 
     @Test
@@ -129,29 +173,22 @@ class BlockUnclesTest {
     }
 
     @Test
-    void selectUnclesReturnsEligibleOrphansAndAssembledBlockIsAccepted() {
-        engine.addBlock(mineNext(List.of())); // height 2
-        BlockImpl orphan = registerOrphanSiblingOfTip(); // orphan at height 2
-
-        List<rhizome.core.block.UncleRef> picked = engine.selectUncles();
-        assertEquals(1, picked.size());
-        assertEquals(orphan.hash(), picked.get(0).hash());
-        assertEquals(orphan.difficulty(), picked.get(0).difficulty());
-
-        // A block carrying exactly the selection is accepted.
-        assertEquals(ExecutionStatus.SUCCESS, engine.addBlock(mineNext(picked)));
-        assertEquals(3, engine.height());
-        // Once referenced, the orphan is no longer offered for the next block.
-        assertTrue(engine.selectUncles().isEmpty());
-    }
-
-    @Test
     void rejectsUncleWithInflatedDifficulty() {
         engine.addBlock(mineNext(List.of())); // height 2
         BlockImpl orphan = registerOrphanSiblingOfTip();
         // Claim a higher difficulty than the orphan actually has: work inflation.
-        UncleRef inflated = new UncleRef(orphan.hash(), orphan.difficulty() + 10);
+        UncleRef inflated = new UncleRef(orphan.hash(), orphan.difficulty() + 10, minerOf(orphan));
         assertEquals(ExecutionStatus.INVALID_UNCLES, engine.addBlock(mineNext(List.of(inflated))));
+        assertEquals(2, engine.height());
+    }
+
+    @Test
+    void rejectsUncleWithForgedMiner() {
+        engine.addBlock(mineNext(List.of())); // height 2
+        BlockImpl orphan = registerOrphanSiblingOfTip();
+        // Redirect the reward to an address that did not mine the orphan.
+        UncleRef forged = new UncleRef(orphan.hash(), orphan.difficulty(), PublicAddress.random());
+        assertEquals(ExecutionStatus.INVALID_UNCLES, engine.addBlock(mineNext(List.of(forged))));
         assertEquals(2, engine.height());
     }
 
@@ -159,7 +196,7 @@ class BlockUnclesTest {
     void rejectsUnknownUncle() {
         engine.addBlock(mineNext(List.of()));
         assertEquals(ExecutionStatus.INVALID_UNCLES,
-            engine.addBlock(mineNext(List.of(new UncleRef(SHA256Hash.random(), 3)))));
+            engine.addBlock(mineNext(List.of(new UncleRef(SHA256Hash.random(), 3, PublicAddress.random())))));
         assertEquals(2, engine.height());
     }
 
@@ -175,15 +212,15 @@ class BlockUnclesTest {
     void rejectsTooManyUncles() {
         assertEquals(ExecutionStatus.INVALID_UNCLES,
             engine.addBlock(mineNext(List.of(
-                new UncleRef(SHA256Hash.random(), 3),
-                new UncleRef(SHA256Hash.random(), 3),
-                new UncleRef(SHA256Hash.random(), 3)))));
+                new UncleRef(SHA256Hash.random(), 3, PublicAddress.random()),
+                new UncleRef(SHA256Hash.random(), 3, PublicAddress.random()),
+                new UncleRef(SHA256Hash.random(), 3, PublicAddress.random())))));
         assertEquals(1, engine.height());
     }
 
     @Test
     void rejectsDuplicateUncles() {
-        UncleRef u = new UncleRef(SHA256Hash.random(), 3);
+        UncleRef u = new UncleRef(SHA256Hash.random(), 3, PublicAddress.random());
         assertEquals(ExecutionStatus.INVALID_UNCLES, engine.addBlock(mineNext(List.of(u, u))));
     }
 
@@ -192,5 +229,9 @@ class BlockUnclesTest {
         BlockImpl a = mineNext(List.of());
         assertTrue(a.uncles().isEmpty());
         assertEquals(ExecutionStatus.SUCCESS, engine.addBlock(a));
+    }
+
+    private long balance(PublicAddress a) {
+        return ledger.hasWallet(a) ? ledger.getWalletValue(a).amount() : 0L;
     }
 }

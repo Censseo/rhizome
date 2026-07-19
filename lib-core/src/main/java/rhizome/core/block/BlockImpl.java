@@ -96,6 +96,7 @@ public final class BlockImpl implements Block {
                 for (UncleRef uncle : uncles) {
                     sha256.update(uncle.hash().hash().getArray());
                     uncleBuf.putInt(uncle.difficulty());
+                    sha256.update(uncle.miner().toBytes());
                 }
                 sha256.update(uncleBuf.array());
             }

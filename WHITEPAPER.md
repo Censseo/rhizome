@@ -26,12 +26,13 @@ Four goals drive the design:
 3. **Pufferfish2 proof of work** — from genesis, no SHA-256 phase and no algorithm
    switch, ported in pure Java and validated bit-for-bit against a C reference.
 4. **Fast, safe cadence** — a ~1-block/second target paced by difficulty (§3.4), with a
-   GHOST-style fork choice on the roadmap (§9) to make sub-5-second blocks safe against
-   the orphaning that a naïve longest chain suffers.
+   GHOST-style fork choice (§9) that credits and rewards orphaned (uncle) work, making
+   sub-5-second blocks safe against the orphaning a naïve longest chain suffers.
 
-The node is functional and covered by **197 tests**: consensus, the WASM contract VM
+The node is functional and covered by **199 tests**: consensus, the WASM contract VM
 and its persistence, execution, storage, mempool, HTTP API, block production, P2P
-synchronisation with reorganisation, and a wallet that deploys and calls contracts.
+synchronisation with reorganisation, GHOST uncles, and a wallet that deploys and calls
+contracts.
 
 ---
 
@@ -459,22 +460,32 @@ discovery; hardening (checkpoints, finality, bounded rate limiting, ban-score, b
 cap); a full security review; and the **WASM smart-contract layer** — a Chicory-backed
 metered VM, a persistent contract store, `DEPLOY`/`CALL` transactions with gas fees,
 atomic per-block contract state with exact reorg reversal, and wallet `deploy`/`call`
-commands. **197 tests, 0 failures.**
+commands. **199 tests, 0 failures.**
 
-**In progress — GHOST fork choice.** A ~1-block/second single longest chain orphans
-blocks because propagation takes a meaningful fraction of the interval (§6.3). A
-GHOST-style fork choice — the heaviest *subtree*, crediting the work of referenced
-orphan (uncle) blocks — lets the target drop toward a few seconds without the
-centralisation and reorg churn a naïve longest chain suffers. Landed: blocks carry
-uncle references (each committing the uncle's hash *and* difficulty, checked against the
-real orphan at admission so work cannot be inflated); a bounded orphan pool retains valid
-off-chain blocks; full uncle validation (recency, single-fork, no double-crediting); and
-the referenced uncle work (`2^difficulty`) now folds into the cumulative chain weight,
-surviving pop and restart from the committed difficulties alone. Node wiring is in place:
-the orphan pool is fed from blocks that lose a reorg and from siblings submitted to the
-node, and the block assembler cites eligible orphans as uncles when producing a block.
-Remaining: uncle rewards (a share to the uncle miner plus a nephew bonus, which requires
-uncle references to also carry the miner address).
+**GHOST fork choice.** A ~1-block/second single longest chain orphans blocks because
+propagation takes a meaningful fraction of the interval (§6.3). A GHOST-style fork
+choice — the heaviest *subtree*, crediting the work of referenced orphan (uncle)
+blocks — lets the target drop toward a few seconds without the centralisation and reorg
+churn a naïve longest chain suffers. It is implemented end to end:
+
+- **Uncle references.** Each block may carry up to `maxUnclesPerBlock` (2) uncle
+  references. A reference commits the uncle's hash, difficulty *and* miner address; all
+  three are checked against the real orphan at admission, so difficulty (work) cannot be
+  inflated and the reward cannot be redirected.
+- **Orphan pool.** A bounded LRU of valid off-chain blocks (PoW-gated), fed from blocks
+  that lose a reorg and from siblings submitted to the node.
+- **Validation.** An uncle must be recent (within `uncleMaxDepth`, 7), fork from a recent
+  main-chain block, not be the canonical block at its height, and not have been referenced
+  already — no double-crediting.
+- **Weighting.** The referenced uncle work (`2^difficulty`) folds into the cumulative
+  chain weight and survives pop and restart from the committed difficulties alone. The
+  block assembler cites eligible orphans automatically when producing a block.
+- **Rewards.** An included uncle pays its miner a flat fraction of the block reward
+  (`uncleRewardNum/uncleRewardDen`, default 1/2) and the nephew a bonus per uncle
+  (`miningReward/nephewRewardDivisor`, default 1/32). Both are fresh issuance, but every
+  uncle is a real proof-of-work block, so nothing is minted without matching work. The
+  amounts are flat (not distance-scaled), so they are derivable from the committed uncle
+  refs alone and reorg reversal is exact.
 
 **Then — autonomous-agent and memecoin primitives.** Account abstraction (contract
 accounts as agents: session keys, spend limits, gas sponsorship), event logs with

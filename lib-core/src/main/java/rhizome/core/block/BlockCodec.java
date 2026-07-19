@@ -30,8 +30,9 @@ public final class BlockCodec {
             dtos[i] = transactions.get(i).serialize();
             size += dtos[i].getSize();
         }
-        // Each uncle: hash (32) + difficulty (4).
-        size += Integer.BYTES + uncles.size() * (rhizome.core.crypto.SHA256Hash.SIZE + Integer.BYTES);
+        // Each uncle: hash (32) + difficulty (4) + miner address (25).
+        int uncleSize = rhizome.core.crypto.SHA256Hash.SIZE + Integer.BYTES + rhizome.core.ledger.PublicAddress.SIZE;
+        size += Integer.BYTES + uncles.size() * uncleSize;
 
         ByteBuffer buffer = ByteBuffer.allocate(size);
         header.writeTo(buffer);
@@ -42,6 +43,7 @@ public final class BlockCodec {
         for (UncleRef uncle : uncles) {
             buffer.put(uncle.hash().hash().getArray());
             buffer.putInt(uncle.difficulty());
+            buffer.put(uncle.miner().toBytes());
         }
         return buffer.array();
     }
@@ -63,7 +65,10 @@ public final class BlockCodec {
             byte[] h = new byte[rhizome.core.crypto.SHA256Hash.SIZE];
             buffer.get(h);
             int difficulty = buffer.getInt();
-            uncles.add(new UncleRef(rhizome.core.crypto.SHA256Hash.of(h), difficulty));
+            byte[] m = new byte[rhizome.core.ledger.PublicAddress.SIZE];
+            buffer.get(m);
+            uncles.add(new UncleRef(rhizome.core.crypto.SHA256Hash.of(h), difficulty,
+                rhizome.core.ledger.PublicAddress.of(m)));
         }
         return Block.of(header, transactions, uncles);
     }

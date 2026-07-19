@@ -143,7 +143,8 @@ public sealed interface Block permits BlockImpl {
                 for (UncleRef uncle : blockImpl.uncles()) {
                     unclesArray.put(new JSONObject()
                         .put("hash", uncle.hash().toHexString())
-                        .put(DIFFICULTY, uncle.difficulty()));
+                        .put(DIFFICULTY, uncle.difficulty())
+                        .put("miner", uncle.miner().toHexString()));
                 }
                 result.put(UNCLES, unclesArray);
             }
@@ -168,7 +169,8 @@ public sealed interface Block permits BlockImpl {
                         : IntStream.range(0, json.getJSONArray(UNCLES).length())
                             .mapToObj(i -> {
                                 JSONObject u = json.getJSONArray(UNCLES).getJSONObject(i);
-                                return new UncleRef(SHA256Hash.of(u.getString("hash")), u.getInt(DIFFICULTY));
+                                return new UncleRef(SHA256Hash.of(u.getString("hash")), u.getInt(DIFFICULTY),
+                                    rhizome.core.ledger.PublicAddress.of(u.getString("miner")));
                             })
                             .collect(Collectors.toList())
                 )
