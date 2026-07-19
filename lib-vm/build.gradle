@@ -3,6 +3,9 @@ plugins {
 }
 
 dependencies {
+    // Ledger / address / amount types shared with the consensus core.
+    api project(':lib-core')
+
     // Deterministic, pure-Java WebAssembly runtime (no JNI) — the smart-contract VM.
     api 'com.dylibso.chicory:runtime:1.7.5'
 }

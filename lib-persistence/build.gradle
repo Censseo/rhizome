@@ -4,6 +4,8 @@ plugins {
 
 dependencies {
     implementation project(':lib-core')
+    // Contract-store interface implemented by the RocksDB-backed store below.
+    implementation project(':lib-vm')
 
     // CQEngine
     implementation 'com.googlecode.cqengine:cqengine:3.6.0'

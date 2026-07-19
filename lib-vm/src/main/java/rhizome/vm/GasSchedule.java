@@ -16,4 +16,8 @@ public final class GasSchedule {
     public static final long STORAGE_WRITE_BASE = 200L;   // writes are the expensive, state-growing op
     public static final long PER_BYTE = 1L;
     public static final long OUTPUT_BASE = 5L;
+
+    /** Deploying stores code on-chain: a base cost plus per code byte. */
+    public static final long DEPLOY_BASE = 500L;
+    public static final long DEPLOY_PER_CODE_BYTE = 10L;
 }
