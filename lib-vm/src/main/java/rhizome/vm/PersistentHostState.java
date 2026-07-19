@@ -20,6 +20,7 @@ public final class PersistentHostState implements HostState {
     private final long value;
 
     private final Map<String, byte[]> pending = new HashMap<>();
+    private final java.util.List<LogEntry> logs = new java.util.ArrayList<>();
     private byte[] output = new byte[0];
 
     public PersistentHostState(ContractStore store, PublicAddress contract,
@@ -90,5 +91,15 @@ public final class PersistentHostState implements HostState {
     @Override
     public byte[] output() {
         return output.clone();
+    }
+
+    @Override
+    public void emitLog(byte[] topic, byte[] data) {
+        logs.add(new LogEntry(topic, data));
+    }
+
+    @Override
+    public java.util.List<LogEntry> logs() {
+        return java.util.List.copyOf(logs);
     }
 }

@@ -15,6 +15,7 @@ public final class MapHostState implements HostState {
     private final byte[] input;
     private final long value;
     private byte[] output = new byte[0];
+    private final java.util.List<LogEntry> logs = new java.util.ArrayList<>();
 
     public MapHostState(byte[] caller, byte[] input, long value) {
         this(new HashMap<>(), caller, input, value);
@@ -70,5 +71,15 @@ public final class MapHostState implements HostState {
     @Override
     public byte[] output() {
         return output.clone();
+    }
+
+    @Override
+    public void emitLog(byte[] topic, byte[] data) {
+        logs.add(new LogEntry(topic, data));
+    }
+
+    @Override
+    public java.util.List<LogEntry> logs() {
+        return java.util.List.copyOf(logs);
     }
 }

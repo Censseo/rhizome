@@ -5,6 +5,7 @@ import java.util.List;
 
 import rhizome.core.block.Block;
 import rhizome.core.blockchain.ChainEngine;
+import rhizome.core.blockchain.ContractProcessor.ContractLog;
 import rhizome.core.blockchain.NetworkParameters;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.mempool.ExecutionStatus;
@@ -22,6 +23,10 @@ public final class NodeService {
     private volatile java.util.function.Consumer<Block> onBlockAccepted;
     private volatile java.util.function.Consumer<Transaction> onTransactionAccepted;
     private volatile PeerRegistry peers;
+    private volatile java.util.function.LongFunction<List<ContractLog>> logSource;
+
+    /** Maximum blocks a single /logs catch-up scan spans, so agents poll in bounded chunks. */
+    public static final int LOG_SCAN_WINDOW = 128;
 
     public NodeService(ChainEngine engine, MemPool mempool) {
         this.engine = engine;
@@ -40,6 +45,41 @@ public final class NodeService {
     public void setPeers(PeerRegistry registry) {
         this.peers = registry;
     }
+
+    /** Source of contract event logs by block height (the contract processor). */
+    public void setLogSource(java.util.function.LongFunction<List<ContractLog>> source) {
+        this.logSource = source;
+    }
+
+    /** Event logs emitted by a specific block, or empty if none / no processor wired. */
+    public List<ContractLog> logsAt(long height) {
+        var source = logSource;
+        return source == null ? List.of() : source.apply(height);
+    }
+
+    /**
+     * A height-cursor catch-up scan: logs from {@code fromHeight} up to the tip, each
+     * tagged with its block height, bounded to {@link #LOG_SCAN_WINDOW} blocks so an
+     * agent streams by repeatedly polling from {@code toHeight + 1}. Returns the
+     * scanned {@code toHeight} and the collected logs.
+     */
+    public LogPage logsFrom(long fromHeight) {
+        long from = Math.max(1, fromHeight);
+        long to = Math.min(engine.height(), from + LOG_SCAN_WINDOW - 1);
+        List<HeightLog> out = new ArrayList<>();
+        for (long h = from; h <= to; h++) {
+            for (ContractLog log : logsAt(h)) {
+                out.add(new HeightLog(h, log));
+            }
+        }
+        return new LogPage(from, Math.max(from - 1, to), out);
+    }
+
+    /** A contract log tagged with the height of the block that emitted it. */
+    public record HeightLog(long height, ContractLog log) {}
+
+    /** One page of a height-cursor log scan: the range covered and the logs in it. */
+    public record LogPage(long fromHeight, long toHeight, List<HeightLog> logs) {}
 
     /** Peer base URLs this node knows (empty if discovery is not enabled). */
     public java.util.List<String> knownPeers() {

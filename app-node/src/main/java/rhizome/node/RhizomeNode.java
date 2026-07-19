@@ -83,6 +83,8 @@ public final class RhizomeNode implements AutoCloseable {
             snapshot, null, System::currentTimeMillis, verifier, contractProcessor);
         mempool = new MemPool(config.params(), verifier, engine, config.mempoolSize());
         service = new NodeService(engine, mempool);
+        // Expose contract event logs (by block height) so agents can watch on-chain state.
+        service.setLogSource(contractProcessor::logs);
 
         // Every node keeps a live peer set (seeded from config), serves /peers and
         // accepts announcements, so the network can self-organise from a few seeds.

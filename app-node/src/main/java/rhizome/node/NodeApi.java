@@ -88,6 +88,7 @@ public final class NodeApi {
                     .put("balance", node.balance(wallet))
                     .put("nextNonce", node.nextNonce(wallet)));
             }))
+            .with(GET, "/logs", req -> guarded(() -> logs(node, req)))
             .with(GET, "/sync", req -> guarded(() -> sync(node, req)))
             .with(POST, "/add_transaction_json", req -> req.loadBody(SMALL_BODY).map(body -> guardedResponse(() -> {
                 Transaction t = Transaction.of(new JSONObject(body.getString(StandardCharsets.UTF_8)));
@@ -124,6 +125,58 @@ public final class NodeApi {
         } catch (RuntimeException e) {
             return "local";
         }
+    }
+
+    /**
+     * Contract event logs, the channel agents watch. Two modes:
+     * <ul>
+     *   <li>{@code ?height=N} — logs emitted by block N.</li>
+     *   <li>{@code ?fromHeight=N} — a bounded height-cursor scan from N to the tip; the
+     *       response's {@code toHeight} is the next cursor, so an agent streams by
+     *       repeatedly polling from {@code toHeight + 1}.</li>
+     * </ul>
+     */
+    private static HttpResponse logs(NodeService node, HttpRequest req) {
+        String heightParam = req.getQueryParameter("height");
+        if (heightParam != null) {
+            long height = parseLong(heightParam);
+            if (height < 1 || height > node.blockCount()) {
+                return badRequest("height out of range");
+            }
+            org.json.JSONArray arr = new org.json.JSONArray();
+            for (var log : node.logsAt(height)) {
+                arr.put(logJson(log));
+            }
+            return json(new JSONObject().put("height", height).put("logs", arr));
+        }
+        long fromHeight = parseLong(req.getQueryParameter("fromHeight"));
+        if (fromHeight < 1) {
+            return badRequest("fromHeight must be >= 1");
+        }
+        NodeService.LogPage page = node.logsFrom(fromHeight);
+        org.json.JSONArray arr = new org.json.JSONArray();
+        for (var entry : page.logs()) {
+            arr.put(logJson(entry.log()).put("height", entry.height()));
+        }
+        return json(new JSONObject()
+            .put("fromHeight", page.fromHeight())
+            .put("toHeight", page.toHeight())
+            .put("logs", arr));
+    }
+
+    private static JSONObject logJson(rhizome.core.blockchain.ContractProcessor.ContractLog log) {
+        return new JSONObject()
+            .put("contract", log.contract().toHexString())
+            .put("topic", hex(log.topic()))
+            .put("data", hex(log.data()));
+    }
+
+    private static String hex(byte[] bytes) {
+        StringBuilder sb = new StringBuilder(bytes.length * 2);
+        for (byte b : bytes) {
+            sb.append(Character.forDigit((b >> 4) & 0xF, 16)).append(Character.forDigit(b & 0xF, 16));
+        }
+        return sb.toString();
     }
 
     private static HttpResponse sync(NodeService node, HttpRequest req) {

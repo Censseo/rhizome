@@ -21,6 +21,7 @@ import org.junit.jupiter.api.Test;
 class WasmVmTest {
 
     private static final byte[] COUNTER = load("/counter.wasm");
+    private static final byte[] EMITTER = load("/emitter.wasm");
     private final WasmVm vm = new WasmVm();
 
     private static byte[] load(String resource) {
@@ -56,6 +57,26 @@ class WasmVmTest {
         ExecResult second = vm.execute(COUNTER, new MapHostState(storage, caller, new byte[0], 0), new GasMeter(10_000_000));
         assertEquals(ExecResult.Status.OK, second.status());
         assertArrayEquals(le64(2), second.output());
+    }
+
+    @Test
+    void contractEmitsEventLog() {
+        Map<String, byte[]> storage = new HashMap<>();
+        byte[] caller = "agent".getBytes(StandardCharsets.UTF_8);
+
+        ExecResult r = vm.execute(EMITTER, new MapHostState(storage, caller, new byte[0], 0), new GasMeter(10_000_000));
+        assertEquals(ExecResult.Status.OK, r.status());
+        assertEquals(1, r.logs().size());
+        LogEntry log = r.logs().get(0);
+        assertArrayEquals("count".getBytes(StandardCharsets.UTF_8), log.topic());
+        assertArrayEquals(le64(1), log.data()); // the new counter value rode along in the log
+    }
+
+    @Test
+    void revertedCallEmitsNoLogs() {
+        // Too little gas to finish: the emitted log must not survive a non-OK execution.
+        ExecResult r = vm.execute(EMITTER, new MapHostState(new byte[0], new byte[0], 0), new GasMeter(50));
+        assertTrue(r.logs().isEmpty());
     }
 
     @Test

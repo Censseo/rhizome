@@ -57,22 +57,40 @@ public interface ContractProcessor {
      */
     List<ContractReceipt> receipts(long blockHeight);
 
+    /**
+     * Event logs emitted by {@code blockHeight}'s contract transactions, in block
+     * order — the channel autonomous agents watch to react to on-chain state. Empty
+     * for a height with no contract logs. Dropped when the block is reverted.
+     */
+    default List<ContractLog> logs(long blockHeight) {
+        return List.of();
+    }
+
     /** Runtime outcome of one contract transaction, recorded for reorg reversal. */
     record ContractReceipt(long gasUsed, boolean success) {}
 
+    /** One event a contract emitted: the emitting contract, an indexable topic, and data. */
+    record ContractLog(PublicAddress contract, byte[] topic, byte[] data) {}
+
     /**
      * Outcome of one contract execution. {@code gasUsed} is charged regardless of
-     * success; {@code contractAddress} is the new address for a DEPLOY (null for CALL).
+     * success; {@code contractAddress} is the new address for a DEPLOY (null for CALL);
+     * {@code logs} are the events it emitted (empty unless it succeeded).
      */
     record ContractResult(boolean success, long gasUsed, byte[] output,
-                          PublicAddress contractAddress, String error) {
+                          PublicAddress contractAddress, String error, List<ContractLog> logs) {
 
         public static ContractResult ok(long gasUsed, byte[] output, PublicAddress contractAddress) {
-            return new ContractResult(true, gasUsed, output, contractAddress, null);
+            return new ContractResult(true, gasUsed, output, contractAddress, null, List.of());
+        }
+
+        public static ContractResult ok(long gasUsed, byte[] output, PublicAddress contractAddress,
+                                        List<ContractLog> logs) {
+            return new ContractResult(true, gasUsed, output, contractAddress, null, List.copyOf(logs));
         }
 
         public static ContractResult reverted(long gasUsed, String error) {
-            return new ContractResult(false, gasUsed, new byte[0], null, error);
+            return new ContractResult(false, gasUsed, new byte[0], null, error, List.of());
         }
     }
 }

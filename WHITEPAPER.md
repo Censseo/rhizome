@@ -29,7 +29,7 @@ Four goals drive the design:
    GHOST-style fork choice (§9) that credits and rewards orphaned (uncle) work, making
    sub-5-second blocks safe against the orphaning a naïve longest chain suffers.
 
-The node is functional and covered by **199 tests**: consensus, the WASM contract VM
+The node is functional and covered by **203 tests**: consensus, the WASM contract VM
 and its persistence, execution, storage, mempool, HTTP API, block production, P2P
 synchronisation with reorganisation, GHOST uncles, and a wallet that deploys and calls
 contracts.
@@ -288,8 +288,16 @@ length must be revisited with it.
 Contracts are **WebAssembly**, run on the pure-Java [Chicory](https://github.com/dylibso/chicory)
 runtime — no JNI, no native dependency, deterministic across nodes because every node
 executes the same interpreter. A contract imports a small host ABI (`storage_read`,
-`storage_write`, `set_output`, plus caller/input/value) from module `env` and exports a
-`call` entry point; the WASM sandbox denies it any other I/O.
+`storage_write`, `set_output`, `emit_log`, plus caller/input/value) from module `env` and
+exports a `call` entry point; the WASM sandbox denies it any other I/O.
+
+**Event logs.** `emit_log(topic, data)` records an event during a call — the channel
+autonomous agents watch to react to on-chain state. Logs are gas-metered, kept only when
+the call succeeds, and never read back by contract code, so they carry no consensus weight
+beyond the gas paid. The processor collects each block's logs (dropping them exactly on a
+reorg, like contract state), and the node exposes them at `GET /logs?height=N` and, for
+streaming, a height-cursor scan `GET /logs?fromHeight=N` whose `toHeight` is the next
+cursor — an agent follows the chain by polling forward from where it left off.
 
 **Gas.** Every executed instruction is charged via the interpreter's execution listener,
 and every host call is charged on top, so a contract that loops forever is aborted
@@ -460,7 +468,7 @@ discovery; hardening (checkpoints, finality, bounded rate limiting, ban-score, b
 cap); a full security review; and the **WASM smart-contract layer** — a Chicory-backed
 metered VM, a persistent contract store, `DEPLOY`/`CALL` transactions with gas fees,
 atomic per-block contract state with exact reorg reversal, and wallet `deploy`/`call`
-commands. **199 tests, 0 failures.**
+commands. **203 tests, 0 failures.**
 
 **GHOST fork choice.** A ~1-block/second single longest chain orphans blocks because
 propagation takes a meaningful fraction of the interval (§6.3). A GHOST-style fork
@@ -487,10 +495,15 @@ churn a naïve longest chain suffers. It is implemented end to end:
   amounts are flat (not distance-scaled), so they are derivable from the committed uncle
   refs alone and reorg reversal is exact.
 
-**Then — autonomous-agent and memecoin primitives.** Account abstraction (contract
-accounts as agents: session keys, spend limits, gas sponsorship), event logs with
-WebSocket streaming so agents react to on-chain state, and a token/AMM/launchpad contract
-suite for cheap fair launches.
+**In progress — autonomous-agent primitives.** Contract event logs are implemented (see
+§5): contracts `emit_log`, the processor collects them per block reorg-safely, and the
+node serves them by height and by a pollable height cursor so agents follow on-chain state
+in near-real-time. Next: push streaming (SSE/WebSocket) over the same event source, and
+account abstraction (contract accounts as agents — session keys, spend limits, gas
+sponsorship).
+
+**Then — memecoin primitives.** A token/AMM/launchpad contract suite for cheap fair
+launches.
 
 **Environment-dependent** — GraalVM native build (`native-image` not installed in the
 current dev environment); production of the real Pandanite snapshot (a synchronised C++

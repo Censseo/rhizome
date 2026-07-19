@@ -46,7 +46,7 @@ public final class WasmVm {
 
             ExportFunction call = instance.export(ENTRY);
             call.apply();
-            return ExecResult.ok(host.output(), gas.used());
+            return ExecResult.ok(host.output(), host.logs(), gas.used());
         } catch (RuntimeException e) {
             if (isOutOfGas(e)) {
                 return ExecResult.outOfGas(gas.used());
@@ -106,7 +106,18 @@ public final class WasmVm {
                 return null;
             });
 
-        return new HostFunction[] {storageRead, storageWrite, setOutput};
+        HostFunction emitLog = new HostFunction(ENV, "emit_log",
+            List.of(ValType.I32, ValType.I32, ValType.I32, ValType.I32), List.of(),
+            (Instance inst, long... args) -> {
+                Memory mem = inst.memory();
+                byte[] topic = mem.readBytes(asOffset(args[0]), asLen(args[1]));
+                byte[] data = mem.readBytes(asOffset(args[2]), asLen(args[3]));
+                gas.charge(GasSchedule.LOG_BASE + (long) (topic.length + data.length) * GasSchedule.PER_BYTE);
+                host.emitLog(topic, data);
+                return null;
+            });
+
+        return new HostFunction[] {storageRead, storageWrite, setOutput, emitLog};
     }
 
     /** A WASM i32 pointer arrives as a long; take the unsigned low 32 bits as a memory offset. */

@@ -43,12 +43,14 @@ import rhizome.core.transaction.TransactionKind;
 class ContractConsensusTest {
 
     private static final byte[] COUNTER = load("/counter.wasm");
+    private static final byte[] EMITTER = load("/emitter.wasm");
     private static final long GAS_LIMIT = 1_000_000;
 
     private NetworkParameters params;
     private InMemoryLedger ledger;
     private InMemoryChainStore store;
     private InMemoryContractStore contracts;
+    private WasmContractProcessor processor;
     private ChainEngine engine;
     private AtomicLong clock;
 
@@ -91,7 +93,7 @@ class ContractConsensusTest {
         LedgerSnapshot snapshot = new LedgerSnapshot("t", 0, params.chainId());
         snapshot.put(sender, new TransactionAmount(10_000_000L));
 
-        var processor = new WasmContractProcessor(new WasmVm(), contracts);
+        processor = new WasmContractProcessor(new WasmVm(), contracts);
         engine = ChainEngine.init(params, ledger, store, snapshot, null, clock::get, null, processor);
     }
 
@@ -176,6 +178,36 @@ class ContractConsensusTest {
         // Pop the deploy: the code is removed.
         engine.popBlock();
         assertEquals(null, contracts.getCode(contract), "deploy reverted");
+    }
+
+    private Transaction callTx(long nonce, PublicAddress contract, byte[] code, TransactionKind kind) {
+        Transaction t = TransactionImpl.builder()
+            .from(sender).to(contract)
+            .amount(new TransactionAmount(0)).fee(new TransactionAmount(0))
+            .chainId(params.chainId()).nonce(nonce).signingKey(key)
+            .kind(kind).data(code).gasLimit(GAS_LIMIT).gasPrice(1)
+            .build();
+        t.sign(priv);
+        return t;
+    }
+
+    @Test
+    void contractLogsAreCollectedPerBlockAndDroppedOnRevert() {
+        PublicAddress contract = Contracts.deriveAddress(sender, 0);
+        // Deploy the emitter (nonce 0), then call it (nonce 1) — the call emits one log.
+        assertEquals(ExecutionStatus.SUCCESS, mineBlock(List.of(callTx(0, PublicAddress.empty(), EMITTER, TransactionKind.DEPLOY))));
+        long callHeight = engine.height() + 1;
+        assertEquals(ExecutionStatus.SUCCESS, mineBlock(List.of(callTx(1, contract, new byte[0], TransactionKind.CALL))));
+
+        List<rhizome.core.blockchain.ContractProcessor.ContractLog> logs = processor.logs(callHeight);
+        assertEquals(1, logs.size());
+        assertEquals(contract, logs.get(0).contract());
+        assertArrayEquals("count".getBytes(), logs.get(0).topic());
+        assertArrayEquals(le64(1), logs.get(0).data());
+
+        // Reverting the call block drops its logs.
+        engine.popBlock();
+        assertTrue(processor.logs(callHeight).isEmpty());
     }
 
     @Test

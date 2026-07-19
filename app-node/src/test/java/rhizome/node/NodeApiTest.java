@@ -203,6 +203,31 @@ class NodeApiTest {
     }
 
     @Test
+    void logsEndpointReturnsContractLogsByHeightAndCursor() throws Exception {
+        var contract = PublicAddress.random();
+        var log = new rhizome.core.blockchain.ContractProcessor.ContractLog(
+            contract, "count".getBytes(), new byte[] {1, 0, 0, 0, 0, 0, 0, 0});
+        var node = new NodeService(engine, mempool);
+        node.setLogSource(h -> h == 1 ? List.of(log) : List.of());
+        var s = NodeApi.servlet(eventloop, node);
+
+        // ?height=1 → that block's logs.
+        JSONObject byHeight = new JSONObject(body(callWith(s, HttpRequest.get("http://x/logs?height=1").build())));
+        assertEquals(1, byHeight.getJSONArray("logs").length());
+        JSONObject entry = byHeight.getJSONArray("logs").getJSONObject(0);
+        assertEquals(contract.toHexString(), entry.getString("contract"));
+        assertEquals("636f756e74", entry.getString("topic")); // "count" in hex
+
+        // ?fromHeight=1 → cursor scan tags each log with its height and reports toHeight.
+        JSONObject page = new JSONObject(body(callWith(s, HttpRequest.get("http://x/logs?fromHeight=1").build())));
+        assertEquals(1, page.getLong("toHeight"));
+        assertEquals(1, page.getJSONArray("logs").getJSONObject(0).getLong("height"));
+
+        // Out-of-range height is a clean 400.
+        assertEquals(400, callWith(s, HttpRequest.get("http://x/logs?height=999").build()).getCode());
+    }
+
+    @Test
     void rejectsInvalidTransactionWith400() throws Exception {
         Transaction t = Transaction.of(sender, PublicAddress.random(), new TransactionAmount(100),
             key, new TransactionAmount(0), 1000L, params.chainId() + 5, 0); // wrong chain-id

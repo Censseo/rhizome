@@ -31,4 +31,10 @@ public interface HostState {
 
     /** The return data set by the contract (empty if none). */
     byte[] output();
+
+    /** Records an event log emitted by the contract during this call. */
+    void emitLog(byte[] topic, byte[] data);
+
+    /** Event logs emitted during this call, in emission order. */
+    java.util.List<LogEntry> logs();
 }

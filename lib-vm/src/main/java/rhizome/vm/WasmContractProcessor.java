@@ -5,6 +5,7 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 import rhizome.core.blockchain.ContractProcessor;
+import rhizome.core.blockchain.ContractProcessor.ContractLog;
 import rhizome.core.blockchain.Contracts;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.transaction.TransactionKind;
@@ -26,10 +27,12 @@ public final class WasmContractProcessor implements ContractProcessor {
     private final int retainDepth;
     private SessionContractStore session;
     private List<ContractReceipt> currentReceipts = new java.util.ArrayList<>();
+    private List<ContractLog> currentLogs = new java.util.ArrayList<>();
 
     /** Undo journals of recently committed blocks, keyed by height, for reorg reversal. */
     private final Map<Long, List<ContractUndo>> journals = new ConcurrentHashMap<>();
     private final Map<Long, List<ContractReceipt>> receiptsByHeight = new ConcurrentHashMap<>();
+    private final Map<Long, List<ContractLog>> logsByHeight = new ConcurrentHashMap<>();
     private long lastCommittedHeight = -1;
 
     /** Uses a default retention depth; fine when reorgs are shallow. */
@@ -52,6 +55,7 @@ public final class WasmContractProcessor implements ContractProcessor {
     public void begin() {
         session = new SessionContractStore(baseStore);
         currentReceipts = new java.util.ArrayList<>();
+        currentLogs = new java.util.ArrayList<>();
     }
 
     @Override
@@ -66,6 +70,7 @@ public final class WasmContractProcessor implements ContractProcessor {
             case TRANSFER -> ContractResult.reverted(0, "not a contract transaction");
         };
         currentReceipts.add(new ContractReceipt(result.gasUsed(), result.success()));
+        currentLogs.addAll(result.logs());
         return result;
     }
 
@@ -89,7 +94,11 @@ public final class WasmContractProcessor implements ContractProcessor {
         ExecResult result = vm.execute(code, host, new GasMeter(gasLimit));
         if (result.succeeded()) {
             host.commit(); // flush this call's writes into the block session
-            return ContractResult.ok(result.gasUsed(), result.output(), null);
+            List<ContractLog> logs = new java.util.ArrayList<>(result.logs().size());
+            for (LogEntry log : result.logs()) {
+                logs.add(new ContractLog(contract, log.topic(), log.data()));
+            }
+            return ContractResult.ok(result.gasUsed(), result.output(), null, logs);
         }
         return ContractResult.reverted(result.gasUsed(), result.message());
     }
@@ -101,7 +110,11 @@ public final class WasmContractProcessor implements ContractProcessor {
             session = null;
         }
         receiptsByHeight.put(blockHeight, currentReceipts);
+        if (!currentLogs.isEmpty()) {
+            logsByHeight.put(blockHeight, currentLogs);
+        }
         currentReceipts = new java.util.ArrayList<>();
+        currentLogs = new java.util.ArrayList<>();
         lastCommittedHeight = Math.max(lastCommittedHeight, blockHeight);
         pruneOldJournals();
     }
@@ -110,6 +123,7 @@ public final class WasmContractProcessor implements ContractProcessor {
     public void discard() {
         session = null;
         currentReceipts = new java.util.ArrayList<>();
+        currentLogs = new java.util.ArrayList<>();
     }
 
     @Override
@@ -118,8 +132,14 @@ public final class WasmContractProcessor implements ContractProcessor {
     }
 
     @Override
+    public List<ContractLog> logs(long blockHeight) {
+        return logsByHeight.getOrDefault(blockHeight, List.of());
+    }
+
+    @Override
     public void revertBlock(long blockHeight) {
         receiptsByHeight.remove(blockHeight);
+        logsByHeight.remove(blockHeight);
         List<ContractUndo> journal = journals.remove(blockHeight);
         if (journal == null) {
             return; // nothing was committed for this height (e.g. a transfer-only block)
@@ -147,6 +167,7 @@ public final class WasmContractProcessor implements ContractProcessor {
         if (cutoff > 0) {
             journals.keySet().removeIf(h -> h < cutoff);
             receiptsByHeight.keySet().removeIf(h -> h < cutoff);
+            logsByHeight.keySet().removeIf(h -> h < cutoff);
         }
     }
 }

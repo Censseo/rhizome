@@ -17,6 +17,9 @@ public final class GasSchedule {
     public static final long PER_BYTE = 1L;
     public static final long OUTPUT_BASE = 5L;
 
+    /** Emitting an event log: a base cost plus per byte of topic + data. */
+    public static final long LOG_BASE = 100L;
+
     /** Deploying stores code on-chain: a base cost plus per code byte. */
     public static final long DEPLOY_BASE = 500L;
     public static final long DEPLOY_PER_CODE_BYTE = 10L;
