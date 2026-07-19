@@ -27,7 +27,7 @@ import rhizome.core.merkletree.MerkleTree;
 import rhizome.core.transaction.Transaction;
 import rhizome.core.transaction.TransactionAmount;
 
-/** Uncle references (GHOST foundation): block preimage, codec, and structural validation. */
+/** Uncle references (GHOST): block preimage/codec, and full uncle validation. */
 class BlockUnclesTest {
 
     private NetworkParameters params;
@@ -45,13 +45,17 @@ class BlockUnclesTest {
         engine = ChainEngine.init(params, new InMemoryLedger(), new InMemoryChainStore(), snapshot, null, clock::get);
     }
 
-    /** A mined next block carrying the given uncle hashes (nonce solved for the with-uncles hash). */
-    private BlockImpl blockWithUncles(List<SHA256Hash> uncles) {
-        long height = engine.height() + 1;
+    /** A mined next block on the current tip, carrying the given uncle hashes. */
+    private BlockImpl mineNext(List<SHA256Hash> uncles) {
+        return mine(engine.height() + 1, engine.tipHash(), uncles, 7);
+    }
+
+    /** A mined block at an arbitrary height/parent with a distinguishing salt (for orphans). */
+    private BlockImpl mine(long height, SHA256Hash parent, List<SHA256Hash> uncles, int salt) {
         var b = (BlockImpl) BlockImpl.builder().id((int) height)
-            .timestamp(clock.addAndGet(1000)).difficulty(engine.difficulty())
-            .lastBlockHash(engine.tipHash()).uncles(new java.util.ArrayList<>(uncles)).build();
-        b.addTransaction(Transaction.of(miner, new TransactionAmount(params.miningReward(height))));
+            .timestamp(clock.addAndGet(1000L + salt)).difficulty(engine.difficulty())
+            .lastBlockHash(parent).uncles(new java.util.ArrayList<>(uncles)).build();
+        b.addTransaction(Transaction.of(PublicAddress.random(), new TransactionAmount(params.miningReward(height))));
         var tree = new MerkleTree();
         tree.setItems(b.transactions());
         b.merkleRoot(tree.getRootHash());
@@ -59,50 +63,66 @@ class BlockUnclesTest {
         return b;
     }
 
-    @Test
-    void unclesCommitToTheHashAndRoundTripThroughTheCodec() {
-        SHA256Hash u = SHA256Hash.random();
-        BlockImpl withUncle = blockWithUncles(List.of(u));
-        BlockImpl without = blockWithUncles(List.of());
-        // Same height/parent, but the uncle changes the header hash (it is committed).
-        assertNotEquals(without.hash(), withUncle.hash());
-
-        Block decoded = BlockCodec.decode(BlockCodec.encode(withUncle));
-        assertEquals(List.of(u), decoded.uncles());
-        assertEquals(withUncle.hash(), decoded.hash()); // hash preserved through the codec
+    /** Registers an orphan sibling of the current tip (forks from the tip's parent). */
+    private BlockImpl registerOrphanSiblingOfTip() {
+        long tipHeight = engine.height();
+        SHA256Hash grandparent = engine.blockAt(tipHeight - 1).hash();
+        BlockImpl orphan = mine(tipHeight, grandparent, List.of(), 500);
+        engine.registerOrphan(orphan);
+        return orphan;
     }
 
     @Test
-    void acceptsABlockWithValidUncleStructure() {
-        assertEquals(ExecutionStatus.SUCCESS,
-            engine.addBlock(blockWithUncles(List.of(SHA256Hash.random()))));
+    void unclesCommitToTheHashAndRoundTripThroughTheCodec() {
+        SHA256Hash u = SHA256Hash.random();
+        BlockImpl withUncle = mineNext(List.of(u));
+        BlockImpl without = mineNext(List.of());
+        assertNotEquals(without.hash(), withUncle.hash()); // committed to the hash
+
+        Block decoded = BlockCodec.decode(BlockCodec.encode(withUncle));
+        assertEquals(List.of(u), decoded.uncles());
+        assertEquals(withUncle.hash(), decoded.hash());
+    }
+
+    @Test
+    void acceptsBlockReferencingAKnownValidOrphanUncle() {
+        engine.addBlock(mineNext(List.of())); // height 2
+        BlockImpl orphan = registerOrphanSiblingOfTip(); // orphan at height 2, forks from genesis
+        assertEquals(ExecutionStatus.SUCCESS, engine.addBlock(mineNext(List.of(orphan.hash())))); // height 3
+        assertEquals(3, engine.height());
+    }
+
+    @Test
+    void rejectsUnknownUncle() {
+        engine.addBlock(mineNext(List.of()));
+        assertEquals(ExecutionStatus.INVALID_UNCLES, engine.addBlock(mineNext(List.of(SHA256Hash.random()))));
         assertEquals(2, engine.height());
     }
 
     @Test
+    void rejectsUncleThatIsAMainChainBlock() {
+        engine.addBlock(mineNext(List.of())); // height 2
+        SHA256Hash canonical = engine.tipHash(); // the canonical block 2
+        engine.registerOrphan(engine.blockAt(2)); // even if known, it is on-chain, not an orphan
+        assertEquals(ExecutionStatus.INVALID_UNCLES, engine.addBlock(mineNext(List.of(canonical))));
+    }
+
+    @Test
     void rejectsTooManyUncles() {
-        assertEquals(ExecutionStatus.INVALID_UNCLES, engine.addBlock(blockWithUncles(
-            List.of(SHA256Hash.random(), SHA256Hash.random(), SHA256Hash.random()))));
+        assertEquals(ExecutionStatus.INVALID_UNCLES,
+            engine.addBlock(mineNext(List.of(SHA256Hash.random(), SHA256Hash.random(), SHA256Hash.random()))));
         assertEquals(1, engine.height());
     }
 
     @Test
     void rejectsDuplicateUncles() {
         SHA256Hash u = SHA256Hash.random();
-        assertEquals(ExecutionStatus.INVALID_UNCLES, engine.addBlock(blockWithUncles(List.of(u, u))));
+        assertEquals(ExecutionStatus.INVALID_UNCLES, engine.addBlock(mineNext(List.of(u, u))));
     }
 
     @Test
-    void rejectsParentAsUncle() {
-        assertEquals(ExecutionStatus.INVALID_UNCLES,
-            engine.addBlock(blockWithUncles(List.of(engine.tipHash()))));
-    }
-
-    @Test
-    void unclelessBlocksHashUnchanged() {
-        // Regression guard: a block with no uncles must hash exactly as before the field
-        // existed (empty uncles contribute nothing to the preimage).
-        BlockImpl a = blockWithUncles(List.of());
+    void unclelessBlocksAreAcceptedAndHashUnchanged() {
+        BlockImpl a = mineNext(List.of());
         assertTrue(a.uncles().isEmpty());
         assertEquals(ExecutionStatus.SUCCESS, engine.addBlock(a));
     }

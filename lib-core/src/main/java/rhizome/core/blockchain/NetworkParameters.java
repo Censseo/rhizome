@@ -77,6 +77,12 @@ public final class NetworkParameters {
      */
     private final int maxUnclesPerBlock;
 
+    /**
+     * How many generations back an uncle may fork from the main chain (GHOST). An
+     * uncle whose parent is older than this is too stale to reference. Ethereum uses 7.
+     */
+    private final int uncleMaxDepth;
+
     // --- Finality / hardening ---
     /**
      * Maximum depth of a chain reorganisation a node will perform. Blocks buried
@@ -161,6 +167,7 @@ public final class NetworkParameters {
             .maxTransactionsPerBlock(25_000)
             .maxBlockSizeBytes(Constants.MAX_BLOCK_SIZE_BYTES)
             .maxUnclesPerBlock(2)
+            .uncleMaxDepth(7)
             .maxReorgDepth(600)
             .decimalScaleFactor(scale)
             // Emission schedule, recalibrated for the 1-block/second cadence (see

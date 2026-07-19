@@ -52,6 +52,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
     private final LongSupplier nowMillis;
     private final SignatureVerifier verifier;
     private final ContractProcessor contractProcessor;
+    private final OrphanPool orphans = new OrphanPool(256);
     private final ReentrantLock lock = new ReentrantLock();
 
     /** Next expected account nonce per sender; rebuilt on init, updated on add/pop. */
@@ -127,7 +128,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             // Structural uncle checks (GHOST): bounded count, distinct, and none is the
             // parent itself. Ancestry/PoW validation and fork-choice weighting land with
             // the orphan pool; for now uncles are carried and committed but earn no work.
-            ExecutionStatus uncleCheck = checkUnclesStructure(b, store.tip().hash());
+            ExecutionStatus uncleCheck = validateUncles(b);
             if (uncleCheck != SUCCESS) {
                 return uncleCheck;
             }
@@ -400,8 +401,29 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         return size;
     }
 
-    /** Structural uncle validation: bounded count, distinct hashes, none is the parent. */
-    private ExecutionStatus checkUnclesStructure(Block block, SHA256Hash parentHash) {
+    /**
+     * Remembers a valid off-chain block so a later block may reference it as an uncle.
+     * Only blocks with valid proof of work are retained (no free pool spam).
+     */
+    public void registerOrphan(Block block) {
+        lock.lock();
+        try {
+            if (block.verifyNonce(params.powAlgorithm())) {
+                orphans.put(block);
+            }
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * Full uncle validation (GHOST): bounded count and distinct; each uncle must be a
+     * known orphan with valid PoW, recent (its id strictly below this block and within
+     * {@code uncleMaxDepth}), forked from a main-chain block (its parent is on our
+     * chain), not itself the canonical block at its height, and not already referenced
+     * by a recent block. Uncle <em>work</em> weighting comes with M4.3.
+     */
+    private ExecutionStatus validateUncles(BlockImpl block) {
         List<SHA256Hash> uncles = block.uncles();
         if (uncles.isEmpty()) {
             return SUCCESS;
@@ -409,10 +431,43 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         if (uncles.size() > params.maxUnclesPerBlock()) {
             return INVALID_UNCLES;
         }
+        int h = block.id();
+        int depth = params.uncleMaxDepth();
+        long tipHeight = store.height();
+
+        // Main-chain hashes an uncle may fork from (its parent), and uncle hashes that
+        // recent blocks have already referenced (to prevent double-referencing).
+        java.util.Set<SHA256Hash> recentChain = new java.util.HashSet<>();
+        java.util.Set<SHA256Hash> alreadyReferenced = new java.util.HashSet<>();
+        for (long ancestor = Math.max(GenesisBlock.GENESIS_ID, h - depth - 1L); ancestor <= tipHeight; ancestor++) {
+            Block onChain = store.blockAt(ancestor);
+            recentChain.add(onChain.hash());
+            if (ancestor >= h - depth) {
+                alreadyReferenced.addAll(onChain.uncles());
+            }
+        }
+
         java.util.Set<SHA256Hash> seen = new java.util.HashSet<>();
-        for (SHA256Hash uncle : uncles) {
-            if (uncle.equals(parentHash) || !seen.add(uncle)) {
-                return INVALID_UNCLES; // no duplicates, and the parent is not its own uncle
+        for (SHA256Hash u : uncles) {
+            if (!seen.add(u)) {
+                return INVALID_UNCLES; // distinct
+            }
+            Block uncle = orphans.get(u);
+            if (uncle == null || !uncle.verifyNonce(params.powAlgorithm())) {
+                return INVALID_UNCLES; // unknown or bad PoW
+            }
+            int uid = uncle.id();
+            if (uid >= h || uid < h - depth) {
+                return INVALID_UNCLES; // must be recent and strictly before this block
+            }
+            if (!recentChain.contains(uncle.lastBlockHash())) {
+                return INVALID_UNCLES; // must fork from a recent main-chain block
+            }
+            if (uid <= tipHeight && store.blockAt(uid).hash().equals(u)) {
+                return INVALID_UNCLES; // that is the canonical block, not an orphan
+            }
+            if (alreadyReferenced.contains(u)) {
+                return INVALID_UNCLES; // already credited by a recent block
             }
         }
         return SUCCESS;
