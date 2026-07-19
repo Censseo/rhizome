@@ -223,8 +223,31 @@ pinned to the height's reward.
 
 ### 5.3 Economics
 
-Initial reward 50 PDN, decaying ×2/3 per epoch of 666 666 blocks (all integer
-arithmetic). Issuance is therefore bounded and deterministic.
+The block subsidy decays geometrically (×2/3) once per epoch, in integer arithmetic, so
+issuance is bounded and deterministic. Total issuance is the geometric series
+`epochBlocks × initialReward × 3 ≈ 100M PDN`.
+
+**Calibration for one-second blocks.** The decay epoch is denominated in *blocks*, so its
+real-time length depends on the block rate. Pandanite's 666 666-block epoch spans about
+1.9 years at 90 s/block — but only **7.7 days at 1 s/block**. Left unchanged, the whole
+subsidy would drain in about **8 months**, with the first epoch alone (a third of all
+coins) emitted in a single week — a launch-fairness and mining-incentive collapse, even
+though the *total* supply is unaffected. Rhizome therefore rescales both knobs by the
+cadence ratio so the **real-time schedule is preserved** regardless of block rate:
+
+| | Original (90 s) | Naïve at 1 s | **Rhizome (1 s)** |
+|---|---|---|---|
+| `rewardEpochBlocks` | 666 666 | 666 666 | **60 000 000** |
+| `initialReward` | 50 PDN | 50 PDN | **0.5555 PDN** |
+| Epoch in real time | ~1.9 yr | 7.7 days | **~1.9 yr** |
+| Subsidy dry-up | ~decades | ~8 months | **~decades** |
+| Emission at launch | 48 000 PDN/day | 4.32M PDN/day | **48 000 PDN/day** |
+| Total issuance | ~100M PDN | ~100M PDN | **~100M PDN** |
+
+Per-block rewards are small because there are 86 400 blocks per day; daily and total
+emission match the intended economics. The invariant is enforced by a test
+(`emissionScheduleIsCalibratedForOneBlockPerSecond`): change the block time and the epoch
+length must be revisited with it.
 
 ---
 

@@ -136,8 +136,16 @@ public final class NetworkParameters {
             .maxTransactionsPerBlock(25_000)
             .maxReorgDepth(600)
             .decimalScaleFactor(scale)
-            .initialReward(50L * scale)
-            .rewardEpochBlocks(666_666L)
+            // Emission schedule, recalibrated for the 1-block/second cadence (see
+            // WHITEPAPER.md §5.3). The decay epoch is measured in BLOCKS, so a value
+            // tuned for slow blocks collapses in real time when blocks are fast: the
+            // Pandanite-style 666,666-block epoch spans ~1.9 years at 90 s/block but
+            // only ~7.7 days at 1 s/block, draining the whole subsidy in ~8 months.
+            // Both knobs are therefore rescaled by the cadence ratio (×90) so the
+            // REAL-TIME schedule is preserved: ~1.9-year epochs, ~48k PDN/day at
+            // launch, ~100M PDN total — independent of the block rate.
+            .initialReward(50L * scale / 90L)      // 0.5555 PDN/block (was 50 PDN @ 90 s)
+            .rewardEpochBlocks(666_666L * 90L)     // 60,000,000 blocks ≈ 1.9 years @ 1 s
             .rewardDecayNum(2L)
             .rewardDecayDen(3L)
             .build();
