@@ -1,5 +1,6 @@
 package rhizome.vm;
 
+import rhizome.core.blockchain.Contracts;
 import rhizome.core.ledger.Ledger;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.transaction.TransactionAmount;

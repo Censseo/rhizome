@@ -1,11 +1,15 @@
 package rhizome.wallet;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 
+import rhizome.core.blockchain.Contracts;
 import rhizome.core.common.Helpers;
+import rhizome.core.common.Utils;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.transaction.Transaction;
 import rhizome.core.transaction.TransactionAmount;
+import rhizome.core.transaction.TransactionKind;
 
 /**
  * Command-line wallet.
@@ -31,6 +35,8 @@ public final class WalletCli {
             case "address" -> address(args);
             case "balance" -> balance(args);
             case "send" -> send(args);
+            case "deploy" -> deploy(args);
+            case "call" -> call(args);
             default -> {
                 System.err.println("Unknown command: " + args[0]);
                 usage();
@@ -81,6 +87,48 @@ public final class WalletCli {
         }
     }
 
+    private static final long DEFAULT_GAS_LIMIT = 10_000_000L;
+    private static final long DEFAULT_GAS_PRICE = 1L;
+
+    private static void deploy(String[] args) throws Exception {
+        require(args, 4, "deploy <nodeUrl> <keyfile> <wasmfile> [gasLimit] [gasPrice]");
+        WalletClient client = new WalletClient(args[1]);
+        Wallet wallet = Wallet.load(Path.of(args[2]));
+        byte[] code = Files.readAllBytes(Path.of(args[3]));
+        long gasLimit = args.length >= 5 ? Long.parseLong(args[4]) : DEFAULT_GAS_LIMIT;
+        long gasPrice = args.length >= 6 ? Long.parseLong(args[5]) : DEFAULT_GAS_PRICE;
+
+        long nonce = client.walletInfo(wallet.address()).nextNonce();
+        Transaction tx = wallet.signedContract(TransactionKind.DEPLOY, PublicAddress.empty(),
+            code, 0, gasLimit, gasPrice, client.chainId(), nonce, System.currentTimeMillis());
+        String status = client.submit(tx);
+        System.out.println("contract: " + Contracts.deriveAddress(wallet.address(), nonce).toHexString());
+        System.out.println("status: " + status);
+        if (!"SUCCESS".equals(status)) {
+            System.exit(1);
+        }
+    }
+
+    private static void call(String[] args) throws Exception {
+        require(args, 5, "call <nodeUrl> <keyfile> <contract> <hexInput> [gasLimit] [gasPrice]");
+        WalletClient client = new WalletClient(args[1]);
+        Wallet wallet = Wallet.load(Path.of(args[2]));
+        PublicAddress contract = PublicAddress.of(args[3]);
+        byte[] input = args[4].isEmpty() ? new byte[0] : Utils.hexStringToByteArray(args[4]);
+        long gasLimit = args.length >= 6 ? Long.parseLong(args[5]) : DEFAULT_GAS_LIMIT;
+        long gasPrice = args.length >= 7 ? Long.parseLong(args[6]) : DEFAULT_GAS_PRICE;
+
+        long nonce = client.walletInfo(wallet.address()).nextNonce();
+        Transaction tx = wallet.signedContract(TransactionKind.CALL, contract,
+            input, 0, gasLimit, gasPrice, client.chainId(), nonce, System.currentTimeMillis());
+        String status = client.submit(tx);
+        System.out.println("txid: " + tx.hashContents().toHexString());
+        System.out.println("status: " + status);
+        if (!"SUCCESS".equals(status)) {
+            System.exit(1);
+        }
+    }
+
     private static void require(String[] args, int n, String usage) {
         if (args.length < n) {
             System.err.println("usage: " + usage);
@@ -94,6 +142,8 @@ public final class WalletCli {
               keygen  <keyfile>
               address <keyfile>
               balance <nodeUrl> <address>
-              send    <nodeUrl> <keyfile> <to> <amount> [fee]""");
+              send    <nodeUrl> <keyfile> <to> <amount> [fee]
+              deploy  <nodeUrl> <keyfile> <wasmfile> [gasLimit] [gasPrice]
+              call    <nodeUrl> <keyfile> <contract> <hexInput> [gasLimit] [gasPrice]""");
     }
 }

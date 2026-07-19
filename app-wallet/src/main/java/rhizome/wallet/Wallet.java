@@ -76,4 +76,17 @@ public final class Wallet {
         Transaction t = Transaction.of(address, to, amount, publicKey, fee, timestamp, chainId, nonce);
         return t.sign(privateKey);
     }
+
+    /** Signs a contract DEPLOY (code) or CALL (input) transaction. */
+    public Transaction signedContract(rhizome.core.transaction.TransactionKind kind, PublicAddress to,
+                                      byte[] data, long value, long gasLimit, long gasPrice,
+                                      int chainId, long nonce, long timestamp) {
+        Transaction t = rhizome.core.transaction.TransactionImpl.builder()
+            .from(address).to(to)
+            .amount(new TransactionAmount(value)).fee(new TransactionAmount(0))
+            .timestamp(timestamp).chainId(chainId).nonce(nonce).signingKey(publicKey)
+            .kind(kind).data(data).gasLimit(gasLimit).gasPrice(gasPrice)
+            .build();
+        return t.sign(privateKey);
+    }
 }

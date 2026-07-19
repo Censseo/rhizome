@@ -89,17 +89,30 @@ class MemPoolTest {
         assertEquals(ExecutionStatus.INVALID_CHAIN_ID, mempool.addTransaction(t));
     }
 
-    @Test
-    void rejectsContractTransactionsUntilExecutionEnabled() {
+    private Transaction contractCall(long nonce, long gasLimit, long gasPrice) {
         Transaction t = rhizome.core.transaction.TransactionImpl.builder()
             .from(sender).to(PublicAddress.random())
             .amount(new TransactionAmount(0)).fee(new TransactionAmount(0))
-            .chainId(params.chainId()).nonce(0).signingKey(key)
+            .chainId(params.chainId()).nonce(nonce).signingKey(key)
             .kind(rhizome.core.transaction.TransactionKind.CALL)
-            .data(new byte[] {1, 2, 3}).gasLimit(100_000).gasPrice(1)
+            .data(new byte[] {1, 2, 3}).gasLimit(gasLimit).gasPrice(gasPrice)
             .build();
         t.sign(priv);
-        assertEquals(ExecutionStatus.CONTRACT_EXECUTION_UNAVAILABLE, mempool.addTransaction(t));
+        return t;
+    }
+
+    @Test
+    void admitsContractCallWithinGasBudget() {
+        // Sender balance is 1_000_000; a gas budget within it is admitted.
+        assertEquals(ExecutionStatus.SUCCESS, mempool.addTransaction(contractCall(0, 100_000, 1)));
+        assertEquals(1, mempool.size());
+    }
+
+    @Test
+    void rejectsContractCallWhoseGasBudgetExceedsBalance() {
+        // gasLimit * gasPrice = 2_000_000 > balance 1_000_000.
+        assertEquals(ExecutionStatus.BALANCE_TOO_LOW, mempool.addTransaction(contractCall(0, 1_000_000, 2)));
+        assertEquals(0, mempool.size());
     }
 
     @Test

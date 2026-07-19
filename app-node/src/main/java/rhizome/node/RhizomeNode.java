@@ -18,7 +18,10 @@ import rhizome.core.blockchain.SignatureVerifier;
 import rhizome.core.ledger.LedgerSnapshot;
 import rhizome.core.ledger.SnapshotLoader;
 import rhizome.core.mempool.MemPool;
+import rhizome.persistence.rocksdb.RocksDbContractStore;
 import rhizome.persistence.rocksdb.RocksDbNodeStore;
+import rhizome.vm.WasmContractProcessor;
+import rhizome.vm.WasmVm;
 
 /**
  * A fully assembled node: RocksDB storage, chain engine, mempool, HTTP API, an
@@ -35,6 +38,7 @@ public final class RhizomeNode implements AutoCloseable {
     private final NodeConfig config;
 
     private RocksDbNodeStore store;
+    private RocksDbContractStore contractStore;
     private ChainEngine engine;
     private MemPool mempool;
     private NodeService service;
@@ -71,9 +75,11 @@ public final class RhizomeNode implements AutoCloseable {
             : SnapshotLoader.empty(config.params().chainId());
 
         store = new RocksDbNodeStore(config.dataDir());
+        contractStore = new RocksDbContractStore(config.dataDir() + "/contracts");
         verifier = new SignatureVerifier();
+        var contractProcessor = new WasmContractProcessor(new WasmVm(), contractStore);
         engine = ChainEngine.init(config.params(), store.ledger(), store.chainStore(),
-            snapshot, null, System::currentTimeMillis, verifier);
+            snapshot, null, System::currentTimeMillis, verifier, contractProcessor);
         mempool = new MemPool(config.params(), verifier, engine, config.mempoolSize());
         service = new NodeService(engine, mempool);
 
@@ -241,6 +247,9 @@ public final class RhizomeNode implements AutoCloseable {
         }
         if (store != null) {
             store.close();
+        }
+        if (contractStore != null) {
+            contractStore.close();
         }
     }
 

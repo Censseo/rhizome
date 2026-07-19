@@ -1,4 +1,4 @@
-package rhizome.vm;
+package rhizome.core.blockchain;
 
 import java.nio.ByteBuffer;
 import java.security.MessageDigest;
@@ -7,7 +7,10 @@ import java.util.Arrays;
 
 import rhizome.core.ledger.PublicAddress;
 
-/** Contract-address derivation. */
+/**
+ * Contract-address derivation. Lives in the consensus core (no VM dependency) so
+ * the executor, the VM processor and the wallet all derive the same address.
+ */
 public final class Contracts {
 
     private Contracts() {}

@@ -78,6 +78,14 @@ public final class MemPool {
         this.maxPerSender = maxPerSender;
     }
 
+    /** Maximum this transaction can debit its sender: value + fee, or value + full gas budget. */
+    private static long maxSpend(TransactionImpl tx) {
+        if (tx.kind().isContract()) {
+            return tx.amount().amount() + Math.multiplyExact(tx.gasLimit(), tx.gasPrice());
+        }
+        return tx.amount().amount() + tx.fee().amount();
+    }
+
     public ExecutionStatus addTransaction(Transaction transaction) {
         var tx = (TransactionImpl) transaction;
         if (tx.isTransactionFee()) {
@@ -89,8 +97,8 @@ public final class MemPool {
         if (tx.amount().amount() < 0 || tx.fee().amount() < 0) {
             return INVALID_TRANSACTION_AMOUNT; // negative would mint money / force negative balances
         }
-        if (tx.kind().isContract()) {
-            return CONTRACT_EXECUTION_UNAVAILABLE; // not executable in consensus yet (see Executor)
+        if (tx.kind().isContract() && (tx.gasLimit() < 0 || tx.gasPrice() < 0)) {
+            return INVALID_TRANSACTION_AMOUNT;
         }
         if (!PublicAddress.of(tx.signingKey()).equals(tx.from())) {
             return WALLET_SIGNATURE_MISMATCH;
@@ -120,12 +128,12 @@ public final class MemPool {
                 return QUEUE_FULL; // one sender cannot monopolise the pool
             }
 
-            // Cumulative spend across this sender's pending set + candidate.
-            long spend = tx.amount().amount() + tx.fee().amount();
+            // Cumulative spend across this sender's pending set + candidate. A contract
+            // transaction can spend its attached value plus the whole gas budget.
+            long spend = maxSpend(tx);
             if (pending != null) {
                 for (Transaction p : pending.values()) {
-                    var pt = (TransactionImpl) p;
-                    spend += pt.amount().amount() + pt.fee().amount();
+                    spend += maxSpend((TransactionImpl) p);
                 }
             }
             if (spend < 0 || spend > accounts.confirmedBalance(from)) {
@@ -168,7 +176,7 @@ public final class MemPool {
                 Transaction next;
                 while ((next = pending.get(nonce)) != null && selected.size() < maxTransactions) {
                     var tx = (TransactionImpl) next;
-                    long spend = tx.amount().amount() + tx.fee().amount();
+                    long spend = maxSpend(tx);
                     if (spend > budget) {
                         break;
                     }

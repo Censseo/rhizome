@@ -80,4 +80,74 @@ class RhizomeNodeTest {
             }
         }
     }
+
+    private static byte[] loadCounter() {
+        try (var in = RhizomeNodeTest.class.getResourceAsStream("/counter.wasm")) {
+            return in.readAllBytes();
+        } catch (java.io.IOException e) {
+            throw new java.io.UncheckedIOException(e);
+        }
+    }
+
+    private static void awaitNonce(rhizome.node.RhizomeNode node, rhizome.core.ledger.PublicAddress a,
+                                   long target, long timeoutMs) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (node.engine().nextNonce(a) < target && System.currentTimeMillis() < deadline) {
+            Thread.sleep(20);
+        }
+    }
+
+    @Test
+    void miningNodeIncludesSubmittedContractTransactions() throws Exception {
+        var pair = rhizome.core.common.Crypto.generateKeyPair();
+        var key = rhizome.core.crypto.PublicKey.of(pair.getPublic());
+        var priv = new rhizome.core.crypto.PrivateKey(
+            (org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters) pair.getPrivate());
+        var sender = PublicAddress.of(key);
+
+        int port = freePort();
+        // The sender mines, so its coinbase rewards fund the gas it spends.
+        NodeConfig config = NodeConfig.defaults(FAST, tempDir.resolve("contract").toString(), port)
+            .withMiner(sender).withBlockIntervalMs(30);
+
+        try (RhizomeNode node = new RhizomeNode(config)) {
+            node.start();
+            awaitHeight(node, 40, 25_000); // accumulate enough balance to cover the gas reservation
+
+            int chainId = node.engine().params().chainId();
+            long gasLimit = 100_000;
+
+            long deployNonce = node.engine().nextNonce(sender);
+            rhizome.core.transaction.Transaction deployTx = rhizome.core.transaction.TransactionImpl.builder()
+                .from(sender).to(PublicAddress.empty())
+                .amount(new rhizome.core.transaction.TransactionAmount(0))
+                .fee(new rhizome.core.transaction.TransactionAmount(0))
+                .chainId(chainId).nonce(deployNonce).signingKey(key)
+                .kind(rhizome.core.transaction.TransactionKind.DEPLOY)
+                .data(loadCounter()).gasLimit(gasLimit).gasPrice(1)
+                .build();
+            deployTx.sign(priv);
+            assertEquals(rhizome.core.mempool.ExecutionStatus.SUCCESS, node.service().submitTransaction(deployTx));
+
+            // The deploy is mined into a block: the sender's nonce advances.
+            awaitNonce(node, sender, deployNonce + 1, 25_000);
+            assertTrue(node.engine().nextNonce(sender) >= deployNonce + 1, "deploy tx should be included");
+
+            var contract = rhizome.core.blockchain.Contracts.deriveAddress(sender, deployNonce);
+            long callNonce = node.engine().nextNonce(sender);
+            rhizome.core.transaction.Transaction callTx = rhizome.core.transaction.TransactionImpl.builder()
+                .from(sender).to(contract)
+                .amount(new rhizome.core.transaction.TransactionAmount(0))
+                .fee(new rhizome.core.transaction.TransactionAmount(0))
+                .chainId(chainId).nonce(callNonce).signingKey(key)
+                .kind(rhizome.core.transaction.TransactionKind.CALL)
+                .data(new byte[0]).gasLimit(gasLimit).gasPrice(1)
+                .build();
+            callTx.sign(priv);
+            assertEquals(rhizome.core.mempool.ExecutionStatus.SUCCESS, node.service().submitTransaction(callTx));
+
+            awaitNonce(node, sender, callNonce + 1, 25_000);
+            assertTrue(node.engine().nextNonce(sender) >= callNonce + 1, "call tx should be included");
+        }
+    }
 }
