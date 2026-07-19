@@ -3,6 +3,7 @@ package rhizome.core.blockchain;
 import lombok.Builder;
 import lombok.Getter;
 import lombok.experimental.Accessors;
+import rhizome.core.common.Constants;
 import rhizome.core.common.PowAlgorithm;
 
 /**
@@ -62,6 +63,13 @@ public final class NetworkParameters {
     /** Window (in blocks) for the median-time-past lower bound. */
     private final int medianTimeWindow;
     private final int maxTransactionsPerBlock;
+
+    /**
+     * Maximum serialized block size in bytes. Bounds a block's cost to download,
+     * store and validate — critical now that contract transactions carry
+     * variable-length payloads (without it a single block could be gigabytes).
+     */
+    private final int maxBlockSizeBytes;
 
     // --- Finality / hardening ---
     /**
@@ -145,6 +153,7 @@ public final class NetworkParameters {
             // past time at this cadence.
             .medianTimeWindow(60)
             .maxTransactionsPerBlock(25_000)
+            .maxBlockSizeBytes(Constants.MAX_BLOCK_SIZE_BYTES)
             .maxReorgDepth(600)
             .decimalScaleFactor(scale)
             // Emission schedule, recalibrated for the 1-block/second cadence (see

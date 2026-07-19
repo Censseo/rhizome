@@ -22,6 +22,8 @@ public final class Constants {
 
     // Blocks
     public static final int MAX_TRANSACTIONS_PER_BLOCK = 25000;
+    /** Max serialized block size (4 MiB): fits a full transfer block and bounds contract payloads. */
+    public static final int MAX_BLOCK_SIZE_BYTES = 4 * 1024 * 1024;
     public static final int PUFFERFISH_START_BLOCK = 124500;
 
     // Difficulty

@@ -54,8 +54,7 @@ public final class NodeApi {
      * of the always-responds robustness rules.
      */
     public static AsyncServlet servlet(Reactor reactor, NodeService node, RateLimiter limiter) {
-        int maxBlockBody = BlockDto.BUFFER_SIZE
-            + node.params().maxTransactionsPerBlock() * (TransactionDto.BUFFER_SIZE + 1) + 1024;
+        int maxBlockBody = node.params().maxBlockSizeBytes() + 1024;
 
         RoutingServlet routing = RoutingServlet.builder(reactor)
             .with(GET, "/block_count", req -> ok(text(String.valueOf(node.blockCount()))))

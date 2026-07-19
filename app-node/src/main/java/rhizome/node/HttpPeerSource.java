@@ -38,10 +38,8 @@ public final class HttpPeerSource implements PeerSource {
     // blocks, each a header plus MAX_TRANSACTIONS_PER_BLOCK transactions). Derived
     // from the fixed DTO layouts so a valid response is never rejected, yet the
     // buffered size is finite instead of whatever a hostile peer chooses to send.
-    private static final long BLOCK_STREAM_CAP = (long) Constants.BLOCKS_PER_FETCH
-        * (rhizome.core.block.dto.BlockDto.BUFFER_SIZE
-           + (long) Constants.MAX_TRANSACTIONS_PER_BLOCK * (rhizome.core.transaction.dto.TransactionDto.BUFFER_SIZE + 1))
-        + 64 * 1024;
+    private static final long BLOCK_STREAM_CAP =
+        (long) Constants.BLOCKS_PER_FETCH * Constants.MAX_BLOCK_SIZE_BYTES + 64 * 1024;
 
     private final String baseUrl;
     private final HttpClient client;

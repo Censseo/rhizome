@@ -37,8 +37,21 @@ public final class BlockAssembler {
             .nonce(SHA256Hash.empty())
             .build();
 
-        block.addTransaction(Transaction.of(miner, new TransactionAmount(params.miningReward(height))));
-        selected.forEach(block::addTransaction);
+        Transaction coinbase = Transaction.of(miner, new TransactionAmount(params.miningReward(height)));
+        block.addTransaction(coinbase);
+
+        // Include transactions only while the block stays under the consensus size cap
+        // (contract payloads are variable length), so the producer never builds a block
+        // the network would reject as too large.
+        long size = rhizome.core.block.dto.BlockDto.BUFFER_SIZE + coinbase.serialize().getSize();
+        for (Transaction t : selected) {
+            long next = size + t.serialize().getSize();
+            if (next > params.maxBlockSizeBytes()) {
+                break;
+            }
+            block.addTransaction(t);
+            size = next;
+        }
 
         var tree = new MerkleTree();
         tree.setItems(block.transactions());

@@ -119,6 +119,11 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
                 || block.transactions().size() > params.maxTransactionsPerBlock()) {
                 return INVALID_TRANSACTION_COUNT; // must at least carry a coinbase
             }
+            // Bound the block's serialized size (cheap, before any expensive work) so a
+            // block laden with contract payloads cannot be a download/storage DoS.
+            if (serializedSize(block) > params.maxBlockSizeBytes()) {
+                return BLOCK_TOO_LARGE;
+            }
             // Static checkpoint: at a pinned height, only the published hash passes.
             SHA256Hash checkpoint = params.checkpoints().get(height + 1);
             if (checkpoint != null && !block.hash().equals(checkpoint)) {
@@ -376,5 +381,14 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         var tree = new MerkleTree();
         tree.setItems(block.transactions());
         return tree.getRootHash();
+    }
+
+    /** Serialized byte size of the block (header + variable-length transactions). */
+    private static long serializedSize(Block block) {
+        long size = rhizome.core.block.dto.BlockDto.BUFFER_SIZE;
+        for (Transaction t : block.transactions()) {
+            size += t.serialize().getSize();
+        }
+        return size;
     }
 }
