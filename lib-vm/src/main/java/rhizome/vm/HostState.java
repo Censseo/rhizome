@@ -37,4 +37,9 @@ public interface HostState {
 
     /** Event logs emitted during this call, in emission order. */
     java.util.List<LogEntry> logs();
+
+    /** The executing contract's own address (EVM ADDRESS); empty when not applicable. */
+    default byte[] selfAddress() {
+        return new byte[0];
+    }
 }

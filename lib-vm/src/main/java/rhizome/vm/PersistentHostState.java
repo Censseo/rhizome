@@ -99,6 +99,11 @@ public final class PersistentHostState implements HostState {
     }
 
     @Override
+    public byte[] selfAddress() {
+        return contract.toBytes();
+    }
+
+    @Override
     public java.util.List<LogEntry> logs() {
         return java.util.List.copyOf(logs);
     }

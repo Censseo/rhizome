@@ -147,6 +147,10 @@ public final class WasmVm {
             List.of(), List.of(ValType.I64),
             (Instance inst, long... args) -> new long[] {host.value()});
 
+        HostFunction getSelf = new HostFunction(ENV, "get_self",
+            List.of(ValType.I32, ValType.I32), List.of(ValType.I32),
+            (Instance inst, long... args) -> new long[] {copyOut(inst, host.selfAddress(), args[0], args[1], gas)});
+
         // call_contract(addr_ptr, addr_len, in_ptr, in_len, out_ptr, out_cap) -> i32:
         // the callee's output length (copied up to out_cap bytes), or -1 if the call
         // failed. The dispatcher runs the callee in its own state frame, so a failed
@@ -168,7 +172,7 @@ public final class WasmVm {
             });
 
         return new HostFunction[] {
-            storageRead, storageWrite, setOutput, emitLog, getCaller, getInput, getValue, callContract};
+            storageRead, storageWrite, setOutput, emitLog, getCaller, getInput, getValue, getSelf, callContract};
     }
 
     /** Copies {@code src} into contract memory (at most {@code cap} bytes) and returns its true length. */

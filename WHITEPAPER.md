@@ -29,7 +29,7 @@ Four goals drive the design:
    GHOST-style fork choice (§9) that credits and rewards orphaned (uncle) work, making
    sub-5-second blocks safe against the orphaning a naïve longest chain suffers.
 
-The node is functional and covered by **210 tests**: consensus, the WASM contract VM
+The node is functional and covered by **213 tests**: consensus, the WASM contract VM
 and its persistence, execution, storage, mempool, HTTP API, block production, P2P
 synchronisation with reorganisation, GHOST uncles, and a wallet that deploys and calls
 contracts.
@@ -289,11 +289,13 @@ Contracts are **WebAssembly**, run on the pure-Java [Chicory](https://github.com
 runtime — no JNI, no native dependency, deterministic across nodes because every node
 executes the same interpreter. A contract imports a small host ABI from module `env` —
 `storage_read`, `storage_write`, `set_output`, `emit_log`, the call context
-(`get_caller`, `get_input`, `get_value`), and `call_contract` — and exports a `call`
-entry point; the WASM sandbox denies it any other I/O. A reference fungible-token
-contract (`contracts/token.rs`, the memecoin base) exercises the whole ABI: it mints a
-supply to its deployer, transfers between accounts, and emits a `transfer` event on each
-move.
+(`get_caller`, `get_input`, `get_value`, `get_self`), and `call_contract` — and exports
+a `call` entry point; the WASM sandbox denies it any other I/O. Reference contracts
+(real Rust→WASM, driven through consensus in the tests) exercise the whole ABI: a
+fungible token (`contracts/token.rs` — mint, transfer, `transfer` events), a
+constant-product AMM (`contracts/amm.rs`), and a fair-launch launchpad
+(`contracts/launchpad.rs`) that sells the token it holds for attached native coin,
+reverting when it cannot deliver so the buyer's coin only moves when tokens do.
 
 **Cross-contract calls.** `call_contract(addr, input) -> output | -1` lets a contract
 drive another (a callee sees the calling *contract* as its caller). Each call frame runs
@@ -483,7 +485,7 @@ discovery; hardening (checkpoints, finality, bounded rate limiting, ban-score, b
 cap); a full security review; and the **WASM smart-contract layer** — a Chicory-backed
 metered VM, a persistent contract store, `DEPLOY`/`CALL` transactions with gas fees,
 atomic per-block contract state with exact reorg reversal, and wallet `deploy`/`call`
-commands. **210 tests, 0 failures.**
+commands. **213 tests, 0 failures.**
 
 **GHOST fork choice.** A ~1-block/second single longest chain orphans blocks because
 propagation takes a meaningful fraction of the interval (§6.3). A GHOST-style fork
@@ -517,13 +519,16 @@ in near-real-time. Next: push streaming (SSE/WebSocket) over the same event sour
 account abstraction (contract accounts as agents — session keys, spend limits, gas
 sponsorship).
 
-**In progress — memecoin primitives.** Two reference contracts are implemented and
-tested through consensus: a fungible token (mint, transfer, `transfer` logs) and a
-constant-product AMM (`x*y=k` with a 0.3% fee, `swap` logs, exact integer math verified
-against the same formula in the test). Composition is now in place too: `call_contract`
-(§5) with per-frame savepoints, forwarded gas, bounded depth and reentrancy refusal,
-proven by a router contract driving the token through consensus. Next: a token-backed
-AMM variant and a fair-launch launchpad built on these calls.
+**Memecoin primitives.** Three reference contracts are implemented and tested through
+consensus: a fungible token (mint, transfer, `transfer` logs), a constant-product AMM
+(`x*y=k` with a 0.3% fee, `swap` logs, exact integer math verified against the same
+formula in the test), and a fair-launch launchpad — a fixed-price, first-come sale where
+a buyer's attached native coin only moves when the tokens are delivered (the launchpad
+checks its own token balance through a `call_contract` output round-trip and reverts
+otherwise). Composition rests on `call_contract` (§5): per-frame savepoints, forwarded
+gas, bounded depth and reentrancy refusal, additionally proven by a router contract
+driving the token through consensus. A remaining nicety is a token-backed AMM variant
+(the current AMM keeps internal balances).
 
 **Environment-dependent** — GraalVM native build (`native-image` not installed in the
 current dev environment); production of the real Pandanite snapshot (a synchronised C++

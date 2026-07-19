@@ -6,7 +6,7 @@ A Java proof-of-work blockchain with **WebAssembly smart contracts** (via the pu
 with corrected consensus rules and Pufferfish2 proof of work — built for cheap token
 launches and autonomous agents. See [`WHITEPAPER.md`](WHITEPAPER.md) for the design.
 
-Status: functional, tested node with a smart-contract VM (210 tests). Requires JDK 21.
+Status: functional, tested node with a smart-contract VM (213 tests). Requires JDK 21.
 
 ## Build & test
 
