@@ -116,6 +116,11 @@ public final class ChainSynchronizer {
                 return Result.PEER_INVALID;
             }
         }
+        // The branch we just replaced is valid work that lost the fork race; keep its
+        // blocks as orphans so a later block can reference them as uncles (GHOST).
+        for (Block block : localBranch) {
+            engine.registerOrphan(block);
+        }
         // Branch prefix applied and (by the gate) already heavier than what it
         // replaced; keep extending toward the peer tip, best effort.
         applyRange(peer, prefetchEnd + 1, peer.height());

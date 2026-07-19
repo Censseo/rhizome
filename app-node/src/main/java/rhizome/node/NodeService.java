@@ -111,6 +111,10 @@ public final class NodeService {
         if (status == ExecutionStatus.SUCCESS) {
             mempool.onBlockApplied(block);
             notify(onBlockAccepted, block);
+        } else {
+            // A block that didn't extend our tip may be a valid sibling that lost the
+            // race; keep it (PoW-gated inside) so a later block can cite it as an uncle.
+            engine.registerOrphan(block);
         }
         return status;
     }

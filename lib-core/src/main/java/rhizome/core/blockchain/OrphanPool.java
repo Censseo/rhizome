@@ -1,6 +1,8 @@
 package rhizome.core.blockchain;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 import rhizome.core.block.Block;
@@ -42,5 +44,10 @@ public final class OrphanPool {
 
     public synchronized int size() {
         return pool.size();
+    }
+
+    /** A snapshot of the pooled orphans, most-recently-used last. */
+    public synchronized List<Block> snapshot() {
+        return new ArrayList<>(pool.values());
     }
 }

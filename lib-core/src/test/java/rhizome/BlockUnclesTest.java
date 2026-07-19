@@ -129,6 +129,23 @@ class BlockUnclesTest {
     }
 
     @Test
+    void selectUnclesReturnsEligibleOrphansAndAssembledBlockIsAccepted() {
+        engine.addBlock(mineNext(List.of())); // height 2
+        BlockImpl orphan = registerOrphanSiblingOfTip(); // orphan at height 2
+
+        List<rhizome.core.block.UncleRef> picked = engine.selectUncles();
+        assertEquals(1, picked.size());
+        assertEquals(orphan.hash(), picked.get(0).hash());
+        assertEquals(orphan.difficulty(), picked.get(0).difficulty());
+
+        // A block carrying exactly the selection is accepted.
+        assertEquals(ExecutionStatus.SUCCESS, engine.addBlock(mineNext(picked)));
+        assertEquals(3, engine.height());
+        // Once referenced, the orphan is no longer offered for the next block.
+        assertTrue(engine.selectUncles().isEmpty());
+    }
+
+    @Test
     void rejectsUncleWithInflatedDifficulty() {
         engine.addBlock(mineNext(List.of())); // height 2
         BlockImpl orphan = registerOrphanSiblingOfTip();

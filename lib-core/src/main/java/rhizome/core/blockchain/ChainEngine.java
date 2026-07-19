@@ -10,6 +10,7 @@ import java.util.function.LongSupplier;
 
 import rhizome.core.block.Block;
 import rhizome.core.block.BlockImpl;
+import rhizome.core.block.UncleRef;
 import rhizome.core.crypto.SHA256Hash;
 import rhizome.core.ledger.Ledger;
 import rhizome.core.ledger.LedgerSnapshot;
@@ -448,7 +449,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
      * check fails.
      */
     private BigInteger validateUncles(BlockImpl block) {
-        List<rhizome.core.block.UncleRef> uncles = block.uncles();
+        List<UncleRef> uncles = block.uncles();
         if (uncles.isEmpty()) {
             return BigInteger.ZERO;
         }
@@ -458,50 +459,91 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         int h = block.id();
         int depth = params.uncleMaxDepth();
         long tipHeight = store.height();
+        UncleContext ctx = uncleContext(h, depth, tipHeight);
 
-        // Main-chain hashes an uncle may fork from (its parent), and uncle hashes that
-        // recent blocks have already referenced (to prevent double-crediting).
+        BigInteger uncleWork = BigInteger.ZERO;
+        java.util.Set<SHA256Hash> seen = new java.util.HashSet<>();
+        for (UncleRef ref : uncles) {
+            SHA256Hash u = ref.hash();
+            if (!seen.add(u)) {
+                return null; // distinct
+            }
+            Block uncle = orphans.get(u);
+            if (uncle == null) {
+                return null; // unknown orphan
+            }
+            if (((BlockImpl) uncle).difficulty() != ref.difficulty()) {
+                return null; // committed difficulty must match the real orphan (no work inflation)
+            }
+            if (!uncleEligible(uncle, h, depth, tipHeight, ctx)) {
+                return null;
+            }
+            uncleWork = uncleWork.add(BigInteger.TWO.pow(ref.difficulty()));
+        }
+        return uncleWork;
+    }
+
+    /**
+     * The uncle references a block at height {@code height} would include when
+     * produced now: eligible orphans from the pool, up to {@code maxUnclesPerBlock},
+     * each committing the orphan's real difficulty. Empty when nothing qualifies.
+     */
+    public List<UncleRef> selectUncles() {
+        lock.lock();
+        try {
+            int h = (int) (store.height() + 1);
+            int depth = params.uncleMaxDepth();
+            long tipHeight = store.height();
+            UncleContext ctx = uncleContext(h, depth, tipHeight);
+            List<UncleRef> out = new ArrayList<>();
+            for (Block orphan : orphans.snapshot()) {
+                if (out.size() >= params.maxUnclesPerBlock()) {
+                    break;
+                }
+                if (uncleEligible(orphan, h, depth, tipHeight, ctx)) {
+                    out.add(new UncleRef(orphan.hash(), ((BlockImpl) orphan).difficulty()));
+                }
+            }
+            return out;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** Recent main-chain hashes an uncle may fork from, and uncle hashes already referenced. */
+    private UncleContext uncleContext(int h, int depth, long tipHeight) {
         java.util.Set<SHA256Hash> recentChain = new java.util.HashSet<>();
         java.util.Set<SHA256Hash> alreadyReferenced = new java.util.HashSet<>();
         for (long ancestor = Math.max(GenesisBlock.GENESIS_ID, h - depth - 1L); ancestor <= tipHeight; ancestor++) {
             Block onChain = store.blockAt(ancestor);
             recentChain.add(onChain.hash());
             if (ancestor >= h - depth) {
-                for (rhizome.core.block.UncleRef ref : onChain.uncles()) {
+                for (UncleRef ref : onChain.uncles()) {
                     alreadyReferenced.add(ref.hash());
                 }
             }
         }
-
-        BigInteger uncleWork = BigInteger.ZERO;
-        java.util.Set<SHA256Hash> seen = new java.util.HashSet<>();
-        for (rhizome.core.block.UncleRef ref : uncles) {
-            SHA256Hash u = ref.hash();
-            if (!seen.add(u)) {
-                return null; // distinct
-            }
-            Block uncle = orphans.get(u);
-            if (uncle == null || !uncle.verifyNonce(params.powAlgorithm())) {
-                return null; // unknown or bad PoW
-            }
-            if (((BlockImpl) uncle).difficulty() != ref.difficulty()) {
-                return null; // committed difficulty must match the real orphan (no work inflation)
-            }
-            int uid = uncle.id();
-            if (uid >= h || uid < h - depth) {
-                return null; // recent and strictly before this block
-            }
-            if (!recentChain.contains(uncle.lastBlockHash())) {
-                return null; // must fork from a recent main-chain block
-            }
-            if (uid <= tipHeight && store.blockAt(uid).hash().equals(u)) {
-                return null; // that is the canonical block, not an orphan
-            }
-            if (alreadyReferenced.contains(u)) {
-                return null; // already credited by a recent block
-            }
-            uncleWork = uncleWork.add(BigInteger.TWO.pow(ref.difficulty()));
-        }
-        return uncleWork;
+        return new UncleContext(recentChain, alreadyReferenced);
     }
+
+    /** Whether {@code uncle} is a valid uncle for a block at height {@code h}. */
+    private boolean uncleEligible(Block uncle, int h, int depth, long tipHeight, UncleContext ctx) {
+        if (!uncle.verifyNonce(params.powAlgorithm())) {
+            return false; // bad PoW
+        }
+        int uid = uncle.id();
+        if (uid >= h || uid < h - depth) {
+            return false; // recent and strictly before this block
+        }
+        if (!ctx.recentChain().contains(uncle.lastBlockHash())) {
+            return false; // must fork from a recent main-chain block
+        }
+        if (uid <= tipHeight && store.blockAt(uid).hash().equals(uncle.hash())) {
+            return false; // that is the canonical block, not an orphan
+        }
+        return !ctx.alreadyReferenced().contains(uncle.hash()); // not already credited
+    }
+
+    private record UncleContext(java.util.Set<SHA256Hash> recentChain,
+                                java.util.Set<SHA256Hash> alreadyReferenced) {}
 }

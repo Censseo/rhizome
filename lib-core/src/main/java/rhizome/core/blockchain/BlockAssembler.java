@@ -35,6 +35,10 @@ public final class BlockAssembler {
             .difficulty(engine.difficulty())
             .lastBlockHash(engine.tipHash())
             .nonce(SHA256Hash.empty())
+            // Credit valid off-chain siblings as uncles (GHOST): weights the chain
+            // toward the true majority of work when blocks are produced faster than
+            // they propagate.
+            .uncles(engine.selectUncles())
             .build();
 
         Transaction coinbase = Transaction.of(miner, new TransactionAmount(params.miningReward(height)));
