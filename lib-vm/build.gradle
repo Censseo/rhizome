@@ -1,0 +1,8 @@
+plugins {
+    id 'java-library'
+}
+
+dependencies {
+    // Deterministic, pure-Java WebAssembly runtime (no JNI) — the smart-contract VM.
+    api 'com.dylibso.chicory:runtime:1.7.5'
+}

@@ -1,2 +1,2 @@
 rootProject.name = 'Rhizome'
-include 'lib-core', 'lib-crypto', 'lib-persistence', 'lib-net', 'app-wallet', 'app-node', 'app-dnsseeder'
+include 'lib-core', 'lib-crypto', 'lib-persistence', 'lib-net', 'lib-vm', 'app-wallet', 'app-node', 'app-dnsseeder'
