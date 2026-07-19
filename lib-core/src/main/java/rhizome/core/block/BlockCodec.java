@@ -22,12 +22,18 @@ public final class BlockCodec {
     public static byte[] encode(Block block) {
         BlockDto header = block.serialize();
         List<Transaction> transactions = block.transactions();
-        int size = BlockDto.BUFFER_SIZE + transactions.size() * TransactionDto.BUFFER_SIZE;
+        // Transactions are variable length (contract payloads), so sum their sizes.
+        int size = BlockDto.BUFFER_SIZE;
+        TransactionDto[] dtos = new TransactionDto[transactions.size()];
+        for (int i = 0; i < dtos.length; i++) {
+            dtos[i] = transactions.get(i).serialize();
+            size += dtos[i].getSize();
+        }
 
         ByteBuffer buffer = ByteBuffer.allocate(size);
         header.writeTo(buffer);
-        for (Transaction t : transactions) {
-            t.serialize().writeTo(buffer);
+        for (TransactionDto dto : dtos) {
+            dto.writeTo(buffer);
         }
         return buffer.array();
     }

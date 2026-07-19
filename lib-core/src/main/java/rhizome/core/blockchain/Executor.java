@@ -101,6 +101,12 @@ public final class Executor {
             if (tx.chainId() != params.chainId()) {
                 return INVALID_CHAIN_ID;
             }
+            // Contract transactions are a valid, signed, serializable type but are not
+            // yet executed in consensus (the executor dispatch lands next), so a block
+            // carrying one is rejected — no contract tx can be mistaken for a transfer.
+            if (tx.kind().isContract()) {
+                return CONTRACT_EXECUTION_UNAVAILABLE;
+            }
             // A negative amount or fee would invert the ledger arithmetic: withdrawing
             // a negative value MINTS money for the sender and deposits drive the
             // recipient's balance negative. Amounts are conceptually unsigned, so any

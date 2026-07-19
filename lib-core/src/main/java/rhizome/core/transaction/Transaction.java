@@ -32,6 +32,10 @@ public sealed interface Transaction permits TransactionImpl {
                 .nonce(transactionImpl.nonce())
                 .signingKey(transactionImpl.signingKey())
                 .signature(transactionImpl.signature())
+                .kind(transactionImpl.kind())
+                .data(transactionImpl.data())
+                .gasLimit(transactionImpl.gasLimit())
+                .gasPrice(transactionImpl.gasPrice())
                 .build();
     }
 
@@ -139,6 +143,10 @@ public sealed interface Transaction permits TransactionImpl {
         static final String SIGNATURE = "signature";
         static final String CHAIN_ID = "chainId";
         static final String NONCE = "accountNonce";
+        static final String KIND = "kind";
+        static final String DATA = "data";
+        static final String GAS_LIMIT = "gasLimit";
+        static final String GAS_PRICE = "gasPrice";
 
         static TransactionSerializer instance = new TransactionSerializer();
 
@@ -154,7 +162,11 @@ public sealed interface Transaction permits TransactionImpl {
                 transactionImpl.fee().amount(),
                 transactionImpl.isTransactionFee(),
                 transactionImpl.chainId(),
-                transactionImpl.nonce()
+                transactionImpl.nonce(),
+                transactionImpl.kind().code(),
+                transactionImpl.gasLimit(),
+                transactionImpl.gasPrice(),
+                transactionImpl.data()
             );
         }
 
@@ -171,6 +183,10 @@ public sealed interface Transaction permits TransactionImpl {
                 .nonce(transactionDto.nonce)
                 .signingKey(transactionDto.signingKey)
                 .signature(transactionDto.signature)
+                .kind(rhizome.core.transaction.TransactionKind.fromCode(transactionDto.kind))
+                .gasLimit(transactionDto.gasLimit)
+                .gasPrice(transactionDto.gasPrice)
+                .data(transactionDto.data)
                 .build();
         }
     
@@ -184,6 +200,13 @@ public sealed interface Transaction permits TransactionImpl {
             result.put(FEE, transactionImpl.fee().amount());
             result.put(CHAIN_ID, transactionImpl.chainId());
             result.put(NONCE, transactionImpl.nonce());
+
+            if (transactionImpl.kind().isContract()) {
+                result.put(KIND, transactionImpl.kind().name());
+                result.put(GAS_LIMIT, transactionImpl.gasLimit());
+                result.put(GAS_PRICE, transactionImpl.gasPrice());
+                result.put(DATA, rhizome.core.common.Utils.bytesToHex(transactionImpl.data()));
+            }
 
             if (!transactionImpl.isTransactionFee()) {
                 result.put(TXID, transactionImpl.hashContents().toHexString());
@@ -205,6 +228,13 @@ public sealed interface Transaction permits TransactionImpl {
                 .chainId(json.optInt(CHAIN_ID, 0))
                 .nonce(json.optLong(NONCE, 0))
                 .to(PublicAddress.of(json.getString(TO)));
+
+            if (json.has(KIND)) {
+                builder.kind(rhizome.core.transaction.TransactionKind.valueOf(json.getString(KIND)))
+                    .gasLimit(json.optLong(GAS_LIMIT, 0))
+                    .gasPrice(json.optLong(GAS_PRICE, 0))
+                    .data(rhizome.core.common.Utils.hexStringToByteArray(json.optString(DATA, "")));
+            }
 
         
             if (json.getString("from").isEmpty()) {

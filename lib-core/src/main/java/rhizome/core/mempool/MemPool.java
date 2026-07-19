@@ -89,6 +89,9 @@ public final class MemPool {
         if (tx.amount().amount() < 0 || tx.fee().amount() < 0) {
             return INVALID_TRANSACTION_AMOUNT; // negative would mint money / force negative balances
         }
+        if (tx.kind().isContract()) {
+            return CONTRACT_EXECUTION_UNAVAILABLE; // not executable in consensus yet (see Executor)
+        }
         if (!PublicAddress.of(tx.signingKey()).equals(tx.from())) {
             return WALLET_SIGNATURE_MISMATCH;
         }

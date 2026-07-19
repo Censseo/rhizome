@@ -40,7 +40,7 @@ public final class HttpPeerSource implements PeerSource {
     // buffered size is finite instead of whatever a hostile peer chooses to send.
     private static final long BLOCK_STREAM_CAP = (long) Constants.BLOCKS_PER_FETCH
         * (rhizome.core.block.dto.BlockDto.BUFFER_SIZE
-           + (long) Constants.MAX_TRANSACTIONS_PER_BLOCK * rhizome.core.transaction.dto.TransactionDto.BUFFER_SIZE)
+           + (long) Constants.MAX_TRANSACTIONS_PER_BLOCK * (rhizome.core.transaction.dto.TransactionDto.BUFFER_SIZE + 1))
         + 64 * 1024;
 
     private final String baseUrl;

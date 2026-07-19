@@ -90,6 +90,19 @@ class MemPoolTest {
     }
 
     @Test
+    void rejectsContractTransactionsUntilExecutionEnabled() {
+        Transaction t = rhizome.core.transaction.TransactionImpl.builder()
+            .from(sender).to(PublicAddress.random())
+            .amount(new TransactionAmount(0)).fee(new TransactionAmount(0))
+            .chainId(params.chainId()).nonce(0).signingKey(key)
+            .kind(rhizome.core.transaction.TransactionKind.CALL)
+            .data(new byte[] {1, 2, 3}).gasLimit(100_000).gasPrice(1)
+            .build();
+        t.sign(priv);
+        assertEquals(ExecutionStatus.CONTRACT_EXECUTION_UNAVAILABLE, mempool.addTransaction(t));
+    }
+
+    @Test
     void rejectsNegativeAmountAndFeeAtAdmission() {
         // Defence-in-depth: negative-value transactions are refused before pooling,
         // never mind the consensus-level guard.

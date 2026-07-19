@@ -62,6 +62,22 @@ public final class TransactionImpl implements Transaction, Comparable<Transactio
     @Builder.Default
     private TransactionSignature signature = TransactionSignature.empty();
 
+    /** What the transaction does. TRANSFER (default) keeps existing behaviour. */
+    @Builder.Default
+    private TransactionKind kind = TransactionKind.TRANSFER;
+
+    /** Contract payload: code for DEPLOY, call input for CALL; empty for TRANSFER. */
+    @Builder.Default
+    private byte[] data = new byte[0];
+
+    /** Max gas a contract execution may consume (0 for TRANSFER). */
+    @Builder.Default
+    private long gasLimit = 0;
+
+    /** Price per gas unit, in base units, paid to the miner (0 for TRANSFER). */
+    @Builder.Default
+    private long gasPrice = 0;
+
     /**
      * Serialization
      */
@@ -113,6 +129,15 @@ public final class TransactionImpl implements Transaction, Comparable<Transactio
         digest.update(longToBytes(timestamp), 0, 8);
         digest.update(intToBytes(chainId), 0, 4);
         digest.update(longToBytes(nonce), 0, 8);
+        // Contract fields are committed only for contract transactions, so a plain
+        // transfer's content hash (and signature) is byte-for-byte what it was
+        // before contracts existed.
+        if (kind.isContract()) {
+            digest.update(new byte[] {kind.code()}, 0, 1);
+            digest.update(longToBytes(gasLimit), 0, 8);
+            digest.update(longToBytes(gasPrice), 0, 8);
+            digest.update(data, 0, data.length);
+        }
         digest.doFinal(sha256Hash, 0);
 
         return SHA256Hash.of(sha256Hash);
@@ -144,16 +169,21 @@ public final class TransactionImpl implements Transaction, Comparable<Transactio
             isTransactionFee == that.isTransactionFee &&
             chainId == that.chainId &&
             nonce == that.nonce &&
+            kind == that.kind &&
+            gasLimit == that.gasLimit &&
+            gasPrice == that.gasPrice &&
             Objects.equals(from, that.from) &&
             Objects.equals(to, that.to) &&
             Objects.equals(amount, that.amount) &&
             Objects.equals(fee, that.fee) &&
+            Arrays.equals(this.data, that.data) &&
             Arrays.equals(this.signingKey.toBytes(), that.signingKey.toBytes()) &&
             Objects.equals(signature, that.signature);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(from, to, amount, isTransactionFee, timestamp, fee, chainId, nonce, signingKey, signature);
+        return Objects.hash(from, to, amount, isTransactionFee, timestamp, fee, chainId, nonce, signingKey,
+            signature, kind, gasLimit, gasPrice, Arrays.hashCode(data));
     }
 }

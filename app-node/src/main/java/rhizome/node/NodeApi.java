@@ -37,7 +37,9 @@ import static io.activej.http.HttpMethod.POST;
 public final class NodeApi {
 
     private static final int SMALL_BODY = 8 * 1024;                 // tx / peer announcements
-    private static final int TX_BODY = TransactionDto.BUFFER_SIZE + 1024;
+    // A single transaction body may be a contract deploy/call carrying up to MAX_DATA
+    // bytes of payload (plus the kind tag and gas fields), so size the cap for that.
+    private static final int TX_BODY = TransactionDto.BUFFER_SIZE + 1 + 20 + TransactionDto.MAX_DATA + 1024;
 
     private NodeApi() {}
 
@@ -53,7 +55,7 @@ public final class NodeApi {
      */
     public static AsyncServlet servlet(Reactor reactor, NodeService node, RateLimiter limiter) {
         int maxBlockBody = BlockDto.BUFFER_SIZE
-            + node.params().maxTransactionsPerBlock() * TransactionDto.BUFFER_SIZE + 1024;
+            + node.params().maxTransactionsPerBlock() * (TransactionDto.BUFFER_SIZE + 1) + 1024;
 
         RoutingServlet routing = RoutingServlet.builder(reactor)
             .with(GET, "/block_count", req -> ok(text(String.valueOf(node.blockCount()))))

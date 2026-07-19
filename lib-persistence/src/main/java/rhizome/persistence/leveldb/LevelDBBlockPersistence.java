@@ -74,31 +74,22 @@ public class LevelDBBlockPersistence extends LevelDBDataStore implements BlockPe
 
     public ByteBuf getRawData(int blockId) {
         var blockHeader = getBlockHeader(blockId);
-        var bufferSize = MemSize.of((long) BlockDto.BUFFER_SIZE + (TransactionDto.BUFFER_SIZE * blockHeader.numTransactions()));
-        var buffer = ByteBufPool.allocateExact(bufferSize);
+        var transactions = getBlockTransactions(blockHeader);
+        // Transactions are variable length (contract payloads), so sum their sizes.
+        long size = BlockDto.BUFFER_SIZE;
+        for (var transaction : transactions) {
+            size += transaction.getSize();
+        }
+        var buffer = ByteBufPool.allocateExact(MemSize.of(size));
         buffer.put(blockHeader.toBuffer());
-
-        getBlockTransactions(blockHeader).forEach(transaction -> buffer.put(transaction.toBuffer()));
+        transactions.forEach(transaction -> buffer.put(transaction.toBuffer()));
         return buffer;
     }
 
     public Block fromRawData(byte[] rawData) {
-        var buffer = ByteBuf.wrapForReading(rawData);
-    
-        var blockHeaderData = new byte[BlockDto.BUFFER_SIZE];
-        buffer.read(blockHeaderData);
-        var blockHeader = BinarySerializable.fromBuffer(blockHeaderData, BlockDto.class);
-    
-        var block = Block.of(blockHeader, new ArrayList<>());
-    
-        for (var i = 0; i < blockHeader.numTransactions(); i++) {
-            var transactionData = new byte[TransactionDto.BUFFER_SIZE];
-            buffer.read(transactionData);
-            TransactionDto transactionDto = BinarySerializable.fromBuffer(transactionData, TransactionDto.class);
-            block.addTransaction(Transaction.of(transactionDto));
-        }
-    
-        return block;
+        // Same header || tx[0] || tx[1] ... layout as the shared block codec, whose
+        // reader handles the variable-length (self-delimiting) transactions.
+        return rhizome.core.block.BlockCodec.decode(rawData);
     }
 
     public Block getBlock(int blockId) {
