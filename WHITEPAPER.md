@@ -1,28 +1,37 @@
 # Rhizome — Technical Whitepaper
 
-> Version 0.9 (alpha) · A Java port of Pandanite · A clean chain seeded from a balance snapshot
+> Version 0.10 (alpha) · A Java proof-of-work smart-contract chain · WASM contracts, built for memecoins and autonomous agents
 
 ## Abstract
 
-Rhizome is a proof-of-work blockchain, rewritten in Java from
-[Pandanite](https://github.com/pandanite-crypto/pandanite) (C++). Rather than maintain
-a codebase carrying fossilised consensus bugs, Rhizome starts a **clean chain** — new
-genesis, corrected rules — whose **initial state is a sanitised snapshot of the
-balances** of the existing Pandanite chain. Holders keep their balance; the network
-restarts on sound rules.
+Rhizome is a proof-of-work blockchain written in Java, descended from
+[Pandanite](https://github.com/pandanite-crypto/pandanite) (C++) but rebuilt as a
+**smart-contract chain** for cheap token launches and **autonomous AI agents**.
+Contracts are **WebAssembly**, executed deterministically on the pure-Java
+[Chicory](https://github.com/dylibso/chicory) runtime (no JNI), so any language that
+compiles to WASM can target the chain and the node stays GraalVM-native-friendly.
 
-Three goals drive the design:
+It starts a **clean chain** — new genesis, corrected rules — whose **initial state is a
+sanitised snapshot of the balances** of the existing Pandanite chain, so holders keep
+their balance while the network restarts on sound rules.
+
+Four goals drive the design:
 
 1. **Correctness** — every known consensus bug of the Pandanite C++ node is fixed from
-   the start (§4), and validation is ordered so that denial of service is expensive.
-2. **Performance** — the target is **one block per second** validated by the network,
-   on a stack built for throughput (§6).
-3. **Pufferfish2 proof of work** — from genesis, with no SHA-256 phase and no algorithm
+   the start (§4), validation is ordered so denial of service is expensive, and contract
+   state moves atomically with its block (including exact reversal on reorg, §5).
+2. **Deterministic, sandboxed contracts** — a metered WASM VM where gas bounds both
+   compute (per instruction) and storage, so untrusted code can neither hang a node nor
+   escape its sandbox (§5).
+3. **Pufferfish2 proof of work** — from genesis, no SHA-256 phase and no algorithm
    switch, ported in pure Java and validated bit-for-bit against a C reference.
+4. **Fast, safe cadence** — a ~1-block/second target paced by difficulty (§3.4), with a
+   GHOST-style fork choice on the roadmap (§9) to make sub-5-second blocks safe against
+   the orphaning that a naïve longest chain suffers.
 
-The node core is functional and covered by **166 tests**: consensus, execution,
-storage, mempool, HTTP API, block production, P2P synchronisation with reorganisation,
-and a wallet.
+The node is functional and covered by **186 tests**: consensus, the WASM contract VM
+and its persistence, execution, storage, mempool, HTTP API, block production, P2P
+synchronisation with reorganisation, and a wallet that deploys and calls contracts.
 
 ---
 
@@ -58,18 +67,22 @@ native compilation.
                                        v
          +-------------------------- lib-core -------------------------+
          |  ChainEngine  (addBlock/popBlock, nonces, work, difficulty) |
-         |  Executor     (transactional application to the ledger)     |
-         |  MemPool      (admission, nonce-ordered selection, fairness) |
-         |  Pufferfish2  (PoW)   DifficultyAdjustment   MerkleTree      |
-         +-----------------------------|------------------------------+
-                                       v
-         +----------------------- lib-persistence --------------------+
-         |  RocksDbNodeStore: ChainStore + Ledger + txdb (one DB,      |
-         |  column families, atomic WriteBatch append/pop)             |
-         +------------------------------------------------------------+
+         |  Executor  (transactional apply; dispatches contract txs)   |
+         |  MemPool   ·  Pufferfish2 (PoW)  ·  Difficulty  ·  Merkle    |
+         |  ContractProcessor (interface) <--- implemented by lib-vm   |
+         +------------------|-------------------------|----------------+
+                            v                         v
+        +-------- lib-vm (WASM contracts) ----+  +--- lib-persistence ---+
+        |  WasmVm (Chicory, gas-metered)      |  |  RocksDbNodeStore:     |
+        |  WasmContractProcessor (sessions,   |  |  ChainStore + Ledger   |
+        |  undo journals, receipts)           |  |  + txdb (one DB, CFs,  |
+        |  ContractStore <-- RocksDbContract  |  |  atomic WriteBatch)    |
+        +-------------------------------------+  +-----------------------+
 ```
 
-Gradle multi-module project (Java 21): `lib-core`, `lib-persistence`, `lib-net`,
+`lib-vm` depends on `lib-core` and implements its `ContractProcessor` interface, so the
+consensus core dispatches contracts without ever depending on the WASM runtime. Gradle
+multi-module project (Java 21): `lib-core`, `lib-vm`, `lib-persistence`, `lib-net`,
 `lib-crypto` (reserved), `app-node`, `app-wallet`, `app-dnsseeder`.
 
 ---
@@ -216,6 +229,15 @@ Amounts and fees are integers (base units, scale 10 000 → "PDN"). They are con
 would mint money for the sender and a negative deposit would drive the recipient's
 balance below zero.
 
+A transaction has a **kind**: `TRANSFER` (the default, unchanged), `DEPLOY` (install
+contract code) or `CALL` (invoke a contract). Contract kinds additionally carry a
+variable-length `data` payload (code or call input) and a gas budget
+(`gasLimit`, `gasPrice`); these fields are part of the signed preimage and the wire
+format only for contract transactions, so a transfer is byte-for-byte what it was before
+contracts existed. Every transaction is self-delimiting on the wire, so a block still
+packs variable-length transactions back to back, and the whole block is bounded by
+`maxBlockSizeBytes` (§5.4).
+
 ### 5.2 Transactional execution
 
 The `Executor` validates then applies a block's transactions:
@@ -259,6 +281,42 @@ Per-block rewards are small because there are 86 400 blocks per day; daily and t
 emission match the intended economics. The invariant is enforced by a test
 (`emissionScheduleIsCalibratedForOneBlockPerSecond`): change the block time and the epoch
 length must be revisited with it.
+
+### 5.4 Smart contracts
+
+Contracts are **WebAssembly**, run on the pure-Java [Chicory](https://github.com/dylibso/chicory)
+runtime — no JNI, no native dependency, deterministic across nodes because every node
+executes the same interpreter. A contract imports a small host ABI (`storage_read`,
+`storage_write`, `set_output`, plus caller/input/value) from module `env` and exports a
+`call` entry point; the WASM sandbox denies it any other I/O.
+
+**Gas.** Every executed instruction is charged via the interpreter's execution listener,
+and every host call is charged on top, so a contract that loops forever is aborted
+deterministically at the same step on every node rather than hanging one. Out-of-gas is a
+clean, identical failure everywhere.
+
+**Deploy and call.** A `DEPLOY` installs code at a deterministic address —
+`SHA-256(deployer ‖ nonce)[:25]`, so addresses are predictable and collision-free. A
+`CALL` runs the target's `call` export with the transaction's input and any attached
+value. The consensus core never depends on the WASM runtime: the `Executor` invokes a
+`ContractProcessor` **interface** (implemented in the VM module), so lib-core stays free
+of Chicory.
+
+**Fees and atomicity.** The caller must be able to afford `value + gasLimit × gasPrice`.
+It always pays `gasUsed × gasPrice` to the miner — even on revert or out-of-gas, the work
+was done (Ethereum-style) — while the value transfer and the contract's storage writes
+apply only on success. A reverted contract call is still *included* in its block and pays
+gas, but does not invalidate the block; only an unaffordable or malformed contract
+transaction fails the block. Contract storage is staged in a per-block session that
+flushes to the store only when the block is accepted, and a per-block **undo journal**
+(each written key's prior value) plus **receipts** (gas used, success) let a reorg reverse
+both the contract state and the contract-transaction ledger effects **exactly** when a
+block is popped — so contract state moves atomically with its block.
+
+**Bounds.** Contract payloads are variable length, so a block is capped at
+`maxBlockSizeBytes` (4 MiB) — checked before any expensive work — and the block builder
+stops adding transactions before crossing it, so a payload-laden block can never be a
+download or storage denial of service.
 
 ---
 
@@ -357,6 +415,12 @@ unproven work), block/request flooding, and network DoS (bounded bodies, ban-sco
 **per-sender** mempool cap ensures fairness between accounts so one sender cannot squat
 the pool.
 
+**Contract-specific:** untrusted WASM is sandboxed by the runtime (no I/O beyond the
+host ABI) and bounded by gas on both compute (per instruction) and storage, so it can
+neither hang a node nor escape; a variable-length payload cannot bloat a block past
+`maxBlockSizeBytes`; and a reorg reverses contract state and contract-transaction ledger
+effects exactly, so a rewritten block leaves no contract residue.
+
 Two bugs were found and fixed during a dedicated security review:
 
 - **Negative amount/fee** — an unvalidated signed amount let a signed transaction mint
@@ -391,14 +455,30 @@ ledger of a synchronised Pandanite node.
 **Done** — crypto & Pufferfish2; consensus model & Executor; chain engine
 (`addBlock`/`popBlock`, nonces, work, difficulty); RocksDB storage; mempool; HTTP API;
 block production; synchronisation + reorg by cumulative work; wallet CLI; gossip & peer
-discovery; hardening (checkpoints, finality, bounded rate limiting, ban-score); a full
-security review. **166 tests, 0 failures.**
+discovery; hardening (checkpoints, finality, bounded rate limiting, ban-score, block-size
+cap); a full security review; and the **WASM smart-contract layer** — a Chicory-backed
+metered VM, a persistent contract store, `DEPLOY`/`CALL` transactions with gas fees,
+atomic per-block contract state with exact reorg reversal, and wallet `deploy`/`call`
+commands. **186 tests, 0 failures.**
+
+**Next — GHOST fork choice.** A ~1-block/second single longest chain orphans blocks
+because propagation takes a meaningful fraction of the interval (§6.3). A GHOST-style
+fork choice — the heaviest *subtree*, crediting the work of referenced orphan (uncle)
+blocks and rewarding them — lets the target drop toward a few seconds without the
+centralisation and reorg churn a naïve longest chain suffers. This reworks fork choice
+and touches the same reorg path the contract-state reversal already exercises.
+
+**Then — autonomous-agent and memecoin primitives.** Account abstraction (contract
+accounts as agents: session keys, spend limits, gas sponsorship), event logs with
+WebSocket streaming so agents react to on-chain state, and a token/AMM/launchpad contract
+suite for cheap fair launches.
 
 **Environment-dependent** — GraalVM native build (`native-image` not installed in the
 current dev environment); production of the real Pandanite snapshot (a synchronised C++
 node is required); a public multi-node testnet.
 
-**Later** — smart contracts, DeFi use cases, cross-chain protocols and a bridge.
+**Later** — DeFi use cases, cross-chain protocols and a bridge; optional sharding
+(parallel chains) if per-chain throughput becomes the limit.
 
 ---
 
