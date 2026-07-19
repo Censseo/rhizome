@@ -107,16 +107,27 @@ inconsistent across a reorg, the flaw behind Pandanite's hard-coded difficulty
 exception for blocks 536100–536200. The step is **bounded and clamped**, which limits
 the leverage of timestamp manipulation (time-warp).
 
-### 3.4 Cadence: one block per second, enforced by the network
+### 3.4 Cadence: one block per second, paced by difficulty
 
-The producer paces its own loop locally, but the **consensus rule** `minBlockTimeSec` —
-a block must be at least `minBlockTime` after its parent — is checked by **every** node.
-On mainnet `minBlockTime = desiredBlockTime = 1 s`: the consensus floor *is* the
-metronome. A modified node cannot flood the network with thousands of valid blocks to
-"steal" the chain, because any block too close to its parent is rejected by the whole
-network (majority miner included) — local producer pacing alone would not stop this.
-The future bound (`maxFutureBlockTime = 15 s`) caps how many blocks can be mined "in
-advance" before real time must catch up.
+The target is one block per second **on average, paced by difficulty** — the standard
+proof-of-work mechanism — not by a per-block time floor. This is a deliberate reversal
+of an earlier design that set `minBlockTime = desiredBlockTime`: making the floor equal
+the target *starves* the retarget. The producer floors every timestamp to
+`parent + minBlockTime`, so a full window then always measures ≈ the desired duration
+and difficulty never rises to track hashrate — it stays pinned near `minDifficulty`
+regardless of the real hashrate. Proof-of-work cost would collapse to a fixed
+`2^minDifficulty`, and an attacker could rewrite history or win the future-bound reward
+race for near-free (the chain would be secured by clocks, not work).
+
+So on mainnet **`minBlockTime = 0`**: difficulty does the pacing, which is what makes
+each block cost real work, so outpacing the chain requires majority hashrate. The flip
+side is honest: at a one-second average the block-time distribution is Poisson (bursts
+and gaps), and single-chain propagation becomes the real limiter — see §6.3. The future
+bound is kept tight (`maxFutureBlockTime = 5 s`) because at one-second blocks it is also
+the number of blocks an attacker could pre-mine into the future before release;
+median-time-past spans ~60 blocks so a few consecutive blocks cannot drag the chain's
+notion of past time. The `minBlockTime` rule still exists as an optional sanity floor
+for networks that want one, but it must stay well below the target.
 
 ### 3.5 `addBlock` validation order
 
@@ -296,6 +307,43 @@ model.
 GraalVM native compilation is a standing design constraint (no runtime codegen; JNI for
 RocksDB declared; reflection kept to compile-time Lombok plus registrable `org.json`),
 even though `native-image` is not installed in the current development environment.
+
+### 6.3 Block propagation and the block-time floor
+
+At a one-second cadence, **propagation latency — not CPU — is the binding constraint**.
+Verification is fast (§6.2), but a block must reach most of a global network before the
+next is found, or the two collide into an orphan. Orphans waste work, raise the effective
+reorg rate, and favour the best-connected miners (centralisation). The floor is physical:
+even an optimal relay needs roughly a few hundred milliseconds to a couple of seconds to
+cover a worldwide peer graph, which is a large fraction of a one-second interval.
+
+The current relay is deliberately simple — a node **pushes each accepted block in full**
+to its peers over one-shot HTTP, and periodically pulls ranges over `/sync`. Three
+upgrades bring it in line with fast-chain practice, in decreasing order of impact:
+
+1. **Compact-block relay (BIP-152 style).** Announce a header plus short transaction IDs;
+   the receiver reconstructs the block from its mempool and requests only the few missing
+   transactions. Because transactions are gossiped continuously, the block on the wire
+   shrinks to a few kilobytes regardless of how full it is — propagation cost becomes
+   size-independent.
+2. **Header-first, announce-then-pull.** Relay and PoW-check the header immediately and
+   forward it, then fetch/reconstruct the body; peers pull a body only if they lack it
+   (`inv`/`getdata`), so each node receives a block once rather than from every peer.
+3. **Persistent streaming connections.** Keep long-lived links to peers (WebSocket or a
+   raw binary channel) so a header can be pushed the instant it is produced, with no
+   per-block TCP/TLS handshake — the "streaming" that matters for inter-node relay.
+
+A reference point: **Alephium** does not run a fast single chain at all. Its per-chain
+block time is 64 s (16 s after Rhône, 8 s after Danube); throughput comes from **sharding
+and a two-dimensional DAG (BlockFlow)** — many parallel chains, each slow enough that
+propagation is a small fraction of its interval. Its WebSocket block streaming is a
+*client-facing* API, not the inter-node mechanism. The lesson is that a robust fast chain
+either keeps the per-chain interval well above propagation time (a few seconds), or
+parallelises (sharding / a GHOST-style fork choice that credits orphaned work), rather
+than pushing a single longest chain below its own propagation latency. Rhizome's
+one-second figure should therefore be read as an average target contingent on the relay
+upgrades above, with a slower per-chain interval or a DAG fork choice as the honest paths
+to genuinely high throughput.
 
 ---
 

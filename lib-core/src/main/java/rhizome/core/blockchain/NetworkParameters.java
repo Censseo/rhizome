@@ -121,18 +121,29 @@ public final class NetworkParameters {
             .powAlgorithm(PowAlgorithm.PUFFERFISH2)
             .genesisTimestamp(0L)
             .genesisDifficulty(16)
-            // Target one block per second. minBlockTimeSec == the target makes the
-            // consensus floor also the metronome: nobody can go faster, and the
-            // difficulty retarget keeps the average from going slower.
+            // Target one block per second, PACED BY DIFFICULTY (a Poisson average),
+            // not by a per-block time floor. minBlockTimeSec MUST stay 0 here: setting
+            // it equal to the target starves the retarget — the producer floors every
+            // timestamp to parent+minBlockTime, so a 60-block window always measures
+            // ~= the desired duration and difficulty never rises to track hashrate.
+            // Difficulty would then stay pinned near minDifficulty regardless of the
+            // real hashrate, collapsing PoW cost to a fixed 2^minDifficulty and letting
+            // an attacker rewrite history or win the future-bound reward race for
+            // near-free. Letting difficulty do the pacing is what actually makes each
+            // block cost work, so outpacing the chain needs real (majority) hashrate.
             .desiredBlockTimeSec(1)
-            .minBlockTimeSec(1)
+            .minBlockTimeSec(0)
             .difficultyLookback(60)
             .minDifficulty(16)
             .maxDifficulty(255)
-            // Tight future bound: at most maxFuture/minBlockTime blocks can ever be
-            // mined "in advance" before real time must catch up (15 here).
-            .maxFutureBlockTimeSec(15)
-            .medianTimeWindow(11)
+            // Future bound kept tight: at 1 s/block it is also the count of blocks an
+            // attacker could pre-mine "into the future" and release to force a reorg,
+            // so 5 s (≈5 blocks) rather than 15, while still tolerating NTP-level skew.
+            .maxFutureBlockTimeSec(5)
+            // Median-time-past over ~1 minute of blocks (not 11 s), so a miner holding
+            // a few consecutive blocks cannot meaningfully drag the chain's notion of
+            // past time at this cadence.
+            .medianTimeWindow(60)
             .maxTransactionsPerBlock(25_000)
             .maxReorgDepth(600)
             .decimalScaleFactor(scale)
