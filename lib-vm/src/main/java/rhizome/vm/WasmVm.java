@@ -30,11 +30,27 @@ public final class WasmVm {
     private static final String ENV = "env";
     private static final String ENTRY = "call";
 
+    /**
+     * Handles a contract-to-contract call requested via the {@code call_contract}
+     * host function. Returns the callee's output on success, or {@code null} when
+     * the call failed (unknown contract, revert, depth or reentrancy limit) — the
+     * caller keeps running either way, its own state untouched by the failure.
+     */
+    @FunctionalInterface
+    public interface ContractCallHandler {
+        byte[] call(byte[] calleeAddress, byte[] input);
+    }
+
     /** Runs {@code wasmCode}'s {@code call} export against {@code host} under {@code gas}. */
     public ExecResult execute(byte[] wasmCode, HostState host, GasMeter gas) {
+        return execute(wasmCode, host, gas, null);
+    }
+
+    /** As above, with {@code calls} dispatching {@code call_contract} (null = calls always fail). */
+    public ExecResult execute(byte[] wasmCode, HostState host, GasMeter gas, ContractCallHandler calls) {
         WasmModule module = Parser.parse(wasmCode);
         ImportValues imports = ImportValues.builder()
-            .addFunction(hostFunctions(host, gas))
+            .addFunction(hostFunctions(host, gas, calls))
             .build();
 
         try {
@@ -64,7 +80,7 @@ public final class WasmVm {
         return false;
     }
 
-    private HostFunction[] hostFunctions(HostState host, GasMeter gas) {
+    private HostFunction[] hostFunctions(HostState host, GasMeter gas, ContractCallHandler calls) {
         HostFunction storageRead = new HostFunction(ENV, "storage_read",
             List.of(ValType.I32, ValType.I32, ValType.I32, ValType.I32), List.of(ValType.I32),
             (Instance inst, long... args) -> {
@@ -131,8 +147,28 @@ public final class WasmVm {
             List.of(), List.of(ValType.I64),
             (Instance inst, long... args) -> new long[] {host.value()});
 
+        // call_contract(addr_ptr, addr_len, in_ptr, in_len, out_ptr, out_cap) -> i32:
+        // the callee's output length (copied up to out_cap bytes), or -1 if the call
+        // failed. The dispatcher runs the callee in its own state frame, so a failed
+        // call leaves no trace; gas is shared with this meter, so nested work draws
+        // from the same budget (forwarded gas, no resurrection).
+        HostFunction callContract = new HostFunction(ENV, "call_contract",
+            List.of(ValType.I32, ValType.I32, ValType.I32, ValType.I32, ValType.I32, ValType.I32),
+            List.of(ValType.I32),
+            (Instance inst, long... args) -> {
+                Memory mem = inst.memory();
+                byte[] callee = mem.readBytes(asOffset(args[0]), asLen(args[1]));
+                byte[] input = mem.readBytes(asOffset(args[2]), asLen(args[3]));
+                gas.charge(GasSchedule.CALL_BASE + (long) input.length * GasSchedule.PER_BYTE);
+                byte[] output = calls == null ? null : calls.call(callee, input);
+                if (output == null) {
+                    return new long[] {-1L};
+                }
+                return new long[] {copyOut(inst, output, args[4], args[5], gas)};
+            });
+
         return new HostFunction[] {
-            storageRead, storageWrite, setOutput, emitLog, getCaller, getInput, getValue};
+            storageRead, storageWrite, setOutput, emitLog, getCaller, getInput, getValue, callContract};
     }
 
     /** Copies {@code src} into contract memory (at most {@code cap} bytes) and returns its true length. */

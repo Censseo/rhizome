@@ -20,6 +20,9 @@ public final class GasSchedule {
     /** Emitting an event log: a base cost plus per byte of topic + data. */
     public static final long LOG_BASE = 100L;
 
+    /** Calling another contract: a base cost plus per byte of input and copied output. */
+    public static final long CALL_BASE = 500L;
+
     /** Deploying stores code on-chain: a base cost plus per code byte. */
     public static final long DEPLOY_BASE = 500L;
     public static final long DEPLOY_PER_CODE_BYTE = 10L;

@@ -84,23 +84,85 @@ public final class WasmContractProcessor implements ContractProcessor {
         return ContractResult.ok(gasUsed, new byte[0], address);
     }
 
+    /** Maximum nesting of contract-to-contract calls (the top-level call is depth 1). */
+    static final int MAX_CALL_DEPTH = 8;
+
     private ContractResult call(PublicAddress caller, PublicAddress contract, byte[] input,
                                 long value, long gasLimit) {
-        byte[] code = session.getCode(contract);
+        GasMeter meter = new GasMeter(gasLimit);
+        CallOutcome outcome = runCall(caller.toBytes(), contract, input, value, meter,
+            session, new java.util.ArrayDeque<>());
+        if (outcome.success()) {
+            return ContractResult.ok(meter.used(), outcome.output(), null, outcome.logs());
+        }
+        return ContractResult.reverted(meter.used(), outcome.error());
+    }
+
+    /** Result of one call frame: callee output and the logs that survived (both empty on failure). */
+    private record CallOutcome(boolean success, byte[] output, List<ContractLog> logs, String error) {
+        static CallOutcome fail(String error) {
+            return new CallOutcome(false, new byte[0], List.of(), error);
+        }
+    }
+
+    /**
+     * Runs one call frame. Each frame executes against its own overlay
+     * ({@link SessionContractStore}) over the parent's store, flushed into the parent
+     * only on success — so a failed sub-call leaves no trace, and a caller that fails
+     * after a successful sub-call discards the sub-call's writes with its own (the
+     * savepoint semantics that make nested calls atomic with the top-level call).
+     * The gas meter is shared across frames (forwarded gas). {@code stack} holds the
+     * contracts currently executing: a callee already on it is reentrancy and is
+     * refused, as is a chain deeper than {@link #MAX_CALL_DEPTH}.
+     */
+    private CallOutcome runCall(byte[] callerBytes, PublicAddress contract, byte[] input,
+                                long value, GasMeter meter, ContractStore parent,
+                                java.util.Deque<PublicAddress> stack) {
+        if (stack.size() >= MAX_CALL_DEPTH) {
+            return CallOutcome.fail("call depth limit");
+        }
+        if (stack.contains(contract)) {
+            return CallOutcome.fail("reentrant call");
+        }
+        byte[] code = parent.getCode(contract);
         if (code == null) {
-            return ContractResult.reverted(0, "no contract at address");
+            return CallOutcome.fail("no contract at address");
         }
-        PersistentHostState host = new PersistentHostState(session, contract, caller.toBytes(), input, value);
-        ExecResult result = vm.execute(code, host, new GasMeter(gasLimit));
-        if (result.succeeded()) {
-            host.commit(); // flush this call's writes into the block session
-            List<ContractLog> logs = new java.util.ArrayList<>(result.logs().size());
-            for (LogEntry log : result.logs()) {
-                logs.add(new ContractLog(contract, log.topic(), log.data()));
-            }
-            return ContractResult.ok(result.gasUsed(), result.output(), null, logs);
+
+        SessionContractStore frame = new SessionContractStore(parent);
+        PersistentHostState host = new PersistentHostState(frame, contract, callerBytes, input, value);
+        List<ContractLog> collected = new java.util.ArrayList<>();
+
+        stack.push(contract);
+        ExecResult result;
+        try {
+            // Nested calls: the running contract is the caller, its frame is the parent
+            // store, value transfer is not forwarded (no ledger access from the VM).
+            result = vm.execute(code, host, meter, (calleeAddr, calleeInput) -> {
+                if (calleeAddr.length != PublicAddress.SIZE) {
+                    return null;
+                }
+                CallOutcome sub = runCall(contract.toBytes(), PublicAddress.of(calleeAddr),
+                    calleeInput, 0, meter, frame, stack);
+                if (!sub.success()) {
+                    return null;
+                }
+                collected.addAll(sub.logs());
+                return sub.output();
+            });
+        } finally {
+            stack.pop();
         }
-        return ContractResult.reverted(result.gasUsed(), result.message());
+
+        if (!result.succeeded()) {
+            return CallOutcome.fail(result.message()); // frame discarded: no writes, no logs
+        }
+        host.commit();                 // this call's own writes into its frame...
+        frame.flushWithJournal();      // ...and the frame (incl. sub-calls) into the parent
+        for (LogEntry log : result.logs()) {
+            collected.add(new ContractLog(contract, log.topic(), log.data()));
+        }
+        return new CallOutcome(true, result.output(), collected, null);
     }
 
     @Override
