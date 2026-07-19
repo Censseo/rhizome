@@ -77,6 +77,22 @@ public final class Executor {
                                                Predicate<SHA256Hash> alreadyExecuted,
                                                NetworkParameters params,
                                                SignatureVerifier verifier) {
+        return executeBlock(block, ledger, alreadyExecuted, params, verifier, null);
+    }
+
+    /**
+     * As above, with a {@link ContractProcessor} for DEPLOY/CALL transactions. When
+     * {@code processor} is null, contract transactions are rejected (consensus does
+     * not run them). Contract state writes are buffered in a per-block session that
+     * is committed only when the whole block succeeds, so block execution stays
+     * atomic; a contract that reverts or runs out of gas still pays its gas (like
+     * Ethereum) without invalidating the block.
+     */
+    public static ExecutionStatus executeBlock(Block block, Ledger ledger,
+                                               Predicate<SHA256Hash> alreadyExecuted,
+                                               NetworkParameters params,
+                                               SignatureVerifier verifier,
+                                               ContractProcessor processor) {
         var blockImpl = (BlockImpl) block;
         long height = blockImpl.id();
         long expectedReward = params.miningReward(height);
@@ -101,10 +117,10 @@ public final class Executor {
             if (tx.chainId() != params.chainId()) {
                 return INVALID_CHAIN_ID;
             }
-            // Contract transactions are a valid, signed, serializable type but are not
-            // yet executed in consensus (the executor dispatch lands next), so a block
-            // carrying one is rejected — no contract tx can be mistaken for a transfer.
-            if (tx.kind().isContract()) {
+            // Contract transactions execute only when a processor is wired; without
+            // one, consensus does not run them, so a block carrying one is rejected —
+            // no contract tx can be mistaken for a transfer.
+            if (tx.kind().isContract() && processor == null) {
                 return CONTRACT_EXECUTION_UNAVAILABLE;
             }
             // A negative amount or fee would invert the ledger arithmetic: withdrawing
@@ -135,10 +151,20 @@ public final class Executor {
         // --- Pass 2: transactional application ---
         PublicAddress miner = ((TransactionImpl) coinbase).to();
         List<AppliedOp> applied = new ArrayList<>();
+        if (processor != null) {
+            processor.begin();
+        }
         try {
             for (Transaction t : block.transactions()) {
                 var tx = (TransactionImpl) t;
                 if (tx.isTransactionFee()) {
+                    continue;
+                }
+                if (tx.kind().isContract()) {
+                    ExecutionStatus contractStatus = applyContract(tx, ledger, applied, miner, processor);
+                    if (contractStatus != SUCCESS) {
+                        return abort(processor, ledger, applied, contractStatus);
+                    }
                     continue;
                 }
                 long amount = tx.amount().amount();
@@ -147,17 +173,14 @@ public final class Executor {
                 try {
                     charged = Math.addExact(amount, fee);
                 } catch (ArithmeticException e) {
-                    rollback(ledger, applied);
-                    return BALANCE_TOO_LOW;
+                    return abort(processor, ledger, applied, BALANCE_TOO_LOW);
                 }
 
                 if (!ledger.hasWallet(tx.from())) {
-                    rollback(ledger, applied);
-                    return SENDER_DOES_NOT_EXIST;
+                    return abort(processor, ledger, applied, SENDER_DOES_NOT_EXIST);
                 }
                 if (ledger.getWalletValue(tx.from()).amount() < charged) {
-                    rollback(ledger, applied);
-                    return BALANCE_TOO_LOW;
+                    return abort(processor, ledger, applied, BALANCE_TOO_LOW);
                 }
 
                 withdraw(ledger, applied, tx.from(), new TransactionAmount(charged));
@@ -167,17 +190,75 @@ public final class Executor {
                 }
             }
             deposit(ledger, applied, miner, ((TransactionImpl) coinbase).amount());
+            if (processor != null) {
+                processor.commit();
+            }
             return SUCCESS;
         } catch (LedgerException e) {
-            rollback(ledger, applied);
-            return BALANCE_TOO_LOW;
+            return abort(processor, ledger, applied, BALANCE_TOO_LOW);
         } catch (ArithmeticException e) {
             // A deposit that would overflow a wallet's 64-bit balance (Math.addExact
             // in the ledger) must be rejected cleanly, not left as a partial mutation.
             // Underflow is already a LedgerException above; this is the overflow twin.
-            rollback(ledger, applied);
-            return BALANCE_OVERFLOW;
+            return abort(processor, ledger, applied, BALANCE_OVERFLOW);
         }
+    }
+
+    /** Rolls back applied ledger ops and discards the contract session, then returns the status. */
+    private static ExecutionStatus abort(ContractProcessor processor, Ledger ledger,
+                                         List<AppliedOp> applied, ExecutionStatus status) {
+        rollback(ledger, applied);
+        if (processor != null) {
+            processor.discard();
+        }
+        return status;
+    }
+
+    /**
+     * Runs one contract transaction. Gas is always charged to the miner (even on a
+     * revert — the work was done); the attached value moves to the contract only on
+     * success; the contract's state writes live in the processor's block session.
+     *
+     * <p>Returns SUCCESS for both a successful and a reverted call (a revert does not
+     * invalidate the block, Ethereum-style). A non-SUCCESS status means the
+     * transaction could not be afforded or applied and the block is invalid.
+     */
+    private static ExecutionStatus applyContract(TransactionImpl tx, Ledger ledger,
+                                                 List<AppliedOp> applied, PublicAddress miner,
+                                                 ContractProcessor processor) {
+        long value = tx.amount().amount();
+        long gasLimit = tx.gasLimit();
+        long gasPrice = tx.gasPrice();
+        if (value < 0 || gasLimit < 0 || gasPrice < 0) {
+            return INVALID_TRANSACTION_AMOUNT;
+        }
+        long required;
+        try {
+            required = Math.addExact(value, Math.multiplyExact(gasLimit, gasPrice));
+        } catch (ArithmeticException e) {
+            return INVALID_TRANSACTION_AMOUNT;
+        }
+        if (!ledger.hasWallet(tx.from())) {
+            return SENDER_DOES_NOT_EXIST;
+        }
+        if (ledger.getWalletValue(tx.from()).amount() < required) {
+            return BALANCE_TOO_LOW;
+        }
+
+        ContractProcessor.ContractResult result =
+            processor.run(tx.from(), tx.kind(), tx.to(), tx.data(), value, gasLimit, tx.nonce());
+
+        long gasFee = Math.multiplyExact(result.gasUsed(), gasPrice);
+        if (gasFee > 0) {
+            withdraw(ledger, applied, tx.from(), new TransactionAmount(gasFee));
+            deposit(ledger, applied, miner, new TransactionAmount(gasFee));
+        }
+        if (result.success() && value > 0) {
+            PublicAddress target = result.contractAddress() != null ? result.contractAddress() : tx.to();
+            withdraw(ledger, applied, tx.from(), new TransactionAmount(value));
+            deposit(ledger, applied, target, new TransactionAmount(value));
+        }
+        return SUCCESS;
     }
 
     private static void withdraw(Ledger ledger, List<AppliedOp> applied,

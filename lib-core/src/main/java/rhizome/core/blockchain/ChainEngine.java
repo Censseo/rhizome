@@ -51,6 +51,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
     private final ChainStore store;
     private final LongSupplier nowMillis;
     private final SignatureVerifier verifier;
+    private final ContractProcessor contractProcessor;
     private final ReentrantLock lock = new ReentrantLock();
 
     /** Next expected account nonce per sender; rebuilt on init, updated on add/pop. */
@@ -60,12 +61,14 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
     private int currentDifficulty;
 
     private ChainEngine(NetworkParameters params, Ledger ledger, ChainStore store,
-                        LongSupplier nowMillis, SignatureVerifier verifier) {
+                        LongSupplier nowMillis, SignatureVerifier verifier,
+                        ContractProcessor contractProcessor) {
         this.params = params;
         this.ledger = ledger;
         this.store = store;
         this.nowMillis = nowMillis;
         this.verifier = verifier;
+        this.contractProcessor = contractProcessor;
     }
 
     /**
@@ -84,7 +87,15 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
     public static ChainEngine init(NetworkParameters params, Ledger ledger, ChainStore store,
                                    LedgerSnapshot snapshot, SHA256Hash expectedGenesisHash,
                                    LongSupplier nowMillis, SignatureVerifier verifier) {
-        ChainEngine engine = new ChainEngine(params, ledger, store, nowMillis, verifier);
+        return init(params, ledger, store, snapshot, expectedGenesisHash, nowMillis, verifier, null);
+    }
+
+    /** As {@link #init}, with a {@link ContractProcessor} enabling contract transactions. */
+    public static ChainEngine init(NetworkParameters params, Ledger ledger, ChainStore store,
+                                   LedgerSnapshot snapshot, SHA256Hash expectedGenesisHash,
+                                   LongSupplier nowMillis, SignatureVerifier verifier,
+                                   ContractProcessor contractProcessor) {
+        ChainEngine engine = new ChainEngine(params, ledger, store, nowMillis, verifier, contractProcessor);
         if (store.height() == 0) {
             Block genesis = GenesisBlock.initChain(ledger, params, snapshot, expectedGenesisHash);
             store.append(genesis);
@@ -143,7 +154,8 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
                 return INVALID_NONCE;
             }
 
-            ExecutionStatus status = Executor.executeBlock(block, ledger, store::hasTransaction, params, verifier);
+            ExecutionStatus status = Executor.executeBlock(
+                block, ledger, store::hasTransaction, params, verifier, contractProcessor);
             if (status != SUCCESS) {
                 return status;
             }
