@@ -53,7 +53,7 @@ public final class BlockImpl implements Block {
      * did before uncles existed.
      */
     @Builder.Default
-    private List<SHA256Hash> uncles = new ArrayList<>();
+    private List<UncleRef> uncles = new ArrayList<>();
 
     /**
      * Serialization
@@ -92,9 +92,12 @@ public final class BlockImpl implements Block {
             // Commit to referenced uncles only when present, so an uncle-less block's
             // hash is byte-for-byte what it was before uncles existed.
             if (uncles != null && !uncles.isEmpty()) {
-                for (SHA256Hash uncle : uncles) {
-                    sha256.update(uncle.hash().getArray());
+                ByteBuffer uncleBuf = ByteBuffer.allocate(uncles.size() * Integer.BYTES);
+                for (UncleRef uncle : uncles) {
+                    sha256.update(uncle.hash().hash().getArray());
+                    uncleBuf.putInt(uncle.difficulty());
                 }
+                sha256.update(uncleBuf.array());
             }
 
             return SHA256Hash.of(sha256.digest());

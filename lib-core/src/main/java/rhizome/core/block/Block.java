@@ -41,7 +41,7 @@ public sealed interface Block permits BlockImpl {
         return of(blockDto, transactions, List.of());
     }
 
-    public static Block of(BlockDto blockDto, List<Transaction> transactions, List<SHA256Hash> uncles) {
+    public static Block of(BlockDto blockDto, List<Transaction> transactions, List<UncleRef> uncles) {
         return BlockImpl.builder()
                 .id(blockDto.id())
                 .timestamp(blockDto.timestamp())
@@ -68,7 +68,7 @@ public sealed interface Block permits BlockImpl {
     public Block id(int id);
     public void addTransaction(Transaction t);
     public List<Transaction> transactions();
-    public List<SHA256Hash> uncles();
+    public List<UncleRef> uncles();
     public boolean verifyNonce(rhizome.core.common.PowAlgorithm powAlgorithm);
     public SHA256Hash hash();
     public SHA256Hash lastBlockHash();
@@ -140,8 +140,10 @@ public sealed interface Block permits BlockImpl {
             result.put(TRANSACTIONS, transactionsArray);
             if (!blockImpl.uncles().isEmpty()) {
                 JSONArray unclesArray = new JSONArray();
-                for (SHA256Hash uncle : blockImpl.uncles()) {
-                    unclesArray.put(uncle.toHexString());
+                for (UncleRef uncle : blockImpl.uncles()) {
+                    unclesArray.put(new JSONObject()
+                        .put("hash", uncle.hash().toHexString())
+                        .put(DIFFICULTY, uncle.difficulty()));
                 }
                 result.put(UNCLES, unclesArray);
             }
@@ -162,9 +164,12 @@ public sealed interface Block permits BlockImpl {
                         .collect(Collectors.toList())
                 )
                 .uncles(
-                    !json.has(UNCLES) ? new java.util.ArrayList<>()
+                    !json.has(UNCLES) ? new java.util.ArrayList<UncleRef>()
                         : IntStream.range(0, json.getJSONArray(UNCLES).length())
-                            .mapToObj(i -> SHA256Hash.of(json.getJSONArray(UNCLES).getString(i)))
+                            .mapToObj(i -> {
+                                JSONObject u = json.getJSONArray(UNCLES).getJSONObject(i);
+                                return new UncleRef(SHA256Hash.of(u.getString("hash")), u.getInt(DIFFICULTY));
+                            })
                             .collect(Collectors.toList())
                 )
                 .build();

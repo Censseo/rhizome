@@ -61,6 +61,9 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
     private BigInteger totalWork = BigInteger.ZERO;
     private int currentDifficulty;
 
+    /** Uncle work credited per block height, so a pop subtracts exactly what an add added. */
+    private final Map<Long, BigInteger> uncleWorkByHeight = new HashMap<>();
+
     private ChainEngine(NetworkParameters params, Ledger ledger, ChainStore store,
                         LongSupplier nowMillis, SignatureVerifier verifier,
                         ContractProcessor contractProcessor) {
@@ -128,9 +131,9 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             // Structural uncle checks (GHOST): bounded count, distinct, and none is the
             // parent itself. Ancestry/PoW validation and fork-choice weighting land with
             // the orphan pool; for now uncles are carried and committed but earn no work.
-            ExecutionStatus uncleCheck = validateUncles(b);
-            if (uncleCheck != SUCCESS) {
-                return uncleCheck;
+            BigInteger uncleWork = validateUncles(b);
+            if (uncleWork == null) {
+                return INVALID_UNCLES;
             }
             // Static checkpoint: at a pinned height, only the published hash passes.
             SHA256Hash checkpoint = params.checkpoints().get(height + 1);
@@ -175,7 +178,8 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
 
             store.append(block);
             commitAccountNonces(block);
-            totalWork = totalWork.add(BigInteger.TWO.pow(b.difficulty()));
+            totalWork = totalWork.add(BigInteger.TWO.pow(b.difficulty())).add(uncleWork);
+            uncleWorkByHeight.put((long) b.id(), uncleWork);
             currentDifficulty = computeDifficultyFromChain();
             return SUCCESS;
         } finally {
@@ -198,7 +202,11 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             }
             store.pop();
             revertAccountNonces(tip);
+            BigInteger uncleWork = uncleWorkByHeight.remove(height);
             totalWork = totalWork.subtract(BigInteger.TWO.pow(((BlockImpl) tip).difficulty()));
+            if (uncleWork != null) {
+                totalWork = totalWork.subtract(uncleWork);
+            }
             currentDifficulty = computeDifficultyFromChain();
         } finally {
             lock.unlock();
@@ -300,13 +308,27 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
     private void rebuildDerivedState() {
         totalWork = BigInteger.ZERO;
         nextNonce.clear();
+        uncleWorkByHeight.clear();
         long height = store.height();
         for (long h = GenesisBlock.GENESIS_ID + 1; h <= height; h++) {
             Block block = store.blockAt(h);
             commitAccountNonces(block);
-            totalWork = totalWork.add(BigInteger.TWO.pow(((BlockImpl) block).difficulty()));
+            // Uncle work is recomputed from the committed uncle difficulties, so the
+            // cumulative weight is restored exactly even with an empty orphan pool.
+            BigInteger uncleWork = uncleWorkOf(block);
+            uncleWorkByHeight.put(h, uncleWork);
+            totalWork = totalWork.add(BigInteger.TWO.pow(((BlockImpl) block).difficulty())).add(uncleWork);
         }
         currentDifficulty = computeDifficultyFromChain();
+    }
+
+    /** Sum of 2^difficulty over a block's referenced uncles (from committed difficulties). */
+    private static BigInteger uncleWorkOf(Block block) {
+        BigInteger work = BigInteger.ZERO;
+        for (rhizome.core.block.UncleRef uncle : block.uncles()) {
+            work = work.add(BigInteger.TWO.pow(uncle.difficulty()));
+        }
+        return work;
     }
 
     /**
@@ -397,7 +419,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         for (Transaction t : block.transactions()) {
             size += t.serialize().getSize();
         }
-        size += (long) block.uncles().size() * SHA256Hash.SIZE;
+        size += (long) block.uncles().size() * (SHA256Hash.SIZE + Integer.BYTES);
         return size;
     }
 
@@ -421,55 +443,65 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
      * known orphan with valid PoW, recent (its id strictly below this block and within
      * {@code uncleMaxDepth}), forked from a main-chain block (its parent is on our
      * chain), not itself the canonical block at its height, and not already referenced
-     * by a recent block. Uncle <em>work</em> weighting comes with M4.3.
+     * by a recent block. Returns the summed uncle work (2^difficulty over the
+     * referenced uncles) to fold into the chain weight, or {@code null} if any
+     * check fails.
      */
-    private ExecutionStatus validateUncles(BlockImpl block) {
-        List<SHA256Hash> uncles = block.uncles();
+    private BigInteger validateUncles(BlockImpl block) {
+        List<rhizome.core.block.UncleRef> uncles = block.uncles();
         if (uncles.isEmpty()) {
-            return SUCCESS;
+            return BigInteger.ZERO;
         }
         if (uncles.size() > params.maxUnclesPerBlock()) {
-            return INVALID_UNCLES;
+            return null;
         }
         int h = block.id();
         int depth = params.uncleMaxDepth();
         long tipHeight = store.height();
 
         // Main-chain hashes an uncle may fork from (its parent), and uncle hashes that
-        // recent blocks have already referenced (to prevent double-referencing).
+        // recent blocks have already referenced (to prevent double-crediting).
         java.util.Set<SHA256Hash> recentChain = new java.util.HashSet<>();
         java.util.Set<SHA256Hash> alreadyReferenced = new java.util.HashSet<>();
         for (long ancestor = Math.max(GenesisBlock.GENESIS_ID, h - depth - 1L); ancestor <= tipHeight; ancestor++) {
             Block onChain = store.blockAt(ancestor);
             recentChain.add(onChain.hash());
             if (ancestor >= h - depth) {
-                alreadyReferenced.addAll(onChain.uncles());
+                for (rhizome.core.block.UncleRef ref : onChain.uncles()) {
+                    alreadyReferenced.add(ref.hash());
+                }
             }
         }
 
+        BigInteger uncleWork = BigInteger.ZERO;
         java.util.Set<SHA256Hash> seen = new java.util.HashSet<>();
-        for (SHA256Hash u : uncles) {
+        for (rhizome.core.block.UncleRef ref : uncles) {
+            SHA256Hash u = ref.hash();
             if (!seen.add(u)) {
-                return INVALID_UNCLES; // distinct
+                return null; // distinct
             }
             Block uncle = orphans.get(u);
             if (uncle == null || !uncle.verifyNonce(params.powAlgorithm())) {
-                return INVALID_UNCLES; // unknown or bad PoW
+                return null; // unknown or bad PoW
+            }
+            if (((BlockImpl) uncle).difficulty() != ref.difficulty()) {
+                return null; // committed difficulty must match the real orphan (no work inflation)
             }
             int uid = uncle.id();
             if (uid >= h || uid < h - depth) {
-                return INVALID_UNCLES; // must be recent and strictly before this block
+                return null; // recent and strictly before this block
             }
             if (!recentChain.contains(uncle.lastBlockHash())) {
-                return INVALID_UNCLES; // must fork from a recent main-chain block
+                return null; // must fork from a recent main-chain block
             }
             if (uid <= tipHeight && store.blockAt(uid).hash().equals(u)) {
-                return INVALID_UNCLES; // that is the canonical block, not an orphan
+                return null; // that is the canonical block, not an orphan
             }
             if (alreadyReferenced.contains(u)) {
-                return INVALID_UNCLES; // already credited by a recent block
+                return null; // already credited by a recent block
             }
+            uncleWork = uncleWork.add(BigInteger.TWO.pow(ref.difficulty()));
         }
-        return SUCCESS;
+        return uncleWork;
     }
 }

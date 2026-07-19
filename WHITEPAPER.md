@@ -29,7 +29,7 @@ Four goals drive the design:
    GHOST-style fork choice on the roadmap (§9) to make sub-5-second blocks safe against
    the orphaning that a naïve longest chain suffers.
 
-The node is functional and covered by **186 tests**: consensus, the WASM contract VM
+The node is functional and covered by **196 tests**: consensus, the WASM contract VM
 and its persistence, execution, storage, mempool, HTTP API, block production, P2P
 synchronisation with reorganisation, and a wallet that deploys and calls contracts.
 
@@ -459,14 +459,20 @@ discovery; hardening (checkpoints, finality, bounded rate limiting, ban-score, b
 cap); a full security review; and the **WASM smart-contract layer** — a Chicory-backed
 metered VM, a persistent contract store, `DEPLOY`/`CALL` transactions with gas fees,
 atomic per-block contract state with exact reorg reversal, and wallet `deploy`/`call`
-commands. **186 tests, 0 failures.**
+commands. **196 tests, 0 failures.**
 
-**Next — GHOST fork choice.** A ~1-block/second single longest chain orphans blocks
-because propagation takes a meaningful fraction of the interval (§6.3). A GHOST-style
-fork choice — the heaviest *subtree*, crediting the work of referenced orphan (uncle)
-blocks and rewarding them — lets the target drop toward a few seconds without the
-centralisation and reorg churn a naïve longest chain suffers. This reworks fork choice
-and touches the same reorg path the contract-state reversal already exercises.
+**In progress — GHOST fork choice.** A ~1-block/second single longest chain orphans
+blocks because propagation takes a meaningful fraction of the interval (§6.3). A
+GHOST-style fork choice — the heaviest *subtree*, crediting the work of referenced
+orphan (uncle) blocks — lets the target drop toward a few seconds without the
+centralisation and reorg churn a naïve longest chain suffers. Landed: blocks carry
+uncle references (each committing the uncle's hash *and* difficulty, checked against the
+real orphan at admission so work cannot be inflated); a bounded orphan pool retains valid
+off-chain blocks; full uncle validation (recency, single-fork, no double-crediting); and
+the referenced uncle work (`2^difficulty`) now folds into the cumulative chain weight,
+surviving pop and restart from the committed difficulties alone. Remaining: node wiring
+(populate the orphan pool from gossip, include eligible uncles when assembling a block)
+and uncle rewards (a share to the uncle miner plus a nephew bonus).
 
 **Then — autonomous-agent and memecoin primitives.** Account abstraction (contract
 accounts as agents: session keys, spend limits, gas sponsorship), event logs with
