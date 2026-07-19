@@ -1,5 +1,7 @@
 package rhizome.core.blockchain;
 
+import java.util.List;
+
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.transaction.TransactionKind;
 
@@ -30,11 +32,33 @@ public interface ContractProcessor {
     ContractResult run(PublicAddress from, TransactionKind kind, PublicAddress to,
                        byte[] data, long value, long gasLimit, long nonce);
 
-    /** Persists the session (block accepted). */
-    void commit();
+    /**
+     * Persists the session (block accepted) and records an undo journal for
+     * {@code blockHeight}, so the block's contract-state changes can be reverted
+     * later on a reorg.
+     */
+    void commit(long blockHeight);
 
-    /** Drops the session (block rejected). */
+    /** Drops the session (block rejected), committing nothing. */
     void discard();
+
+    /**
+     * Undoes the contract-state changes committed for {@code blockHeight}, restoring
+     * the exact pre-block state. Called by the engine when a block is popped in a
+     * reorg. A height with no recorded journal is a no-op.
+     */
+    void revertBlock(long blockHeight);
+
+    /**
+     * Per-contract-transaction receipts for {@code blockHeight}, in block order — the
+     * runtime facts (gas used, whether it succeeded) the ledger cannot re-derive from
+     * the transaction alone, needed to reverse a contract tx's gas fee and value
+     * transfer on a reorg. Empty for a height with no contract transactions.
+     */
+    List<ContractReceipt> receipts(long blockHeight);
+
+    /** Runtime outcome of one contract transaction, recorded for reorg reversal. */
+    record ContractReceipt(long gasUsed, boolean success) {}
 
     /**
      * Outcome of one contract execution. {@code gasUsed} is charged regardless of

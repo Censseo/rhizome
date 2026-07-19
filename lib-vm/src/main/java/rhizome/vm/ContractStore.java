@@ -14,8 +14,14 @@ public interface ContractStore {
 
     void putCode(PublicAddress contract, byte[] code);
 
+    /** Removes a contract's code (used to undo a DEPLOY on reorg). */
+    void deleteCode(PublicAddress contract);
+
     /** Value at {@code key} in {@code contract}'s storage, or {@code null} if unset. */
     byte[] getStorage(PublicAddress contract, byte[] key);
 
     void putStorage(PublicAddress contract, byte[] key, byte[] value);
+
+    /** Removes a storage entry (used to undo a first write on reorg). */
+    void deleteStorage(PublicAddress contract, byte[] key);
 }

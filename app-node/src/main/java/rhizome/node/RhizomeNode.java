@@ -77,7 +77,8 @@ public final class RhizomeNode implements AutoCloseable {
         store = new RocksDbNodeStore(config.dataDir());
         contractStore = new RocksDbContractStore(config.dataDir() + "/contracts");
         verifier = new SignatureVerifier();
-        var contractProcessor = new WasmContractProcessor(new WasmVm(), contractStore);
+        var contractProcessor = new WasmContractProcessor(new WasmVm(), contractStore,
+            config.params().maxReorgDepth());
         engine = ChainEngine.init(config.params(), store.ledger(), store.chainStore(),
             snapshot, null, System::currentTimeMillis, verifier, contractProcessor);
         mempool = new MemPool(config.params(), verifier, engine, config.mempoolSize());

@@ -35,6 +35,11 @@ public final class InMemoryContractStore implements ContractStore {
     }
 
     @Override
+    public void deleteCode(PublicAddress contract) {
+        code.remove(hex(contract.toBytes()));
+    }
+
+    @Override
     public byte[] getStorage(PublicAddress contract, byte[] key) {
         byte[] v = storage.get(slot(contract, key));
         return v == null ? null : v.clone();
@@ -43,5 +48,10 @@ public final class InMemoryContractStore implements ContractStore {
     @Override
     public void putStorage(PublicAddress contract, byte[] key, byte[] value) {
         storage.put(slot(contract, key), value.clone());
+    }
+
+    @Override
+    public void deleteStorage(PublicAddress contract, byte[] key) {
+        storage.remove(slot(contract, key));
     }
 }

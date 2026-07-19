@@ -66,6 +66,11 @@ public final class RocksDbContractStore implements ContractStore, AutoCloseable 
     }
 
     @Override
+    public void deleteCode(PublicAddress contract) {
+        delete(codeCf, contract.toBytes());
+    }
+
+    @Override
     public byte[] getStorage(PublicAddress contract, byte[] key) {
         return get(storageCf, slot(contract, key));
     }
@@ -73,6 +78,11 @@ public final class RocksDbContractStore implements ContractStore, AutoCloseable 
     @Override
     public void putStorage(PublicAddress contract, byte[] key, byte[] value) {
         put(storageCf, slot(contract, key), value);
+    }
+
+    @Override
+    public void deleteStorage(PublicAddress contract, byte[] key) {
+        delete(storageCf, slot(contract, key));
     }
 
     private byte[] get(ColumnFamilyHandle cf, byte[] key) {
@@ -88,6 +98,14 @@ public final class RocksDbContractStore implements ContractStore, AutoCloseable 
             db.put(cf, key, value);
         } catch (RocksDBException e) {
             throw new IllegalStateException("contract store write failed", e);
+        }
+    }
+
+    private void delete(ColumnFamilyHandle cf, byte[] key) {
+        try {
+            db.delete(cf, key);
+        } catch (RocksDBException e) {
+            throw new IllegalStateException("contract store delete failed", e);
         }
     }
 

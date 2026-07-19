@@ -1,5 +1,9 @@
 package rhizome.vm;
 
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+
 import rhizome.core.blockchain.ContractProcessor;
 import rhizome.core.blockchain.Contracts;
 import rhizome.core.ledger.PublicAddress;
@@ -19,16 +23,35 @@ public final class WasmContractProcessor implements ContractProcessor {
 
     private final WasmVm vm;
     private final ContractStore baseStore;
+    private final int retainDepth;
     private SessionContractStore session;
+    private List<ContractReceipt> currentReceipts = new java.util.ArrayList<>();
 
+    /** Undo journals of recently committed blocks, keyed by height, for reorg reversal. */
+    private final Map<Long, List<ContractUndo>> journals = new ConcurrentHashMap<>();
+    private final Map<Long, List<ContractReceipt>> receiptsByHeight = new ConcurrentHashMap<>();
+    private long lastCommittedHeight = -1;
+
+    /** Uses a default retention depth; fine when reorgs are shallow. */
     public WasmContractProcessor(WasmVm vm, ContractStore baseStore) {
+        this(vm, baseStore, 600);
+    }
+
+    /**
+     * @param retainDepth how many recent blocks' undo journals to keep — must be at
+     *                    least the chain's max reorg depth so any reversible block can
+     *                    be undone; older journals are pruned to bound memory.
+     */
+    public WasmContractProcessor(WasmVm vm, ContractStore baseStore, int retainDepth) {
         this.vm = vm;
         this.baseStore = baseStore;
+        this.retainDepth = retainDepth;
     }
 
     @Override
     public void begin() {
         session = new SessionContractStore(baseStore);
+        currentReceipts = new java.util.ArrayList<>();
     }
 
     @Override
@@ -37,11 +60,13 @@ public final class WasmContractProcessor implements ContractProcessor {
         if (session == null) {
             begin();
         }
-        return switch (kind) {
+        ContractResult result = switch (kind) {
             case DEPLOY -> deploy(from, data, nonce, gasLimit);
             case CALL -> call(from, to, data, value, gasLimit);
             case TRANSFER -> ContractResult.reverted(0, "not a contract transaction");
         };
+        currentReceipts.add(new ContractReceipt(result.gasUsed(), result.success()));
+        return result;
     }
 
     private ContractResult deploy(PublicAddress deployer, byte[] code, long nonce, long gasLimit) {
@@ -70,15 +95,59 @@ public final class WasmContractProcessor implements ContractProcessor {
     }
 
     @Override
-    public void commit() {
+    public void commit(long blockHeight) {
         if (session != null) {
-            session.flush();
+            journals.put(blockHeight, session.flushWithJournal());
             session = null;
         }
+        receiptsByHeight.put(blockHeight, currentReceipts);
+        currentReceipts = new java.util.ArrayList<>();
+        lastCommittedHeight = Math.max(lastCommittedHeight, blockHeight);
+        pruneOldJournals();
     }
 
     @Override
     public void discard() {
         session = null;
+        currentReceipts = new java.util.ArrayList<>();
+    }
+
+    @Override
+    public List<ContractReceipt> receipts(long blockHeight) {
+        return receiptsByHeight.getOrDefault(blockHeight, List.of());
+    }
+
+    @Override
+    public void revertBlock(long blockHeight) {
+        receiptsByHeight.remove(blockHeight);
+        List<ContractUndo> journal = journals.remove(blockHeight);
+        if (journal == null) {
+            return; // nothing was committed for this height (e.g. a transfer-only block)
+        }
+        // Apply in reverse so repeated writes to the same key restore the earliest prior.
+        for (int i = journal.size() - 1; i >= 0; i--) {
+            ContractUndo u = journal.get(i);
+            if (u.isCode()) {
+                if (u.prior() == null) {
+                    baseStore.deleteCode(u.contract());
+                } else {
+                    baseStore.putCode(u.contract(), u.prior());
+                }
+            } else if (u.prior() == null) {
+                baseStore.deleteStorage(u.contract(), u.key());
+            } else {
+                baseStore.putStorage(u.contract(), u.key(), u.prior());
+            }
+        }
+    }
+
+    /** Drops journals buried deeper than the retention depth (unreachable by any reorg). */
+    private void pruneOldJournals() {
+        long cutoff = lastCommittedHeight - retainDepth;
+        if (cutoff > 0) {
+            journals.keySet().removeIf(h -> h < cutoff);
+            receiptsByHeight.keySet().removeIf(h -> h < cutoff);
+        }
     }
 }
+

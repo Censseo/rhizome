@@ -159,6 +159,26 @@ class ContractConsensusTest {
     }
 
     @Test
+    void popRevertsContractStateExactly() {
+        PublicAddress contract = Contracts.deriveAddress(sender, 0);
+
+        assertEquals(ExecutionStatus.SUCCESS, mineBlock(List.of(deployTx(0, COUNTER))));
+        assertEquals(ExecutionStatus.SUCCESS, mineBlock(List.of(callTx(1, contract)))); // counter -> 1
+        assertEquals(ExecutionStatus.SUCCESS, mineBlock(List.of(callTx(2, contract)))); // counter -> 2
+        assertArrayEquals(le64(2), contracts.getStorage(contract, new byte[] {0}));
+
+        // Pop the two calls: the counter rewinds 2 -> 1 -> absent, exactly.
+        engine.popBlock();
+        assertArrayEquals(le64(1), contracts.getStorage(contract, new byte[] {0}), "call 2 reverted");
+        engine.popBlock();
+        assertEquals(null, contracts.getStorage(contract, new byte[] {0}), "call 1 reverted");
+
+        // Pop the deploy: the code is removed.
+        engine.popBlock();
+        assertEquals(null, contracts.getCode(contract), "deploy reverted");
+    }
+
+    @Test
     void callToMissingContractIsIncludedButChangesNoState() {
         // A CALL to an address with no code reverts: the block is still valid, but no
         // contract state appears and (with no gas charged for a missing contract) the

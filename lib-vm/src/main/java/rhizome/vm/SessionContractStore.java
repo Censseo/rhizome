@@ -1,6 +1,8 @@
 package rhizome.vm;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import rhizome.core.ledger.PublicAddress;
@@ -8,9 +10,12 @@ import rhizome.core.ledger.PublicAddress;
 /**
  * A write-buffering overlay over a base {@link ContractStore}: reads fall through
  * to the base unless the key was written in this session; writes stay in memory
- * until {@link #flush()}. This is the per-block session — the executor flushes it
- * when the block is accepted and drops it otherwise, so contract state moves
- * atomically with the block.
+ * until {@link #flushWithJournal()}. This is the per-block session — the executor
+ * flushes it when the block is accepted and drops it otherwise, so contract state
+ * moves atomically with the block.
+ *
+ * <p>Flushing also captures an undo journal (the base's prior value for every
+ * written key), so a reorg can restore the exact pre-block state.
  */
 final class SessionContractStore implements ContractStore {
 
@@ -46,6 +51,11 @@ final class SessionContractStore implements ContractStore {
     }
 
     @Override
+    public void deleteCode(PublicAddress contract) {
+        codeWrites.remove(hex(contract.toBytes()));
+    }
+
+    @Override
     public byte[] getStorage(PublicAddress contract, byte[] key) {
         String k = slot(contract, key);
         return storageWrites.containsKey(k) ? storageWrites.get(k).clone() : base.getStorage(contract, key);
@@ -56,15 +66,31 @@ final class SessionContractStore implements ContractStore {
         storageWrites.put(slot(contract, key), value.clone());
     }
 
-    /** Writes every buffered change into the base store. */
-    void flush() {
-        codeWrites.forEach((k, v) -> base.putCode(PublicAddress.of(hexToBytes(k)), v));
+    @Override
+    public void deleteStorage(PublicAddress contract, byte[] key) {
+        storageWrites.remove(slot(contract, key));
+    }
+
+    /**
+     * Writes every buffered change into the base store and returns the undo journal
+     * (each written key's prior base value, {@code null} if it did not exist), so the
+     * block can be reverted exactly.
+     */
+    List<ContractUndo> flushWithJournal() {
+        List<ContractUndo> journal = new ArrayList<>();
+        codeWrites.forEach((k, v) -> {
+            PublicAddress contract = PublicAddress.of(hexToBytes(k));
+            journal.add(new ContractUndo(true, contract, null, base.getCode(contract)));
+            base.putCode(contract, v);
+        });
         storageWrites.forEach((slot, v) -> {
             int sep = slot.indexOf(':');
             PublicAddress contract = PublicAddress.of(hexToBytes(slot.substring(0, sep)));
             byte[] key = hexToBytes(slot.substring(sep + 1));
+            journal.add(new ContractUndo(false, contract, key, base.getStorage(contract, key)));
             base.putStorage(contract, key, v);
         });
+        return journal;
     }
 
     private static byte[] hexToBytes(String hex) {

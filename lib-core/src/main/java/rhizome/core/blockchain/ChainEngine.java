@@ -179,7 +179,10 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
                 throw new IllegalStateException("Cannot pop genesis");
             }
             Block tip = store.tip();
-            Executor.rollbackBlock(tip, ledger);
+            Executor.rollbackBlock(tip, ledger, contractProcessor, height);
+            if (contractProcessor != null) {
+                contractProcessor.revertBlock(height); // undo this block's contract-state changes
+            }
             store.pop();
             revertAccountNonces(tip);
             totalWork = totalWork.subtract(BigInteger.TWO.pow(((BlockImpl) tip).difficulty()));

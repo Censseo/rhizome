@@ -191,7 +191,7 @@ public final class Executor {
             }
             deposit(ledger, applied, miner, ((TransactionImpl) coinbase).amount());
             if (processor != null) {
-                processor.commit();
+                processor.commit(blockImpl.id());
             }
             return SUCCESS;
         } catch (LedgerException e) {
@@ -291,7 +291,7 @@ public final class Executor {
      * {@link #executeBlock}'s mutations, in reverse order. The block must be the
      * most recently applied one (used by {@code popBlock} during reorgs).
      */
-    public static void rollbackBlock(Block block, Ledger ledger) {
+    public static void rollbackBlock(Block block, Ledger ledger, ContractProcessor processor, long height) {
         List<Transaction> transactions = block.transactions();
         Transaction coinbase = transactions.stream()
             .filter(t -> ((TransactionImpl) t).isTransactionFee())
@@ -299,10 +299,20 @@ public final class Executor {
             .orElseThrow(() -> new IllegalArgumentException("Block has no coinbase"));
         PublicAddress miner = ((TransactionImpl) coinbase).to();
 
+        // Runtime receipts (gas used, success) for this block's contract txs, in block
+        // order; consumed in reverse as we walk transactions backwards.
+        List<ContractProcessor.ContractReceipt> receipts =
+            processor != null ? processor.receipts(height) : List.of();
+        int ri = receipts.size() - 1;
+
         ledger.revertDeposit(miner, ((TransactionImpl) coinbase).amount());
         for (int i = transactions.size() - 1; i >= 0; i--) {
             var tx = (TransactionImpl) transactions.get(i);
             if (tx.isTransactionFee()) {
+                continue;
+            }
+            if (tx.kind().isContract()) {
+                revertContract(ledger, tx, receipts.get(ri--), miner);
                 continue;
             }
             long fee = tx.fee().amount();
@@ -311,6 +321,23 @@ public final class Executor {
             }
             ledger.revertDeposit(tx.to(), tx.amount());
             ledger.revertSend(tx.from(), new TransactionAmount(tx.amount().amount() + fee));
+        }
+    }
+
+    /** Inverse of {@link #applyContract}'s ledger effects, using the block's receipt. */
+    private static void revertContract(Ledger ledger, TransactionImpl tx,
+                                       ContractProcessor.ContractReceipt receipt, PublicAddress miner) {
+        long gasFee = Math.multiplyExact(receipt.gasUsed(), tx.gasPrice());
+        if (gasFee > 0) {
+            ledger.revertDeposit(miner, new TransactionAmount(gasFee));
+            ledger.revertSend(tx.from(), new TransactionAmount(gasFee));
+        }
+        long value = tx.amount().amount();
+        if (receipt.success() && value > 0) {
+            PublicAddress target = tx.kind() == rhizome.core.transaction.TransactionKind.DEPLOY
+                ? Contracts.deriveAddress(tx.from(), tx.nonce()) : tx.to();
+            ledger.revertDeposit(target, new TransactionAmount(value));
+            ledger.revertSend(tx.from(), new TransactionAmount(value));
         }
     }
 }
