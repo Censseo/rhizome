@@ -29,7 +29,7 @@ Four goals drive the design:
    GHOST-style fork choice (§9) that credits and rewards orphaned (uncle) work, making
    sub-5-second blocks safe against the orphaning a naïve longest chain suffers.
 
-The node is functional and covered by **203 tests**: consensus, the WASM contract VM
+The node is functional and covered by **205 tests**: consensus, the WASM contract VM
 and its persistence, execution, storage, mempool, HTTP API, block production, P2P
 synchronisation with reorganisation, GHOST uncles, and a wallet that deploys and calls
 contracts.
@@ -287,9 +287,12 @@ length must be revisited with it.
 
 Contracts are **WebAssembly**, run on the pure-Java [Chicory](https://github.com/dylibso/chicory)
 runtime — no JNI, no native dependency, deterministic across nodes because every node
-executes the same interpreter. A contract imports a small host ABI (`storage_read`,
-`storage_write`, `set_output`, `emit_log`, plus caller/input/value) from module `env` and
-exports a `call` entry point; the WASM sandbox denies it any other I/O.
+executes the same interpreter. A contract imports a small host ABI from module `env` —
+`storage_read`, `storage_write`, `set_output`, `emit_log`, and the call context
+(`get_caller`, `get_input`, `get_value`) — and exports a `call` entry point; the WASM
+sandbox denies it any other I/O. A reference fungible-token contract
+(`contracts/token.rs`, the memecoin base) exercises the whole ABI: it mints a supply to
+its deployer, transfers between accounts, and emits a `transfer` event on each move.
 
 **Event logs.** `emit_log(topic, data)` records an event during a call — the channel
 autonomous agents watch to react to on-chain state. Logs are gas-metered, kept only when
@@ -468,7 +471,7 @@ discovery; hardening (checkpoints, finality, bounded rate limiting, ban-score, b
 cap); a full security review; and the **WASM smart-contract layer** — a Chicory-backed
 metered VM, a persistent contract store, `DEPLOY`/`CALL` transactions with gas fees,
 atomic per-block contract state with exact reorg reversal, and wallet `deploy`/`call`
-commands. **203 tests, 0 failures.**
+commands. **205 tests, 0 failures.**
 
 **GHOST fork choice.** A ~1-block/second single longest chain orphans blocks because
 propagation takes a meaningful fraction of the interval (§6.3). A GHOST-style fork
@@ -502,8 +505,9 @@ in near-real-time. Next: push streaming (SSE/WebSocket) over the same event sour
 account abstraction (contract accounts as agents — session keys, spend limits, gas
 sponsorship).
 
-**Then — memecoin primitives.** A token/AMM/launchpad contract suite for cheap fair
-launches.
+**In progress — memecoin primitives.** A fungible-token contract is implemented and
+tested through consensus (mint, transfer, `transfer` logs). Next in the suite: a constant-
+product AMM and a fair-launch launchpad.
 
 **Environment-dependent** — GraalVM native build (`native-image` not installed in the
 current dev environment); production of the real Pandanite snapshot (a synchronised C++

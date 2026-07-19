@@ -117,7 +117,32 @@ public final class WasmVm {
                 return null;
             });
 
-        return new HostFunction[] {storageRead, storageWrite, setOutput, emitLog};
+        // Read the call context into contract memory. Each returns the source's true
+        // length (so a contract can size its buffer), copying at most out_cap bytes.
+        HostFunction getCaller = new HostFunction(ENV, "get_caller",
+            List.of(ValType.I32, ValType.I32), List.of(ValType.I32),
+            (Instance inst, long... args) -> new long[] {copyOut(inst, host.caller(), args[0], args[1], gas)});
+
+        HostFunction getInput = new HostFunction(ENV, "get_input",
+            List.of(ValType.I32, ValType.I32), List.of(ValType.I32),
+            (Instance inst, long... args) -> new long[] {copyOut(inst, host.input(), args[0], args[1], gas)});
+
+        HostFunction getValue = new HostFunction(ENV, "get_value",
+            List.of(), List.of(ValType.I64),
+            (Instance inst, long... args) -> new long[] {host.value()});
+
+        return new HostFunction[] {
+            storageRead, storageWrite, setOutput, emitLog, getCaller, getInput, getValue};
+    }
+
+    /** Copies {@code src} into contract memory (at most {@code cap} bytes) and returns its true length. */
+    private static long copyOut(Instance inst, byte[] src, long ptr, long cap, GasMeter gas) {
+        int copied = Math.min(src.length, asLen(cap));
+        if (copied > 0) {
+            inst.memory().write(asOffset(ptr), src, 0, copied);
+        }
+        gas.charge((long) copied * GasSchedule.PER_BYTE);
+        return src.length;
     }
 
     /** A WASM i32 pointer arrives as a long; take the unsigned low 32 bits as a memory offset. */
