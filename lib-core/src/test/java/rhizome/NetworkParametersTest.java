@@ -45,11 +45,11 @@ class NetworkParametersTest {
     }
 
     @Test
-    void emissionScheduleIsCalibratedForOneBlockPerSecond() {
-        // Guards against the "reward curve is broken at 1 blk/s" regression: the decay
-        // epoch is denominated in blocks, so its REAL-TIME length must be recomputed
-        // from the block time. At 1 s/block the epoch must span years, not days, and
-        // the subsidy must last decades, not months.
+    void emissionScheduleIsCalibratedForTheBlockCadence() {
+        // Guards against the "reward curve is broken at fast blocks" regression: the
+        // decay epoch is denominated in blocks, so its REAL-TIME length must be
+        // recomputed from the block time. Whatever the cadence, the epoch must span
+        // years, not days, and the subsidy must last decades, not months.
         NetworkParameters p = NetworkParameters.cleanMainnet();
         long blockTime = p.desiredBlockTimeSec();
         double epochYears = p.rewardEpochBlocks() * blockTime / 86_400.0 / 365.25;
@@ -70,7 +70,7 @@ class NetworkParametersTest {
         assertTrue(totalPdn > 80_000_000L && totalPdn < 120_000_000L,
             "total issuance should be ~100M PDN, was " + totalPdn);
 
-        // The subsidy tail must survive well beyond a year of 1-second blocks.
+        // The subsidy tail must survive well beyond a year at the configured cadence.
         long blocksPerYear = 365L * 86_400L / blockTime;
         assertTrue(p.miningReward(blocksPerYear) > 0, "reward must not dry up within a year");
     }

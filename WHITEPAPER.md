@@ -25,9 +25,9 @@ Four goals drive the design:
    escape its sandbox (§5).
 3. **Pufferfish2 proof of work** — from genesis, no SHA-256 phase and no algorithm
    switch, ported in pure Java and validated bit-for-bit against a C reference.
-4. **Fast, safe cadence** — a ~1-block/second target paced by difficulty (§3.4), with a
+4. **Fast, safe cadence** — a 5-second block target paced by difficulty (§3.4), with a
    GHOST-style fork choice (§9) that credits and rewards orphaned (uncle) work, making
-   sub-5-second blocks safe against the orphaning a naïve longest chain suffers.
+   the fast cadence safe against the orphaning a naïve longest chain suffers.
 
 The node is functional and covered by **213 tests**: consensus, the WASM contract VM
 and its persistence, execution, storage, mempool, HTTP API, block production, P2P
@@ -121,12 +121,12 @@ inconsistent across a reorg, the flaw behind Pandanite's hard-coded difficulty
 exception for blocks 536100–536200. The step is **bounded and clamped**, which limits
 the leverage of timestamp manipulation (time-warp).
 
-### 3.4 Cadence: one block per second, paced by difficulty
+### 3.4 Cadence: one block every five seconds, paced by difficulty
 
-The target is one block per second **on average, paced by difficulty** — the standard
-proof-of-work mechanism — not by a per-block time floor. This is a deliberate reversal
-of an earlier design that set `minBlockTime = desiredBlockTime`: making the floor equal
-the target *starves* the retarget. The producer floors every timestamp to
+The target is one block every five seconds **on average, paced by difficulty** — the
+standard proof-of-work mechanism — not by a per-block time floor. This is a deliberate
+reversal of an earlier design that set `minBlockTime = desiredBlockTime`: making the
+floor equal the target *starves* the retarget. The producer floors every timestamp to
 `parent + minBlockTime`, so a full window then always measures ≈ the desired duration
 and difficulty never rises to track hashrate — it stays pinned near `minDifficulty`
 regardless of the real hashrate. Proof-of-work cost would collapse to a fixed
@@ -135,13 +135,20 @@ race for near-free (the chain would be secured by clocks, not work).
 
 So on mainnet **`minBlockTime = 0`**: difficulty does the pacing, which is what makes
 each block cost real work, so outpacing the chain requires majority hashrate. The flip
-side is honest: at a one-second average the block-time distribution is Poisson (bursts
-and gaps), and single-chain propagation becomes the real limiter — see §6.3. The future
-bound is kept tight (`maxFutureBlockTime = 5 s`) because at one-second blocks it is also
-the number of blocks an attacker could pre-mine into the future before release;
-median-time-past spans ~60 blocks so a few consecutive blocks cannot drag the chain's
-notion of past time. The `minBlockTime` rule still exists as an optional sanity floor
-for networks that want one, but it must stay well below the target.
+side is honest: at a fast average the block-time distribution is Poisson (bursts and
+gaps), and propagation is the binding constraint — see §6.3. **Why 5 s and not 1 s**: at
+~200 ms real-world propagation, a 1-second target orphans ≈18% of honest blocks
+(`1 − e^(−0.2)`) versus ≈4% at 5 seconds. GHOST (§9) credits orphaned work either way,
+but a high steady orphan rate still favours a selfish miner — whose private chain never
+races itself — and multiplies bandwidth and storage. Five seconds keeps near-instant UX
+with a comfortable margin; one second becomes viable once compact-block relay exists.
+
+The future bound is kept tight (`maxFutureBlockTime = 15 s`, ≈3 blocks) because divided
+by the block time it is the number of blocks an attacker can pre-mine into the future
+before release; median-time-past spans ~60 blocks (≈5 minutes) so a few consecutive
+blocks cannot drag the chain's notion of past time. The `minBlockTime` rule still exists
+as an optional sanity floor for networks that want one, but it must stay well below the
+target.
 
 ### 3.5 `addBlock` validation order
 
@@ -183,8 +190,8 @@ repeatedly for lack of such a rule.
 
 Synchronisation is hardened against hostile peers:
 
-- **Finality window** — a reorg deeper than `maxReorgDepth` (600 blocks) is refused
-  outright: buried history cannot be rewritten, whatever work is claimed.
+- **Finality window** — a reorg deeper than `maxReorgDepth` (120 blocks, ≈10 minutes)
+  is refused outright: buried history cannot be rewritten, whatever work is claimed.
 - **No free rollbacks** — before any local mutation, a bounded prefix of the peer's
   branch is fetched and **validated statelessly** (id continuity, hash chaining from the
   fork point, per-block PoW, and verified work strictly above ours). A peer that merely
@@ -261,27 +268,28 @@ The block subsidy decays geometrically (×2/3) once per epoch, in integer arithm
 issuance is bounded and deterministic. Total issuance is the geometric series
 `epochBlocks × initialReward × 3 ≈ 100M PDN`.
 
-**Calibration for one-second blocks.** The decay epoch is denominated in *blocks*, so its
+**Calibration for fast blocks.** The decay epoch is denominated in *blocks*, so its
 real-time length depends on the block rate. Pandanite's 666 666-block epoch spans about
-1.9 years at 90 s/block — but only **7.7 days at 1 s/block**. Left unchanged, the whole
-subsidy would drain in about **8 months**, with the first epoch alone (a third of all
-coins) emitted in a single week — a launch-fairness and mining-incentive collapse, even
-though the *total* supply is unaffected. Rhizome therefore rescales both knobs by the
-cadence ratio so the **real-time schedule is preserved** regardless of block rate:
+1.9 years at 90 s/block — but only **38 days at 5 s/block**. Left unchanged, the whole
+subsidy would drain in a few years, with the first epoch alone (a third of all coins)
+emitted in ~5 weeks — a launch-fairness and mining-incentive collapse, even though the
+*total* supply is unaffected. Rhizome therefore rescales both knobs by the cadence ratio
+(×18 = 90/5) so the **real-time schedule is preserved** regardless of block rate:
 
-| | Original (90 s) | Naïve at 1 s | **Rhizome (1 s)** |
+| | Original (90 s) | Naïve at 5 s | **Rhizome (5 s)** |
 |---|---|---|---|
-| `rewardEpochBlocks` | 666 666 | 666 666 | **60 000 000** |
-| `initialReward` | 50 PDN | 50 PDN | **0.5555 PDN** |
-| Epoch in real time | ~1.9 yr | 7.7 days | **~1.9 yr** |
-| Subsidy dry-up | ~decades | ~8 months | **~decades** |
-| Emission at launch | 48 000 PDN/day | 4.32M PDN/day | **48 000 PDN/day** |
+| `rewardEpochBlocks` | 666 666 | 666 666 | **~12 000 000** |
+| `initialReward` | 50 PDN | 50 PDN | **2.7777 PDN** |
+| Epoch in real time | ~1.9 yr | 38 days | **~1.9 yr** |
+| Subsidy dry-up | ~decades | ~few years | **~decades** |
+| Emission at launch | 48 000 PDN/day | 864 000 PDN/day | **48 000 PDN/day** |
 | Total issuance | ~100M PDN | ~100M PDN | **~100M PDN** |
 
-Per-block rewards are small because there are 86 400 blocks per day; daily and total
-emission match the intended economics. The invariant is enforced by a test
-(`emissionScheduleIsCalibratedForOneBlockPerSecond`): change the block time and the epoch
-length must be revisited with it.
+Per-block rewards are small because there are 17 280 blocks per day; daily and total
+emission match the intended economics. The invariant is enforced by a cadence-relative
+test (`emissionScheduleIsCalibratedForTheBlockCadence`): it recomputes the epoch's
+real-time span and total issuance from `desiredBlockTimeSec`, so changing the block time
+forces the epoch to be revisited with it.
 
 ### 5.4 Smart contracts
 
@@ -386,7 +394,7 @@ model.
 - **Parallel, cached signature verification** — signatures are verified once at mempool
   admission and cached, so block execution gets a cache hit; batches verify in parallel.
   Measured ≈140 blocks/s with a warm cache versus ≈6.6 sequentially — the single change
-  that makes a one-second block realistic under load.
+  that makes a fast block cadence realistic under load.
 
 GraalVM native compilation is a standing design constraint (no runtime codegen; JNI for
 RocksDB declared; reflection kept to compile-time Lombok plus registrable `org.json`),
@@ -394,12 +402,14 @@ even though `native-image` is not installed in the current development environme
 
 ### 6.3 Block propagation and the block-time floor
 
-At a one-second cadence, **propagation latency — not CPU — is the binding constraint**.
+At a fast cadence, **propagation latency — not CPU — is the binding constraint**.
 Verification is fast (§6.2), but a block must reach most of a global network before the
 next is found, or the two collide into an orphan. Orphans waste work, raise the effective
 reorg rate, and favour the best-connected miners (centralisation). The floor is physical:
 even an optimal relay needs roughly a few hundred milliseconds to a couple of seconds to
-cover a worldwide peer graph, which is a large fraction of a one-second interval.
+cover a worldwide peer graph. This is precisely why the mainnet target is **5 seconds**
+rather than 1: at ~200 ms propagation the expected orphan rate is ≈4% (versus ≈18% at a
+1-second target), and GHOST (§9) credits what little is orphaned.
 
 The current relay is deliberately simple — a node **pushes each accepted block in full**
 to its peers over one-shot HTTP, and periodically pulls ranges over `/sync`. Three
@@ -424,10 +434,10 @@ propagation is a small fraction of its interval. Its WebSocket block streaming i
 *client-facing* API, not the inter-node mechanism. The lesson is that a robust fast chain
 either keeps the per-chain interval well above propagation time (a few seconds), or
 parallelises (sharding / a GHOST-style fork choice that credits orphaned work), rather
-than pushing a single longest chain below its own propagation latency. Rhizome's
-one-second figure should therefore be read as an average target contingent on the relay
-upgrades above, with a slower per-chain interval or a DAG fork choice as the honest paths
-to genuinely high throughput.
+than pushing a single longest chain below its own propagation latency. Rhizome applies
+that lesson twice over: the 5-second interval keeps propagation a small fraction of the
+cadence, and GHOST (§9) credits and rewards whatever is still orphaned. Dropping toward
+1 s remains possible later, contingent on the relay upgrades above.
 
 ---
 
@@ -487,11 +497,12 @@ metered VM, a persistent contract store, `DEPLOY`/`CALL` transactions with gas f
 atomic per-block contract state with exact reorg reversal, and wallet `deploy`/`call`
 commands. **213 tests, 0 failures.**
 
-**GHOST fork choice.** A ~1-block/second single longest chain orphans blocks because
-propagation takes a meaningful fraction of the interval (§6.3). A GHOST-style fork
-choice — the heaviest *subtree*, crediting the work of referenced orphan (uncle)
-blocks — lets the target drop toward a few seconds without the centralisation and reorg
-churn a naïve longest chain suffers. It is implemented end to end:
+**GHOST fork choice.** A fast single longest chain orphans blocks because propagation
+takes a meaningful fraction of the interval (§6.3). A GHOST-style fork choice — the
+heaviest *subtree*, crediting the work of referenced orphan (uncle) blocks — is what
+makes the 5-second target safe (and a future drop toward 1 s possible) without the
+centralisation and reorg churn a naïve longest chain suffers. It is implemented end to
+end:
 
 - **Uncle references.** Each block may carry up to `maxUnclesPerBlock` (2) uncle
   references. A reference commits the uncle's hash, difficulty *and* miner address; all

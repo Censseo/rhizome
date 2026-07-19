@@ -87,7 +87,7 @@ public final class NetworkParameters {
     /**
      * Maximum depth of a chain reorganisation a node will perform. Blocks buried
      * deeper are final: even a heavier competing chain cannot rewrite them
-     * (weak-subjectivity finality window). At 1 block/s, 600 ≈ 10 minutes.
+     * (weak-subjectivity finality window). At 5 s/block, 120 ≈ 10 minutes.
      */
     private final int maxReorgDepth;
     /**
@@ -167,45 +167,55 @@ public final class NetworkParameters {
             .powAlgorithm(PowAlgorithm.PUFFERFISH2)
             .genesisTimestamp(0L)
             .genesisDifficulty(16)
-            // Target one block per second, PACED BY DIFFICULTY (a Poisson average),
-            // not by a per-block time floor. minBlockTimeSec MUST stay 0 here: setting
-            // it equal to the target starves the retarget — the producer floors every
-            // timestamp to parent+minBlockTime, so a 60-block window always measures
-            // ~= the desired duration and difficulty never rises to track hashrate.
-            // Difficulty would then stay pinned near minDifficulty regardless of the
-            // real hashrate, collapsing PoW cost to a fixed 2^minDifficulty and letting
-            // an attacker rewrite history or win the future-bound reward race for
-            // near-free. Letting difficulty do the pacing is what actually makes each
-            // block cost work, so outpacing the chain needs real (majority) hashrate.
-            .desiredBlockTimeSec(1)
+            // Target one block every FIVE seconds, PACED BY DIFFICULTY (a Poisson
+            // average), not by a per-block time floor. minBlockTimeSec MUST stay 0
+            // here: setting it equal to the target starves the retarget — the producer
+            // floors every timestamp to parent+minBlockTime, so a 60-block window
+            // always measures ~= the desired duration and difficulty never rises to
+            // track hashrate. Difficulty would then stay pinned near minDifficulty
+            // regardless of the real hashrate, collapsing PoW cost to a fixed
+            // 2^minDifficulty and letting an attacker rewrite history or win the
+            // future-bound reward race for near-free. Letting difficulty do the pacing
+            // is what actually makes each block cost work, so outpacing the chain
+            // needs real (majority) hashrate.
+            //
+            // Why 5 s and not 1 s: propagation is the binding constraint. At ~200 ms
+            // network propagation, a 1 s target orphans ~18% of honest blocks
+            // (1 - e^(-0.2)); at 5 s it is ~4%. GHOST absorbs orphaned work either
+            // way, but a high steady orphan rate still favours a selfish miner (whose
+            // private chain never races itself) and multiplies bandwidth and storage.
+            // 5 s keeps near-instant UX with a comfortable margin; 1 s becomes viable
+            // once compact-block propagation exists.
+            .desiredBlockTimeSec(5)
             .minBlockTimeSec(0)
             .difficultyLookback(60)
             .minDifficulty(16)
             .maxDifficulty(255)
-            // Future bound kept tight: at 1 s/block it is also the count of blocks an
-            // attacker could pre-mine "into the future" and release to force a reorg,
-            // so 5 s (≈5 blocks) rather than 15, while still tolerating NTP-level skew.
-            .maxFutureBlockTimeSec(5)
-            // Median-time-past over ~1 minute of blocks (not 11 s), so a miner holding
-            // a few consecutive blocks cannot meaningfully drag the chain's notion of
-            // past time at this cadence.
+            // Future bound kept tight: divided by the block time it is the count of
+            // blocks an attacker could pre-mine "into the future" and release to force
+            // a reorg, so 15 s (≈3 blocks at 5 s) while still tolerating NTP-level skew.
+            .maxFutureBlockTimeSec(15)
+            // Median-time-past over ~5 minutes of blocks, so a miner holding a few
+            // consecutive blocks cannot meaningfully drag the chain's notion of past
+            // time at this cadence.
             .medianTimeWindow(60)
             .maxTransactionsPerBlock(25_000)
             .maxBlockSizeBytes(Constants.MAX_BLOCK_SIZE_BYTES)
             .maxUnclesPerBlock(2)
             .uncleMaxDepth(7)
-            .maxReorgDepth(600)
+            // ~10 minutes of wall-clock finality at 5 s/block.
+            .maxReorgDepth(120)
             .decimalScaleFactor(scale)
-            // Emission schedule, recalibrated for the 1-block/second cadence (see
+            // Emission schedule, recalibrated for the 5-second cadence (see
             // WHITEPAPER.md §5.3). The decay epoch is measured in BLOCKS, so a value
             // tuned for slow blocks collapses in real time when blocks are fast: the
             // Pandanite-style 666,666-block epoch spans ~1.9 years at 90 s/block but
-            // only ~7.7 days at 1 s/block, draining the whole subsidy in ~8 months.
-            // Both knobs are therefore rescaled by the cadence ratio (×90) so the
-            // REAL-TIME schedule is preserved: ~1.9-year epochs, ~48k PDN/day at
+            // only ~38 days at 5 s/block, draining the whole subsidy in a few years.
+            // Both knobs are therefore rescaled by the cadence ratio (×18 = 90/5) so
+            // the REAL-TIME schedule is preserved: ~1.9-year epochs, ~48k PDN/day at
             // launch, ~100M PDN total — independent of the block rate.
-            .initialReward(50L * scale / 90L)      // 0.5555 PDN/block (was 50 PDN @ 90 s)
-            .rewardEpochBlocks(666_666L * 90L)     // 60,000,000 blocks ≈ 1.9 years @ 1 s
+            .initialReward(50L * scale * 5L / 90L) // 2.7777 PDN/block (was 50 PDN @ 90 s)
+            .rewardEpochBlocks(666_666L * 18L)     // ~12,000,000 blocks ≈ 1.9 years @ 5 s
             .rewardDecayNum(2L)
             .rewardDecayDen(3L)
             .build();
@@ -214,7 +224,7 @@ public final class NetworkParameters {
     /**
      * A low-difficulty network for local development and tests. Keeps a relaxed
      * timing profile (no min-block-time floor, wide future bound, longer target)
-     * so tests can drive controlled clocks freely; the 1-block/s consensus floor
+     * so tests can drive controlled clocks freely; the fast-cadence consensus floor
      * is a mainnet property, exercised by dedicated tests via explicit params.
      */
     public static NetworkParameters testnet() {
