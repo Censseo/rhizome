@@ -24,4 +24,22 @@ public interface ContractStore {
 
     /** Removes a storage entry (used to undo a first write on reorg). */
     void deleteStorage(PublicAddress contract, byte[] key);
+
+    /**
+     * Visits every deployed contract's code — the state-snapshot export path. Optional:
+     * stores that never serve snapshots may leave the unsupported default.
+     */
+    default void forEachCode(java.util.function.BiConsumer<PublicAddress, byte[]> consumer) {
+        throw new UnsupportedOperationException("this contract store does not support enumeration");
+    }
+
+    /** Visits every {@code (contract, key, value)} storage entry — the snapshot export path. */
+    default void forEachStorage(StorageConsumer consumer) {
+        throw new UnsupportedOperationException("this contract store does not support enumeration");
+    }
+
+    @FunctionalInterface
+    interface StorageConsumer {
+        void accept(PublicAddress contract, byte[] key, byte[] value);
+    }
 }

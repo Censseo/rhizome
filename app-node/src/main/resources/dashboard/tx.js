@@ -15,7 +15,14 @@
 const RzTx = (() => {
   const C = typeof RzCrypto !== 'undefined' ? RzCrypto : require('./crypto.js');
 
-  const KIND = { TRANSFER: 0, DEPLOY: 1, CALL: 2 };
+  const KIND = {
+    TRANSFER: 0, DEPLOY: 1, CALL: 2,
+    BOX_CREATE: 3, BOX_UPDATE: 4, BOX_SPEND: 5, BOX_COLLECT: 6,
+    TOKEN_MINT: 7, TOKEN_TRANSFER: 8, TOKEN_BURN: 9,
+  };
+
+  /** Box register type tags (BoxRegisterType codes). */
+  const REGISTER = { BYTES: 0, I64: 1, BOOL: 2, ADDRESS: 3, HASH32: 4, STRING: 5 };
 
   function hexToBytes(hex) {
     const clean = (hex || '').trim().replace(/^0x/i, '');
@@ -123,9 +130,100 @@ const RzTx = (() => {
     return C.concat(...pieces);
   }
 
+  // ---- data boxes (BoxPayload wire format) ----
+
+  /**
+   * Encodes one register value to its payload bytes. reg = {type, value}:
+   * BYTES/HASH32 take hex, ADDRESS takes a 50-hex address, I64 a decimal
+   * (8 bytes big-endian, matching the chain's integer convention), BOOL
+   * "true"/"false", STRING UTF-8 text.
+   */
+  function registerPayload(reg) {
+    switch (reg.type) {
+      case 'I64': return be(BigInt(reg.value), 8);
+      case 'BOOL': return new Uint8Array([reg.value === true || reg.value === 'true' ? 1 : 0]);
+      case 'ADDRESS': return addressBytes(reg.value);
+      case 'HASH32': {
+        const b = hexToBytes(reg.value);
+        if (b.length !== 32) throw new Error('HASH32: 32 octets attendus');
+        return b;
+      }
+      case 'STRING': return new TextEncoder().encode(reg.value);
+      default: return hexToBytes(reg.value || '');
+    }
+  }
+
+  function encodeRegisters(regs) {
+    const pieces = [new Uint8Array([regs.length])];
+    for (const reg of regs) {
+      const payload = registerPayload(reg);
+      pieces.push(new Uint8Array([REGISTER[reg.type] ?? 0]), be(payload.length, 2), payload);
+    }
+    return C.concat(...pieces);
+  }
+
+  /** BOX_CREATE data: regCount(1) || regs. */
+  function encodeBoxCreate(regs) { return encodeRegisters(regs); }
+
+  /** BOX_UPDATE data: boxId(32) || regCount(1) || regs. */
+  function encodeBoxUpdate(boxIdHex, regs) {
+    const id = hexToBytes(boxIdHex);
+    if (id.length !== 32) throw new Error('box id: 32 octets attendus');
+    return C.concat(id, encodeRegisters(regs));
+  }
+
+  /** BOX_SPEND / BOX_COLLECT data: boxId(32). */
+  function encodeBoxTarget(boxIdHex) {
+    const id = hexToBytes(boxIdHex);
+    if (id.length !== 32) throw new Error('box id: 32 octets attendus');
+    return id;
+  }
+
+  /** Box id for a BOX_CREATE: SHA256(creator(25) || nonce(8 BE) || "rzbox"). */
+  function deriveBoxId(creatorHex, nonce) {
+    return bytesToHex(C.sha256(C.concat(addressBytes(creatorHex), be(nonce, 8),
+      new TextEncoder().encode('rzbox'))));
+  }
+
+  /**
+   * Serialized box size for a register set (the min-value / rent base):
+   * id(32)+owner(25)+value(8)+created(8)+rentPaid(8)+regCount(1) + Σ(tag+len+payload).
+   */
+  function boxSerializedSize(regs) {
+    let size = 32 + 25 + 8 + 8 + 8 + 1;
+    for (const reg of regs) size += 3 + registerPayload(reg).length;
+    return size;
+  }
+
+  // ---- native tokens (TokenPayload wire format) ----
+
+  /** TOKEN_MINT data: amount(8 BE) || decimals(1) || symLen(1) || symbol || nameLen(1) || name. */
+  function encodeTokenMint(amount, decimals, symbol, name) {
+    const sym = new TextEncoder().encode(symbol);
+    const nm = new TextEncoder().encode(name);
+    if (sym.length > 255 || nm.length > 255) throw new Error('symbole/nom trop long');
+    return C.concat(be(BigInt(amount), 8), new Uint8Array([Number(decimals) & 0xff]),
+      new Uint8Array([sym.length]), sym, new Uint8Array([nm.length]), nm);
+  }
+
+  /** TOKEN_TRANSFER / TOKEN_BURN data: tokenId(32) || amount(8 BE). */
+  function encodeTokenAmount(tokenIdHex, amount) {
+    const id = hexToBytes(tokenIdHex);
+    if (id.length !== 32) throw new Error('token id: 32 octets attendus');
+    return C.concat(id, be(BigInt(amount), 8));
+  }
+
+  /** Token id for a TOKEN_MINT: SHA256(minter(25) || nonce(8 BE) || "rztoken"). */
+  function deriveTokenId(minterHex, nonce) {
+    return bytesToHex(C.sha256(C.concat(addressBytes(minterHex), be(nonce, 8),
+      new TextEncoder().encode('rztoken'))));
+  }
+
   return {
-    KIND, hexToBytes, bytesToHex, be, le64,
+    KIND, REGISTER, hexToBytes, bytesToHex, be, le64,
     addressFromPublicKey, addressBytes, buildSigned, deriveContractAddress, buildCallPayload,
+    encodeBoxCreate, encodeBoxUpdate, encodeBoxTarget, deriveBoxId, boxSerializedSize,
+    encodeTokenMint, encodeTokenAmount, deriveTokenId,
   };
 })();
 

@@ -232,6 +232,9 @@ function renderDashboard() {
         ['Transactions', s.windowTxCount, 'sur ' + s.windowBlocks + ' blocs'],
         ['Travail total', BigInt(s.totalWork).toString(2).length + ' bits', 'log2 du cumul'],
       ];
+      if (s.stateRoot) {
+        tileData.push(['State root', short(s.stateRoot, 6), 'état authentifié (SMT)']);
+      }
       tiles.replaceChildren(...tileData.map(([k, v, sub]) =>
         el('div', { class: 'tile' },
           el('div', { class: 'k' }, k), el('div', { class: 'v' }, String(v)),
@@ -535,6 +538,7 @@ function renderWallet() {
           } finally { btn.disabled = false; }
         },
       }, 'Signer et envoyer'), resultZone),
+    App.features.tokens ? tokensCard(address) : null,
     el('details', null, el('summary', null, 'Exporter / oublier la clé'),
       el('div', { class: 'card' },
         el('label', { class: 'f' }, 'Clé privée (à sauvegarder en lieu sûr)'),
@@ -546,6 +550,96 @@ function renderWallet() {
             }
           },
         }, 'Oublier la clé'))));
+}
+
+/**
+ * Native-token panel of the wallet: holdings, mint, transfer, burn. Token
+ * amounts here are raw units — each token carries its own decimals, shown in
+ * the holdings list.
+ */
+function tokensCard(address) {
+  const holdingsZone = el('div');
+  const out = el('div');
+
+  async function refreshHoldings() {
+    try {
+      const res = await api('/tokens?holder=' + address);
+      holdingsZone.replaceChildren(res.tokens.length === 0
+        ? el('p', { class: 'muted' }, 'Aucun token détenu.')
+        : el('table', null,
+          el('thead', null, el('tr', null, el('th', null, 'Token'), el('th', null, 'Id'),
+            el('th', null, 'Solde (brut)'), el('th', null, 'Décimales'), el('th', null, 'Supply'))),
+          el('tbody', null, res.tokens.map(t => el('tr', null,
+            el('td', null, t.symbol + ' — ' + t.name),
+            el('td', { class: 'mono' }, el('a', {
+              href: '#', onclick: ev => { ev.preventDefault(); transferId.value = t.id; },
+            }, short(t.id, 8))),
+            el('td', { class: 'num' }, String(t.balance)),
+            el('td', { class: 'num' }, String(t.decimals)),
+            el('td', { class: 'num' }, String(t.totalSupply)))))));
+    } catch (e) {
+      holdingsZone.replaceChildren(el('div', { class: 'result-box err' }, String(e)));
+    }
+  }
+
+  const mintSupply = el('input', { placeholder: 'Supply (unités brutes)' });
+  const mintDecimals = el('input', { placeholder: 'Décimales (0-18)', value: '0' });
+  const mintSymbol = el('input', { placeholder: 'Symbole (ex : PNDA)' });
+  const mintName = el('input', { placeholder: 'Nom' });
+  const transferId = el('input', { class: 'mono', placeholder: 'Token id (64 hex)' });
+  const transferTo = el('input', { class: 'mono', placeholder: 'Destinataire (50 hex)' });
+  const transferAmount = el('input', { placeholder: 'Montant (brut)' });
+
+  async function tokenTx(kind, to, data, label) {
+    try {
+      const built = await sendFromWallet({ to, kind, data });
+      out.replaceChildren(el('div', { class: 'result-box ok' },
+        label + ' soumis — txid ', el('span', { class: 'mono' }, short(built.txid, 14))));
+      setTimeout(refreshHoldings, 3000);
+    } catch (e) {
+      out.replaceChildren(el('div', { class: 'result-box err' }, label + ' : ' + e.message));
+    }
+  }
+
+  const card = el('div', { class: 'card' }, el('h3', null, 'Tokens natifs'),
+    holdingsZone,
+    el('div', { class: 'grid2', style: 'margin-top:14px' },
+      el('div', null,
+        el('label', { class: 'f' }, 'Émettre un token (TOKEN_MINT — une transaction, pas de contrat)'),
+        el('div', { class: 'row' }, mintSymbol, mintName),
+        el('div', { class: 'row' }, mintSupply, mintDecimals),
+        el('button', {
+          class: 'small', onclick: async () => {
+            try {
+              const account = await api('/wallet?address=' + address);
+              const id = RzTx.deriveTokenId(address, BigInt(account.nextNonce));
+              await tokenTx(RzTx.KIND.TOKEN_MINT, address,
+                RzTx.encodeTokenMint(mintSupply.value.trim(), mintDecimals.value.trim() || '0',
+                  mintSymbol.value.trim(), mintName.value.trim()), 'TOKEN_MINT');
+              out.append(el('div', { class: 'muted', style: 'margin-top:6px' },
+                'Token id (au minage) : ', el('span', { class: 'mono' }, id)));
+            } catch (e) { toast(e.message, true); }
+          },
+        }, 'Émettre')),
+      el('div', null,
+        el('label', { class: 'f' }, 'Transférer / brûler'),
+        transferId, transferTo, transferAmount,
+        el('div', { class: 'row' },
+          el('button', {
+            class: 'small', onclick: () => tokenTx(RzTx.KIND.TOKEN_TRANSFER, transferTo.value.trim(),
+              RzTx.encodeTokenAmount(transferId.value.trim(), transferAmount.value.trim() || '0'), 'TOKEN_TRANSFER'),
+          }, 'Transférer'),
+          el('button', {
+            class: 'danger small', onclick: () => {
+              if (confirm('Brûler ' + transferAmount.value + ' unités ? Le supply total diminue.')) {
+                tokenTx(RzTx.KIND.TOKEN_BURN, address,
+                  RzTx.encodeTokenAmount(transferId.value.trim(), transferAmount.value.trim() || '0'), 'TOKEN_BURN');
+              }
+            },
+          }, 'Brûler')))),
+    out);
+  refreshHoldings();
+  return card;
 }
 
 /* ================= page: contracts ================= */
@@ -769,10 +863,10 @@ function renderInteract(zone, presetAddress) {
           ev.target.disabled = true;
           try {
             const payload = buildPayload();
-            const res = await apiPost('/contract/query', {
-              address: addrInput.value.trim(),
+            const res = await apiPost('/call_readonly', {
+              to: addrInput.value.trim(),
               input: RzTx.bytesToHex(payload),
-              caller: WalletStore.address() || undefined,
+              from: WalletStore.address() || '',
             });
             resultZone.replaceChildren(el('div', { class: 'result-box ' + (res.success ? 'ok' : 'err') },
               res.success ? 'Lecture OK (' + res.gasUsed + ' gas) — ' + decodeOutput(res.output)
@@ -874,8 +968,8 @@ function renderAgents() {
         class: 'secondary small', style: 'flex:0 0 auto;margin-top:0', onclick: async () => {
           try {
             const payload = RzTx.buildCallPayload(5, [{ type: 'address', value: sessionKeyInput.value.trim() }]);
-            const res = await apiPost('/contract/query', {
-              address, input: RzTx.bytesToHex(payload),
+            const res = await apiPost('/call_readonly', {
+              to: address, input: RzTx.bytesToHex(payload),
             });
             if (res.success && res.output && res.output.length >= 66) {
               const bytes = RzTx.hexToBytes(res.output);
@@ -992,34 +1086,183 @@ function renderAgents() {
 
 function renderBoxes() {
   $view.append(el('h1', null, 'Data boxes'),
-    el('p', { class: 'sub' }, 'Objets d’état de première classe pour le stockage on-chain par des agents — inspirés des boxes d’Ergo.'));
+    el('p', { class: 'sub' }, 'Objets d’état de première classe pour le stockage on-chain (mémoire d’agent, oracles, annuaires) — valeur verrouillée proportionnelle à la taille, rente de stockage, registres typés.'));
 
   if (!App.features.boxes) {
-    $view.append(
-      el('div', { class: 'callout warn' },
-        'Ce node n’active pas encore la couche de data boxes : la spécification (Phase 1) est en cours d’implémentation sur la branche ',
-        el('span', { class: 'mono' }, 'claude/ergo-pandanite-analysis'),
-        ' (docs/spec-boxes.md). Cette page s’activera automatiquement quand le node exposera les endpoints ',
-        el('span', { class: 'mono' }, '/box'), ' et ', el('span', { class: 'mono' }, '/boxes'), '.'),
-      el('div', { class: 'grid2' },
-        el('div', { class: 'card' }, el('h3', null, 'Ce qui arrive'),
-          el('ul', { style: 'margin:0;padding-left:18px;font-size:13.5px' },
-            el('li', null, 'Boxes de 64 KiB max : identifiant stable (créateur + nonce), propriétaire, jusqu’à 6 registres typés (octets, entiers, adresses, hashes, chaînes UTF-8).'),
-            el('li', null, 'Quatre opérations protocole : création, mise à jour, destruction, collecte de rente — déterministes, sans exécution WASM.'),
-            el('li', null, 'Anti-dust (minValuePerByte) et rente de stockage : l’état ne grossit pas sans payeur.'),
-            el('li', null, 'Lecture par les contrats via box_read ; événements poussés sur le flux SSE existant.'))),
-        el('div', { class: 'card' }, el('h3', null, 'Cas d’usage agents'),
-          el('ul', { style: 'margin:0;padding-left:18px;font-size:13.5px' },
-            el('li', null, 'Mémoire persistante d’agent (embeddings, état sérialisé).'),
-            el('li', null, 'Oracles : une box mise à jour par son owner, lue par les contrats.'),
-            el('li', null, 'Annuaire d’agents : endpoint + clé publique publiés on-chain.'),
-            el('li', null, 'Documents ancrés : hash de contenu off-chain + métadonnées.')))));
+    $view.append(el('div', { class: 'callout warn' },
+      'La couche de data boxes n’est pas active sur ce node. Cette page s’activera automatiquement quand ',
+      el('span', { class: 'mono' }, 'GET /features'), ' annoncera ', el('span', { class: 'mono' }, 'boxes: true'), '.'));
     return;
   }
 
-  // Future: once the node flips features.boxes, list and inspect boxes here.
-  $view.append(el('div', { class: 'card' }, el('h3', null, 'Boxes'),
-    el('p', { class: 'muted' }, 'API boxes détectée — interface de navigation à venir dans une prochaine itération.')));
+  const wallet = WalletStore.address();
+  const REGISTER_TYPES = ['STRING', 'BYTES', 'I64', 'BOOL', 'ADDRESS', 'HASH32'];
+
+  /* ---- list ---- */
+  const ownerInput = el('input', { class: 'mono', placeholder: 'Adresse propriétaire (50 hex)', value: wallet || '' });
+  const listZone = el('div');
+
+  function registerView(reg) {
+    const value = reg.type === 'STRING' ? '« ' + reg.string + ' »'
+      : reg.type === 'I64' ? BigInt('0x' + (reg.hex || '0')).toString()
+      : reg.type === 'BOOL' ? (reg.hex === '01' ? 'true' : 'false')
+      : reg.hex;
+    return el('div', { class: 'mono muted', style: 'font-size:12px' },
+      el('span', { class: 'badge' }, reg.type), ' ', short(String(value), 32));
+  }
+
+  function boxCard(b, refresh) {
+    const actions = el('div', { class: 'row' });
+    const out = el('div');
+    const mine = wallet && b.owner.toLowerCase() === wallet.toLowerCase();
+    async function boxTx(kind, data, label) {
+      try {
+        const built = await sendFromWallet({ to: wallet, kind, data });
+        out.replaceChildren(el('div', { class: 'result-box ok' },
+          label + ' soumis — txid ', el('span', { class: 'mono' }, short(built.txid, 14))));
+        setTimeout(refresh, 3000);
+      } catch (e) {
+        out.replaceChildren(el('div', { class: 'result-box err' }, label + ' : ' + e.message));
+      }
+    }
+    if (mine) {
+      actions.append(
+        el('button', {
+          class: 'secondary small', onclick: () => {
+            const regs = editRegistersPrompt(b);
+            if (regs) boxTx(RzTx.KIND.BOX_UPDATE, RzTx.encodeBoxUpdate(b.id, regs), 'BOX_UPDATE');
+          },
+        }, 'Mettre à jour'),
+        el('button', {
+          class: 'danger small', onclick: () => {
+            if (confirm('Détruire cette box ? La valeur verrouillée (' + fmtCoins(b.value) + ') est remboursée au owner.')) {
+              boxTx(RzTx.KIND.BOX_SPEND, RzTx.encodeBoxTarget(b.id), 'BOX_SPEND');
+            }
+          },
+        }, 'Détruire'));
+    }
+    if (App.stats.height >= b.expiresAtHeight) {
+      actions.append(el('button', {
+        class: 'small', onclick: () => boxTx(RzTx.KIND.BOX_COLLECT, RzTx.encodeBoxTarget(b.id), 'BOX_COLLECT'),
+      }, 'Collecter la rente'));
+    }
+    return el('div', { class: 'tpl' },
+      el('div', { class: 'mono', style: 'font-size:12px' }, short(b.id, 14)),
+      el('p', { style: 'margin:6px 0' },
+        fmtCoins(b.value) + ' verrouillés · ' + b.sizeBytes + ' octets',
+        el('br'), el('span', { class: 'muted' },
+          'créée #' + b.createdHeight + ' · expire #' + b.expiresAtHeight +
+          (App.stats.height >= b.expiresAtHeight ? ' (rente exigible)' : ''))),
+      ...(b.registers || []).map(registerView),
+      actions, out);
+  }
+
+  // BOX_UPDATE replaces the register list wholesale, so the edit prompt starts
+  // from the current registers as JSON — crude but complete for v1.
+  function editRegistersPrompt(b) {
+    const current = (b.registers || []).map(r => ({
+      type: r.type, value: r.type === 'STRING' ? r.string : r.type === 'I64' ? BigInt('0x' + (r.hex || '0')).toString() : r.type === 'BOOL' ? (r.hex === '01' ? 'true' : 'false') : r.hex,
+    }));
+    const raw = prompt('Registres (JSON [{type, value}], types: ' + REGISTER_TYPES.join('/') + ') :',
+      JSON.stringify(current));
+    if (raw === null) return null;
+    try {
+      return JSON.parse(raw);
+    } catch (e) { toast('JSON invalide : ' + e.message, true); return null; }
+  }
+
+  async function refreshList() {
+    const owner = ownerInput.value.trim();
+    if (!owner) {
+      listZone.replaceChildren(el('p', { class: 'muted' },
+        'Renseignez une adresse (ou créez un wallet) pour lister ses boxes.'));
+      return;
+    }
+    try {
+      const res = await api('/boxes?owner=' + owner + '&limit=50');
+      listZone.replaceChildren(
+        res.boxes.length === 0 ? el('p', { class: 'muted' }, 'Aucune box pour cette adresse.') :
+        el('div', { class: 'tpl-grid' }, res.boxes.map(b => boxCard(b, refreshList))));
+    } catch (e) {
+      listZone.replaceChildren(el('div', { class: 'result-box err' }, String(e)));
+    }
+  }
+  ownerInput.addEventListener('change', refreshList);
+
+  /* ---- create ---- */
+  const regsZone = el('div');
+  const valueInput = el('input', { placeholder: 'Valeur verrouillée (unités de base)' });
+  const createOut = el('div');
+  const minInfo = el('div', { class: 'muted', style: 'margin-top:8px' });
+
+  function regRow() {
+    const typeSel = el('select', null, ...REGISTER_TYPES.map(t => el('option', { value: t }, t)));
+    const valInput = el('input', { class: 'mono', placeholder: 'valeur' });
+    const row = el('div', { class: 'row', style: 'margin-top:6px' }, typeSel, valInput,
+      el('button', { class: 'danger small', style: 'flex:0 0 auto', onclick: () => { row.remove(); refreshMin(); } }, '✕'));
+    typeSel.addEventListener('change', refreshMin);
+    valInput.addEventListener('input', refreshMin);
+    return row;
+  }
+  function currentRegs() {
+    return [...regsZone.querySelectorAll('.row')].map(row => ({
+      type: row.querySelector('select').value,
+      value: row.querySelector('input').value,
+    }));
+  }
+  function refreshMin() {
+    try {
+      const size = RzTx.boxSerializedSize(currentRegs());
+      const min = BigInt(size) * BigInt(App.stats.minValuePerByte || 1);
+      minInfo.textContent = size + ' octets sérialisés — valeur minimale : ' + min + ' unités de base';
+      if (!valueInput.value || BigInt(valueInput.value) < min) valueInput.value = min.toString();
+    } catch (e) { minInfo.textContent = ''; }
+  }
+
+  $view.append(
+    el('div', { class: 'card' }, el('h3', null, 'Boxes par propriétaire'),
+      el('div', { class: 'searchbar' }, ownerInput,
+        el('button', { onclick: refreshList }, 'Lister')), listZone),
+    el('div', { class: 'grid2' },
+      el('div', { class: 'card' }, el('h3', null, 'Créer une box'),
+        wallet ? null : el('p', { class: 'warn' }, 'Créez d’abord un wallet.'),
+        el('label', { class: 'f' }, 'Registres (max ' + (App.stats.maxBoxRegisters || 6) + ', remplis densément)'),
+        regsZone,
+        el('button', { class: 'secondary small', onclick: () => { regsZone.append(regRow()); refreshMin(); } }, '+ registre'),
+        el('label', { class: 'f' }, 'Valeur verrouillée (remboursée à la destruction)'), valueInput,
+        minInfo,
+        el('button', {
+          onclick: async ev => {
+            ev.target.disabled = true;
+            try {
+              const account = await api('/wallet?address=' + wallet);
+              const boxId = RzTx.deriveBoxId(wallet, BigInt(account.nextNonce));
+              const built = await sendFromWallet({
+                to: wallet, kind: RzTx.KIND.BOX_CREATE,
+                data: RzTx.encodeBoxCreate(currentRegs()),
+                amount: BigInt(valueInput.value || '0'),
+              });
+              createOut.replaceChildren(el('div', { class: 'result-box ok' },
+                'BOX_CREATE soumis — txid ', el('span', { class: 'mono' }, short(built.txid, 14)),
+                el('div', null, 'Box id (au minage) : ', el('span', { class: 'mono' }, boxId))));
+              setTimeout(refreshList, 3000);
+            } catch (e) {
+              createOut.replaceChildren(el('div', { class: 'result-box err' }, 'Échec : ' + e.message));
+            } finally { ev.target.disabled = false; }
+          },
+        }, 'Signer et créer'), createOut),
+      el('div', { class: 'card' }, el('h3', null, 'Économie des boxes'),
+        el('dl', { class: 'kv' },
+          el('dt', null, 'minValuePerByte'), el('dd', null, String(App.stats.minValuePerByte)),
+          el('dt', null, 'Rente / période'), el('dd', null, String(App.stats.storageFeeFactor) + ' par octet'),
+          el('dt', null, 'Période de rente'), el('dd', null, App.stats.storagePeriodBlocks + ' blocs'),
+          el('dt', null, 'State root'), el('dd', { class: 'mono' },
+            App.stats.stateRoot ? short(App.stats.stateRoot, 16) : '—')),
+        el('p', { class: 'muted', style: 'font-size:12.5px' },
+          'Une box verrouille de la valeur proportionnelle à sa taille (anti-dust). Passé la période, la rente devient exigible : n’importe qui peut la collecter (BOX_COLLECT) — une box sans payeur finit détruite, l’état ne grossit pas indéfiniment.'))));
+  refreshList();
+  regsZone.append(regRow());
+  refreshMin();
 }
 
 /* ================= go ================= */

@@ -72,6 +72,25 @@ final class SessionContractStore implements ContractStore {
     }
 
     /**
+     * The forward changes buffered in this session, with their final values — for the
+     * authenticated state root. Contracts only ever set (a write of empty bytes is a
+     * value, not a deletion), so every change carries a non-null value.
+     */
+    List<rhizome.core.blockchain.ContractProcessor.ContractChange> forwardChanges() {
+        List<rhizome.core.blockchain.ContractProcessor.ContractChange> out = new ArrayList<>();
+        codeWrites.forEach((k, v) ->
+            out.add(new rhizome.core.blockchain.ContractProcessor.ContractChange(
+                true, PublicAddress.of(hexToBytes(k)), null, v)));
+        storageWrites.forEach((slot, v) -> {
+            int sep = slot.indexOf(':');
+            PublicAddress contract = PublicAddress.of(hexToBytes(slot.substring(0, sep)));
+            byte[] key = hexToBytes(slot.substring(sep + 1));
+            out.add(new rhizome.core.blockchain.ContractProcessor.ContractChange(false, contract, key, v));
+        });
+        return out;
+    }
+
+    /**
      * Writes every buffered change into the base store and returns the undo journal
      * (each written key's prior base value, {@code null} if it did not exist), so the
      * block can be reverted exactly.

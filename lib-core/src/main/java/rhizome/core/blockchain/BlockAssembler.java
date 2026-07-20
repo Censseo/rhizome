@@ -4,12 +4,15 @@ import java.util.List;
 
 import rhizome.core.block.Block;
 import rhizome.core.block.BlockImpl;
+import rhizome.core.box.BoxPayload;
 import rhizome.core.crypto.SHA256Hash;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.mempool.MemPool;
 import rhizome.core.merkletree.MerkleTree;
 import rhizome.core.transaction.Transaction;
 import rhizome.core.transaction.TransactionAmount;
+import rhizome.core.transaction.TransactionImpl;
+import rhizome.core.transaction.TransactionKind;
 
 /**
  * Builds an unmined candidate block for the current chain tip: a coinbase paying
@@ -55,6 +58,35 @@ public final class BlockAssembler {
             }
             block.addTransaction(t);
             size = next;
+        }
+
+        // Rent collection (GHOST-like opportunistic clean-up): mint an unsigned BOX_COLLECT
+        // for each expired box, crediting the rent to the miner. Bounded per block, and
+        // included only while the block stays under the size cap.
+        int slotsLeft = Math.max(0, params.maxTransactionsPerBlock() - block.transactions().size());
+        int collectBudget = Math.min(params.maxBoxCollectsPerBlock(), slotsLeft);
+        if (collectBudget > 0) {
+            long ts = block.timestamp();
+            for (byte[] boxId : engine.collectableBoxIds(height, collectBudget)) {
+                Transaction collect = TransactionImpl.builder()
+                    .kind(TransactionKind.BOX_COLLECT)
+                    .from(PublicAddress.empty())
+                    .to(miner)
+                    .amount(new TransactionAmount(0))
+                    .fee(new TransactionAmount(0))
+                    .isTransactionFee(false)
+                    .chainId(params.chainId())
+                    .nonce(0)
+                    .timestamp(ts)
+                    .data(BoxPayload.encodeTarget(boxId))
+                    .build();
+                long next = size + collect.serialize().getSize();
+                if (next > params.maxBlockSizeBytes()) {
+                    break;
+                }
+                block.addTransaction(collect);
+                size = next;
+            }
         }
 
         var tree = new MerkleTree();

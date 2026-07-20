@@ -26,4 +26,7 @@ public final class GasSchedule {
     /** Deploying stores code on-chain: a base cost plus per code byte. */
     public static final long DEPLOY_BASE = 500L;
     public static final long DEPLOY_PER_CODE_BYTE = 10L;
+
+    /** Reading a data box (Ergo-style data input): cheap, base plus per copied byte. */
+    public static final long BOX_READ_BASE = 100L;
 }

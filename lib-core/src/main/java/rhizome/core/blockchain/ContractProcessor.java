@@ -66,6 +66,30 @@ public interface ContractProcessor {
         return List.of();
     }
 
+    /**
+     * Executes a read-only CALL against committed state and discards all writes — a
+     * dry run for querying contract state off-chain. Never mutates the store or the
+     * block session, so it is safe to call concurrently with block processing. Returns
+     * the would-be output, gas and logs; not wired to the ledger (no value actually
+     * moves). Default: unsupported.
+     */
+    default ContractResult dryRun(PublicAddress from, PublicAddress to, byte[] input,
+                                  long value, long gasLimit) {
+        throw new UnsupportedOperationException("dry-run not supported");
+    }
+
+    /** Contract code/storage writes committed by {@code blockHeight}, for the authenticated state root. */
+    default List<ContractChange> changes(long blockHeight) {
+        return List.of();
+    }
+
+    /**
+     * One committed contract write with its final value. {@code code} distinguishes a code
+     * write (deploy — {@code key} null) from a storage write. Contracts never delete forward
+     * (a storage write of empty bytes is a value, not a deletion), so {@code value} is non-null.
+     */
+    record ContractChange(boolean code, PublicAddress contract, byte[] key, byte[] value) {}
+
     /** Runtime outcome of one contract transaction, recorded for reorg reversal. */
     record ContractReceipt(long gasUsed, boolean success) {}
 

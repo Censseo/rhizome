@@ -53,9 +53,11 @@ offline against your own node:
   throwaway state overlay.
 - **Agents IA** — deploy and manage agent wallets: init/exec, grant/revoke
   capped session keys, inspect sessions, watch grant/spend events live.
-- **Boxes** — dormant page for the upcoming data-box layer (spec'd in
-  `docs/spec-boxes.md` on the ergo-analysis branch); it activates itself when
-  the node starts advertising the feature in `GET /features`.
+- **Boxes** — browse, create, update, spend and rent-collect data boxes with
+  typed registers; the minimum locked value is computed client-side from the
+  node's `minValuePerByte`. Native tokens (mint/transfer/burn, holdings) live
+  in the Wallet page. Both activate from the `GET /features` flags, so a node
+  built without those layers keeps the pages dormant.
 
 A quick local playground:
 

@@ -49,6 +49,7 @@ public sealed interface Block permits BlockImpl {
                 .merkleRoot(blockDto.merkleRoot())
                 .lastBlockHash(blockDto.lastBlockHash())
                 .nonce(blockDto.nonce())
+                .stateRoot(blockDto.stateRoot())
                 .transactions(transactions)
                 .uncles(new java.util.ArrayList<>(uncles))
                 .build();
@@ -92,6 +93,8 @@ public sealed interface Block permits BlockImpl {
         static final String TIMESTAMP = "timestamp";
         static final String DIFFICULTY = "difficulty";
         static final String NONCE = "nonce";
+        static final String STATE_ROOT = "stateRoot";
+        static final String VOTE = "vote";
         static final String MERKLE_ROOT = "merkleRoot";
         static final String LAST_BLOCK_HASH = "lastBlockHash";
         static final String TRANSACTIONS = "transactions";
@@ -109,7 +112,9 @@ public sealed interface Block permits BlockImpl {
                 blockImpl.transactions().size(),
                 blockImpl.lastBlockHash(),
                 blockImpl.merkleRoot(),
-                blockImpl.nonce()
+                blockImpl.nonce(),
+                blockImpl.stateRoot(),
+                blockImpl.vote()
             );
         }
     
@@ -133,6 +138,14 @@ public sealed interface Block permits BlockImpl {
             result.put(TIMESTAMP, Long.toString(blockImpl.timestamp()));
             result.put(MERKLE_ROOT, blockImpl.merkleRoot().toHexString());
             result.put(LAST_BLOCK_HASH, blockImpl.lastBlockHash().toHexString());
+            // Committed only when set, mirroring the header hash, so a stateless block's
+            // JSON (and the hash a peer recomputes from it) is unchanged.
+            if (!blockImpl.stateRoot().equals(SHA256Hash.empty())) {
+                result.put(STATE_ROOT, blockImpl.stateRoot().toHexString());
+            }
+            if (blockImpl.vote() != 0) {
+                result.put(VOTE, blockImpl.vote());
+            }
             JSONArray transactionsArray = new JSONArray();
             for (Transaction transaction : blockImpl.transactions()) {
                 transactionsArray.put(transaction.toJson());
@@ -159,6 +172,8 @@ public sealed interface Block permits BlockImpl {
                 .merkleRoot(SHA256Hash.of(json.getString(MERKLE_ROOT)))
                 .lastBlockHash(SHA256Hash.of(json.getString(LAST_BLOCK_HASH)))
                 .nonce(SHA256Hash.of(json.getString(NONCE)))
+                .stateRoot(json.has(STATE_ROOT) ? SHA256Hash.of(json.getString(STATE_ROOT)) : SHA256Hash.empty())
+                .vote(json.optInt(VOTE, 0))
                 .transactions(
                     IntStream.range(0, json.getJSONArray(TRANSACTIONS).length())
                         .mapToObj(i -> Transaction.of(json.getJSONArray(TRANSACTIONS).getJSONObject(i)))

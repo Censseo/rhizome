@@ -90,7 +90,9 @@ public final class TransactionImpl implements Transaction, Comparable<Transactio
     }
     
     public boolean signatureValid() {
-        if (isTransactionFee()) return true;
+        // Coinbase and rent collection (BOX_COLLECT) are self-authorized: minted by the
+        // block producer, carrying no signature, validated by consensus rules instead.
+        if (isTransactionFee() || kind == TransactionKind.BOX_COLLECT) return true;
         return checkSignature(hashContents().toBytes(), this.signature.toBytes(), this.signingKey);
     }
 
@@ -129,10 +131,10 @@ public final class TransactionImpl implements Transaction, Comparable<Transactio
         digest.update(longToBytes(timestamp), 0, 8);
         digest.update(intToBytes(chainId), 0, 4);
         digest.update(longToBytes(nonce), 0, 8);
-        // Contract fields are committed only for contract transactions, so a plain
-        // transfer's content hash (and signature) is byte-for-byte what it was
-        // before contracts existed.
-        if (kind.isContract()) {
+        // Payload fields are committed for every non-transfer kind (contract and box),
+        // so a plain transfer's content hash (and signature) is byte-for-byte what it
+        // was before contracts existed.
+        if (kind.hasPayload()) {
             digest.update(new byte[] {kind.code()}, 0, 1);
             digest.update(longToBytes(gasLimit), 0, 8);
             digest.update(longToBytes(gasPrice), 0, 8);

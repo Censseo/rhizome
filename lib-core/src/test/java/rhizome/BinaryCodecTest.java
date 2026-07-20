@@ -29,7 +29,7 @@ class BinaryCodecTest {
     @Test
     void fixedBufferSizes() {
         assertEquals(64 + 32 + 8 + 25 + 8 + 8 + 1 + 4 + 8, TransactionDto.BUFFER_SIZE);
-        assertEquals(4 + 8 + 4 + 4 + 32 + 32 + 32, BlockDto.BUFFER_SIZE);
+        assertEquals(4 + 8 + 4 + 4 + 32 + 32 + 32 + 32 + 4, BlockDto.BUFFER_SIZE); // + stateRoot(32) + vote(4)
     }
 
     @Test

@@ -13,7 +13,9 @@ import rhizome.core.serialization.BinarySerializable;
  * Wire/storage form of a block header. Fixed big-endian layout
  * ({@link #BUFFER_SIZE} bytes), hand-written for determinism and native-image
  * friendliness: {@code id(4) || timestamp(8) || difficulty(4) ||
- * numTransactions(4) || lastBlockHash(32) || merkleRoot(32) || nonce(32)}.
+ * numTransactions(4) || lastBlockHash(32) || merkleRoot(32) || nonce(32) ||
+ * stateRoot(32)}. The state root is carried on the wire always (zero when the
+ * producer runs without the accumulator), so the header format is fixed once.
  */
 @Getter
 public class BlockDto implements BinarySerializable {
@@ -24,10 +26,12 @@ public class BlockDto implements BinarySerializable {
     public final SHA256Hash lastBlockHash;
     public final SHA256Hash merkleRoot;
     public final SHA256Hash nonce;
+    public final SHA256Hash stateRoot;
+    public final int vote;
 
     public static final int BUFFER_SIZE =
         Integer.BYTES + Long.BYTES + Integer.BYTES + Integer.BYTES
-        + SHA256Hash.SIZE + SHA256Hash.SIZE + SHA256Hash.SIZE;
+        + SHA256Hash.SIZE + SHA256Hash.SIZE + SHA256Hash.SIZE + SHA256Hash.SIZE + Integer.BYTES;
 
     public BlockDto(
         int id,
@@ -37,6 +41,19 @@ public class BlockDto implements BinarySerializable {
         SHA256Hash lastBlockHash,
         SHA256Hash merkleRoot,
         SHA256Hash nonce) {
+        this(id, timestamp, difficulty, numTransactions, lastBlockHash, merkleRoot, nonce, SHA256Hash.empty(), 0);
+    }
+
+    public BlockDto(
+        int id,
+        long timestamp,
+        int difficulty,
+        int numTransactions,
+        SHA256Hash lastBlockHash,
+        SHA256Hash merkleRoot,
+        SHA256Hash nonce,
+        SHA256Hash stateRoot,
+        int vote) {
 
         this.id = id;
         this.timestamp = timestamp;
@@ -45,6 +62,8 @@ public class BlockDto implements BinarySerializable {
         this.lastBlockHash = lastBlockHash;
         this.merkleRoot = merkleRoot;
         this.nonce = nonce;
+        this.stateRoot = stateRoot;
+        this.vote = vote;
     }
 
     @Override
@@ -56,6 +75,8 @@ public class BlockDto implements BinarySerializable {
         BinaryIO.putFixed(buffer, lastBlockHash.toBytes(), SHA256Hash.SIZE);
         BinaryIO.putFixed(buffer, merkleRoot.toBytes(), SHA256Hash.SIZE);
         BinaryIO.putFixed(buffer, nonce.toBytes(), SHA256Hash.SIZE);
+        BinaryIO.putFixed(buffer, stateRoot.toBytes(), SHA256Hash.SIZE);
+        buffer.putInt(vote);
     }
 
     public static BlockDto readFrom(ByteBuffer buffer) {
@@ -66,7 +87,10 @@ public class BlockDto implements BinarySerializable {
         SHA256Hash lastBlockHash = SHA256Hash.of(BinaryIO.getFixed(buffer, SHA256Hash.SIZE));
         SHA256Hash merkleRoot = SHA256Hash.of(BinaryIO.getFixed(buffer, SHA256Hash.SIZE));
         SHA256Hash nonce = SHA256Hash.of(BinaryIO.getFixed(buffer, SHA256Hash.SIZE));
-        return new BlockDto(id, timestamp, difficulty, numTransactions, lastBlockHash, merkleRoot, nonce);
+        SHA256Hash stateRoot = SHA256Hash.of(BinaryIO.getFixed(buffer, SHA256Hash.SIZE));
+        int vote = buffer.getInt();
+        return new BlockDto(id, timestamp, difficulty, numTransactions, lastBlockHash, merkleRoot, nonce,
+            stateRoot, vote);
     }
 
     @Override

@@ -82,16 +82,17 @@ class DashboardApiTest {
 
         var verifier = new SignatureVerifier();
         processor = new WasmContractProcessor(new WasmVm(), new InMemoryContractStore());
+        var boxProcessor = new rhizome.core.box.DefaultBoxProcessor(
+            new rhizome.core.box.InMemoryBoxStore(), params);
+        var tokenProcessor = new rhizome.core.token.DefaultTokenProcessor(
+            new rhizome.core.token.InMemoryTokenStore(), params);
         engine = ChainEngine.init(params, new InMemoryLedger(), new InMemoryChainStore(),
-            snapshot, null, clock::get, verifier, processor);
+            snapshot, null, clock::get, verifier, processor, boxProcessor, tokenProcessor);
         var mempool = new MemPool(params, verifier, engine, 1000);
         node = new NodeService(engine, mempool);
         node.setLogSource(processor::logs);
         node.setCodeSource(processor::codeAt);
-        node.setContractQuery((caller, contract, input, gasLimit) -> {
-            var r = processor.query(caller, contract, input, gasLimit);
-            return new NodeService.QueryOutcome(r.success(), r.output(), r.gasUsed(), r.error());
-        });
+        node.setContracts(processor);
         servlet = NodeApi.servlet(eventloop, node);
 
         eventloop.keepAlive(true);
@@ -208,7 +209,8 @@ class DashboardApiTest {
         JSONObject features = new JSONObject(body(call(HttpRequest.get("http://x/features").build())));
         assertTrue(features.getBoolean("dashboard"));
         assertTrue(features.getBoolean("contracts"));
-        assertFalse(features.getBoolean("boxes"));
+        assertTrue(features.getBoolean("boxes"));
+        assertTrue(features.getBoolean("tokens"));
     }
 
     // ---- explorer scans ----
@@ -282,12 +284,12 @@ class DashboardApiTest {
             "http://x/contract?address=" + PublicAddress.random().toHexString()).build())));
         assertFalse(missing.getBoolean("exists"));
 
-        // The query executes against a throwaway overlay: it sees counter=1 -> outputs 2,
-        // and repeating it returns the same value (no state was committed).
+        // The dashboard reads via /call_readonly: a dry run against a throwaway overlay
+        // sees counter=1 -> outputs 2, and repeating it returns the same value.
         for (int i = 0; i < 2; i++) {
-            HttpResponse q = call(HttpRequest.post("http://x/contract/query")
+            HttpResponse q = call(HttpRequest.post("http://x/call_readonly")
                 .withBody(new JSONObject()
-                    .put("address", contract.toHexString())
+                    .put("to", contract.toHexString())
                     .put("input", "").toString().getBytes(java.nio.charset.StandardCharsets.UTF_8))
                 .build());
             assertEquals(200, q.getCode());
@@ -297,10 +299,10 @@ class DashboardApiTest {
             assertTrue(res.getLong("gasUsed") > 0);
         }
 
-        // Query against an empty address fails cleanly.
-        HttpResponse bad = call(HttpRequest.post("http://x/contract/query")
+        // Dry run against an empty address fails cleanly.
+        HttpResponse bad = call(HttpRequest.post("http://x/call_readonly")
             .withBody(new JSONObject()
-                .put("address", PublicAddress.random().toHexString())
+                .put("to", PublicAddress.random().toHexString())
                 .put("input", "").toString().getBytes(java.nio.charset.StandardCharsets.UTF_8))
             .build());
         assertEquals(200, bad.getCode());
