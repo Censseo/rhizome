@@ -894,3 +894,9 @@ node is required); a public multi-node testnet.
   #29 (Merkle), #37 (Ed25519 malleability), #52 (rate-limiter leak).
 - Fossilised incidents: `pandanite/invalid.json`, `blacklist.txt`, `config.cpp`
   `bannedHashes`, the `blockchain.cpp` difficulty hack (blocks 536100–536200).
+- Design lineage: [Ergo](https://github.com/ergoplatform/ergo) — the extended-UTXO
+  **box** model (adapted to account-based **data boxes**, §5.5), the **authenticated
+  state root** with light-client proofs (an AVL+ tree there, a sparse Merkle tree here,
+  §5.7), and the **buried-pivot snapshot bootstrap** (Ergo's §8 bootstrapping, adapted to
+  an order-independent sparse-Merkle root with flat per-domain dumps rather than an AVL+
+  manifest, §6.4). The EIP-1 wallet **scan** predicate model informs `/scan` (§5.5).
