@@ -1,6 +1,7 @@
 package rhizome.core.blockchain;
 
 import rhizome.core.block.Block;
+import rhizome.core.block.BlockHeader;
 import rhizome.core.crypto.SHA256Hash;
 
 /**
@@ -17,6 +18,17 @@ public interface ChainStore {
     long height();
 
     Block blockAt(long height);
+
+    /**
+     * The logical header at a height. The engine's derived state (difficulty,
+     * median-time, uncle work, votes) depends only on headers, so it reads
+     * through here — a store that has pruned the body can still serve the
+     * header. The default derives it from the full block; persistent stores
+     * override it to read a dedicated header column family.
+     */
+    default BlockHeader headerAt(long height) {
+        return BlockHeader.of(blockAt(height));
+    }
 
     default Block tip() {
         return blockAt(height());

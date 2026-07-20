@@ -16,7 +16,9 @@ import org.rocksdb.WriteOptions;
 
 import rhizome.core.block.Block;
 import rhizome.core.block.BlockCodec;
+import rhizome.core.block.BlockHeader;
 import rhizome.core.block.BlockImpl;
+import rhizome.core.block.HeaderCodec;
 import rhizome.core.blockchain.ChainStore;
 import rhizome.core.crypto.SHA256Hash;
 import rhizome.core.ledger.Ledger;
@@ -48,6 +50,7 @@ public final class RocksDbNodeStore implements AutoCloseable {
     }
 
     private static final byte[] CF_BLOCKS = "blocks".getBytes();
+    private static final byte[] CF_HEADERS = "headers".getBytes();
     private static final byte[] CF_TXINDEX = "txindex".getBytes();
     private static final byte[] CF_META = "meta".getBytes();
     private static final byte[] CF_LEDGER = "ledger".getBytes();
@@ -56,6 +59,7 @@ public final class RocksDbNodeStore implements AutoCloseable {
     private final RocksDB db;
     private final ColumnFamilyHandle defaultCf;
     private final ColumnFamilyHandle blocksCf;
+    private final ColumnFamilyHandle headersCf;
     private final ColumnFamilyHandle txIndexCf;
     private final ColumnFamilyHandle metaCf;
     private final ColumnFamilyHandle ledgerCf;
@@ -65,6 +69,7 @@ public final class RocksDbNodeStore implements AutoCloseable {
         List<ColumnFamilyDescriptor> descriptors = List.of(
             new ColumnFamilyDescriptor(RocksDB.DEFAULT_COLUMN_FAMILY),
             new ColumnFamilyDescriptor(CF_BLOCKS),
+            new ColumnFamilyDescriptor(CF_HEADERS),
             new ColumnFamilyDescriptor(CF_TXINDEX),
             new ColumnFamilyDescriptor(CF_META),
             new ColumnFamilyDescriptor(CF_LEDGER));
@@ -79,9 +84,52 @@ public final class RocksDbNodeStore implements AutoCloseable {
         }
         this.defaultCf = handles.get(0);
         this.blocksCf = handles.get(1);
-        this.txIndexCf = handles.get(2);
-        this.metaCf = handles.get(3);
-        this.ledgerCf = handles.get(4);
+        this.headersCf = handles.get(2);
+        this.txIndexCf = handles.get(3);
+        this.metaCf = handles.get(4);
+        this.ledgerCf = handles.get(5);
+        backfillHeaders();
+    }
+
+    /**
+     * Boot migration: an older database has block bodies but no {@code headers}
+     * column family. Derive every header from its stored block in one pass so
+     * the engine can run header-only afterwards. Idempotent — a header already
+     * present is left untouched — so a partially-backfilled database (crash
+     * mid-migration) is completed on the next boot rather than restarted.
+     */
+    private void backfillHeaders() throws IOException {
+        long height;
+        try {
+            byte[] value = db.get(metaCf, HEIGHT_KEY);
+            height = value == null ? 0 : bytesToLong(value);
+        } catch (RocksDBException e) {
+            throw new IOException("Failed to read chain height during header backfill", e);
+        }
+        if (height == 0) {
+            return; // fresh database: nothing to migrate
+        }
+        try {
+            long migrated = 0;
+            for (long h = 1; h <= height; h++) {
+                byte[] key = heightKey(h);
+                if (db.get(headersCf, key) != null) {
+                    continue; // already backfilled
+                }
+                byte[] body = db.get(blocksCf, key);
+                if (body == null) {
+                    continue; // pruned body with no header: nothing to derive from
+                }
+                Block block = BlockCodec.decode(body);
+                db.put(headersCf, writeOptions, key, HeaderCodec.encode(BlockHeader.of(block)));
+                migrated++;
+            }
+            if (migrated > 0) {
+                System.out.println("[RocksDbNodeStore] backfilled " + migrated + " block header(s)");
+            }
+        } catch (RocksDBException e) {
+            throw new IOException("Failed to backfill block headers", e);
+        }
     }
 
     public ChainStore chainStore() {
@@ -96,6 +144,7 @@ public final class RocksDbNodeStore implements AutoCloseable {
     public void close() {
         defaultCf.close();
         blocksCf.close();
+        headersCf.close();
         txIndexCf.close();
         metaCf.close();
         ledgerCf.close();
@@ -135,6 +184,20 @@ public final class RocksDbNodeStore implements AutoCloseable {
         }
 
         @Override
+        public BlockHeader headerAt(long height) {
+            try {
+                byte[] value = db.get(headersCf, heightKey(height));
+                if (value != null) {
+                    return HeaderCodec.decode(value);
+                }
+                // No stored header (should not happen post-backfill); fall back to the body.
+                return BlockHeader.of(blockAt(height));
+            } catch (RocksDBException e) {
+                throw new LedgerException("Failed to read header " + height, e);
+            }
+        }
+
+        @Override
         public void append(Block block) {
             long expected = height() + 1;
             if (((BlockImpl) block).id() != expected) {
@@ -142,13 +205,17 @@ public final class RocksDbNodeStore implements AutoCloseable {
                     "Expected block " + expected + " but got " + ((BlockImpl) block).id());
             }
             try (WriteBatch batch = new WriteBatch()) {
-                batch.put(blocksCf, heightKey(expected), BlockCodec.encode(block));
+                byte[] key = heightKey(expected);
+                batch.put(blocksCf, key, BlockCodec.encode(block));
+                // The header is committed in the same batch as the body, so the two
+                // column families can never disagree after a crash.
+                batch.put(headersCf, key, HeaderCodec.encode(BlockHeader.of(block)));
                 for (Transaction t : block.transactions()) {
                     if (!((TransactionImpl) t).isTransactionFee()) {
-                        batch.put(txIndexCf, t.hashContents().toBytes(), heightKey(expected));
+                        batch.put(txIndexCf, t.hashContents().toBytes(), key);
                     }
                 }
-                batch.put(metaCf, HEIGHT_KEY, heightKey(expected));
+                batch.put(metaCf, HEIGHT_KEY, key);
                 db.write(writeOptions, batch);
             } catch (RocksDBException e) {
                 throw new LedgerException("Failed to append block " + expected, e);
@@ -163,7 +230,9 @@ public final class RocksDbNodeStore implements AutoCloseable {
             }
             Block tip = blockAt(height);
             try (WriteBatch batch = new WriteBatch()) {
-                batch.delete(blocksCf, heightKey(height));
+                byte[] key = heightKey(height);
+                batch.delete(blocksCf, key);
+                batch.delete(headersCf, key);
                 for (Transaction t : tip.transactions()) {
                     if (!((TransactionImpl) t).isTransactionFee()) {
                         batch.delete(txIndexCf, t.hashContents().toBytes());

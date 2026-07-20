@@ -16,6 +16,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import rhizome.core.block.Block;
+import rhizome.core.block.BlockCodec;
+import rhizome.core.block.BlockHeader;
 import rhizome.core.block.BlockImpl;
 import rhizome.core.blockchain.ChainEngine;
 import rhizome.core.blockchain.ChainStore;
@@ -132,6 +134,99 @@ class RocksDbNodeStoreTest {
             assertEquals(workAfter, reloaded.totalWork());
             assertEquals(1, reloaded.nextNonce(sender));
         }
+    }
+
+    @Test
+    void headerColumnFamilyStaysConsistentWithBodiesAcrossReopen() throws IOException {
+        NetworkParameters params = fastParams();
+        String path = tempDir.resolve("db").toString();
+        AtomicLong clock = new AtomicLong(0);
+
+        LedgerSnapshot snapshot = new LedgerSnapshot("test", 0, params.chainId());
+        PublicAddress miner = PublicAddress.random();
+
+        try (RocksDbNodeStore store = new RocksDbNodeStore(path)) {
+            ChainStore chain = store.chainStore();
+            ChainEngine engine = ChainEngine.init(params, store.ledger(), chain, snapshot, null, clock::get);
+            for (int i = 0; i < 3; i++) {
+                assertEquals(ExecutionStatus.SUCCESS, engine.addBlock(mine(engine, params, miner, List.of(), clock)));
+            }
+            for (long h = 1; h <= chain.height(); h++) {
+                // The header read from the dedicated CF must hash exactly as the body's header.
+                assertEquals(chain.blockAt(h).hash(), chain.headerAt(h).hash());
+                assertEquals(BlockHeader.of(chain.blockAt(h)), chain.headerAt(h));
+            }
+        }
+
+        // Reopen: headers were persisted in the same batch as the bodies.
+        try (RocksDbNodeStore store = new RocksDbNodeStore(path)) {
+            ChainStore chain = store.chainStore();
+            assertEquals(4, chain.height());
+            for (long h = 1; h <= chain.height(); h++) {
+                assertEquals(chain.blockAt(h).hash(), chain.headerAt(h).hash());
+            }
+        }
+    }
+
+    @Test
+    void backfillsHeadersForLegacyDatabaseWithoutHeaderCf() throws Exception {
+        org.rocksdb.RocksDB.loadLibrary();
+        String path = tempDir.resolve("legacy-db").toString();
+
+        // Build a few blocks and remember their hashes.
+        Block b1 = looseBlock(1, rhizome.core.crypto.SHA256Hash.random());
+        Block b2 = looseBlock(2, b1.hash());
+        Block b3 = looseBlock(3, b2.hash());
+        List<Block> blocks = List.of(b1, b2, b3);
+
+        // Write a *legacy* database: the pre-headers column-family set (no "headers" CF).
+        List<org.rocksdb.ColumnFamilyDescriptor> legacy = List.of(
+            new org.rocksdb.ColumnFamilyDescriptor(org.rocksdb.RocksDB.DEFAULT_COLUMN_FAMILY),
+            new org.rocksdb.ColumnFamilyDescriptor("blocks".getBytes()),
+            new org.rocksdb.ColumnFamilyDescriptor("txindex".getBytes()),
+            new org.rocksdb.ColumnFamilyDescriptor("meta".getBytes()),
+            new org.rocksdb.ColumnFamilyDescriptor("ledger".getBytes()));
+        List<org.rocksdb.ColumnFamilyHandle> handles = new java.util.ArrayList<>();
+        try (org.rocksdb.DBOptions options = new org.rocksdb.DBOptions()
+                .setCreateIfMissing(true).setCreateMissingColumnFamilies(true);
+             org.rocksdb.WriteOptions wo = new org.rocksdb.WriteOptions()) {
+            org.rocksdb.RocksDB raw = org.rocksdb.RocksDB.open(options, path, legacy, handles);
+            try {
+                org.rocksdb.ColumnFamilyHandle blocksCf = handles.get(1);
+                org.rocksdb.ColumnFamilyHandle metaCf = handles.get(3);
+                for (int i = 0; i < blocks.size(); i++) {
+                    raw.put(blocksCf, wo, rhizome.core.common.Utils.longToBytes(i + 1L),
+                        BlockCodec.encode(blocks.get(i)));
+                }
+                raw.put(metaCf, wo, "height".getBytes(), rhizome.core.common.Utils.longToBytes(3L));
+            } finally {
+                handles.forEach(org.rocksdb.ColumnFamilyHandle::close);
+                raw.close();
+            }
+        }
+
+        // Reopen through RocksDbNodeStore: the missing headers CF is created and backfilled.
+        try (RocksDbNodeStore store = new RocksDbNodeStore(path)) {
+            ChainStore chain = store.chainStore();
+            assertEquals(3, chain.height());
+            for (int i = 0; i < blocks.size(); i++) {
+                assertEquals(blocks.get(i).hash(), chain.headerAt(i + 1L).hash());
+                assertEquals(BlockHeader.of(blocks.get(i)), chain.headerAt(i + 1L));
+            }
+        }
+    }
+
+    /** A standalone, un-mined block (valid encoding; not chain-validated) for storage tests. */
+    private Block looseBlock(int id, rhizome.core.crypto.SHA256Hash parent) {
+        var b = (BlockImpl) BlockImpl.builder()
+            .id(id).timestamp(1_000_000L + id).difficulty(4)
+            .lastBlockHash(parent).build();
+        b.addTransaction(Transaction.of(PublicAddress.random(), new TransactionAmount(50L)));
+        var tree = new MerkleTree();
+        tree.setItems(b.transactions());
+        b.merkleRoot(tree.getRootHash());
+        b.nonce(rhizome.core.crypto.SHA256Hash.random());
+        return b;
     }
 
     private Block mine(ChainEngine engine, NetworkParameters params, PublicAddress miner,
