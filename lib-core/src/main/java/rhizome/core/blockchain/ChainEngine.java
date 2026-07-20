@@ -62,8 +62,8 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
     private final OrphanPool orphans = new OrphanPool(256);
     private final ReentrantLock lock = new ReentrantLock();
 
-    /** Next expected account nonce per sender; rebuilt on init, updated on add/pop. */
-    private final Map<rhizome.core.ledger.PublicAddress, Long> nextNonce = new HashMap<>();
+    /** Next expected account nonce per sender; persisted, updated incrementally on add/pop. */
+    private final NonceStore nonceStore;
 
     private BigInteger totalWork = BigInteger.ZERO;
     private int currentDifficulty;
@@ -81,6 +81,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
     private final java.util.TreeMap<Long, long[]> voteParamsByBoundary = new java.util.TreeMap<>();
 
     private ChainEngine(NetworkParameters params, Ledger ledger, ChainStore store,
+                        NonceStore nonceStore,
                         LongSupplier nowMillis, SignatureVerifier verifier,
                         ContractProcessor contractProcessor,
                         rhizome.core.box.BoxProcessor boxProcessor,
@@ -89,6 +90,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         this.params = params;
         this.ledger = ledger;
         this.store = store;
+        this.nonceStore = nonceStore;
         this.nowMillis = nowMillis;
         this.verifier = verifier;
         this.contractProcessor = contractProcessor;
@@ -154,7 +156,23 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
                                    rhizome.core.box.BoxProcessor boxProcessor,
                                    rhizome.core.token.TokenProcessor tokenProcessor,
                                    rhizome.core.state.StateAccumulator stateAccumulator) {
-        ChainEngine engine = new ChainEngine(params, ledger, store, nowMillis, verifier,
+        return init(params, ledger, store, new InMemoryNonceStore(), snapshot, expectedGenesisHash,
+            nowMillis, verifier, contractProcessor, boxProcessor, tokenProcessor, stateAccumulator);
+    }
+
+    /**
+     * As {@link #init}, with a persisted {@link NonceStore} so account nonces survive
+     * restarts and the boot rebuild need not walk historical transaction bodies.
+     */
+    public static ChainEngine init(NetworkParameters params, Ledger ledger, ChainStore store,
+                                   NonceStore nonceStore,
+                                   LedgerSnapshot snapshot, SHA256Hash expectedGenesisHash,
+                                   LongSupplier nowMillis, SignatureVerifier verifier,
+                                   ContractProcessor contractProcessor,
+                                   rhizome.core.box.BoxProcessor boxProcessor,
+                                   rhizome.core.token.TokenProcessor tokenProcessor,
+                                   rhizome.core.state.StateAccumulator stateAccumulator) {
+        ChainEngine engine = new ChainEngine(params, ledger, store, nonceStore, nowMillis, verifier,
             contractProcessor, boxProcessor, tokenProcessor, stateAccumulator);
         engine.genesisSnapshot = snapshot;
         if (store.height() == 0) {
@@ -413,7 +431,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
     public long nextNonce(rhizome.core.ledger.PublicAddress sender) {
         lock.lock();
         try {
-            return nextNonce.getOrDefault(sender, 0L);
+            return nonceStore.next(sender);
         } finally {
             lock.unlock();
         }
@@ -751,15 +769,20 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
 
     private void rebuildDerivedState() {
         totalWork = BigInteger.ZERO;
-        nextNonce.clear();
         uncleWorkByHeight.clear();
         voteParamsByBoundary.clear();
         long height = store.height();
+        // Work, uncle weight and votes are recomputed from headers alone. Account nonces
+        // are persisted and maintained incrementally, so they are reconstructed from the
+        // bodies only when the nonce store is empty — a fresh column family (one-time
+        // migration) or a non-persistent in-memory store. After that first pass they
+        // persist, so a normal restart is O(headers) and never re-reads a body.
+        boolean backfillNonces = nonceStore.isEmpty() && height > GenesisBlock.GENESIS_ID;
         for (long h = GenesisBlock.GENESIS_ID + 1; h <= height; h++) {
-            // Work, uncle weight and votes are header-only; the account nonces still
-            // walk the body here (removed in A4, when they become a persisted store).
             BlockHeader header = store.headerAt(h);
-            commitAccountNonces(store.blockAt(h));
+            if (backfillNonces) {
+                commitAccountNonces(store.blockAt(h));
+            }
             // Uncle work is recomputed from the committed uncle difficulties, so the
             // cumulative weight is restored exactly even with an empty orphan pool.
             BigInteger uncleWork = uncleWorkOf(header);
@@ -821,7 +844,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             if (tx.isTransactionFee() || isSelfAuthorized(tx)) {
                 continue;
             }
-            long want = expected.computeIfAbsent(tx.from(), a -> nextNonce.getOrDefault(a, 0L));
+            long want = expected.computeIfAbsent(tx.from(), a -> nonceStore.next(a));
             if (tx.nonce() != want) {
                 return INVALID_TRANSACTION_NONCE;
             }
@@ -839,7 +862,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         for (Transaction t : block.transactions()) {
             var tx = (TransactionImpl) t;
             if (!tx.isTransactionFee() && !isSelfAuthorized(tx)) {
-                nextNonce.merge(tx.from(), tx.nonce() + 1, Math::max);
+                nonceStore.set(tx.from(), Math.max(nonceStore.next(tx.from()), tx.nonce() + 1));
             }
         }
     }
@@ -852,13 +875,9 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
                 lowest.merge(tx.from(), tx.nonce(), Math::min);
             }
         }
-        lowest.forEach((sender, nonce) -> {
-            if (nonce == 0) {
-                nextNonce.remove(sender);
-            } else {
-                nextNonce.put(sender, nonce);
-            }
-        });
+        // The block's lowest nonce for a sender becomes the next-expected again; set(_, 0)
+        // clears the entry (that sender's first transaction is being undone).
+        lowest.forEach(nonceStore::set);
     }
 
     private static SHA256Hash computeMerkleRoot(Block block) {

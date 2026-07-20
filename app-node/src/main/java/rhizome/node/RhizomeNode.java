@@ -100,8 +100,8 @@ public final class RhizomeNode implements AutoCloseable {
         // session-aware view, so a box written earlier in the block is visible.
         contractProcessor.setBoxReader(boxProcessor::get);
         engine = ChainEngine.init(config.params(), store.ledger(), store.chainStore(),
-            snapshot, null, System::currentTimeMillis, verifier, contractProcessor, boxProcessor,
-            tokenProcessor, stateAccumulator);
+            store.nonceStore(), snapshot, null, System::currentTimeMillis, verifier, contractProcessor,
+            boxProcessor, tokenProcessor, stateAccumulator);
         mempool = new MemPool(config.params(), verifier, engine, config.mempoolSize());
         service = new NodeService(engine, mempool);
         // Expose contract event logs and box lifecycle events (by block height) so agents

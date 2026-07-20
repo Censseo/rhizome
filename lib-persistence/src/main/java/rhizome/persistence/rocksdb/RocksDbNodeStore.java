@@ -54,6 +54,7 @@ public final class RocksDbNodeStore implements AutoCloseable {
     private static final byte[] CF_TXINDEX = "txindex".getBytes();
     private static final byte[] CF_META = "meta".getBytes();
     private static final byte[] CF_LEDGER = "ledger".getBytes();
+    private static final byte[] CF_NONCES = "nonces".getBytes();
     private static final byte[] HEIGHT_KEY = "height".getBytes();
 
     private final RocksDB db;
@@ -63,6 +64,7 @@ public final class RocksDbNodeStore implements AutoCloseable {
     private final ColumnFamilyHandle txIndexCf;
     private final ColumnFamilyHandle metaCf;
     private final ColumnFamilyHandle ledgerCf;
+    private final ColumnFamilyHandle noncesCf;
     private final WriteOptions writeOptions = new WriteOptions();
 
     public RocksDbNodeStore(String path) throws IOException {
@@ -72,7 +74,8 @@ public final class RocksDbNodeStore implements AutoCloseable {
             new ColumnFamilyDescriptor(CF_HEADERS),
             new ColumnFamilyDescriptor(CF_TXINDEX),
             new ColumnFamilyDescriptor(CF_META),
-            new ColumnFamilyDescriptor(CF_LEDGER));
+            new ColumnFamilyDescriptor(CF_LEDGER),
+            new ColumnFamilyDescriptor(CF_NONCES));
         List<ColumnFamilyHandle> handles = new ArrayList<>();
         try {
             DBOptions options = new DBOptions()
@@ -88,6 +91,7 @@ public final class RocksDbNodeStore implements AutoCloseable {
         this.txIndexCf = handles.get(3);
         this.metaCf = handles.get(4);
         this.ledgerCf = handles.get(5);
+        this.noncesCf = handles.get(6);
         backfillHeaders();
     }
 
@@ -140,6 +144,11 @@ public final class RocksDbNodeStore implements AutoCloseable {
         return new RocksLedger();
     }
 
+    /** Persisted next-nonce-per-sender, so the engine need not replay bodies at boot. */
+    public rhizome.core.blockchain.NonceStore nonceStore() {
+        return new RocksNonceStore();
+    }
+
     @Override
     public void close() {
         defaultCf.close();
@@ -148,6 +157,7 @@ public final class RocksDbNodeStore implements AutoCloseable {
         txIndexCf.close();
         metaCf.close();
         ledgerCf.close();
+        noncesCf.close();
         writeOptions.close();
         db.close();
     }
@@ -333,6 +343,51 @@ public final class RocksDbNodeStore implements AutoCloseable {
                 db.put(ledgerCf, writeOptions, wallet.toBytes(), ByteBuffer.allocate(8).putLong(amount).array());
             } catch (RocksDBException e) {
                 throw new LedgerException("Failed to write wallet value", e);
+            }
+        }
+    }
+
+    // ---- NonceStore view (next expected account nonce per sender) ----
+
+    private final class RocksNonceStore implements rhizome.core.blockchain.NonceStore {
+
+        @Override
+        public long next(PublicAddress sender) {
+            try {
+                byte[] value = db.get(noncesCf, sender.toBytes());
+                return value == null ? 0L : bytesToLong(value);
+            } catch (RocksDBException e) {
+                throw new LedgerException("Failed to read account nonce", e);
+            }
+        }
+
+        @Override
+        public void set(PublicAddress sender, long next) {
+            try {
+                if (next <= 0) {
+                    db.delete(noncesCf, writeOptions, sender.toBytes());
+                } else {
+                    db.put(noncesCf, writeOptions, sender.toBytes(), longToBytes(next));
+                }
+            } catch (RocksDBException e) {
+                throw new LedgerException("Failed to write account nonce", e);
+            }
+        }
+
+        @Override
+        public boolean isEmpty() {
+            try (RocksIterator it = db.newIterator(noncesCf)) {
+                it.seekToFirst();
+                return !it.isValid();
+            }
+        }
+
+        @Override
+        public void forEach(java.util.function.ObjLongConsumer<PublicAddress> consumer) {
+            try (RocksIterator it = db.newIterator(noncesCf)) {
+                for (it.seekToFirst(); it.isValid(); it.next()) {
+                    consumer.accept(PublicAddress.of(it.key()), bytesToLong(it.value()));
+                }
             }
         }
     }

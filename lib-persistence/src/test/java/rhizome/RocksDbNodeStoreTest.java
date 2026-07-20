@@ -216,6 +216,73 @@ class RocksDbNodeStoreTest {
         }
     }
 
+    @Test
+    void persistedNoncesLetRestartSkipTheBodyWalk() throws IOException {
+        NetworkParameters params = fastParams();
+        String path = tempDir.resolve("db").toString();
+        AtomicLong clock = new AtomicLong(0);
+
+        var pair = generateKeyPair();
+        PublicKey key = PublicKey.of(pair.getPublic());
+        PrivateKey priv = new PrivateKey((Ed25519PrivateKeyParameters) pair.getPrivate());
+        PublicAddress sender = PublicAddress.of(key);
+        PublicAddress miner = PublicAddress.random();
+
+        LedgerSnapshot snapshot = new LedgerSnapshot("test", 0, params.chainId());
+        snapshot.put(sender, new TransactionAmount(1_000_000L));
+
+        // Build a chain of three blocks each carrying one account transaction (nonces 0,1,2).
+        try (RocksDbNodeStore store = new RocksDbNodeStore(path)) {
+            ChainEngine engine = ChainEngine.init(params, store.ledger(), store.chainStore(),
+                store.nonceStore(), snapshot, null, clock::get, null, null, null, null, null);
+            for (int n = 0; n < 3; n++) {
+                Transaction send = Transaction.of(sender, PublicAddress.random(), new TransactionAmount(1_000),
+                    key, new TransactionAmount(0), clock.get(), params.chainId(), n);
+                send.sign(priv);
+                assertEquals(ExecutionStatus.SUCCESS, engine.addBlock(mine(engine, params, miner, List.of(send), clock)));
+            }
+            assertEquals(3L, engine.nextNonce(sender));
+
+            // pop then re-add: the persisted nonce must track exactly (3 → 2 → 3).
+            engine.popBlock();
+            assertEquals(2L, engine.nextNonce(sender));
+            Transaction resend = Transaction.of(sender, PublicAddress.random(), new TransactionAmount(1_000),
+                key, new TransactionAmount(0), clock.get(), params.chainId(), 2);
+            resend.sign(priv);
+            assertEquals(ExecutionStatus.SUCCESS, engine.addBlock(mine(engine, params, miner, List.of(resend), clock)));
+            assertEquals(3L, engine.nextNonce(sender));
+        }
+
+        // Reopen behind a store that forbids reading any historical body (only genesis and
+        // the tip may be read). Because the nonces are persisted, the boot rebuild must not
+        // walk the bodies — if it did, this throws.
+        try (RocksDbNodeStore store = new RocksDbNodeStore(path)) {
+            ChainStore guarded = new NoHistoricalBodyStore(store.chainStore());
+            ChainEngine reloaded = ChainEngine.init(params, store.ledger(), guarded,
+                store.nonceStore(), snapshot, null, clock::get, null, null, null, null, null);
+            assertEquals(4, reloaded.height());
+            assertEquals(3L, reloaded.nextNonce(sender));
+        }
+    }
+
+    /** A {@link ChainStore} that refuses to read a body strictly between genesis and the tip. */
+    private static final class NoHistoricalBodyStore implements ChainStore {
+        private final ChainStore inner;
+        NoHistoricalBodyStore(ChainStore inner) { this.inner = inner; }
+        @Override public long height() { return inner.height(); }
+        @Override public Block blockAt(long height) {
+            if (height > 1 && height < inner.height()) {
+                throw new AssertionError("boot rebuild read a historical body at height " + height
+                    + "; persisted nonces must make it header-only");
+            }
+            return inner.blockAt(height);
+        }
+        @Override public BlockHeader headerAt(long height) { return inner.headerAt(height); }
+        @Override public void append(Block block) { inner.append(block); }
+        @Override public void pop() { inner.pop(); }
+        @Override public boolean hasTransaction(rhizome.core.crypto.SHA256Hash h) { return inner.hasTransaction(h); }
+    }
+
     /** A standalone, un-mined block (valid encoding; not chain-validated) for storage tests. */
     private Block looseBlock(int id, rhizome.core.crypto.SHA256Hash parent) {
         var b = (BlockImpl) BlockImpl.builder()
