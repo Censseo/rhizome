@@ -29,10 +29,11 @@ Four goals drive the design:
    GHOST-style fork choice (§9) that credits and rewards orphaned (uncle) work, making
    the fast cadence safe against the orphaning a naïve longest chain suffers.
 
-The node is functional and covered by **222 tests**: consensus, the WASM contract VM
+The node is functional and covered by **254 tests**: consensus, the WASM contract VM
 and its persistence, execution, storage, mempool, HTTP API, block production, P2P
-synchronisation with reorganisation, GHOST uncles, and a wallet that deploys and calls
-contracts.
+synchronisation with reorganisation, GHOST uncles, data boxes (agent-facing on-chain
+storage with typed registers, an anti-dust deposit and storage rent), and a wallet that
+deploys and calls contracts and manages boxes.
 
 ---
 
@@ -237,13 +238,14 @@ Amounts and fees are integers (base units, scale 10 000 → "PDN"). They are con
 would mint money for the sender and a negative deposit would drive the recipient's
 balance below zero.
 
-A transaction has a **kind**: `TRANSFER` (the default, unchanged), `DEPLOY` (install
-contract code) or `CALL` (invoke a contract). Contract kinds additionally carry a
-variable-length `data` payload (code or call input) and a gas budget
-(`gasLimit`, `gasPrice`); these fields are part of the signed preimage and the wire
-format only for contract transactions, so a transfer is byte-for-byte what it was before
-contracts existed. Every transaction is self-delimiting on the wire, so a block still
-packs variable-length transactions back to back, and the whole block is bounded by
+A transaction has a **kind**: `TRANSFER` (the default, unchanged), the contract kinds
+`DEPLOY` (install contract code) and `CALL` (invoke a contract), or the data-box kinds
+`BOX_CREATE`/`BOX_UPDATE`/`BOX_SPEND`/`BOX_COLLECT` (§5.5). Every non-transfer kind carries
+a variable-length `data` payload and the gas fields (`gasLimit`, `gasPrice`) in its signed
+preimage and wire format, so a transfer is byte-for-byte what it was before contracts
+existed; the box kinds reuse that same suffix with the gas fields pinned to zero (box ops
+run no VM). Every transaction is self-delimiting on the wire, so a block still packs
+variable-length transactions back to back, and the whole block is bounded by
 `maxBlockSizeBytes` (§5.4).
 
 ### 5.2 Transactional execution
@@ -366,6 +368,99 @@ block is popped — so contract state moves atomically with its block.
 `maxBlockSizeBytes` (4 MiB) — checked before any expensive work — and the block builder
 stops adding transactions before crossing it, so a payload-laden block can never be a
 download or storage denial of service.
+
+### 5.5 Data boxes
+
+Contract key/value storage is anonymous and untyped — good for a contract's private
+bookkeeping, poor as a place for an **autonomous agent to keep information other parties
+can find, read and prove**. Rhizome adds a **data box**: a first-class, addressable state
+object, inspired by Ergo's extended-UTXO box but adapted to this chain's account model and
+WASM contracts rather than replacing them. It is the substrate for agent memory,
+directories, and oracles.
+
+**The object.** A box has a **stable 32-byte id** = `SHA-256(creator ‖ nonce ‖ "rzbox")`
+— derived once from the creating account and its nonce (the domain suffix keeps it
+disjoint from a contract address), so an agent references "its memory" or "the oracle box"
+permanently. It carries an **owner** (an account or a contract), a **value** in base units
+locked into the box, its `createdHeight` and `rentPaidHeight`, and up to **six typed
+registers**: `BYTES`, `I64`, `BOOL`, `ADDRESS` (25-byte reference), `HASH32` (content hash
+of an off-chain blob), and `STRING` (UTF-8). The protocol validates each register's shape
+against its tag but attaches no meaning to the value — tags are annotations for readers
+(agents, indexers, wallets). A box serializes to at most **64 KiB**.
+
+This is deliberately **not** Ergo's design in two ways, both because Rhizome's constraints
+differ. First, the id is **stable and the content mutable**, where an Ergo box is
+content-addressed (its id changes on every update, forcing the ecosystem into a singleton-
+NFT pattern to give an oracle a durable identity); with no authenticated-state leaf to
+commit yet, Rhizome has nothing to gain from content-addressing and everything to gain from
+a permanent handle. Second, a box is guarded by its **owner** — an account signature, or the
+approval of the controlling contract — not by a script language: Rhizome already has a
+Turing-complete guard (WASM), so Ergo's "self-replicating box" becomes simply "a box owned
+by a contract," whose transition rules the contract enforces. The 64-KiB ceiling (versus
+Ergo's 4 KiB) follows from the same reasoning: Ergo's limit bounds the size of its AVL+
+inclusion proofs (the box *is* the leaf) and of script execution contexts, neither of which
+applies here — the real bounds are the transaction wire cap (128 KiB) and the 4-MiB block.
+Larger objects use a `HASH32` register over off-chain data, or chunk across boxes.
+
+**Lifecycle.** Four transaction kinds operate on boxes, all deterministic (no VM, no gas —
+paid by the ordinary fee):
+
+- `BOX_CREATE` locks `value` into a new box at the derived id. The value **leaves the
+  ledger** into the box (the chain's total money is now account balances *plus* box values).
+- `BOX_UPDATE` (owner only) replaces the registers, optionally tops up the value, and resets
+  the rent clock — touching a box keeps it alive.
+- `BOX_SPEND` (owner only) destroys the box and returns its value to the owner.
+- `BOX_COLLECT` charges storage rent (below).
+
+**Anti-dust.** A box must lock at least `size × minValuePerByte`, so writing data on-chain
+costs in proportion to the state it occupies from the moment of creation — essential when
+the writers are programs. The locked value is a **refundable deposit**, returned on spend,
+not a fee.
+
+**Storage rent.** After `storagePeriodBlocks` a box becomes collectable. Anyone — in
+practice the miner — may then charge rent of `storageFeeFactor × size`, recreating the box
+with reduced value, its registers, owner and id preserved and its rent clock reset. If the
+charge would drop the value below the dust floor, the whole box is collected and destroyed
+instead: **abandoned state is garbage-collected economically**, and the collected rent
+gives miners a revenue stream that outlives the block subsidy. A box funded at the minimum
+is recycled after roughly one storage period. Rent collection is an *opportunity*, never an
+obligation; a block without it is valid.
+
+`BOX_COLLECT` is **unsigned and self-authorized**, like the coinbase: the block producer
+mints it, crediting the rent to the miner, so no private key is needed to run the
+collector. It is bounded per block (`maxBoxCollectsPerBlock`) and drawn from a
+rent-ordered **expiry index**, so selecting collectable boxes is O(1) per box rather than a
+scan. Because a collect only ever touches an already-expired box and credits a named
+recipient, an unsigned, permissionless collect can neither steal nor forge.
+
+**Data inputs.** A contract reads any box through a `box_read(id)` host call — the box is
+**not consumed** (Ergo's data-input idea) and reads see boxes written earlier in the same
+block. This is the contention-free oracle pattern: an oracle agent updates its box each
+tick; any number of consumer contracts read it in the same block without racing for it, at
+a flat cost, with no cross-contract call.
+
+**Persistence and reorg.** Boxes live in RocksDB with owner and rent-expiry secondary
+indexes and a **persisted per-block undo journal** — unlike the contract store's in-memory
+journals, so box state is exactly restorable on a reorg even after a restart. A box op's
+ledger effects (value locked or released) are reversed from per-block receipts, so a popped
+block rewinds both box state and balances exactly, atomically with the block.
+
+**Observability and tooling.** Box lifecycle events (`box.created`/`updated`/`spent`/
+`collected`) ride the same feed as contract logs — `GET /logs` and the live SSE stream — so
+an agent watches state changes with the machinery it already uses. `GET /box?id=` reads a
+box and `GET /boxes?owner=` lists an account's boxes; the wallet gains
+`box-create`/`update`/`spend`/`show`/`list`. Together with the agent wallet (§5.4), an agent
+on Rhizome has identity, funds, **persistent addressable memory**, and real-time
+observability — the full on-chain loop.
+
+**Future work — an authenticated state root.** Boxes are not yet committed in the block
+header, so a light client cannot *prove* a box without trusting a node. The next step is a
+state root (an authenticated tree over boxes, balances and contract storage) added to the
+header preimage, whose box leaf commits `(box header, hash(registers))` rather than the raw
+content — keeping inclusion proofs small regardless of box size, exactly the property
+Ergo's 4-KiB limit had to buy. That unlocks light-client proofs, then trust-minimised
+snapshot sync, and finally miner-voted box parameters (rent factor, dust floor) via a
+soft-forkable extension section. Until then the box parameters are consensus constants.
 
 ---
 
@@ -507,10 +602,14 @@ ledger of a synchronised Pandanite node.
 (`addBlock`/`popBlock`, nonces, work, difficulty); RocksDB storage; mempool; HTTP API;
 block production; synchronisation + reorg by cumulative work; wallet CLI; gossip & peer
 discovery; hardening (checkpoints, finality, bounded rate limiting, ban-score, block-size
-cap); a full security review; and the **WASM smart-contract layer** — a Chicory-backed
+cap); a full security review; the **WASM smart-contract layer** — a Chicory-backed
 metered VM, a persistent contract store, `DEPLOY`/`CALL` transactions with gas fees,
 atomic per-block contract state with exact reorg reversal, and wallet `deploy`/`call`
-commands. **222 tests, 0 failures.**
+commands; and the **data-box layer** (§5.5) — stable-id, typed-register storage objects
+with an anti-dust deposit, permissionless miner-collected storage rent, read-only
+`box_read` data inputs for contracts, a persisted per-block undo journal for exact reorg
+reversal, owner/expiry indexes, `GET /box`+`/boxes`, box lifecycle events on the log/SSE
+feed, and wallet `box-*` commands. **254 tests, 0 failures.**
 
 **GHOST fork choice.** A fast single longest chain orphans blocks because propagation
 takes a meaningful fraction of the interval (§6.3). A GHOST-style fork choice — the
@@ -541,10 +640,14 @@ end:
 **Autonomous-agent primitives.** Contract event logs are implemented (see §5):
 contracts `emit_log`, the processor collects them per block reorg-safely, and the node
 serves them by height, by a pollable height cursor, and by live SSE push at
-`/logs/stream` (§5.4) — so agents follow on-chain state in real time. Account
-abstraction is covered by the agent wallet (§5.4): contract accounts with owner-driven
-`exec` and revocable, per-token-capped session keys. Gas sponsorship (a third party
-paying a transaction's gas) remains protocol-level future work.
+`/logs/stream` (§5.4) — so agents follow on-chain state in real time. **Persistent
+addressable memory** is covered by data boxes (§5.5): typed-register storage objects an
+agent creates, updates and proves, read contention-free by any contract via `box_read`,
+kept honest by an anti-dust deposit and storage rent that recycles the memory of dead
+agents. Account abstraction is covered by the agent wallet (§5.4): contract accounts with
+owner-driven `exec` and revocable, per-token-capped session keys. The remaining protocol-
+level work is an authenticated state root so agents can prove a box to a light client
+(§5.5), and gas sponsorship (a third party paying a transaction's gas).
 
 **Memecoin primitives.** Three reference contracts are implemented and tested through
 consensus: a fungible token (mint, transfer, `transfer` logs), a constant-product AMM

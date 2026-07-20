@@ -216,6 +216,11 @@ ajuste un paramètre d'un pas borné (`Parameters.scala:158-183`), 90 % sur 32
 
 ## 4. Proposition d'intégration : des « data boxes » dans Rhizome
 
+> **Statut : implémenté.** La proposition ci-dessous a été réalisée (phase 1 +
+> rente) et la conception de référence vit désormais dans
+> [`WHITEPAPER.md`](../WHITEPAPER.md) §5.5. Cette section est conservée comme
+> trace de l'analyse qui y a mené.
+
 Design cible : un **objet box natif** à côté des comptes et des contrats — le
 sous-ensemble d'Ergo utile aux agents, sans changer le modèle de ledger.
 
@@ -231,7 +236,7 @@ Box {
                   (BYTES / INT / LONG / ADDRESS / HASH), remplissage dense
   // taille totale sérialisée ≤ 64 KiB (le plafond de 4 Ko d'Ergo borne la
   // taille des preuves AVL+ et des contextes de script — contraintes qui ne
-  // s'appliquent pas ici, cf. spec-boxes.md §3.4)
+  // s'appliquent pas ici, cf. WHITEPAPER.md §5.5)
 }
 ```
 
