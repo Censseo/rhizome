@@ -19,6 +19,7 @@ import rhizome.core.block.BlockImpl;
 import rhizome.core.blockchain.ChainEngine;
 import rhizome.core.blockchain.ChainSynchronizer;
 import rhizome.core.blockchain.ChainSynchronizer.Result;
+import rhizome.core.blockchain.HeaderSynchronizer;
 import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
@@ -107,6 +108,20 @@ class NodeSyncIntegrationTest {
 
         ChainEngine local = newEngine();
         Result result = new ChainSynchronizer(local).syncFrom(peer);
+
+        assertEquals(Result.EXTENDED, result);
+        assertEquals(6, local.height());
+        assertEquals(peer.totalWork(), local.totalWork());
+        assertTrue(local.tipHash().equals(peer.blockHash(6)));
+    }
+
+    @Test
+    void freshNodeSyncsHeadersFirstFromHttpPeer() {
+        var peer = new HttpPeerSource("http://localhost:" + port);
+        ChainEngine local = newEngine();
+        // Drives the real /headers endpoint: HeaderChain validates the peer's headers,
+        // then bodies are fetched and each verified against its validated header.
+        Result result = new HeaderSynchronizer(local).syncFrom(peer);
 
         assertEquals(Result.EXTENDED, result);
         assertEquals(6, local.height());

@@ -1,0 +1,154 @@
+package rhizome;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import java.math.BigInteger;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicLong;
+
+import org.junit.jupiter.api.Test;
+
+import rhizome.core.block.Block;
+import rhizome.core.block.BlockHeader;
+import rhizome.core.block.BlockImpl;
+import rhizome.core.blockchain.ChainEngine;
+import rhizome.core.blockchain.ChainSynchronizer;
+import rhizome.core.blockchain.HeaderSynchronizer;
+import rhizome.core.blockchain.InMemoryChainStore;
+import rhizome.core.blockchain.Miner;
+import rhizome.core.blockchain.NetworkParameters;
+import rhizome.core.blockchain.PeerSource;
+import rhizome.core.common.PowAlgorithm;
+import rhizome.core.crypto.SHA256Hash;
+import rhizome.core.ledger.InMemoryLedger;
+import rhizome.core.ledger.LedgerSnapshot;
+import rhizome.core.ledger.PublicAddress;
+import rhizome.core.mempool.ExecutionStatus;
+import rhizome.core.merkletree.MerkleTree;
+import rhizome.core.transaction.Transaction;
+import rhizome.core.transaction.TransactionAmount;
+
+/**
+ * The headers-first synchroniser: it extends and reorgs like the old block-based one,
+ * but a peer that lies about its total work is refused after downloading only headers —
+ * never a block — and a peer without the /headers endpoint transparently falls back to
+ * full-block sync.
+ */
+class HeaderSynchronizerTest {
+
+    private static final NetworkParameters PARAMS = NetworkParameters.testnet().toBuilder()
+        .powAlgorithm(PowAlgorithm.SHA256).genesisDifficulty(4).minDifficulty(4).build();
+
+    private static ChainEngine newEngine() {
+        return ChainEngine.init(PARAMS, new InMemoryLedger(), new InMemoryChainStore(),
+            new LedgerSnapshot("t", 0, PARAMS.chainId()), null, () -> 100_000_000_000L);
+    }
+
+    private static void mine(ChainEngine engine, PublicAddress miner, AtomicLong clock, int count) {
+        for (int i = 0; i < count; i++) {
+            long h = engine.height() + 1;
+            var b = (BlockImpl) BlockImpl.builder().id((int) h)
+                .timestamp(clock.addAndGet(90_000)).difficulty(engine.difficulty())
+                .lastBlockHash(engine.tipHash()).build();
+            b.addTransaction(Transaction.of(miner, new TransactionAmount(PARAMS.miningReward(h))));
+            var tree = new MerkleTree();
+            tree.setItems(b.transactions());
+            b.merkleRoot(tree.getRootHash());
+            b.nonce(Miner.mineNonce(b.hash(), b.difficulty(), PARAMS.powAlgorithm()));
+            assertEquals(ExecutionStatus.SUCCESS, engine.addBlock(b));
+        }
+    }
+
+    /** A {@link PeerSource} reading straight from an engine (in-process, no HTTP). */
+    static class EnginePeer implements PeerSource {
+        final ChainEngine e;
+        int blockFetches = 0;
+        EnginePeer(ChainEngine e) { this.e = e; }
+        @Override public long height() { return e.height(); }
+        @Override public BigInteger totalWork() { return e.totalWork(); }
+        @Override public SHA256Hash blockHash(long h) { return e.blockAt(h).hash(); }
+        @Override public List<Block> blocks(long start, long end) {
+            blockFetches++;
+            List<Block> out = new ArrayList<>();
+            for (long h = start; h <= Math.min(end, e.height()); h++) out.add(e.blockAt(h));
+            return out;
+        }
+        @Override public List<BlockHeader> headers(long start, long end) {
+            List<BlockHeader> out = new ArrayList<>();
+            for (long h = start; h <= Math.min(end, e.height()); h++) out.add(e.headerAt(h));
+            return out;
+        }
+    }
+
+    @Test
+    void extendsFromHeavierPeer() {
+        ChainEngine peer = newEngine();
+        mine(peer, PublicAddress.random(), new AtomicLong(0), 5);
+
+        ChainEngine local = newEngine();
+        ChainSynchronizer.Result r = new HeaderSynchronizer(local).syncFrom(new EnginePeer(peer));
+
+        assertEquals(ChainSynchronizer.Result.EXTENDED, r);
+        assertEquals(6, local.height());
+        assertEquals(peer.totalWork(), local.totalWork());
+        assertTrue(local.tipHash().equals(peer.tipHash()));
+    }
+
+    @Test
+    void reorgsToAHeavierBranch() {
+        ChainEngine local = newEngine();
+        mine(local, PublicAddress.random(), new AtomicLong(0), 3); // local: genesis + 3
+
+        ChainEngine peer = newEngine();
+        mine(peer, PublicAddress.random(), new AtomicLong(0), 6); // peer: genesis + 6, heavier
+
+        ChainSynchronizer.Result r = new HeaderSynchronizer(local).syncFrom(new EnginePeer(peer));
+
+        assertEquals(ChainSynchronizer.Result.REORGED, r);
+        assertEquals(7, local.height());
+        assertTrue(local.tipHash().equals(peer.tipHash()));
+    }
+
+    @Test
+    void peerLyingAboutTotalWorkCostsOnlyHeaders() {
+        ChainEngine local = newEngine();
+        mine(local, PublicAddress.random(), new AtomicLong(0), 5); // real work W
+
+        ChainEngine peer = newEngine();
+        mine(peer, PublicAddress.random(), new AtomicLong(0), 2); // only 2 blocks of real work
+
+        // The peer claims enormous work but can only serve its 2 light headers.
+        EnginePeer liar = new EnginePeer(peer) {
+            @Override public BigInteger totalWork() { return e.totalWork().add(BigInteger.TWO.pow(200)); }
+        };
+
+        ChainSynchronizer.Result r = new HeaderSynchronizer(local).syncFrom(liar);
+
+        assertEquals(ChainSynchronizer.Result.PEER_INVALID, r);
+        assertEquals(6, local.height(), "local chain untouched");
+        assertEquals(0, liar.blockFetches, "gate rejected on headers alone — no body downloaded");
+    }
+
+    @Test
+    void fallsBackToBlockSyncForPeerWithoutHeaders() {
+        ChainEngine peer = newEngine();
+        mine(peer, PublicAddress.random(), new AtomicLong(0), 4);
+
+        // A peer predating /headers: headers() throws, so the synchroniser must fall back.
+        EnginePeer legacy = new EnginePeer(peer) {
+            @Override public List<BlockHeader> headers(long start, long end) {
+                throw new UnsupportedOperationException("no /headers");
+            }
+        };
+
+        ChainEngine local = newEngine();
+        ChainSynchronizer.Result r = new HeaderSynchronizer(local).syncFrom(legacy);
+
+        assertEquals(ChainSynchronizer.Result.EXTENDED, r);
+        assertEquals(5, local.height());
+        assertTrue(local.tipHash().equals(peer.tipHash()));
+        assertTrue(legacy.blockFetches > 0, "fallback path downloads full blocks");
+    }
+}

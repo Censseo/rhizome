@@ -14,6 +14,7 @@ import org.slf4j.LoggerFactory;
 import rhizome.core.blockchain.BlockProducer;
 import rhizome.core.blockchain.ChainEngine;
 import rhizome.core.blockchain.ChainSynchronizer;
+import rhizome.core.blockchain.HeaderSynchronizer;
 import rhizome.core.blockchain.SignatureVerifier;
 import rhizome.core.ledger.LedgerSnapshot;
 import rhizome.core.ledger.SnapshotLoader;
@@ -192,7 +193,7 @@ public final class RhizomeNode implements AutoCloseable {
 
     /** One sync round across all known peers; peer failures are isolated. */
     public void syncRound() {
-        var synchronizer = new ChainSynchronizer(engine);
+        var synchronizer = new HeaderSynchronizer(engine);
         for (String peerUrl : registry.snapshot()) {
             if (registry.isBanned(peerUrl)) {
                 continue;

@@ -466,6 +466,11 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         return params;
     }
 
+    /** Current wall-clock (ms) from the engine's time source — the reference for the future-block bound. */
+    public long nowMillis() {
+        return nowMillis.getAsLong();
+    }
+
     // ---- data boxes ----
 
     /** The box at {@code id} from committed state, or {@code null} (none / boxes disabled). */
