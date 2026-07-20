@@ -73,32 +73,14 @@ public class LevelDBBlockPersistence extends LevelDBDataStore implements BlockPe
     }
 
     public ByteBuf getRawData(int blockId) {
-        var blockHeader = getBlockHeader(blockId);
-        var bufferSize = MemSize.of((long) BlockDto.BUFFER_SIZE + (TransactionDto.BUFFER_SIZE * blockHeader.numTransactions()));
-        var buffer = ByteBufPool.allocateExact(bufferSize);
-        buffer.put(blockHeader.toBuffer());
-
-        getBlockTransactions(blockHeader).forEach(transaction -> buffer.put(transaction.toBuffer()));
-        return buffer;
+        // Emit the canonical block-codec format (header || txs || uncle section) so it
+        // round-trips through fromRawData; this legacy store keeps no uncles, so the
+        // reconstructed block carries none.
+        return ByteBuf.wrapForReading(rhizome.core.block.BlockCodec.encode(getBlock(blockId)));
     }
 
     public Block fromRawData(byte[] rawData) {
-        var buffer = ByteBuf.wrapForReading(rawData);
-    
-        var blockHeaderData = new byte[BlockDto.BUFFER_SIZE];
-        buffer.read(blockHeaderData);
-        var blockHeader = BinarySerializable.fromBuffer(blockHeaderData, BlockDto.class);
-    
-        var block = Block.of(blockHeader, new ArrayList<>());
-    
-        for (var i = 0; i < blockHeader.numTransactions(); i++) {
-            var transactionData = new byte[TransactionDto.BUFFER_SIZE];
-            buffer.read(transactionData);
-            TransactionDto transactionDto = BinarySerializable.fromBuffer(transactionData, TransactionDto.class);
-            block.addTransaction(Transaction.of(transactionDto));
-        }
-    
-        return block;
+        return rhizome.core.block.BlockCodec.decode(rawData);
     }
 
     public Block getBlock(int blockId) {

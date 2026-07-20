@@ -8,7 +8,7 @@ import java.net.InetSocketAddress;
 
 // import com.dslplatform.json.DslJson;
 
-import io.activej.http.AsyncHttpClient;
+import io.activej.http.HttpClient;
 import io.activej.http.HttpRequest;
 import io.activej.promise.Promise;
 import lombok.Builder;
@@ -27,7 +27,7 @@ import static io.activej.common.Checks.checkState;
 public class GossipSystem implements PeerSystem {
 
     private final Peer localhostPeer;
-    private final AsyncHttpClient httpClient;
+    private final HttpClient httpClient;
     // @Builder.Default private DslJson<Object> dslJson = new DslJson<>();
 
     // private RpcServer peerServer;

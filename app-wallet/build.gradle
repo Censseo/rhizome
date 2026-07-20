@@ -5,11 +5,14 @@ plugins {
 dependencies {
     implementation project(':lib-core')
     implementation project(':lib-net')
+
+    // The end-to-end wallet test drives a real node.
+    testImplementation project(':app-node')
+    testImplementation project(':lib-persistence')
 }
 
 application {
-    // Define the main class for the application.
-    // mainClass = 'rhizome.server.App'
+    mainClass = 'rhizome.wallet.WalletCli'
 }
 
 tasks.named('test') {

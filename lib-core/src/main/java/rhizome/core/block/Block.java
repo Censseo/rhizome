@@ -33,10 +33,15 @@ public sealed interface Block permits BlockImpl {
                 .lastBlockHash(blockImpl.lastBlockHash())
                 .nonce(blockImpl.nonce())
                 .transactions(blockImpl.transactions())
+                .uncles(blockImpl.uncles())
                 .build();
     }
 
     public static Block of(BlockDto blockDto, List<Transaction> transactions) {
+        return of(blockDto, transactions, List.of());
+    }
+
+    public static Block of(BlockDto blockDto, List<Transaction> transactions, List<UncleRef> uncles) {
         return BlockImpl.builder()
                 .id(blockDto.id())
                 .timestamp(blockDto.timestamp())
@@ -45,6 +50,7 @@ public sealed interface Block permits BlockImpl {
                 .lastBlockHash(blockDto.lastBlockHash())
                 .nonce(blockDto.nonce())
                 .transactions(transactions)
+                .uncles(new java.util.ArrayList<>(uncles))
                 .build();
     }
 
@@ -62,7 +68,8 @@ public sealed interface Block permits BlockImpl {
     public Block id(int id);
     public void addTransaction(Transaction t);
     public List<Transaction> transactions();
-    public boolean verifyNonce();
+    public List<UncleRef> uncles();
+    public boolean verifyNonce(rhizome.core.common.PowAlgorithm powAlgorithm);
     public SHA256Hash hash();
     public SHA256Hash lastBlockHash();
     public int difficulty();
@@ -87,7 +94,8 @@ public sealed interface Block permits BlockImpl {
         static final String NONCE = "nonce";
         static final String MERKLE_ROOT = "merkleRoot";
         static final String LAST_BLOCK_HASH = "lastBlockHash";
-        static final String TRANSACTIONS = "transactions";        
+        static final String TRANSACTIONS = "transactions";
+        static final String UNCLES = "uncles";
 
         static BlockSerializer instance = new BlockSerializer();
 
@@ -130,6 +138,16 @@ public sealed interface Block permits BlockImpl {
                 transactionsArray.put(transaction.toJson());
             }
             result.put(TRANSACTIONS, transactionsArray);
+            if (!blockImpl.uncles().isEmpty()) {
+                JSONArray unclesArray = new JSONArray();
+                for (UncleRef uncle : blockImpl.uncles()) {
+                    unclesArray.put(new JSONObject()
+                        .put("hash", uncle.hash().toHexString())
+                        .put(DIFFICULTY, uncle.difficulty())
+                        .put("miner", uncle.miner().toHexString()));
+                }
+                result.put(UNCLES, unclesArray);
+            }
             return result;
         }
     
@@ -145,6 +163,16 @@ public sealed interface Block permits BlockImpl {
                     IntStream.range(0, json.getJSONArray(TRANSACTIONS).length())
                         .mapToObj(i -> Transaction.of(json.getJSONArray(TRANSACTIONS).getJSONObject(i)))
                         .collect(Collectors.toList())
+                )
+                .uncles(
+                    !json.has(UNCLES) ? new java.util.ArrayList<UncleRef>()
+                        : IntStream.range(0, json.getJSONArray(UNCLES).length())
+                            .mapToObj(i -> {
+                                JSONObject u = json.getJSONArray(UNCLES).getJSONObject(i);
+                                return new UncleRef(SHA256Hash.of(u.getString("hash")), u.getInt(DIFFICULTY),
+                                    rhizome.core.ledger.PublicAddress.of(u.getString("miner")));
+                            })
+                            .collect(Collectors.toList())
                 )
                 .build();
         }

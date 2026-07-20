@@ -4,13 +4,14 @@ import org.jetbrains.annotations.NotNull;
 import lombok.Getter;
 import lombok.Setter;
 import rhizome.core.blockchain.AbstractBlockchain;
-import io.activej.async.service.EventloopService;
+import io.activej.async.service.ReactiveService;
 import io.activej.eventloop.Eventloop;
 import io.activej.promise.Promise;
+import io.activej.reactor.Reactor;
 
 @Getter
 @Setter
-public class BlockchainService extends AbstractBlockchain implements EventloopService {
+public class BlockchainService extends AbstractBlockchain implements ReactiveService {
 
     private Eventloop eventloop;
 
@@ -29,10 +30,7 @@ public class BlockchainService extends AbstractBlockchain implements EventloopSe
     }
 
     @Override
-    public @NotNull Eventloop getEventloop() {
-        // TODO Auto-generated method stub
-        throw new UnsupportedOperationException("Unimplemented method 'getEventloop'");
+    public @NotNull Reactor getReactor() {
+        return eventloop;
     }
-
-    
 }

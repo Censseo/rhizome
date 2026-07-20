@@ -1,47 +1,52 @@
 package rhizome.core.serialization;
 
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
+import java.nio.ByteBuffer;
 
 import org.jetbrains.annotations.NotNull;
 
-import io.activej.serializer.BinarySerializer;
-import io.activej.serializer.SerializerFactory;
-import rhizome.core.crypto.PublicKey;
-import rhizome.core.crypto.SHA256Hash;
-import rhizome.core.ledger.PublicAddress;
-import rhizome.core.transaction.TransactionSignature;
+import rhizome.core.block.dto.BlockDto;
+import rhizome.core.transaction.dto.TransactionDto;
 
+/**
+ * Fixed-layout binary form for the core wire/storage objects.
+ *
+ * <p>Encoding is hand-written per type ({@link #writeTo}/{@code readFrom}) rather
+ * than delegated to a reflective/codegen serializer: the core types have a fixed
+ * shape, so a direct {@link ByteBuffer} write is the fastest option, is
+ * deterministic (no schema drift across library versions), and pulls in no
+ * runtime bytecode generation — a prerequisite for GraalVM native-image.
+ */
 public interface BinarySerializable {
-    static Map<Class<? extends BinarySerializable>, BinarySerializer<? extends BinarySerializable>> serializerCache = new ConcurrentHashMap<>();
 
-    public static <T extends BinarySerializable> T fromBuffer(byte[] buffer, Class<T> clazz) {
-        return fromBuffer(buffer, 0, clazz);
-    }
-
-    public static <T extends BinarySerializable> T fromBuffer(byte[] buffer, int pos, Class<T> clazz) {
-        var serializer = getSerializer(clazz);
-        return serializer.decode(buffer, pos);
-    }
-
-    public default <T extends BinarySerializable> byte[] toBuffer() {
-        var buffer = new byte[getSize()];
-        var serializer = getSerializer((Class<T>) this.getClass());
-        serializer.encode(buffer, 0, (T) this);
-        return buffer;
-    }
-
+    /** Serialized size in bytes (fixed per type). */
     @NotNull
     int getSize();
 
-    static <T extends BinarySerializable> BinarySerializer<T> getSerializer(Class<T> clazz) {
-        return (BinarySerializer<T>) serializerCache.computeIfAbsent(clazz, k ->
-            SerializerFactory.builder()
-            .with(SHA256Hash.class, ctx -> new SerializerDefSHA256Hash())
-            .with(PublicAddress.class, ctx -> new SerializerDefPublicAddress())
-            .with(PublicKey.class, ctx -> new SerializerDefPublicKey())
-            .with(TransactionSignature.class, ctx -> new SerializerDefTransactionSignature())
-            .build()
-            .create(k));
+    /** Writes this object's fixed-layout encoding at the buffer's current position. */
+    void writeTo(ByteBuffer buffer);
+
+    default byte[] toBuffer() {
+        ByteBuffer buffer = ByteBuffer.allocate(getSize());
+        writeTo(buffer);
+        return buffer.array();
+    }
+
+    static <T extends BinarySerializable> T fromBuffer(byte[] buffer, Class<T> clazz) {
+        return fromBuffer(buffer, 0, clazz);
+    }
+
+    static <T extends BinarySerializable> T fromBuffer(byte[] buffer, int pos, Class<T> clazz) {
+        ByteBuffer bb = ByteBuffer.wrap(buffer, pos, buffer.length - pos);
+        return clazz.cast(read(bb, clazz));
+    }
+
+    private static BinarySerializable read(ByteBuffer bb, Class<?> clazz) {
+        if (clazz == BlockDto.class) {
+            return BlockDto.readFrom(bb);
+        }
+        if (clazz == TransactionDto.class) {
+            return TransactionDto.readFrom(bb);
+        }
+        throw new IllegalArgumentException("No binary codec registered for " + clazz.getName());
     }
 }

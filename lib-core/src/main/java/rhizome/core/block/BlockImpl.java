@@ -15,7 +15,7 @@ import org.json.JSONObject;
 import lombok.Builder;
 import lombok.Data;
 import rhizome.core.block.dto.BlockDto;
-import rhizome.core.common.Constants;
+import rhizome.core.common.PowAlgorithm;
 import rhizome.core.crypto.SHA256Hash;
 import rhizome.core.transaction.Transaction;
 
@@ -47,6 +47,15 @@ public final class BlockImpl implements Block {
     private SHA256Hash nonce = SHA256Hash.empty();
 
     /**
+     * Hashes of referenced uncle blocks (valid orphans sharing a recent ancestor).
+     * Empty for a plain block; the basis of the GHOST fork choice. Committed in the
+     * header hash only when non-empty, so an uncle-less block hashes exactly as it
+     * did before uncles existed.
+     */
+    @Builder.Default
+    private List<UncleRef> uncles = new ArrayList<>();
+
+    /**
      * Serialization
      */
     public BlockDto serialize() {
@@ -58,9 +67,13 @@ public final class BlockImpl implements Block {
     }
 
     /**
-     * Cryptographic Hashing
-     * @return
-     * @throws NoSuchAlgorithmException
+     * Block header hash.
+     *
+     * <p>The preimage commits to every header field:
+     * {@code merkleRoot || lastBlockHash || id || difficulty || numTransactions || timestamp}
+     * (integers big-endian). Pandanite's C++ omitted {@code id} and the
+     * transaction count, which left the PoW-algorithm switch keyed on a value
+     * the PoW itself did not commit to; the clean chain closes that hole.
      */
     public SHA256Hash hash() {
         try {
@@ -68,12 +81,25 @@ public final class BlockImpl implements Block {
 
             sha256.update(merkleRoot.hash().getArray());
             sha256.update(lastBlockHash.hash().getArray());
-            
-            // Convert int and long to byte arrays and update hash
-            ByteBuffer buffer = ByteBuffer.allocate(Integer.BYTES + Long.BYTES);
+
+            ByteBuffer buffer = ByteBuffer.allocate(3 * Integer.BYTES + Long.BYTES);
+            buffer.putInt(id);
             buffer.putInt(difficulty);
+            buffer.putInt(transactions.size());
             buffer.putLong(timestamp);
             sha256.update(buffer.array());
+
+            // Commit to referenced uncles only when present, so an uncle-less block's
+            // hash is byte-for-byte what it was before uncles existed.
+            if (uncles != null && !uncles.isEmpty()) {
+                ByteBuffer uncleBuf = ByteBuffer.allocate(uncles.size() * Integer.BYTES);
+                for (UncleRef uncle : uncles) {
+                    sha256.update(uncle.hash().hash().getArray());
+                    uncleBuf.putInt(uncle.difficulty());
+                    sha256.update(uncle.miner().toBytes());
+                }
+                sha256.update(uncleBuf.array());
+            }
 
             return SHA256Hash.of(sha256.digest());
         } catch (NoSuchAlgorithmException e) {
@@ -81,8 +107,13 @@ public final class BlockImpl implements Block {
         }
     }
 
-    public boolean verifyNonce() {
-        boolean usePufferfish = id() > Constants.PUFFERFISH_START_BLOCK;
+    /**
+     * Checks the proof-of-work nonce under the chain's PoW algorithm (from
+     * {@code NetworkParameters}). The clean chain uses Pufferfish2 from genesis;
+     * there is no height-based algorithm switch.
+     */
+    public boolean verifyNonce(PowAlgorithm powAlgorithm) {
+        boolean usePufferfish = powAlgorithm == PowAlgorithm.PUFFERFISH2;
         return verifyHash(hash(), nonce, difficulty, usePufferfish, true);
     }
 

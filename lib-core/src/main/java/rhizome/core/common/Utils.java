@@ -23,6 +23,13 @@ public class Utils {
         return buffer.getLong();
     }
 
+    public static byte[] intToBytes(int value) {
+        ByteBuffer buffer = ByteBuffer.allocate(Integer.BYTES);
+        buffer.order(ByteOrder.BIG_ENDIAN);
+        buffer.putInt(value);
+        return buffer.array();
+    }
+
     public static String bytesToHex(byte[] bytes) {
         return hexFormat.formatHex(bytes);
     }
