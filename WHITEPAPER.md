@@ -29,7 +29,7 @@ Four goals drive the design:
    GHOST-style fork choice (§9) that credits and rewards orphaned (uncle) work, making
    the fast cadence safe against the orphaning a naïve longest chain suffers.
 
-The node is functional and covered by **219 tests**: consensus, the WASM contract VM
+The node is functional and covered by **222 tests**: consensus, the WASM contract VM
 and its persistence, execution, storage, mempool, HTTP API, block production, P2P
 synchronisation with reorganisation, GHOST uncles, and a wallet that deploys and calls
 contracts.
@@ -307,7 +307,13 @@ self-contained constant-product AMM (`contracts/amm.rs`), a token-backed AMM pai
 (`contracts/pair.rs`) that pulls and pays two real tokens via `call_contract` along
 `x*y=k`, and a fair-launch launchpad (`contracts/launchpad.rs`) that sells the token it
 holds for attached native coin, reverting when it cannot deliver so the buyer's coin
-only moves when tokens do.
+only moves when tokens do. Rounding out the suite, an **agent wallet**
+(`contracts/agent_wallet.rs`) is account abstraction for autonomous agents: a contract
+account whose owner drives arbitrary calls through it (`exec` — the wallet is the
+callee's caller, so it owns tokens and positions), and can grant **session keys** —
+other addresses allowed to move at most a capped amount of one token out of the wallet,
+decremented per spend and revocable at any time. An AI agent operates with its own key
+inside a hard budget; it never holds the treasury's keys.
 
 **Cross-contract calls.** `call_contract(addr, input) -> output | -1` lets a contract
 drive another (a callee sees the calling *contract* as its caller). Each call frame runs
@@ -504,7 +510,7 @@ discovery; hardening (checkpoints, finality, bounded rate limiting, ban-score, b
 cap); a full security review; and the **WASM smart-contract layer** — a Chicory-backed
 metered VM, a persistent contract store, `DEPLOY`/`CALL` transactions with gas fees,
 atomic per-block contract state with exact reorg reversal, and wallet `deploy`/`call`
-commands. **219 tests, 0 failures.**
+commands. **222 tests, 0 failures.**
 
 **GHOST fork choice.** A fast single longest chain orphans blocks because propagation
 takes a meaningful fraction of the interval (§6.3). A GHOST-style fork choice — the
@@ -532,12 +538,13 @@ end:
   amounts are flat (not distance-scaled), so they are derivable from the committed uncle
   refs alone and reorg reversal is exact.
 
-**In progress — autonomous-agent primitives.** Contract event logs are implemented (see
-§5): contracts `emit_log`, the processor collects them per block reorg-safely, and the
-node serves them by height and by a pollable height cursor so agents follow on-chain state
-in near-real-time, including live SSE push at `/logs/stream` (§5.4). Next: account
-abstraction (contract accounts as agents — session keys, spend limits; gas sponsorship
-needs protocol-level work).
+**Autonomous-agent primitives.** Contract event logs are implemented (see §5):
+contracts `emit_log`, the processor collects them per block reorg-safely, and the node
+serves them by height, by a pollable height cursor, and by live SSE push at
+`/logs/stream` (§5.4) — so agents follow on-chain state in real time. Account
+abstraction is covered by the agent wallet (§5.4): contract accounts with owner-driven
+`exec` and revocable, per-token-capped session keys. Gas sponsorship (a third party
+paying a transaction's gas) remains protocol-level future work.
 
 **Memecoin primitives.** Three reference contracts are implemented and tested through
 consensus: a fungible token (mint, transfer, `transfer` logs), a constant-product AMM
