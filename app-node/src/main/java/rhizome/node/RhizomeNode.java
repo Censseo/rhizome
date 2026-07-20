@@ -45,6 +45,7 @@ public final class RhizomeNode implements AutoCloseable {
     private SignatureVerifier verifier;
 
     private Eventloop eventloop;
+    private SseLogHub sseHub;
     private Thread eventloopThread;
     private HttpServer httpServer;
 
@@ -105,11 +106,16 @@ public final class RhizomeNode implements AutoCloseable {
 
     private void startHttp() throws IOException {
         eventloop = Eventloop.create();
+        // Stream every applied block's logs (plus a heartbeat) to SSE subscribers,
+        // whatever path the block arrived by: API submit, gossip, sync or the local
+        // producer. The engine listener only enqueues onto the event loop.
+        sseHub = new SseLogHub(eventloop, 256);
+        engine.setOnBlockApplied(height -> sseHub.publish(height, service.logsAt(height)));
         // Per-client rate limit (fixed 1s window) with a bounded client table
         // (the table cap is the memory-leak fix; the per-window count is generous
         // so honest peers on a shared host are never throttled).
         RateLimiter limiter = new RateLimiter(1000, 1000, 65_536);
-        httpServer = HttpServer.builder(eventloop, NodeApi.servlet(eventloop, service, limiter))
+        httpServer = HttpServer.builder(eventloop, NodeApi.servlet(eventloop, service, limiter, sseHub))
             .withListenPort(config.apiPort())
             .build();
         eventloop.keepAlive(true);

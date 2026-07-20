@@ -29,7 +29,7 @@ Four goals drive the design:
    GHOST-style fork choice (§9) that credits and rewards orphaned (uncle) work, making
    the fast cadence safe against the orphaning a naïve longest chain suffers.
 
-The node is functional and covered by **216 tests**: consensus, the WASM contract VM
+The node is functional and covered by **219 tests**: consensus, the WASM contract VM
 and its persistence, execution, storage, mempool, HTTP API, block production, P2P
 synchronisation with reorganisation, GHOST uncles, and a wallet that deploys and calls
 contracts.
@@ -324,9 +324,14 @@ every enclosing frame succeeds, each stamped with its emitting contract.
 autonomous agents watch to react to on-chain state. Logs are gas-metered, kept only when
 the call succeeds, and never read back by contract code, so they carry no consensus weight
 beyond the gas paid. The processor collects each block's logs (dropping them exactly on a
-reorg, like contract state), and the node exposes them at `GET /logs?height=N` and, for
-streaming, a height-cursor scan `GET /logs?fromHeight=N` whose `toHeight` is the next
-cursor — an agent follows the chain by polling forward from where it left off.
+reorg, like contract state), and the node exposes them three ways: `GET /logs?height=N`
+(one block), a height-cursor scan `GET /logs?fromHeight=N` whose `toHeight` is the next
+cursor, and **live push over Server-Sent Events** at `GET /logs/stream` — one heartbeat
+comment per applied block (a natural keepalive at the 5-second cadence, whatever path
+the block arrived by: submit, gossip, sync or local production) and one `data:` event
+per log, with the block height as the SSE event id. A subscriber that cannot keep up is
+disconnected rather than buffered without bound, and resumes exactly where it left off
+via the `fromHeight` cursor — push for liveness, cursor for correctness.
 
 **Gas.** Every executed instruction is charged via the interpreter's execution listener,
 and every host call is charged on top, so a contract that loops forever is aborted
@@ -499,7 +504,7 @@ discovery; hardening (checkpoints, finality, bounded rate limiting, ban-score, b
 cap); a full security review; and the **WASM smart-contract layer** — a Chicory-backed
 metered VM, a persistent contract store, `DEPLOY`/`CALL` transactions with gas fees,
 atomic per-block contract state with exact reorg reversal, and wallet `deploy`/`call`
-commands. **216 tests, 0 failures.**
+commands. **219 tests, 0 failures.**
 
 **GHOST fork choice.** A fast single longest chain orphans blocks because propagation
 takes a meaningful fraction of the interval (§6.3). A GHOST-style fork choice — the
@@ -530,9 +535,9 @@ end:
 **In progress — autonomous-agent primitives.** Contract event logs are implemented (see
 §5): contracts `emit_log`, the processor collects them per block reorg-safely, and the
 node serves them by height and by a pollable height cursor so agents follow on-chain state
-in near-real-time. Next: push streaming (SSE/WebSocket) over the same event source, and
-account abstraction (contract accounts as agents — session keys, spend limits, gas
-sponsorship).
+in near-real-time, including live SSE push at `/logs/stream` (§5.4). Next: account
+abstraction (contract accounts as agents — session keys, spend limits; gas sponsorship
+needs protocol-level work).
 
 **Memecoin primitives.** Three reference contracts are implemented and tested through
 consensus: a fungible token (mint, transfer, `transfer` logs), a constant-product AMM

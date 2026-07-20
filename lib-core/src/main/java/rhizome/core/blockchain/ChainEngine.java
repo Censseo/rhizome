@@ -65,6 +65,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
 
     /** Uncle work credited per block height, so a pop subtracts exactly what an add added. */
     private final Map<Long, BigInteger> uncleWorkByHeight = new HashMap<>();
+    private volatile java.util.function.LongConsumer onBlockApplied;
 
     private ChainEngine(NetworkParameters params, Ledger ledger, ChainStore store,
                         LongSupplier nowMillis, SignatureVerifier verifier,
@@ -183,10 +184,23 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             totalWork = totalWork.add(BigInteger.TWO.pow(b.difficulty())).add(uncleWork);
             uncleWorkByHeight.put((long) b.id(), uncleWork);
             currentDifficulty = computeDifficultyFromChain();
+            if (onBlockApplied != null) {
+                onBlockApplied.accept(b.id()); // fast/non-blocking by contract (see setter)
+            }
             return SUCCESS;
         } finally {
             lock.unlock();
         }
+    }
+
+    /**
+     * Called with the height of every successfully applied block — whatever the entry
+     * path (API submit, gossip, sync, local producer). Runs while the engine lock is
+     * held, so the listener must be fast and non-blocking (e.g. hand off to a queue or
+     * an event loop); it must not call back into the engine.
+     */
+    public void setOnBlockApplied(java.util.function.LongConsumer listener) {
+        this.onBlockApplied = listener;
     }
 
     /** Removes the tip block (never genesis), reverting ledger and nonces. */

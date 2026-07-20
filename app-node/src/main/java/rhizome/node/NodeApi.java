@@ -54,6 +54,11 @@ public final class NodeApi {
      * of the always-responds robustness rules.
      */
     public static AsyncServlet servlet(Reactor reactor, NodeService node, RateLimiter limiter) {
+        return servlet(reactor, node, limiter, null);
+    }
+
+    /** As above, with an optional SSE hub backing {@code GET /logs/stream}. */
+    public static AsyncServlet servlet(Reactor reactor, NodeService node, RateLimiter limiter, SseLogHub sse) {
         int maxBlockBody = node.params().maxBlockSizeBytes() + 1024;
 
         RoutingServlet routing = RoutingServlet.builder(reactor)
@@ -89,6 +94,7 @@ public final class NodeApi {
                     .put("nextNonce", node.nextNonce(wallet)));
             }))
             .with(GET, "/logs", req -> guarded(() -> logs(node, req)))
+            .with(GET, "/logs/stream", req -> guarded(() -> logStream(sse)))
             .with(GET, "/sync", req -> guarded(() -> sync(node, req)))
             .with(POST, "/add_transaction_json", req -> req.loadBody(SMALL_BODY).map(body -> guardedResponse(() -> {
                 Transaction t = Transaction.of(new JSONObject(body.getString(StandardCharsets.UTF_8)));
@@ -162,6 +168,25 @@ public final class NodeApi {
             .put("fromHeight", page.fromHeight())
             .put("toHeight", page.toHeight())
             .put("logs", arr));
+    }
+
+    /**
+     * Live contract-log push over Server-Sent Events: a heartbeat comment per applied
+     * block and one {@code data:} event per log (see {@link SseLogHub} for the format
+     * and the slow-subscriber contract). 503 when streaming is not wired or full.
+     */
+    private static HttpResponse logStream(SseLogHub sse) {
+        var stream = sse == null ? null : sse.subscribe();
+        if (stream == null) {
+            return HttpResponse.ofCode(503)
+                .withJson(new JSONObject().put("error", "streaming unavailable").toString())
+                .build();
+        }
+        return HttpResponse.ok200()
+            .withHeader(HttpHeaders.CONTENT_TYPE, "text/event-stream")
+            .withHeader(HttpHeaders.CACHE_CONTROL, "no-cache")
+            .withBodyStream(stream)
+            .build();
     }
 
     private static JSONObject logJson(rhizome.core.blockchain.ContractProcessor.ContractLog log) {
