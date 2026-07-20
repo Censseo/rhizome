@@ -176,6 +176,40 @@ public final class RocksDbNodeStore implements AutoCloseable {
         return new RocksChainStore();
     }
 
+    /**
+     * Snap-sync bootstrap: adopts a run of already-validated headers as chain history
+     * without their bodies. The store must hold exactly genesis (height 1) and the headers
+     * must be contiguous from height 2. Afterwards {@code height()} is the last header's
+     * height, and the body-less range is marked pruned so peers and the local engine treat
+     * it exactly like a pruned node's discarded history.
+     */
+    public void bootstrapHeaders(List<BlockHeader> headers) {
+        long height = new RocksChainStore().height();
+        if (height != 1) {
+            throw new IllegalStateException("bootstrap requires a store holding exactly genesis, height was " + height);
+        }
+        if (headers.isEmpty()) {
+            return;
+        }
+        try (WriteBatch batch = new WriteBatch()) {
+            long expected = 2;
+            for (BlockHeader header : headers) {
+                if (header.id() != expected) {
+                    throw new IllegalArgumentException("non-contiguous bootstrap header at " + header.id()
+                        + ", expected " + expected);
+                }
+                batch.put(headersCf, heightKey(expected), HeaderCodec.encode(header));
+                expected++;
+            }
+            long tip = expected - 1;
+            batch.put(metaCf, HEIGHT_KEY, heightKey(tip));
+            batch.put(metaCf, PRUNED_BELOW_KEY, heightKey(tip + 1));
+            db.write(writeOptions, batch);
+        } catch (RocksDBException e) {
+            throw new LedgerException("Failed to bootstrap headers", e);
+        }
+    }
+
     public Ledger ledger() {
         return new RocksLedger();
     }

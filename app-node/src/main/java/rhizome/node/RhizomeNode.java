@@ -124,6 +124,23 @@ public final class RhizomeNode implements AutoCloseable {
         tokenStore = new RocksDbTokenStore(config.dataDir() + "/tokens");
         stateStore = new RocksDbStateStore(config.dataDir() + "/state");
         verifier = new SignatureVerifier();
+
+        // RHIZOME_SYNC=snap on an empty data dir: adopt a peer's verified state snapshot at
+        // a buried pivot instead of replaying history; falls back to full sync when no peer
+        // offers a usable snapshot. The engine boot below then starts at the pivot.
+        if ("snap".equalsIgnoreCase(System.getenv("RHIZOME_SYNC")) && store.chainStore().height() == 0) {
+            for (String peerUrl : config.peers()) {
+                try {
+                    if (SnapshotBootstrap.bootstrap(config.params(), snapshot, store, boxStore, tokenStore,
+                            contractStore, stateStore, new HttpPeerSource(peerUrl), System.currentTimeMillis())) {
+                        break;
+                    }
+                } catch (RuntimeException e) {
+                    log.warn("Snap bootstrap from {} failed: {}", peerUrl, e.toString());
+                }
+            }
+        }
+
         var contractProcessor = new WasmContractProcessor(new WasmVm(), contractStore,
             config.params().maxReorgDepth());
         var boxProcessor = new DefaultBoxProcessor(boxStore, config.params());
