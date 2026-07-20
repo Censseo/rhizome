@@ -284,7 +284,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             // fully applied, so undo it (ledger + processors + accumulator) before rejecting.
             if (stateAccumulator != null) {
                 long height2 = b.id();
-                byte[] newRoot = stateAccumulator.applyBlock(height2, collectStateChanges(touched, height2));
+                byte[] newRoot = stateAccumulator.applyBlock(height2, collectStateChanges(block, touched, height2));
                 if (!java.util.Arrays.equals(newRoot, b.stateRoot().toBytes())) {
                     stateAccumulator.revertBlock(height2);
                     Executor.rollbackBlock(block, ledger, contractProcessor, boxProcessor, height2, params);
@@ -690,7 +690,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
                 return; // invalid block; leave the state root empty and let addBlock reject it
             }
             long h = b.id();
-            byte[] root = stateAccumulator.dryApply(collectStateChanges(touched, h));
+            byte[] root = stateAccumulator.dryApply(collectStateChanges(candidate, touched, h));
             b.stateRoot(SHA256Hash.of(root));
             Executor.rollbackBlock(candidate, ledger, contractProcessor, boxProcessor, h, params);
             if (contractProcessor != null) {
@@ -707,9 +707,9 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         }
     }
 
-    /** Gathers a block's committed ledger, box and token changes into state accumulator changes. */
+    /** Gathers a block's committed ledger, nonce, box and token changes into state accumulator changes. */
     private List<rhizome.core.state.StateChange> collectStateChanges(
-            java.util.Set<PublicAddress> touched, long height) {
+            Block block, java.util.Set<PublicAddress> touched, long height) {
         List<rhizome.core.state.StateChange> changes = new ArrayList<>();
         for (PublicAddress a : touched) {
             long bal = ledger.hasWallet(a) ? ledger.getWalletValue(a).amount() : 0;
@@ -718,6 +718,20 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
                 ? rhizome.core.state.StateChange.delete(rhizome.core.state.StateKeys.LEDGER, key)
                 : rhizome.core.state.StateChange.set(rhizome.core.state.StateKeys.LEDGER, key, longBytesBE(bal)));
         }
+        // Account nonces (⚠ consensus domain 0x07): each sender's next-expected nonce after this
+        // block is max(txNonce)+1 over its transactions — a deterministic function of block content
+        // (sequentiality already validated). Committing it lets a snap-synced node obtain nonces
+        // verifiably (root equality) rather than trusting a peer. Derived from the block, not the
+        // nonce store, because the store is advanced only after this collection runs.
+        java.util.Map<PublicAddress, Long> newNonces = new HashMap<>();
+        for (Transaction t : block.transactions()) {
+            var tx = (TransactionImpl) t;
+            if (!tx.isTransactionFee() && !isSelfAuthorized(tx)) {
+                newNonces.merge(tx.from(), tx.nonce() + 1, Math::max);
+            }
+        }
+        newNonces.forEach((from, nonce) -> changes.add(rhizome.core.state.StateChange.set(
+            rhizome.core.state.StateKeys.ACCOUNT_NONCE, from.toBytes(), longBytesBE(nonce))));
         if (boxProcessor != null) {
             for (var m : boxProcessor.changes(height)) {
                 changes.add(m.box() == null

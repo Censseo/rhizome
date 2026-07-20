@@ -23,6 +23,8 @@ public final class StateKeys {
     public static final byte CONTRACT_CODE = 0x05;
     /** Contract storage: raw key = contract(25) ‖ key, value = stored bytes. */
     public static final byte CONTRACT_STORAGE = 0x06;
+    /** Account nonce: raw key = address(25), value = next-expected nonce(8, big-endian). */
+    public static final byte ACCOUNT_NONCE = 0x07;
 
     private StateKeys() {}
 

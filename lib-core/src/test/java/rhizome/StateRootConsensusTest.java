@@ -216,4 +216,32 @@ class StateRootConsensusTest {
         assertFalse(SparseMerkleTree.verify(root, StateKeys.key(StateKeys.LEDGER, bob.toBytes()),
             StateKeys.valueHash(ledgerValue(999)), ledgerProof));
     }
+
+    @Test
+    void accountNonceIsCommittedAndProvableAgainstRoot() {
+        // Three account transactions from the sender (nonces 0,1,2) advance its next nonce to 3.
+        assertEquals(ExecutionStatus.SUCCESS, engine.addBlock(mine(List.of(transfer(1_000, 0)))));
+        assertEquals(ExecutionStatus.SUCCESS, engine.addBlock(mine(List.of(transfer(1_000, 1)))));
+        assertEquals(ExecutionStatus.SUCCESS, engine.addBlock(mine(List.of(transfer(1_000, 2)))));
+        assertEquals(3L, engine.nextNonce(sender));
+
+        byte[] root = engine.stateRoot();
+        // The committed next-expected nonce (3, big-endian 8 bytes) is provable to a light client.
+        byte[] nonceValue = Utils.longToBytes(3L);
+        StateProof nonceProof = engine.stateProof(StateKeys.ACCOUNT_NONCE, sender.toBytes());
+        assertNotNull(nonceProof);
+        assertArrayEquals(StateKeys.valueHash(nonceValue), nonceProof.valueHash());
+        assertTrue(SparseMerkleTree.verify(root, StateKeys.key(StateKeys.ACCOUNT_NONCE, sender.toBytes()),
+            nonceProof.valueHash(), nonceProof));
+
+        // A different nonce value must not verify against the honest proof.
+        assertFalse(SparseMerkleTree.verify(root, StateKeys.key(StateKeys.ACCOUNT_NONCE, sender.toBytes()),
+            StateKeys.valueHash(Utils.longToBytes(2L)), nonceProof));
+
+        // A pop rewinds the nonce leaf with the block: next nonce and the committed value both drop.
+        engine.popBlock();
+        assertEquals(2L, engine.nextNonce(sender));
+        StateProof after = engine.stateProof(StateKeys.ACCOUNT_NONCE, sender.toBytes());
+        assertArrayEquals(StateKeys.valueHash(Utils.longToBytes(2L)), after.valueHash());
+    }
 }
