@@ -221,9 +221,16 @@ ajuste un paramètre d'un pas borné (`Parameters.scala:158-183`), 90 % sur 32
 > (`TOKEN_MINT`/`TRANSFER`/`BURN`, §5.6) et la **racine d'état authentifiée**
 > (Sparse Merkle Tree sur ledger + boxes + tokens, preuves clients légers, §5.7).
 > Le stockage contractuel est aussi committé dans la racine (§5.7) et les
-> **paramètres économiques sont votables par les mineurs** (§5.8). Voir
-> [`WHITEPAPER.md`](../WHITEPAPER.md). Reste en travaux futurs : le snap-sync
-> (nécessite un sync headers-first, seul prérequis restant) et les `dataBoxIds`
+> **paramètres économiques sont votables par les mineurs** (§5.8). Le **sync
+> headers-first, les nœuds élagués et le snap-sync trust-minimisé** sont désormais
+> réalisés (§6.4) : `BlockHeader`/`HeaderCodec` de première classe, validateur
+> stateless `HeaderChain`, `HeaderSynchronizer` dont le gate de travail refuse un
+> pair menteur sur les seuls en-têtes, nonces de compte persistés + domaine d'état
+> `ACCOUNT_NONCE` (§6.5), pruning configurable (`RHIZOME_PRUNE`), et bootstrap par
+> snapshot (`RHIZOME_SYNC=snap`) vérifié par égalité de racine contre un en-tête
+> validé sous PoW — l'adaptation du bootstrap Ergo (§8, §3.4 ci-dessous) à une
+> racine sparse-Merkle, sans manifest d'arbre. Voir
+> [`WHITEPAPER.md`](../WHITEPAPER.md). Reste en travaux futurs : les `dataBoxIds`
 > déclarés dans les transactions (largement couverts par `box_read`). Trace de
 > l'analyse d'origine.
 

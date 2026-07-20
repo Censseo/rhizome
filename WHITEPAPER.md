@@ -29,14 +29,15 @@ Four goals drive the design:
    GHOST-style fork choice (§9) that credits and rewards orphaned (uncle) work, making
    the fast cadence safe against the orphaning a naïve longest chain suffers.
 
-The node is functional and covered by **304 tests**: consensus, the WASM contract VM
+The node is functional and covered by **345 tests**: consensus, the WASM contract VM
 and its persistence, execution, storage, mempool, HTTP API, block production, P2P
 synchronisation with reorganisation, GHOST uncles, data boxes (agent-facing on-chain
 storage with typed registers, an anti-dust deposit and storage rent), native tokens
 (one-transaction fungible-asset launches), an authenticated state root committed in every
-header (light-client proofs of any ledger, box, token or contract entry), miner-voted
-economic parameters, and a wallet that deploys and calls contracts and manages boxes and
-tokens.
+header (light-client proofs of any ledger, nonce, box, token or contract entry),
+**headers-first sync, pruned nodes, and trust-minimised snapshot bootstrap** (§6.4),
+miner-voted economic parameters, and a wallet that deploys and calls contracts and manages
+boxes and tokens.
 
 ---
 
@@ -539,15 +540,14 @@ SMT key from `(domain, rawKey)` and folds the siblings to check it against a roo
 trusts — the stateless verifier is a few lines and needs nothing else. A genesis seed commits
 the snapshot balances so block 2 builds on them.
 
-Committed today: **the full state** — ledger balances, boxes, token metadata/balances, and
-**contract code and key/value storage** — so a light client can prove any of them against a
-header (`GET /state/proof?domain=…` covers all six domains). Still ahead: **snapshot sync** — a
-new node downloads a recent state tree bound to a header-committed root, then a suffix of full
-blocks (the root makes it trust-minimised). It additionally needs **headers-first sync**, which
-the current engine does not yet separate (difficulty, median-time and cumulative work are
-recomputed from historical block timestamps, so old blocks cannot yet be pruned); that is the
-one remaining prerequisite, and because the `stateRoot` header field is fixed in the format,
-adding it needs no further hard fork.
+Committed today: **the full state** — ledger balances, **account nonces**, boxes, token
+metadata/balances, and **contract code and key/value storage** — so a light client can prove
+any of them against a header (`GET /state/proof?domain=…` covers all seven domains). The
+account-nonce domain (§6.5) was added so a snapshot-bootstrapped node obtains replay-protection
+state **verifiably** rather than on trust — the one deliberate change it makes to every root,
+free while the chain is pre-launch. This root is what makes **snapshot bootstrap**
+trust-minimised: a new node rebuilds a recent state tree and accepts it only when it reproduces
+the root committed in a proof-of-work-validated header (§6.4).
 
 ### 5.8 Miner-voted parameters
 
@@ -590,6 +590,10 @@ RPC forks that were tried upstream were non-functional and depended on runtime c
   table, fixing the Pandanite #52 memory leak), each POST body is capped, and the sync
   client **bounds peer response sizes** (a giant `/total_work` string would be an
   O(n²) BigInteger-parse CPU DoS).
+- **Headers-first sync** — initial synchronisation validates the header chain before
+  downloading any body (`/headers`), which turns the anti-DoS work gate from a full-block
+  download into a ~150 B/header one; pruned nodes and snapshot bootstrap build on the same
+  machinery (`/state/snapshot/*`). See §6.4.
 
 ### 6.2 Performance stack (target: 1 block/s)
 
@@ -650,6 +654,96 @@ than pushing a single longest chain below its own propagation latency. Rhizome a
 that lesson twice over: the 5-second interval keeps propagation a small fraction of the
 cadence, and GHOST (§9) credits and rewards whatever is still orphaned. Dropping toward
 1 s remains possible later, contingent on the relay upgrades above.
+
+### 6.4 Headers-first sync, pruned nodes, and snapshot bootstrap
+
+Initial sync happens in two phases: **validate the header chain first, download bodies
+second**. A block header carries its whole proof-of-work preimage plus its uncle
+references, so a `BlockHeader` verifies its own PoW without the body — headers are the
+canonical hash carrier, and `BlockImpl.hash()` delegates to them, so the two can never
+diverge. Nodes serve `GET /headers?start=&end=` (a self-framing binary stream, ~150 B per
+header versus up to 4 MiB for a full block).
+
+**The state machine.** The synchroniser (`HeaderSynchronizer`, subsuming the older
+block-based one) finds the common ancestor on headers, then downloads the contested range's
+headers and validates them **statelessly** (`HeaderChain`): id continuity, hash chaining,
+per-header PoW, the difficulty recomputed from header timestamps, median-time-past, the
+future bound, and structural uncle limits. It returns the branch's **cumulative work** —
+each header's `2^difficulty` plus its committed uncle difficulties, which live inside the
+PoW preimage and so cannot be inflated. Only when that proven work strictly exceeds the
+local branch does it enter body sync: fetch bodies in batches, **verify each against its
+already-validated header** (hash equality) before execution, with the same restore-on-
+failure and orphan-registration a reorg always had.
+
+The payoff is the anti-DoS gate. Previously a peer that merely *claimed* huge total work
+cost us a full-block download before we could refute it; now it costs a bounded **header**
+download (capped per round), after which the work gate refuses it without a single body
+fetched. A peer that predates `/headers` (a 404) transparently falls back to the old
+full-block path — the change is additive, no wire format changed.
+
+For this to work the engine had to stop reading historical **bodies** for its derived state.
+Difficulty, median-time, uncle work and vote tallies now read only `headerAt(h)`; account
+nonces — the one piece of derived state at transaction granularity — are **persisted** in a
+`nonces` column family, advanced in lockstep with the chain and watermarked by height, so a
+restart rebuilds derived state in `O(headers)` and never re-reads a body (§6.5).
+
+**Pruned nodes.** With the body dependency gone, a node configured with `RHIZOME_PRUNE=N`
+keeps only the most recent `N` block bodies (plus genesis, all headers, and the transaction
+index), discarding each body as it falls out of the window — an amortised `O(1)` delete in
+the same write batch as the append. `N` is floored at boot to at least the deepest history
+the engine can read (reorg window, uncle depth, difficulty and median-time windows) plus a
+margin, so pruning can never remove a body a reorg still needs. A pruned node mines,
+validates, serves every header and its recent bodies, and restarts correctly; `/sync` for a
+discarded range answers **410 Gone** with the prune watermark (advertised on `/info`), and
+the synchroniser routes deep body requests to an archive peer instead of penalising the
+pruned one.
+
+**Snapshot bootstrap (snap-sync).** A brand-new node can skip replaying history entirely.
+Its trust reduces to exactly what full validation gives, in four steps (the model is Ergo's
+bootstrap §8, adapted to a sparse-Merkle root):
+
+1. **Genesis is built locally** from the network parameters and balance snapshot — chain
+   identity is never taken from a peer.
+2. **Every header** from genesis to the peer tip is validated under full PoW, so the state
+   root committed in any header carries the chain's whole accumulated work.
+3. The node picks a **pivot** buried at least `maxReorgDepth` under the peer tip. Because
+   every node refuses reorgs deeper than that (§3.7), the imported state can never be forced
+   to unwind — no "de-import" path is ever needed.
+4. It downloads the state **snapshot** at the pivot and rebuilds the sparse-Merkle tree from
+   it, accepting the state **only when it reproduces the pivot header's committed root**.
+   Any tampered, dropped or duplicated entry changes the rebuilt root and the whole import is
+   refused with the stores untouched.
+
+The snapshot itself is a flat per-domain dump — for each of the seven state domains, a paged
+run of `(rawKey, value)` chunks. Unlike Ergo's AVL+ manifest-and-subtree scheme, **it
+carries no tree structure**: the sparse-Merkle root is a function of the binding *set* alone
+(§5.7), so the importer can insert chunks in any order and the single final root equality
+verifies the lot. Servers **materialise** a consistent snapshot periodically
+(`RHIZOME_SNAPSHOT_EVERY` blocks) under a point-in-time lock and advertise
+`(pivotHeight, stateRoot, chunkCount)` on `GET /state/snapshot/info`, serving chunks by index.
+Secondary indexes (box owner/expiry, token minter/holder) are **recomputed locally** from the
+verified values, never transferred — an untrusted index cannot be smuggled in. After import
+the node holds genesis, headers to the pivot (body-less, marked pruned), and the full pivot
+state; ordinary headers-first sync then pulls only the body suffix above the pivot. A
+snap-synced node is a first-class citizen from the first block: it validates, serves, and
+proves state entries against the root like any other.
+
+### 6.5 Account nonces as authenticated state
+
+Sequential per-account nonces are the replay-protection rule, and they are the only derived
+state computed at *transaction* granularity rather than from headers. Two needs converge on
+persisting them. **Pruning:** without historical bodies a node cannot reconstruct nonces at
+boot, so they live in a persistent store, updated on every add and pop and watermarked by the
+height through which they are current — a persistent store reports the tip, so a restart (even
+a pruned node's, even a chain that has never seen an account transaction) reads no body;
+reconstructing nonces from bodies that lie below the prune watermark is refused loudly rather
+than silently under-counting. **Snapshot bootstrap:** a bootstrapped node must obtain nonces
+*verifiably*, or it could not validate the next block's nonce rule. So the account nonce is a
+committed state domain (`ACCOUNT_NONCE`, key = address, value = next nonce): each sender's
+`max(txNonce)+1` over the block is folded into the state root, derived from block content
+(sequentiality already checked) so producer and validators agree. This is the chantier's one
+consensus change — it alters every state root, hence must land while the chain is pre-launch;
+after launch the same change would need a height-activated fork.
 
 ---
 
@@ -718,7 +812,14 @@ to the full state (ledger, boxes, tokens and contract code/storage) in every hea
 by the producer and validated by every node with full rollback on mismatch, reorg-safe, with
 `GET /state`+`/state/proof` and a stateless light-client verifier; and **miner-voted
 parameters** (§5.8) — a header vote, per-epoch tally and reorg-safe derived params for the box
-fee/dust factors. **304 tests, 0 failures.**
+fee/dust factors; and **headers-first sync, pruning and snapshot bootstrap** (§6.4) — a
+first-class `BlockHeader`/`HeaderCodec`, a stateless `HeaderChain` validator, a
+`HeaderSynchronizer` whose work gate refuses a lying peer on headers alone, persisted account
+nonces plus an `ACCOUNT_NONCE` state domain (§6.5) so the engine's derived state is header-only,
+configurable body pruning (`RHIZOME_PRUNE`) with a `/sync` 410 and a `prunedBelow` advert, and
+trust-minimised snap-sync (`RHIZOME_SYNC=snap`) — periodic per-domain snapshot materialisation,
+`/state/snapshot/*`, and a bootstrap that adopts a peer's state at a buried pivot only when it
+reproduces a PoW-validated header's root. **345 tests, 0 failures.**
 
 **GHOST fork choice.** A fast single longest chain orphans blocks because propagation
 takes a meaningful fraction of the interval (§6.3). A GHOST-style fork choice — the
@@ -754,9 +855,10 @@ addressable memory** is covered by data boxes (§5.5): typed-register storage ob
 agent creates, updates and proves, read contention-free by any contract via `box_read`,
 kept honest by an anti-dust deposit and storage rent that recycles the memory of dead
 agents. Account abstraction is covered by the agent wallet (§5.4): contract accounts with
-owner-driven `exec` and revocable, per-token-capped session keys. The remaining protocol-
-level work is an authenticated state root so agents can prove a box to a light client
-(§5.5), and gas sponsorship (a third party paying a transaction's gas).
+owner-driven `exec` and revocable, per-token-capped session keys — and any of that state is
+provable to a light client against the authenticated root (§5.7), which a snap-synced or
+pruned agent node can rely on without holding history (§6.4). The remaining protocol-level
+work is gas sponsorship (a third party paying a transaction's gas).
 
 **Memecoin primitives.** Native tokens (§5.6) make a fungible-asset launch a single
 gas-free transaction — `TOKEN_MINT`/`TRANSFER`/`BURN`, unique unforgeable ids, minter and
