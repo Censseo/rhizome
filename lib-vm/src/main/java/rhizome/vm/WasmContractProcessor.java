@@ -193,6 +193,11 @@ public final class WasmContractProcessor implements ContractProcessor {
         return new CallOutcome(true, result.output(), collected, null);
     }
 
+    /** Deployed code at {@code contract} in the committed state, or {@code null}. */
+    public byte[] codeAt(PublicAddress contract) {
+        return baseStore.getCode(contract);
+    }
+
     @Override
     public void commit(long blockHeight) {
         if (session != null) {

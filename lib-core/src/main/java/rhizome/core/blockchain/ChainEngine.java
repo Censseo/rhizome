@@ -503,6 +503,16 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
 
     // ---- data boxes ----
 
+    /** Whether the data-box layer is wired (box transactions and queries active). */
+    public boolean boxesEnabled() {
+        return boxProcessor != null;
+    }
+
+    /** Whether the native-token layer is wired. */
+    public boolean tokensEnabled() {
+        return tokenProcessor != null;
+    }
+
     /** The box at {@code id} from committed state, or {@code null} (none / boxes disabled). */
     public rhizome.core.box.Box box(byte[] id) {
         if (boxProcessor == null) {

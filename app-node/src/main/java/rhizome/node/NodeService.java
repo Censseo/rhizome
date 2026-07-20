@@ -24,6 +24,7 @@ public final class NodeService {
     private volatile java.util.function.Consumer<Transaction> onTransactionAccepted;
     private volatile PeerRegistry peers;
     private volatile java.util.function.LongFunction<List<ContractLog>> logSource;
+    private volatile java.util.function.Function<PublicAddress, byte[]> codeSource;
     private volatile java.util.function.LongFunction<List<rhizome.core.box.BoxProcessor.BoxEvent>> boxEventSource;
     private volatile java.util.function.LongFunction<List<rhizome.core.token.TokenProcessor.TokenEvent>> tokenEventSource;
     private volatile rhizome.core.blockchain.ContractProcessor contracts;
@@ -65,6 +66,17 @@ public final class NodeService {
     /** Source of contract event logs by block height (the contract processor). */
     public void setLogSource(java.util.function.LongFunction<List<ContractLog>> source) {
         this.logSource = source;
+    }
+
+    /** Source of deployed contract code by address (the contract store). */
+    public void setCodeSource(java.util.function.Function<PublicAddress, byte[]> source) {
+        this.codeSource = source;
+    }
+
+    /** Deployed code at {@code contract}, or {@code null} if none / no store wired. */
+    public byte[] contractCode(PublicAddress contract) {
+        var source = codeSource;
+        return source == null ? null : source.apply(contract);
     }
 
     /** Source of box lifecycle events by block height (the box processor). */
@@ -153,6 +165,16 @@ public final class NodeService {
     public rhizome.core.blockchain.ContractProcessor.ContractResult dryRun(
             PublicAddress from, PublicAddress to, byte[] input, long value, long gasLimit) {
         return contracts.dryRun(from, to, input, value, gasLimit);
+    }
+
+    /** Whether the data-box layer is active on this node. */
+    public boolean boxesAvailable() {
+        return engine.boxesEnabled();
+    }
+
+    /** Whether the native-token layer is active on this node. */
+    public boolean tokensAvailable() {
+        return engine.tokensEnabled();
     }
 
     /** A box from committed state, or {@code null} if none / boxes disabled. */
