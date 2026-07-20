@@ -669,6 +669,12 @@ function renderContracts(sub) {
 }
 
 function renderTplGallery(zone) {
+  if (App.features.tokens) {
+    zone.append(el('div', { class: 'callout' },
+      'Pour émettre un simple token fongible, préférez les ',
+      el('a', { href: '#/wallet' }, 'tokens natifs du wallet'),
+      ' (TOKEN_MINT : une transaction, pas de contrat, pas de gas). Le template token.wasm ci-dessous reste utile quand un contrat doit composer avec le token — pools AMM, launchpad, agent wallets.'));
+  }
   zone.append(el('div', { class: 'callout' },
     'Les templates sont compilés depuis les sources Rust embarquées (no_std → wasm32). Pour écrire votre propre contrat : partez d’une source ci-dessous, compilez avec ',
     el('span', { class: 'mono' }, 'cargo build --target wasm32-unknown-unknown'),
