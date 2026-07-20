@@ -9,6 +9,7 @@ import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.LongSupplier;
 
 import rhizome.core.block.Block;
+import rhizome.core.block.BlockHeader;
 import rhizome.core.block.BlockImpl;
 import rhizome.core.block.UncleRef;
 import rhizome.core.crypto.SHA256Hash;
@@ -594,7 +595,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         long netSff = 0;
         long netMvb = 0;
         for (long h = height - epoch + 1; h <= height; h++) {
-            int vote = ((BlockImpl) store.blockAt(h)).vote();
+            int vote = store.headerAt(h).vote();
             int paramId = Math.abs(vote);
             int dir = Integer.signum(vote);
             if (paramId == VoteableParams.STORAGE_FEE_FACTOR) {
@@ -755,23 +756,25 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         voteParamsByBoundary.clear();
         long height = store.height();
         for (long h = GenesisBlock.GENESIS_ID + 1; h <= height; h++) {
-            Block block = store.blockAt(h);
-            commitAccountNonces(block);
+            // Work, uncle weight and votes are header-only; the account nonces still
+            // walk the body here (removed in A4, when they become a persisted store).
+            BlockHeader header = store.headerAt(h);
+            commitAccountNonces(store.blockAt(h));
             // Uncle work is recomputed from the committed uncle difficulties, so the
             // cumulative weight is restored exactly even with an empty orphan pool.
-            BigInteger uncleWork = uncleWorkOf(block);
+            BigInteger uncleWork = uncleWorkOf(header);
             uncleWorkByHeight.put(h, uncleWork);
-            totalWork = totalWork.add(BigInteger.TWO.pow(((BlockImpl) block).difficulty())).add(uncleWork);
+            totalWork = totalWork.add(BigInteger.TWO.pow(header.difficulty())).add(uncleWork);
             applyVotingAt(h); // replay epoch tallies so the votable params are restored
         }
         currentDifficulty = computeDifficultyFromChain();
         syncVoteableHolder();
     }
 
-    /** Sum of 2^difficulty over a block's referenced uncles (from committed difficulties). */
-    private static BigInteger uncleWorkOf(Block block) {
+    /** Sum of 2^difficulty over a header's referenced uncles (from committed difficulties). */
+    private static BigInteger uncleWorkOf(BlockHeader header) {
         BigInteger work = BigInteger.ZERO;
-        for (rhizome.core.block.UncleRef uncle : block.uncles()) {
+        for (rhizome.core.block.UncleRef uncle : header.uncles()) {
             work = work.add(BigInteger.TWO.pow(uncle.difficulty()));
         }
         return work;
@@ -790,8 +793,8 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         long height = store.height();
         for (long boundary = lookback; boundary <= height; boundary += lookback) {
             long windowStart = boundary - lookback + 1;
-            long observedMs = ((BlockImpl) store.blockAt(boundary)).timestamp()
-                - ((BlockImpl) store.blockAt(windowStart)).timestamp();
+            long observedMs = store.headerAt(boundary).timestamp()
+                - store.headerAt(windowStart).timestamp();
             difficulty = DifficultyAdjustment.nextDifficulty(
                 params, difficulty, lookback - 1L, observedMs / 1000);
         }
@@ -803,7 +806,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         int window = (int) Math.min(params.medianTimeWindow(), height);
         List<Long> timestamps = new ArrayList<>(window);
         for (long h = height - window + 1; h <= height; h++) {
-            timestamps.add(((BlockImpl) store.blockAt(h)).timestamp());
+            timestamps.add(store.headerAt(h).timestamp());
         }
         timestamps.sort(Long::compare);
         return timestamps.get(timestamps.size() / 2);
@@ -982,7 +985,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         java.util.Set<SHA256Hash> recentChain = new java.util.HashSet<>();
         java.util.Set<SHA256Hash> alreadyReferenced = new java.util.HashSet<>();
         for (long ancestor = Math.max(GenesisBlock.GENESIS_ID, h - depth - 1L); ancestor <= tipHeight; ancestor++) {
-            Block onChain = store.blockAt(ancestor);
+            BlockHeader onChain = store.headerAt(ancestor);
             recentChain.add(onChain.hash());
             if (ancestor >= h - depth) {
                 for (UncleRef ref : onChain.uncles()) {
@@ -1005,7 +1008,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         if (!ctx.recentChain().contains(uncle.lastBlockHash())) {
             return false; // must fork from a recent main-chain block
         }
-        if (uid <= tipHeight && store.blockAt(uid).hash().equals(uncle.hash())) {
+        if (uid <= tipHeight && store.headerAt(uid).hash().equals(uncle.hash())) {
             return false; // that is the canonical block, not an orphan
         }
         return !ctx.alreadyReferenced().contains(uncle.hash()); // not already credited
