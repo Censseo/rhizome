@@ -538,14 +538,14 @@ SMT key from `(domain, rawKey)` and folds the siblings to check it against a roo
 trusts — the stateless verifier is a few lines and needs nothing else. A genesis seed commits
 the snapshot balances so block 2 builds on them.
 
-Committed today: **ledger balances, boxes, and token metadata/balances** — the "who owns
-what" a light client cares about. Not yet committed (re-derived by re-execution, not proven):
-**contract key/value storage** (the highest-churn state; contracts are provable through their
-box and token effects). Still ahead: **snapshot sync** (a new node downloads a recent state
-tree, its manifest bound to a header-committed root, then a suffix of full blocks — the root
-makes it trust-minimised) and **miner-voted parameters** (rent factor, dust floor, block cost)
-via a soft-forkable extension section. Because the `stateRoot` header field is now fixed in the
-format, adding those needs no further hard fork.
+Committed today: **the full state** — ledger balances, boxes, token metadata/balances, and
+**contract code and key/value storage** — so a light client can prove any of them against a
+header (`GET /state/proof?domain=…` covers all six domains). Still ahead: **snapshot sync** (a
+new node downloads a recent state tree bound to a header-committed root, then a suffix of full
+blocks — the root makes it trust-minimised; it additionally needs headers-first sync, which the
+current engine does not yet separate) and **miner-voted parameters** (rent factor, dust floor,
+block cost) via a soft-forkable extension section. Because the `stateRoot` header field is now
+fixed in the format, adding those needs no further hard fork.
 
 ---
 

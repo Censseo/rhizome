@@ -19,6 +19,10 @@ public final class StateKeys {
     public static final byte TOKEN_META = 0x03;
     /** Token balance: raw key = tokenId(32) ‖ address(25), value = amount(8, big-endian). */
     public static final byte TOKEN_BALANCE = 0x04;
+    /** Contract code: raw key = contract address(25), value = WASM code. */
+    public static final byte CONTRACT_CODE = 0x05;
+    /** Contract storage: raw key = contract(25) ‖ key, value = stored bytes. */
+    public static final byte CONTRACT_STORAGE = 0x06;
 
     private StateKeys() {}
 

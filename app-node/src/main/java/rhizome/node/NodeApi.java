@@ -307,7 +307,7 @@ public final class NodeApi {
         }
         Byte domain = stateDomain(req.getQueryParameter("domain"));
         if (domain == null) {
-            return badRequest("domain must be ledger|box|token_meta|token_balance");
+            return badRequest("domain must be ledger|box|token_meta|token_balance|contract_code|contract_storage");
         }
         byte[] key = rhizome.core.common.Utils.hexStringToByteArray(req.getQueryParameter("key"));
         rhizome.core.state.StateProof proof = node.stateProof(domain, key);
@@ -334,6 +334,8 @@ public final class NodeApi {
             case "box" -> rhizome.core.state.StateKeys.BOX;
             case "token_meta" -> rhizome.core.state.StateKeys.TOKEN_META;
             case "token_balance" -> rhizome.core.state.StateKeys.TOKEN_BALANCE;
+            case "contract_code" -> rhizome.core.state.StateKeys.CONTRACT_CODE;
+            case "contract_storage" -> rhizome.core.state.StateKeys.CONTRACT_STORAGE;
             default -> null;
         };
     }

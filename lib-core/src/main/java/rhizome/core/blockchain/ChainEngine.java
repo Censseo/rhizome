@@ -636,6 +636,18 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
                 }
             }
         }
+        if (contractProcessor != null) {
+            for (var ch : contractProcessor.changes(height)) {
+                if (ch.code()) {
+                    changes.add(rhizome.core.state.StateChange.set(
+                        rhizome.core.state.StateKeys.CONTRACT_CODE, ch.contract().toBytes(), ch.value()));
+                } else {
+                    byte[] rawKey = concat(ch.contract().toBytes(), ch.key());
+                    changes.add(rhizome.core.state.StateChange.set(
+                        rhizome.core.state.StateKeys.CONTRACT_STORAGE, rawKey, ch.value()));
+                }
+            }
+        }
         return changes;
     }
 

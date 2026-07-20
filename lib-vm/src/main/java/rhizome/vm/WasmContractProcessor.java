@@ -5,6 +5,7 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 import rhizome.core.blockchain.ContractProcessor;
+import rhizome.core.blockchain.ContractProcessor.ContractChange;
 import rhizome.core.blockchain.ContractProcessor.ContractLog;
 import rhizome.core.blockchain.Contracts;
 import rhizome.core.ledger.PublicAddress;
@@ -34,6 +35,7 @@ public final class WasmContractProcessor implements ContractProcessor {
     private final Map<Long, List<ContractUndo>> journals = new ConcurrentHashMap<>();
     private final Map<Long, List<ContractReceipt>> receiptsByHeight = new ConcurrentHashMap<>();
     private final Map<Long, List<ContractLog>> logsByHeight = new ConcurrentHashMap<>();
+    private final Map<Long, List<ContractChange>> changesByHeight = new ConcurrentHashMap<>();
     private long lastCommittedHeight = -1;
 
     /** Uses a default retention depth; fine when reorgs are shallow. */
@@ -194,7 +196,11 @@ public final class WasmContractProcessor implements ContractProcessor {
     @Override
     public void commit(long blockHeight) {
         if (session != null) {
+            List<ContractChange> changes = session.forwardChanges();
             journals.put(blockHeight, session.flushWithJournal());
+            if (!changes.isEmpty()) {
+                changesByHeight.put(blockHeight, changes);
+            }
             session = null;
         }
         receiptsByHeight.put(blockHeight, currentReceipts);
@@ -225,9 +231,15 @@ public final class WasmContractProcessor implements ContractProcessor {
     }
 
     @Override
+    public List<ContractChange> changes(long blockHeight) {
+        return changesByHeight.getOrDefault(blockHeight, List.of());
+    }
+
+    @Override
     public void revertBlock(long blockHeight) {
         receiptsByHeight.remove(blockHeight);
         logsByHeight.remove(blockHeight);
+        changesByHeight.remove(blockHeight);
         List<ContractUndo> journal = journals.remove(blockHeight);
         if (journal == null) {
             return; // nothing was committed for this height (e.g. a transfer-only block)
@@ -256,6 +268,7 @@ public final class WasmContractProcessor implements ContractProcessor {
             journals.keySet().removeIf(h -> h < cutoff);
             receiptsByHeight.keySet().removeIf(h -> h < cutoff);
             logsByHeight.keySet().removeIf(h -> h < cutoff);
+            changesByHeight.keySet().removeIf(h -> h < cutoff);
         }
     }
 }

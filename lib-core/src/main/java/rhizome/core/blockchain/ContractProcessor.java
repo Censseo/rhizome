@@ -78,6 +78,18 @@ public interface ContractProcessor {
         throw new UnsupportedOperationException("dry-run not supported");
     }
 
+    /** Contract code/storage writes committed by {@code blockHeight}, for the authenticated state root. */
+    default List<ContractChange> changes(long blockHeight) {
+        return List.of();
+    }
+
+    /**
+     * One committed contract write with its final value. {@code code} distinguishes a code
+     * write (deploy — {@code key} null) from a storage write. Contracts never delete forward
+     * (a storage write of empty bytes is a value, not a deletion), so {@code value} is non-null.
+     */
+    record ContractChange(boolean code, PublicAddress contract, byte[] key, byte[] value) {}
+
     /** Runtime outcome of one contract transaction, recorded for reorg reversal. */
     record ContractReceipt(long gasUsed, boolean success) {}
 
