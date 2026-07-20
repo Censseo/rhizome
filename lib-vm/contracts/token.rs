@@ -15,9 +15,14 @@ extern "C" {
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }
 
+/// Revert the whole call: used by transfer_from, whose callers (pools, wallets)
+/// must observe failure through call_contract's -1 rather than a silent no-op.
+fn fail() -> ! { core::arch::wasm32::unreachable() }
+
 const ADDR_LEN: usize = 25;
 
-// Storage key layout: [0] = init flag; [1 || addr(25)] = balance of addr (8 LE bytes).
+// Storage key layout: [0] = init flag; [1 || addr(25)] = balance (8 LE);
+// [2 || owner(25) || spender(25)] = allowance (8 LE).
 fn balance_key(addr: &[u8; ADDR_LEN]) -> [u8; 1 + ADDR_LEN] {
     let mut key = [0u8; 1 + ADDR_LEN];
     key[0] = 1;
@@ -26,27 +31,78 @@ fn balance_key(addr: &[u8; ADDR_LEN]) -> [u8; 1 + ADDR_LEN] {
     key
 }
 
-fn read_balance(addr: &[u8; ADDR_LEN]) -> u64 {
-    let key = balance_key(addr);
+fn allowance_key(owner: &[u8; ADDR_LEN], spender: &[u8; ADDR_LEN]) -> [u8; 1 + 2 * ADDR_LEN] {
+    let mut key = [0u8; 1 + 2 * ADDR_LEN];
+    key[0] = 2;
+    let mut i = 0;
+    while i < ADDR_LEN {
+        key[1 + i] = owner[i];
+        key[1 + ADDR_LEN + i] = spender[i];
+        i += 1;
+    }
+    key
+}
+
+fn read_u64(key: &[u8]) -> u64 {
     let mut buf = [0u8; 8];
     let n = unsafe { storage_read(key.as_ptr(), key.len() as i32, buf.as_mut_ptr(), 8) };
     if n == 8 { u64::from_le_bytes(buf) } else { 0 }
 }
 
-fn write_balance(addr: &[u8; ADDR_LEN], amount: u64) {
-    let key = balance_key(addr);
-    let val = amount.to_le_bytes();
+fn write_u64(key: &[u8], v: u64) {
+    let val = v.to_le_bytes();
     unsafe { storage_write(key.as_ptr(), key.len() as i32, val.as_ptr(), 8); }
 }
 
+fn read_balance(addr: &[u8; ADDR_LEN]) -> u64 { read_u64(&balance_key(addr)) }
+fn write_balance(addr: &[u8; ADDR_LEN], amount: u64) { write_u64(&balance_key(addr), amount); }
+
+fn read_addr(input: &[u8], off: usize) -> [u8; ADDR_LEN] {
+    let mut a = [0u8; ADDR_LEN];
+    let mut i = 0;
+    while i < ADDR_LEN { a[i] = input[off + i]; i += 1; }
+    a
+}
+
+fn read_u64_at(input: &[u8], off: usize) -> u64 {
+    let mut b = [0u8; 8];
+    let mut i = 0;
+    while i < 8 { b[i] = input[off + i]; i += 1; }
+    u64::from_le_bytes(b)
+}
+
+/// Moves `amount` from `from` to `to` and emits the "transfer" log.
+/// Returns false (leaving state untouched) when the balance is short.
+fn do_transfer(from: &[u8; ADDR_LEN], to: &[u8; ADDR_LEN], amount: u64) -> bool {
+    let from_bal = read_balance(from);
+    if from_bal < amount { return false; }
+    write_balance(from, from_bal - amount);
+    let to_bal = read_balance(to);
+    write_balance(to, to_bal + amount);
+
+    // log: from(25) || to(25) || amount(8 LE)
+    let mut data = [0u8; ADDR_LEN * 2 + 8];
+    let mut i = 0;
+    while i < ADDR_LEN { data[i] = from[i]; data[ADDR_LEN + i] = to[i]; i += 1; }
+    let amt = amount.to_le_bytes();
+    i = 0;
+    while i < 8 { data[ADDR_LEN * 2 + i] = amt[i]; i += 1; }
+    let topic = *b"transfer";
+    unsafe { emit_log(topic.as_ptr(), 8, data.as_ptr(), data.len() as i32); }
+    true
+}
+
 /// Entry point. input[0] is the method selector:
-///   0 = init(supply u64)         — once; mints the whole supply to the caller
-///   1 = transfer(to[25], amt u64) — moves caller's balance, emits a "transfer" log
-///   2 = balance_of(addr[25])      — returns the balance as 8 LE bytes via set_output
+///   0 = init(supply u64)                    — once; mints the whole supply to the caller
+///   1 = transfer(to[25], amt u64)           — moves caller's balance; silent no-op if short
+///   2 = balance_of(addr[25])                — balance as 8 LE bytes via set_output
+///   3 = approve(spender[25], amt u64)       — lets spender pull up to amt from the caller
+///   4 = transfer_from(from[25], to[25], amt) — spends the caller's allowance; TRAPS on
+///       insufficient allowance or balance, so composing contracts observe the failure
 #[no_mangle]
 pub extern "C" fn call() {
-    let mut input = [0u8; 64];
-    let n = unsafe { get_input(input.as_mut_ptr(), 64) };
+    let mut input = [0u8; 96];
+    let n = unsafe { get_input(input.as_mut_ptr(), 96) };
     if n < 1 { return; }
 
     let mut caller = [0u8; ADDR_LEN];
@@ -58,44 +114,44 @@ pub extern "C" fn call() {
             let flag = [0u8; 1];
             let mut probe = [0u8; 1];
             if unsafe { storage_read(flag.as_ptr(), 1, probe.as_mut_ptr(), 1) } >= 0 { return; }
-            let mut sb = [0u8; 8];
-            let mut i = 0;
-            while i < 8 { sb[i] = input[1 + i]; i += 1; }
-            write_balance(&caller, u64::from_le_bytes(sb));
+            write_balance(&caller, read_u64_at(&input, 1));
             let one = [1u8; 1];
             unsafe { storage_write(flag.as_ptr(), 1, one.as_ptr(), 1); }
         }
         1 => {
-            let mut to = [0u8; ADDR_LEN];
-            let mut i = 0;
-            while i < ADDR_LEN { to[i] = input[1 + i]; i += 1; }
-            let mut ab = [0u8; 8];
-            i = 0;
-            while i < 8 { ab[i] = input[1 + ADDR_LEN + i]; i += 1; }
-            let amount = u64::from_le_bytes(ab);
+            let to = read_addr(&input, 1);
+            do_transfer(&caller, &to, read_u64_at(&input, 1 + ADDR_LEN));
+        }
+        2 => {
+            let addr = read_addr(&input, 1);
+            let out = read_balance(&addr).to_le_bytes();
+            unsafe { set_output(out.as_ptr(), 8); }
+        }
+        3 => {
+            let spender = read_addr(&input, 1);
+            let amount = read_u64_at(&input, 1 + ADDR_LEN);
+            write_u64(&allowance_key(&caller, &spender), amount);
 
-            let from_bal = read_balance(&caller);
-            if from_bal < amount { return; }
-            write_balance(&caller, from_bal - amount);
-            let to_bal = read_balance(&to);
-            write_balance(&to, to_bal + amount);
-
-            // log: from(25) || to(25) || amount(8 LE)
+            // log: owner(25) || spender(25) || amount(8 LE)
             let mut data = [0u8; ADDR_LEN * 2 + 8];
-            i = 0;
-            while i < ADDR_LEN { data[i] = caller[i]; data[ADDR_LEN + i] = to[i]; i += 1; }
+            let mut i = 0;
+            while i < ADDR_LEN { data[i] = caller[i]; data[ADDR_LEN + i] = spender[i]; i += 1; }
             let amt = amount.to_le_bytes();
             i = 0;
             while i < 8 { data[ADDR_LEN * 2 + i] = amt[i]; i += 1; }
-            let topic = *b"transfer";
-            unsafe { emit_log(topic.as_ptr(), 8, data.as_ptr(), data.len() as i32); }
+            let topic = *b"approve";
+            unsafe { emit_log(topic.as_ptr(), 7, data.as_ptr(), data.len() as i32); }
         }
-        2 => {
-            let mut addr = [0u8; ADDR_LEN];
-            let mut i = 0;
-            while i < ADDR_LEN { addr[i] = input[1 + i]; i += 1; }
-            let out = read_balance(&addr).to_le_bytes();
-            unsafe { set_output(out.as_ptr(), 8); }
+        4 => {
+            let from = read_addr(&input, 1);
+            let to = read_addr(&input, 1 + ADDR_LEN);
+            let amount = read_u64_at(&input, 1 + 2 * ADDR_LEN);
+
+            let key = allowance_key(&from, &caller);
+            let allowance = read_u64(&key);
+            if allowance < amount { fail(); }
+            if !do_transfer(&from, &to, amount) { fail(); }
+            write_u64(&key, allowance - amount);
         }
         _ => {}
     }

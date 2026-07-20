@@ -29,7 +29,7 @@ Four goals drive the design:
    GHOST-style fork choice (§9) that credits and rewards orphaned (uncle) work, making
    the fast cadence safe against the orphaning a naïve longest chain suffers.
 
-The node is functional and covered by **213 tests**: consensus, the WASM contract VM
+The node is functional and covered by **216 tests**: consensus, the WASM contract VM
 and its persistence, execution, storage, mempool, HTTP API, block production, P2P
 synchronisation with reorganisation, GHOST uncles, and a wallet that deploys and calls
 contracts.
@@ -300,10 +300,14 @@ executes the same interpreter. A contract imports a small host ABI from module `
 (`get_caller`, `get_input`, `get_value`, `get_self`), and `call_contract` — and exports
 a `call` entry point; the WASM sandbox denies it any other I/O. Reference contracts
 (real Rust→WASM, driven through consensus in the tests) exercise the whole ABI: a
-fungible token (`contracts/token.rs` — mint, transfer, `transfer` events), a
-constant-product AMM (`contracts/amm.rs`), and a fair-launch launchpad
-(`contracts/launchpad.rs`) that sells the token it holds for attached native coin,
-reverting when it cannot deliver so the buyer's coin only moves when tokens do.
+fungible token (`contracts/token.rs` — mint, transfer, allowances via
+`approve`/`transfer_from`, `transfer`/`approve` events; `transfer_from` *traps* on an
+insufficient allowance or balance so composing contracts observe the failure), a
+self-contained constant-product AMM (`contracts/amm.rs`), a token-backed AMM pair
+(`contracts/pair.rs`) that pulls and pays two real tokens via `call_contract` along
+`x*y=k`, and a fair-launch launchpad (`contracts/launchpad.rs`) that sells the token it
+holds for attached native coin, reverting when it cannot deliver so the buyer's coin
+only moves when tokens do.
 
 **Cross-contract calls.** `call_contract(addr, input) -> output | -1` lets a contract
 drive another (a callee sees the calling *contract* as its caller). Each call frame runs
@@ -495,7 +499,7 @@ discovery; hardening (checkpoints, finality, bounded rate limiting, ban-score, b
 cap); a full security review; and the **WASM smart-contract layer** — a Chicory-backed
 metered VM, a persistent contract store, `DEPLOY`/`CALL` transactions with gas fees,
 atomic per-block contract state with exact reorg reversal, and wallet `deploy`/`call`
-commands. **213 tests, 0 failures.**
+commands. **216 tests, 0 failures.**
 
 **GHOST fork choice.** A fast single longest chain orphans blocks because propagation
 takes a meaningful fraction of the interval (§6.3). A GHOST-style fork choice — the
@@ -538,8 +542,10 @@ a buyer's attached native coin only moves when the tokens are delivered (the lau
 checks its own token balance through a `call_contract` output round-trip and reverts
 otherwise). Composition rests on `call_contract` (§5): per-frame savepoints, forwarded
 gas, bounded depth and reentrancy refusal, additionally proven by a router contract
-driving the token through consensus. A remaining nicety is a token-backed AMM variant
-(the current AMM keeps internal balances).
+driving the token through consensus. The token-backed AMM pair completes the suite: the
+token grew allowances (`approve`/`transfer_from`), and the pair pulls the input leg and
+pays the output leg on two real token contracts atomically — an unauthorised swap
+unwinds both legs.
 
 **Environment-dependent** — GraalVM native build (`native-image` not installed in the
 current dev environment); production of the real Pandanite snapshot (a synchronised C++
