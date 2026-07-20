@@ -65,9 +65,11 @@ class HeaderSynchronizerTest {
     static class EnginePeer implements PeerSource {
         final ChainEngine e;
         int blockFetches = 0;
+        long prunedBelow = 0;
         EnginePeer(ChainEngine e) { this.e = e; }
         @Override public long height() { return e.height(); }
         @Override public BigInteger totalWork() { return e.totalWork(); }
+        @Override public long prunedBelow() { return prunedBelow; }
         @Override public SHA256Hash blockHash(long h) { return e.blockAt(h).hash(); }
         @Override public List<Block> blocks(long start, long end) {
             blockFetches++;
@@ -129,6 +131,45 @@ class HeaderSynchronizerTest {
         assertEquals(ChainSynchronizer.Result.PEER_INVALID, r);
         assertEquals(6, local.height(), "local chain untouched");
         assertEquals(0, liar.blockFetches, "gate rejected on headers alone — no body downloaded");
+    }
+
+    @Test
+    void skipsPeerThatHasPrunedTheNeededBodies() {
+        ChainEngine peer = newEngine();
+        mine(peer, PublicAddress.random(), new AtomicLong(0), 11); // peer height 12
+
+        EnginePeer pruned = new EnginePeer(peer);
+        pruned.prunedBelow = 6; // bodies below 6 discarded
+
+        ChainEngine local = newEngine(); // fresh: needs bodies from height 2 up
+        ChainSynchronizer.Result r = new HeaderSynchronizer(local).syncFrom(pruned);
+
+        assertEquals(ChainSynchronizer.Result.PEER_PRUNED, r);
+        assertEquals(1, local.height(), "nothing applied");
+        assertEquals(0, pruned.blockFetches, "did not even attempt to download pruned bodies");
+    }
+
+    @Test
+    void syncsFromPrunedPeerWhenTheNeededRangeIsRetained() {
+        ChainEngine peer = newEngine();
+        AtomicLong peerClock = new AtomicLong(0);
+        PublicAddress peerMiner = PublicAddress.random();
+        mine(peer, peerMiner, peerClock, 10); // peer height 11
+
+        // Local catches up fully while the peer is still an archive.
+        ChainEngine local = newEngine();
+        assertEquals(ChainSynchronizer.Result.EXTENDED, new HeaderSynchronizer(local).syncFrom(new EnginePeer(peer)));
+        assertEquals(11, local.height());
+
+        // The peer advances (same clock) and then prunes below 6; local only needs the tail (12..13).
+        mine(peer, peerMiner, peerClock, 2);
+        EnginePeer prunedPeer = new EnginePeer(peer);
+        prunedPeer.prunedBelow = 6;
+
+        ChainSynchronizer.Result r = new HeaderSynchronizer(local).syncFrom(prunedPeer);
+        assertEquals(ChainSynchronizer.Result.EXTENDED, r);
+        assertEquals(13, local.height());
+        assertTrue(local.tipHash().equals(peer.tipHash()));
     }
 
     @Test

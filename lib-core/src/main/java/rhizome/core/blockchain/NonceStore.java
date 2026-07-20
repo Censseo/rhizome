@@ -24,8 +24,19 @@ public interface NonceStore {
     /** Sets the next nonce for {@code sender}; a value {@code <= 0} removes the entry. */
     void set(PublicAddress sender, long next);
 
-    /** True when no sender has a recorded nonce (a fresh store, before any account tx). */
-    boolean isEmpty();
+    /**
+     * The chain height through which these nonces are known to be current — the tip the
+     * store was last {@link #markSyncedThrough(long) marked} at. {@code 0} means the nonces
+     * have never been synced (a fresh column family, or a transient in-memory store at boot),
+     * which is what tells the engine to reconstruct them from block bodies. A persistent store
+     * that advanced in lockstep with the chain reports the tip here, so a restart — even of a
+     * pruned node whose old bodies are gone, and even when no account has ever sent — skips the
+     * body walk entirely.
+     */
+    long syncedThroughHeight();
+
+    /** Records that the nonces are current as of chain height {@code height}. */
+    void markSyncedThrough(long height);
 
     /** Visits every {@code (sender, nextNonce)} pair — used to export the account-nonce domain. */
     void forEach(ObjLongConsumer<PublicAddress> consumer);

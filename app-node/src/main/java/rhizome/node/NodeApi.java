@@ -72,6 +72,7 @@ public final class NodeApi {
                 .put("height", node.blockCount())
                 .put("difficulty", node.difficulty())
                 .put("mempool", node.mempoolSize())
+                .put("prunedBelow", node.prunedBelow())
                 .put("storageFeeFactor", node.voteableParams()[0])
                 .put("minValuePerByte", node.voteableParams()[1]))))
             .with(GET, "/peers", req -> ok(json(new JSONObject()
@@ -494,6 +495,14 @@ public final class NodeApi {
         }
         if (end - start + 1 > Constants.BLOCKS_PER_FETCH) {
             return badRequest("range too large (max " + Constants.BLOCKS_PER_FETCH + ")");
+        }
+        // Pruned node: the requested range dips into bodies we have discarded. Answer 410 GONE
+        // with the watermark so the caller sources these blocks (or a snapshot) from an archive.
+        long prunedBelow = node.prunedBelow();
+        if (prunedBelow > 0 && start < prunedBelow) {
+            return HttpResponse.ofCode(410)
+                .withJson(new JSONObject().put("error", "pruned").put("prunedBelow", prunedBelow).toString())
+                .build();
         }
         long cappedEnd = Math.min(end, node.blockCount());
         ByteArrayOutputStream out = new ByteArrayOutputStream();

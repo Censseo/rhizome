@@ -303,6 +303,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
 
             store.append(block);
             commitAccountNonces(block);
+            nonceStore.markSyncedThrough(b.id()); // nonces now reflect this new tip
             totalWork = totalWork.add(BigInteger.TWO.pow(b.difficulty())).add(uncleWork);
             uncleWorkByHeight.put((long) b.id(), uncleWork);
             currentDifficulty = computeDifficultyFromChain();
@@ -350,6 +351,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             }
             store.pop();
             revertAccountNonces(tip);
+            nonceStore.markSyncedThrough(height - 1); // nonces now reflect the tip after the pop
             // Drop the vote tally established at this height (if it was an epoch boundary),
             // restoring the previous epoch's params — reorg-safe without a reversible tally.
             if (voteParamsByBoundary.remove(height) != null) {
@@ -399,6 +401,16 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         lock.lock();
         try {
             return store.headerAt(height);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** Exclusive upper bound of pruned block bodies ({@code 0} = archive node). See {@link ChainStore#prunedBelow()}. */
+    public long prunedBelow() {
+        lock.lock();
+        try {
+            return store.prunedBelow();
         } finally {
             lock.unlock();
         }
@@ -801,15 +813,26 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         uncleWorkByHeight.clear();
         voteParamsByBoundary.clear();
         long height = store.height();
-        // Work, uncle weight and votes are recomputed from headers alone. Account nonces
-        // are persisted and maintained incrementally, so they are reconstructed from the
-        // bodies only when the nonce store is empty — a fresh column family (one-time
-        // migration) or a non-persistent in-memory store. After that first pass they
-        // persist, so a normal restart is O(headers) and never re-reads a body.
-        boolean backfillNonces = nonceStore.isEmpty() && height > GenesisBlock.GENESIS_ID;
+        // Work, uncle weight and votes are recomputed from headers alone. Account nonces are
+        // persisted and maintained incrementally, so they are reconstructed from the bodies
+        // only for the heights the nonce store has not yet synced — a fresh column family
+        // (one-time migration from a full archive) or a transient in-memory store at boot. A
+        // persistent store that advanced in lockstep reports the tip, so a normal restart —
+        // even a pruned node's, even one that has never seen an account transaction — reads no
+        // body at all.
+        long nonceSynced = nonceStore.syncedThroughHeight();
+        long backfillFrom = Math.max(GenesisBlock.GENESIS_ID + 1, nonceSynced + 1);
+        if (backfillFrom <= height && backfillFrom <= store.prunedBelow()) {
+            // The nonces we must rebuild live in bodies that have been pruned — an
+            // inconsistent store (a pruned node whose nonces were not persisted). Fail loudly
+            // rather than dying later on a missing body or, worse, undercounting nonces.
+            throw new IllegalStateException(
+                "cannot rebuild account nonces from pruned bodies (synced through " + nonceSynced
+                    + ", pruned below " + store.prunedBelow() + ")");
+        }
         for (long h = GenesisBlock.GENESIS_ID + 1; h <= height; h++) {
             BlockHeader header = store.headerAt(h);
-            if (backfillNonces) {
+            if (h >= backfillFrom) {
                 commitAccountNonces(store.blockAt(h));
             }
             // Uncle work is recomputed from the committed uncle difficulties, so the
@@ -818,6 +841,9 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             uncleWorkByHeight.put(h, uncleWork);
             totalWork = totalWork.add(BigInteger.TWO.pow(header.difficulty())).add(uncleWork);
             applyVotingAt(h); // replay epoch tallies so the votable params are restored
+        }
+        if (height > nonceSynced) {
+            nonceStore.markSyncedThrough(height); // persist the catch-up so the next restart skips it
         }
         currentDifficulty = computeDifficultyFromChain();
         syncVoteableHolder();

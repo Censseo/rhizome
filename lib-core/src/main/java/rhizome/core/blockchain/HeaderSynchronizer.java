@@ -78,6 +78,12 @@ public final class HeaderSynchronizer {
             return ChainSynchronizer.Result.PEER_INVALID; // claimed heavy, proved light
         }
 
+        // The headers prove the peer is heavier, but if it has pruned the bodies we need there
+        // is nothing to download here — leave it for an archive peer rather than banning it.
+        if (forkHeight + 1 < peer.prunedBelow()) {
+            return ChainSynchronizer.Result.PEER_PRUNED;
+        }
+
         // --- Bodies: fetch, verify each against its validated header, apply ---
         if (forkHeight == engine.height()) {
             return applyBodies(peer, forkHeight, branch)

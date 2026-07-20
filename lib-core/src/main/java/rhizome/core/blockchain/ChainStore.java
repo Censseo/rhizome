@@ -34,6 +34,28 @@ public interface ChainStore {
         return blockAt(height());
     }
 
+    /**
+     * Whether the full body at {@code height} is still stored. A pruned node keeps only
+     * recent bodies (plus genesis and every header); an archive node keeps them all.
+     */
+    default boolean hasBody(long height) {
+        return true;
+    }
+
+    /**
+     * The exclusive upper bound of the pruned range: bodies for heights in
+     * {@code (genesis, prunedBelow())} have been discarded (genesis is always retained).
+     * {@code 0} means nothing is pruned (an archive node).
+     */
+    default long prunedBelow() {
+        return 0;
+    }
+
+    /** Discards block bodies below {@code height} (keeping genesis, headers and the tx index). */
+    default void pruneBodiesBelow(long height) {
+        // Archive stores keep everything; no-op.
+    }
+
     /** Appends the next block (must be height()+1). */
     void append(Block block);
 

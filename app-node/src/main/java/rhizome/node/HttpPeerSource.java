@@ -77,6 +77,12 @@ public final class HttpPeerSource implements PeerSource {
     }
 
     @Override
+    public long prunedBelow() {
+        JSONObject info = new JSONObject(getString("/info", SCALAR_CAP));
+        return info.optLong("prunedBelow", 0);
+    }
+
+    @Override
     public List<BlockHeader> headers(long start, long end) {
         // A peer predating the /headers endpoint answers 404; surface it as "unsupported"
         // so the synchronizer falls back to full-block sync (D7) instead of banning.

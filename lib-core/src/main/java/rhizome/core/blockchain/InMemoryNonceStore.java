@@ -14,6 +14,7 @@ import rhizome.core.ledger.PublicAddress;
 public final class InMemoryNonceStore implements NonceStore {
 
     private final Map<PublicAddress, Long> nonces = new HashMap<>();
+    private long syncedThroughHeight = 0;
 
     @Override
     public long next(PublicAddress sender) {
@@ -30,8 +31,13 @@ public final class InMemoryNonceStore implements NonceStore {
     }
 
     @Override
-    public boolean isEmpty() {
-        return nonces.isEmpty();
+    public long syncedThroughHeight() {
+        return syncedThroughHeight; // resets to 0 each construction: an in-memory store rebuilds at boot
+    }
+
+    @Override
+    public void markSyncedThrough(long height) {
+        this.syncedThroughHeight = height;
     }
 
     @Override

@@ -235,6 +235,11 @@ public final class NodeService {
         return engine.height();
     }
 
+    /** Exclusive upper bound of pruned block bodies (0 = archive node). */
+    public long prunedBelow() {
+        return engine.prunedBelow();
+    }
+
     public java.math.BigInteger totalWork() {
         return engine.totalWork();
     }

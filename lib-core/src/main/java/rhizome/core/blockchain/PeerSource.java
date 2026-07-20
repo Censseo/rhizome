@@ -33,4 +33,14 @@ public interface PeerSource {
     default List<BlockHeader> headers(long start, long end) {
         throw new UnsupportedOperationException("peer does not support headers-first sync");
     }
+
+    /**
+     * The peer's prune watermark: it can serve block bodies only for heights
+     * {@code >= prunedBelow()} (plus genesis). {@code 0} means an archive peer that
+     * serves every body. The synchroniser uses this to avoid asking a pruned peer for
+     * bodies it no longer holds.
+     */
+    default long prunedBelow() {
+        return 0;
+    }
 }

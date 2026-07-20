@@ -56,6 +56,13 @@ public final class RocksDbNodeStore implements AutoCloseable {
     private static final byte[] CF_LEDGER = "ledger".getBytes();
     private static final byte[] CF_NONCES = "nonces".getBytes();
     private static final byte[] HEIGHT_KEY = "height".getBytes();
+    private static final byte[] PRUNED_BELOW_KEY = "prunedBelow".getBytes();
+    private static final byte[] NONCE_HEIGHT_KEY = "nonceHeight".getBytes();
+
+    private static final long GENESIS_HEIGHT = 1L;
+
+    /** Bodies for the most recent {@code keepBlocks} heights are retained (0 = archive, keep all). */
+    private final int keepBlocks;
 
     private final RocksDB db;
     private final ColumnFamilyHandle defaultCf;
@@ -68,6 +75,18 @@ public final class RocksDbNodeStore implements AutoCloseable {
     private final WriteOptions writeOptions = new WriteOptions();
 
     public RocksDbNodeStore(String path) throws IOException {
+        this(path, 0);
+    }
+
+    /**
+     * @param keepBlocks number of most-recent block bodies to retain (0 = archive node,
+     *                   keep every body). Headers, the transaction index and genesis are
+     *                   always retained. The caller is responsible for enforcing a safe
+     *                   floor (≥ the deepest history the engine may read: reorg depth,
+     *                   uncle depth, difficulty/median windows).
+     */
+    public RocksDbNodeStore(String path, int keepBlocks) throws IOException {
+        this.keepBlocks = keepBlocks;
         List<ColumnFamilyDescriptor> descriptors = List.of(
             new ColumnFamilyDescriptor(RocksDB.DEFAULT_COLUMN_FAMILY),
             new ColumnFamilyDescriptor(CF_BLOCKS),
@@ -93,6 +112,23 @@ public final class RocksDbNodeStore implements AutoCloseable {
         this.ledgerCf = handles.get(5);
         this.noncesCf = handles.get(6);
         backfillHeaders();
+        catchUpPruning();
+    }
+
+    /**
+     * Boot catch-up: if this node runs pruned but holds bodies older than the retention
+     * window (e.g. pruning was just enabled on an archive, or {@code keepBlocks} shrank),
+     * discard them in one pass so the on-disk state matches the configured retention.
+     */
+    private void catchUpPruning() {
+        if (keepBlocks <= 0) {
+            return;
+        }
+        long height = new RocksChainStore().height();
+        long firstToKeep = height - keepBlocks + 1;
+        if (firstToKeep > GENESIS_HEIGHT + 1) {
+            new RocksChainStore().pruneBodiesBelow(firstToKeep);
+        }
     }
 
     /**
@@ -226,9 +262,57 @@ public final class RocksDbNodeStore implements AutoCloseable {
                     }
                 }
                 batch.put(metaCf, HEIGHT_KEY, key);
+                // Incremental pruning (amortised O(1)): the body that just fell out of the
+                // retention window is discarded in the same batch. Genesis is never pruned.
+                if (keepBlocks > 0) {
+                    long fallsOut = expected - keepBlocks;
+                    if (fallsOut > GENESIS_HEIGHT) {
+                        batch.delete(blocksCf, heightKey(fallsOut));
+                        batch.put(metaCf, PRUNED_BELOW_KEY, heightKey(fallsOut + 1));
+                    }
+                }
                 db.write(writeOptions, batch);
             } catch (RocksDBException e) {
                 throw new LedgerException("Failed to append block " + expected, e);
+            }
+        }
+
+        @Override
+        public boolean hasBody(long height) {
+            if (height == GENESIS_HEIGHT) {
+                return true;
+            }
+            try {
+                return db.get(blocksCf, heightKey(height)) != null;
+            } catch (RocksDBException e) {
+                throw new LedgerException("Failed to probe body " + height, e);
+            }
+        }
+
+        @Override
+        public long prunedBelow() {
+            try {
+                byte[] value = db.get(metaCf, PRUNED_BELOW_KEY);
+                return value == null ? 0 : bytesToLong(value);
+            } catch (RocksDBException e) {
+                throw new LedgerException("Failed to read prune watermark", e);
+            }
+        }
+
+        @Override
+        public void pruneBodiesBelow(long height) {
+            long from = Math.max(GENESIS_HEIGHT + 1, prunedBelow());
+            if (height <= from) {
+                return;
+            }
+            try (WriteBatch batch = new WriteBatch()) {
+                for (long h = from; h < height; h++) {
+                    batch.delete(blocksCf, heightKey(h)); // headers + txindex retained
+                }
+                batch.put(metaCf, PRUNED_BELOW_KEY, heightKey(height));
+                db.write(writeOptions, batch);
+            } catch (RocksDBException e) {
+                throw new LedgerException("Failed to prune bodies below " + height, e);
             }
         }
 
@@ -375,10 +459,21 @@ public final class RocksDbNodeStore implements AutoCloseable {
         }
 
         @Override
-        public boolean isEmpty() {
-            try (RocksIterator it = db.newIterator(noncesCf)) {
-                it.seekToFirst();
-                return !it.isValid();
+        public long syncedThroughHeight() {
+            try {
+                byte[] value = db.get(metaCf, NONCE_HEIGHT_KEY);
+                return value == null ? 0 : bytesToLong(value);
+            } catch (RocksDBException e) {
+                throw new LedgerException("Failed to read nonce sync height", e);
+            }
+        }
+
+        @Override
+        public void markSyncedThrough(long height) {
+            try {
+                db.put(metaCf, writeOptions, NONCE_HEIGHT_KEY, longToBytes(height));
+            } catch (RocksDBException e) {
+                throw new LedgerException("Failed to write nonce sync height", e);
             }
         }
 

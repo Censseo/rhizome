@@ -34,7 +34,7 @@ import rhizome.core.mempool.ExecutionStatus;
  */
 public final class ChainSynchronizer {
 
-    public enum Result { NO_CHANGE, EXTENDED, REORGED, REORG_TOO_DEEP, INCOMPATIBLE, PEER_INVALID }
+    public enum Result { NO_CHANGE, EXTENDED, REORGED, REORG_TOO_DEEP, INCOMPATIBLE, PEER_INVALID, PEER_PRUNED }
 
     /** Extra blocks fetched beyond the fork depth during pre-validation. */
     static final int PREFETCH_EXTRA = 2 * Constants.BLOCKS_PER_FETCH;

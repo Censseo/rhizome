@@ -15,6 +15,7 @@ import rhizome.core.blockchain.BlockProducer;
 import rhizome.core.blockchain.ChainEngine;
 import rhizome.core.blockchain.ChainSynchronizer;
 import rhizome.core.blockchain.HeaderSynchronizer;
+import rhizome.core.blockchain.NetworkParameters;
 import rhizome.core.blockchain.SignatureVerifier;
 import rhizome.core.ledger.LedgerSnapshot;
 import rhizome.core.ledger.SnapshotLoader;
@@ -75,6 +76,38 @@ public final class RhizomeNode implements AutoCloseable {
     private static final int PENALTY_INVALID = 100;
     private static final int PENALTY_REORG_TOO_DEEP = 25;
     private static final int PENALTY_INCOMPATIBLE = 10;
+    /** Safety headroom above the deepest history the engine reads, when pruning. */
+    private static final int PRUNE_MARGIN = 128;
+
+    /**
+     * Retention (in blocks) for this node, from {@code RHIZOME_PRUNE}: absent/0 = archive
+     * (keep every body). A positive value must be at least the deepest history the engine may
+     * read — the reorg window, uncle depth, and the difficulty/median timestamp windows —
+     * plus a safety margin, or the node would prune a body it still needs. Enforced here so a
+     * misconfiguration fails fast at boot rather than mid-reorg.
+     */
+    private static int keepBlocks(NetworkParameters params) {
+        String env = System.getenv("RHIZOME_PRUNE");
+        if (env == null || env.isBlank()) {
+            return 0;
+        }
+        int requested;
+        try {
+            requested = Integer.parseInt(env.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException("RHIZOME_PRUNE must be an integer, was: " + env, e);
+        }
+        if (requested <= 0) {
+            return 0; // archive
+        }
+        int floor = Math.max(Math.max(params.maxReorgDepth(), params.uncleMaxDepth()),
+            Math.max(params.difficultyLookback(), params.medianTimeWindow())) + PRUNE_MARGIN;
+        if (requested < floor) {
+            throw new IllegalArgumentException("RHIZOME_PRUNE=" + requested
+                + " is below the safe floor of " + floor + " blocks (reorg/uncle/difficulty/median windows)");
+        }
+        return requested;
+    }
 
     public RhizomeNode(NodeConfig config) {
         this.config = config;
@@ -85,7 +118,7 @@ public final class RhizomeNode implements AutoCloseable {
             ? SnapshotLoader.fromFile(Path.of(config.snapshotPath().get()))
             : SnapshotLoader.empty(config.params().chainId());
 
-        store = new RocksDbNodeStore(config.dataDir());
+        store = new RocksDbNodeStore(config.dataDir(), keepBlocks(config.params()));
         contractStore = new RocksDbContractStore(config.dataDir() + "/contracts");
         boxStore = new RocksDbBoxStore(config.dataDir() + "/boxes");
         tokenStore = new RocksDbTokenStore(config.dataDir() + "/tokens");
@@ -206,6 +239,8 @@ public final class RhizomeNode implements AutoCloseable {
                     case PEER_INVALID -> penalize(peerUrl, PENALTY_INVALID, "served an invalid chain");
                     case REORG_TOO_DEEP -> penalize(peerUrl, PENALTY_REORG_TOO_DEEP, "reorg past finality");
                     case INCOMPATIBLE -> penalize(peerUrl, PENALTY_INCOMPATIBLE, "wrong network / genesis");
+                    case PEER_PRUNED ->
+                        log.debug("Peer {} pruned the bodies we need; trying another source", peerUrl);
                     case NO_CHANGE -> { /* healthy, nothing to do */ }
                 }
             } catch (HttpPeerSource.PeerUnavailableException e) {

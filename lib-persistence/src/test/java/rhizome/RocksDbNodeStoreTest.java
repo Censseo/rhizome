@@ -217,6 +217,79 @@ class RocksDbNodeStoreTest {
     }
 
     @Test
+    void prunedStoreKeepsHeadersRecentBodiesAndGenesis() throws IOException {
+        NetworkParameters params = fastParams();
+        String path = tempDir.resolve("db").toString();
+        int keep = 5;
+        PublicAddress miner = PublicAddress.random();
+
+        AtomicLong clock = new AtomicLong(0);
+        try (RocksDbNodeStore store = new RocksDbNodeStore(path, keep)) {
+            ChainStore chain = store.chainStore();
+            // A pruned node must persist nonces (it cannot rebuild them from discarded bodies).
+            ChainEngine engine = ChainEngine.init(params, store.ledger(), chain, store.nonceStore(),
+                new LedgerSnapshot("test", 0, params.chainId()), null, clock::get, null, null, null, null, null);
+            for (int i = 0; i < 10; i++) {
+                assertEquals(ExecutionStatus.SUCCESS, engine.addBlock(mine(engine, params, miner, List.of(), clock)));
+            }
+            long height = chain.height(); // 11 (genesis + 10)
+            assertEquals(11, height);
+
+            // The last `keep` bodies are retained; older ones (except genesis) are pruned.
+            assertEquals(height - keep + 1, chain.prunedBelow());
+            assertTrue(chain.hasBody(1), "genesis body always kept");
+            for (long h = height - keep + 1; h <= height; h++) {
+                assertTrue(chain.hasBody(h), "recent body " + h + " must remain");
+            }
+            for (long h = 2; h < height - keep + 1; h++) {
+                assertFalse(chain.hasBody(h), "old body " + h + " must be pruned");
+            }
+            // Headers survive for every height — including pruned ones — which is the point.
+            for (long h = 1; h <= height; h++) {
+                assertEquals(h, chain.headerAt(h).id());
+            }
+        }
+
+        // Reopen the pruned store: derived state rebuilds header-only from the persisted
+        // nonces, without touching a single (now-absent) old body.
+        try (RocksDbNodeStore store = new RocksDbNodeStore(path, keep)) {
+            ChainEngine reloaded = ChainEngine.init(params, store.ledger(), store.chainStore(),
+                store.nonceStore(), new LedgerSnapshot("test", 0, params.chainId()), null, clock::get,
+                null, null, null, null, null);
+            assertEquals(11, reloaded.height());
+            assertEquals(11 - keep + 1, store.chainStore().prunedBelow());
+        }
+    }
+
+    @Test
+    void enablingPruningOnAnArchivePrunesOldBodiesAtBoot() throws IOException {
+        NetworkParameters params = fastParams();
+        String path = tempDir.resolve("db").toString();
+        PublicAddress miner = PublicAddress.random();
+
+        // Build a full archive of 8 blocks.
+        AtomicLong clock = new AtomicLong(0);
+        try (RocksDbNodeStore store = new RocksDbNodeStore(path)) {
+            ChainEngine engine = ChainEngine.init(params, store.ledger(), store.chainStore(),
+                new LedgerSnapshot("test", 0, params.chainId()), null, clock::get);
+            for (int i = 0; i < 7; i++) {
+                assertEquals(ExecutionStatus.SUCCESS, engine.addBlock(mine(engine, params, miner, List.of(), clock)));
+            }
+            assertEquals(8, store.chainStore().height());
+            assertTrue(store.chainStore().hasBody(2), "archive keeps every body");
+        }
+
+        // Reopen with pruning: the boot catch-up discards the now-old bodies.
+        try (RocksDbNodeStore store = new RocksDbNodeStore(path, 3)) {
+            ChainStore chain = store.chainStore();
+            assertEquals(8 - 3 + 1, chain.prunedBelow());
+            assertFalse(chain.hasBody(2));
+            assertTrue(chain.hasBody(6));
+            assertTrue(chain.hasBody(1)); // genesis
+        }
+    }
+
+    @Test
     void persistedNoncesLetRestartSkipTheBodyWalk() throws IOException {
         NetworkParameters params = fastParams();
         String path = tempDir.resolve("db").toString();
