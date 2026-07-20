@@ -58,12 +58,36 @@ public final class Wallet {
             .put("address", address.toHexString());
     }
 
+    /** Env var holding the passphrase that encrypts the key file at rest (empty/unset = plaintext). */
+    private static final String PASSPHRASE_ENV = "RHIZOME_WALLET_PASSPHRASE";
+
+    private static char[] passphrase() {
+        String p = System.getenv(PASSPHRASE_ENV);
+        return (p == null || p.isEmpty()) ? null : p.toCharArray();
+    }
+
+    /**
+     * Persists the key. When {@code RHIZOME_WALLET_PASSPHRASE} is set the seed is sealed with
+     * AES-256-GCM under a PBKDF2-derived key, so the file on disk never exposes a spendable key;
+     * otherwise it is written as before (backward compatible).
+     */
     public void save(Path keyFile) throws IOException {
-        Files.writeString(keyFile, toJson().toString(2), StandardCharsets.UTF_8);
+        String plaintext = toJson().toString(2);
+        char[] pass = passphrase();
+        String content = pass == null ? plaintext : WalletKeystore.encrypt(plaintext, pass);
+        Files.writeString(keyFile, content, StandardCharsets.UTF_8);
     }
 
     public static Wallet load(Path keyFile) throws IOException {
-        JSONObject json = new JSONObject(Files.readString(keyFile, StandardCharsets.UTF_8));
+        String content = Files.readString(keyFile, StandardCharsets.UTF_8);
+        if (WalletKeystore.isEncrypted(content)) {
+            char[] pass = passphrase();
+            if (pass == null) {
+                throw new IOException("wallet file is encrypted; set " + PASSPHRASE_ENV + " to load it");
+            }
+            content = WalletKeystore.decrypt(content, pass);
+        }
+        JSONObject json = new JSONObject(content);
         return fromPrivate(PrivateKey.of(json.getString("privateKey")));
     }
 

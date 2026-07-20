@@ -173,8 +173,15 @@ public final class RhizomeNode implements AutoCloseable {
         // Every node keeps a live peer set (seeded from config), serves /peers and
         // accepts announcements, so the network can self-organise from a few seeds.
         banList = new PeerBanList(BAN_THRESHOLD, 60 * 60 * 1000L, 4096);
-        registry = new PeerRegistry(config.selfUrl(), 128, banList);
-        registry.addAll(config.peers());
+        // Block SSRF-prone (loopback / private / metadata) discovered peers on mainnet, where
+        // the node is internet-exposed. Testnet/devnets peer over localhost, so they stay
+        // permissive; an operator running mainnet over private infra can opt back in.
+        boolean blockPrivatePeers =
+            config.params().networkName().toLowerCase(java.util.Locale.ROOT).contains("mainnet")
+            && !"true".equalsIgnoreCase(System.getenv("RHIZOME_ALLOW_PRIVATE_PEERS"));
+        registry = new PeerRegistry(config.selfUrl(), 128, banList, blockPrivatePeers);
+        // Config peers are trusted seeds: protected from eclipse eviction and SSRF filtering.
+        registry.addSeeds(config.peers());
         service.setPeers(registry);
 
         startHttp();

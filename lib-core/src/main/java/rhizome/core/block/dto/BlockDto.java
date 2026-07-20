@@ -84,6 +84,12 @@ public class BlockDto implements BinarySerializable {
         long timestamp = buffer.getLong();
         int difficulty = buffer.getInt();
         int numTransactions = buffer.getInt();
+        // Bound the attacker-controlled count BEFORE any caller pre-sizes a collection
+        // from it (BlockCodec did `new ArrayList<>(numTransactions)`): a raw wire int of
+        // 0x7FFFFFFF would otherwise allocate gigabytes and OOM the node on decode.
+        if (numTransactions < 0 || numTransactions > rhizome.core.common.Constants.MAX_TRANSACTIONS_PER_BLOCK) {
+            throw new IllegalArgumentException("numTransactions out of range: " + numTransactions);
+        }
         SHA256Hash lastBlockHash = SHA256Hash.of(BinaryIO.getFixed(buffer, SHA256Hash.SIZE));
         SHA256Hash merkleRoot = SHA256Hash.of(BinaryIO.getFixed(buffer, SHA256Hash.SIZE));
         SHA256Hash nonce = SHA256Hash.of(BinaryIO.getFixed(buffer, SHA256Hash.SIZE));

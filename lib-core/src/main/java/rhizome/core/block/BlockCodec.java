@@ -53,6 +53,7 @@ public final class BlockCodec {
     }
 
     private static Block decode(ByteBuffer buffer) {
+        // BlockDto.readFrom already bounds numTransactions, so this pre-size is safe.
         BlockDto header = BlockDto.readFrom(buffer);
 
         List<Transaction> transactions = new ArrayList<>(header.numTransactions());
@@ -61,6 +62,11 @@ public final class BlockCodec {
         }
         List<UncleRef> uncles = new ArrayList<>();
         int numUncles = buffer.getInt();
+        // Reject an out-of-range uncle count before iterating: consensus caps uncles at
+        // maxUnclesPerBlock (2); a raw wire int must never drive an unbounded loop/alloc.
+        if (numUncles < 0 || numUncles > rhizome.core.common.Constants.MAX_UNCLES_PER_BLOCK) {
+            throw new IllegalArgumentException("numUncles out of range: " + numUncles);
+        }
         for (int i = 0; i < numUncles; i++) {
             byte[] h = new byte[rhizome.core.crypto.SHA256Hash.SIZE];
             buffer.get(h);

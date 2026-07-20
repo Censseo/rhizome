@@ -24,6 +24,8 @@ public final class PeerDiscovery {
 
     private static final Logger log = LoggerFactory.getLogger(PeerDiscovery.class);
     private static final int MAX_FAILURES = 3;
+    /** Cap on peers ingested from a single peer's PEX response per round (anti gossip-amplification/eclipse). */
+    private static final int MAX_PEX_PER_PEER = 16;
 
     private final PeerRegistry registry;
     private final String selfUrl;
@@ -62,7 +64,9 @@ public final class PeerDiscovery {
             throw new IllegalStateException("/peers -> " + resp.statusCode());
         }
         JSONArray arr = new JSONObject(resp.body()).getJSONArray("peers");
-        return arr.toList().stream().map(Object::toString).toList();
+        // Bound how many addresses one peer can contribute per round, so a single malicious
+        // peer cannot flood the registry with sybil URLs (PEX amplification / eclipse).
+        return arr.toList().stream().map(Object::toString).limit(MAX_PEX_PER_PEER).toList();
     }
 
     private void announceTo(String peer) throws Exception {

@@ -78,12 +78,26 @@ public final class HeaderCodec {
         SHA256Hash merkleRoot = SHA256Hash.of(BinaryIO.getFixed(buffer, SHA256Hash.SIZE));
         SHA256Hash nonce = SHA256Hash.of(BinaryIO.getFixed(buffer, SHA256Hash.SIZE));
         SHA256Hash stateRoot = SHA256Hash.of(BinaryIO.getFixed(buffer, SHA256Hash.SIZE));
+        if (numTransactions < 0 || numTransactions > rhizome.core.common.Constants.MAX_TRANSACTIONS_PER_BLOCK) {
+            throw new IllegalArgumentException("numTransactions out of range: " + numTransactions);
+        }
         int vote = buffer.getInt();
         int numUncles = buffer.getInt();
+        // Bound the uncle count before pre-sizing the list — `new ArrayList<>(0x7FFFFFFF)`
+        // is a one-header remote OOM on the /headers sync path otherwise.
+        if (numUncles < 0 || numUncles > rhizome.core.common.Constants.MAX_UNCLES_PER_BLOCK) {
+            throw new IllegalArgumentException("numUncles out of range: " + numUncles);
+        }
         List<UncleRef> uncles = new ArrayList<>(numUncles);
         for (int i = 0; i < numUncles; i++) {
             SHA256Hash uncleHash = SHA256Hash.of(BinaryIO.getFixed(buffer, SHA256Hash.SIZE));
             int uncleDifficulty = buffer.getInt();
+            // Bound uncle difficulty at decode: HeaderChain.uncleWork folds it into
+            // BigInteger.TWO.pow(difficulty), so an unbounded/negative wire int would OOM
+            // (pow(2^31)) or throw (negative) before any consensus check runs.
+            if (uncleDifficulty < 0 || uncleDifficulty > rhizome.core.common.Constants.MAX_DIFFICULTY) {
+                throw new IllegalArgumentException("uncleDifficulty out of range: " + uncleDifficulty);
+            }
             PublicAddress uncleMiner = PublicAddress.of(BinaryIO.getFixed(buffer, PublicAddress.SIZE));
             uncles.add(new UncleRef(uncleHash, uncleDifficulty, uncleMiner));
         }

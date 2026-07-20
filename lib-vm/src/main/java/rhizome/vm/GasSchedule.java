@@ -12,6 +12,14 @@ public final class GasSchedule {
     /** Charged for every executed WASM instruction (the compute meter). */
     public static final long PER_INSTRUCTION = 1L;
 
+    /**
+     * Charged per 64 KiB page of linear memory — for the eagerly-allocated initial
+     * memory at instantiation and for each page a {@code memory.grow} adds. Without
+     * this, a module could allocate gigabytes for a couple of gas (the "1 gas per
+     * memory.grow" bug); paired with the hard page cap in {@link WasmVm}.
+     */
+    public static final long MEMORY_PER_PAGE = 128L;
+
     public static final long STORAGE_READ_BASE = 50L;
     public static final long STORAGE_WRITE_BASE = 200L;   // writes are the expensive, state-growing op
     public static final long PER_BYTE = 1L;

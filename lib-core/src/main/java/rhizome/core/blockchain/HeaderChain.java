@@ -163,7 +163,17 @@ public final class HeaderChain {
             if (!seen.add(ref.hash())) {
                 return null; // duplicate uncle within one block
             }
-            work = work.add(BigInteger.TWO.pow(ref.difficulty()));
+            // Defense-in-depth against the BigInteger.TWO.pow(difficulty) OOM/blow-up.
+            // Difficulty is a leading-zero-bit count, so it is bounded by maxDifficulty;
+            // reject an out-of-range value rather than fold pow(2^31) into the total. This
+            // mirrors the header decode bound (uncleWork also runs on locally-held headers)
+            // and is a pure safety bound — not a new consensus rule — so it can never reject
+            // an uncle the engine's validateUncles would accept.
+            int d = ref.difficulty();
+            if (d < 0 || d > params.maxDifficulty()) {
+                return null;
+            }
+            work = work.add(BigInteger.TWO.pow(d));
         }
         return work;
     }

@@ -284,9 +284,15 @@ public final class NetworkParameters {
      * is a mainnet property, exercised by dedicated tests via explicit params.
      */
     public static NetworkParameters testnet() {
+        // Testnet is the low-difficulty development network: coins carry no value, so
+        // ASIC-resistance is irrelevant here and the memory-hard Pufferfish2 would only
+        // make local devnets/CI slow. Mainnet (cleanMainnet) keeps PUFFERFISH2. This is a
+        // deliberate per-network choice, not the old bug where Pufferfish2 was silently
+        // never invoked (Crypto.concatHashes now honors the flag).
         return cleanMainnet().toBuilder()
             .chainId(2)
             .networkName("rhizome-testnet")
+            .powAlgorithm(PowAlgorithm.SHA256)
             .genesisDifficulty(6)
             .minDifficulty(6)
             .desiredBlockTimeSec(90)
