@@ -32,6 +32,11 @@ public interface TokenProcessor {
         return List.of();
     }
 
+    /** Token store ops committed by {@code blockHeight}, for the authenticated state root. */
+    default List<TokenStore.TokenOp> changes(long blockHeight) {
+        return List.of();
+    }
+
     /** Committed metadata for {@code tokenId}, or {@code null}. */
     TokenMeta meta(byte[] tokenId);
 

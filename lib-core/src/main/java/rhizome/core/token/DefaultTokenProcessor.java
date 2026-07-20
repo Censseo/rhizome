@@ -28,6 +28,7 @@ public final class DefaultTokenProcessor implements TokenProcessor {
     private Map<String, Long> sessionBalance;
     private List<TokenEvent> currentEvents = new ArrayList<>();
     private final Map<Long, List<TokenEvent>> eventsByHeight = new ConcurrentHashMap<>();
+    private final Map<Long, List<TokenStore.TokenOp>> changesByHeight = new ConcurrentHashMap<>();
     private long lastCommittedHeight = -1;
 
     public DefaultTokenProcessor(TokenStore store, NetworkParameters params) {
@@ -159,6 +160,9 @@ public final class DefaultTokenProcessor implements TokenProcessor {
             sessionBalance.forEach((key, amount) ->
                 ops.add(new TokenStore.TokenOp.BalanceSet(tokenIdOf(key), addressOf(key), amount)));
             store.applyBlock(blockHeight, ops);
+            if (!ops.isEmpty()) {
+                changesByHeight.put(blockHeight, ops);
+            }
             sessionMeta = null;
             sessionBalance = null;
         }
@@ -170,6 +174,7 @@ public final class DefaultTokenProcessor implements TokenProcessor {
         long cutoff = lastCommittedHeight - retainDepth;
         if (cutoff > 0) {
             eventsByHeight.keySet().removeIf(h -> h < cutoff);
+            changesByHeight.keySet().removeIf(h -> h < cutoff);
             store.pruneJournals(cutoff);
         }
     }
@@ -184,12 +189,18 @@ public final class DefaultTokenProcessor implements TokenProcessor {
     @Override
     public void revertBlock(long blockHeight) {
         eventsByHeight.remove(blockHeight);
+        changesByHeight.remove(blockHeight);
         store.revertBlock(blockHeight);
     }
 
     @Override
     public List<TokenEvent> events(long blockHeight) {
         return eventsByHeight.getOrDefault(blockHeight, List.of());
+    }
+
+    @Override
+    public List<TokenStore.TokenOp> changes(long blockHeight) {
+        return changesByHeight.getOrDefault(blockHeight, List.of());
     }
 
     @Override

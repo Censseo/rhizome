@@ -57,6 +57,9 @@ public final class BlockProducer {
     public Optional<Block> produce() {
         Block candidate = BlockAssembler.assemble(engine, mempool, miner, nowMillis.getAsLong());
         var block = (BlockImpl) candidate;
+        // Commit the authenticated state root this block produces (no-op if the accumulator
+        // is off) before solving the PoW, so the header hash binds it.
+        engine.stampStateRoot(block);
         block.nonce(Miner.mineNonce(block.hash(), block.difficulty(), engine.params().powAlgorithm()));
 
         ExecutionStatus status = engine.addBlock(block);

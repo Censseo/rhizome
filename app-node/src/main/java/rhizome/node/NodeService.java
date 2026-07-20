@@ -114,6 +114,18 @@ public final class NodeService {
         return engine.tokenIdsByHolder(address, afterId, limit);
     }
 
+    // ---- authenticated state ----
+
+    /** The current authenticated state root, or {@code null} if the accumulator is off. */
+    public byte[] stateRoot() {
+        return engine.stateRoot();
+    }
+
+    /** A membership proof for a state entry at the current root, or {@code null} if absent / off. */
+    public rhizome.core.state.StateProof stateProof(byte domain, byte[] rawKey) {
+        return engine.stateProof(domain, rawKey);
+    }
+
     /** The contract processor, for read-only dry-run calls. */
     public void setContracts(rhizome.core.blockchain.ContractProcessor contracts) {
         this.contracts = contracts;

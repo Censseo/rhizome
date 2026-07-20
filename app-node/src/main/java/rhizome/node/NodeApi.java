@@ -109,6 +109,8 @@ public final class NodeApi {
             .with(GET, "/token", req -> guarded(() -> token(node, req)))
             .with(GET, "/token_balance", req -> guarded(() -> tokenBalance(node, req)))
             .with(GET, "/tokens", req -> guarded(() -> tokens(node, req)))
+            .with(GET, "/state", req -> guarded(() -> state(node)))
+            .with(GET, "/state/proof", req -> guarded(() -> stateProof(node, req)))
             .with(GET, "/logs", req -> guarded(() -> logs(node, req)))
             .with(GET, "/logs/stream", req -> guarded(() -> logStream(sse)))
             .with(GET, "/sync", req -> guarded(() -> sync(node, req)))
@@ -283,6 +285,57 @@ public final class NodeApi {
             result.put("next", rhizome.core.common.Utils.bytesToHex(last));
         }
         return json(result);
+    }
+
+    /** The current authenticated state root: {@code GET /state}. */
+    private static HttpResponse state(NodeService node) {
+        byte[] root = node.stateRoot();
+        return json(new JSONObject().put("stateRoot", root == null ? JSONObject.NULL : hex(root)));
+    }
+
+    /**
+     * A light-client membership proof: {@code GET /state/proof?domain=<d>&key=<hex>}, where
+     * {@code d} is {@code ledger}/{@code box}/{@code token_meta}/{@code token_balance}. Returns
+     * the root, the bound value hash and the sibling hashes; the client re-derives the SMT key
+     * from {@code (domain, key)} and folds the siblings to check it against the root. 404 if absent.
+     */
+    private static HttpResponse stateProof(NodeService node, HttpRequest req) {
+        byte[] root = node.stateRoot();
+        if (root == null) {
+            return HttpResponse.ofCode(503)
+                .withJson(new JSONObject().put("error", "state root unavailable").toString()).build();
+        }
+        Byte domain = stateDomain(req.getQueryParameter("domain"));
+        if (domain == null) {
+            return badRequest("domain must be ledger|box|token_meta|token_balance");
+        }
+        byte[] key = rhizome.core.common.Utils.hexStringToByteArray(req.getQueryParameter("key"));
+        rhizome.core.state.StateProof proof = node.stateProof(domain, key);
+        if (proof == null) {
+            return HttpResponse.ofCode(404)
+                .withJson(new JSONObject().put("error", "no such state entry").toString()).build();
+        }
+        org.json.JSONArray siblings = new org.json.JSONArray();
+        for (byte[] s : proof.siblings()) {
+            siblings.put(hex(s));
+        }
+        return json(new JSONObject()
+            .put("root", hex(root))
+            .put("valueHash", hex(proof.valueHash()))
+            .put("siblings", siblings));
+    }
+
+    private static Byte stateDomain(String name) {
+        if (name == null) {
+            return null;
+        }
+        return switch (name) {
+            case "ledger" -> rhizome.core.state.StateKeys.LEDGER;
+            case "box" -> rhizome.core.state.StateKeys.BOX;
+            case "token_meta" -> rhizome.core.state.StateKeys.TOKEN_META;
+            case "token_balance" -> rhizome.core.state.StateKeys.TOKEN_BALANCE;
+            default -> null;
+        };
     }
 
     /** Native token metadata: {@code GET /token?id=<hex64>}; 404 if absent. */

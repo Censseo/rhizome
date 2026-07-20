@@ -36,6 +36,7 @@ public final class DefaultBoxProcessor implements BoxProcessor {
 
     private final Map<Long, List<BoxReceipt>> receiptsByHeight = new ConcurrentHashMap<>();
     private final Map<Long, List<BoxEvent>> eventsByHeight = new ConcurrentHashMap<>();
+    private final Map<Long, List<BoxStore.BoxMutation>> changesByHeight = new ConcurrentHashMap<>();
     private long lastCommittedHeight = -1;
 
     public DefaultBoxProcessor(BoxStore store, NetworkParameters params) {
@@ -202,6 +203,9 @@ public final class DefaultBoxProcessor implements BoxProcessor {
                 }
             }
             store.applyBlock(blockHeight, mutations);
+            if (!mutations.isEmpty()) {
+                changesByHeight.put(blockHeight, mutations);
+            }
             session = null;
         }
         if (!currentReceipts.isEmpty()) {
@@ -227,6 +231,7 @@ public final class DefaultBoxProcessor implements BoxProcessor {
     public void revertBlock(long blockHeight) {
         receiptsByHeight.remove(blockHeight);
         eventsByHeight.remove(blockHeight);
+        changesByHeight.remove(blockHeight);
         store.revertBlock(blockHeight);
     }
 
@@ -238,6 +243,11 @@ public final class DefaultBoxProcessor implements BoxProcessor {
     @Override
     public List<BoxEvent> events(long blockHeight) {
         return eventsByHeight.getOrDefault(blockHeight, List.of());
+    }
+
+    @Override
+    public List<BoxStore.BoxMutation> changes(long blockHeight) {
+        return changesByHeight.getOrDefault(blockHeight, List.of());
     }
 
     @Override
@@ -298,6 +308,7 @@ public final class DefaultBoxProcessor implements BoxProcessor {
         if (cutoff > 0) {
             receiptsByHeight.keySet().removeIf(h -> h < cutoff);
             eventsByHeight.keySet().removeIf(h -> h < cutoff);
+            changesByHeight.keySet().removeIf(h -> h < cutoff);
             store.pruneJournals(cutoff);
         }
     }

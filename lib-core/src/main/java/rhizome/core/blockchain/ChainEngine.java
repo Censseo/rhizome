@@ -56,6 +56,8 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
     private final ContractProcessor contractProcessor;
     private final rhizome.core.box.BoxProcessor boxProcessor;
     private final rhizome.core.token.TokenProcessor tokenProcessor;
+    private final rhizome.core.state.StateAccumulator stateAccumulator;
+    private LedgerSnapshot genesisSnapshot;
     private final OrphanPool orphans = new OrphanPool(256);
     private final ReentrantLock lock = new ReentrantLock();
 
@@ -73,7 +75,8 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
                         LongSupplier nowMillis, SignatureVerifier verifier,
                         ContractProcessor contractProcessor,
                         rhizome.core.box.BoxProcessor boxProcessor,
-                        rhizome.core.token.TokenProcessor tokenProcessor) {
+                        rhizome.core.token.TokenProcessor tokenProcessor,
+                        rhizome.core.state.StateAccumulator stateAccumulator) {
         this.params = params;
         this.ledger = ledger;
         this.store = store;
@@ -82,6 +85,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         this.contractProcessor = contractProcessor;
         this.boxProcessor = boxProcessor;
         this.tokenProcessor = tokenProcessor;
+        this.stateAccumulator = stateAccumulator;
     }
 
     /**
@@ -129,8 +133,21 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
                                    ContractProcessor contractProcessor,
                                    rhizome.core.box.BoxProcessor boxProcessor,
                                    rhizome.core.token.TokenProcessor tokenProcessor) {
+        return init(params, ledger, store, snapshot, expectedGenesisHash, nowMillis, verifier,
+            contractProcessor, boxProcessor, tokenProcessor, null);
+    }
+
+    /** As {@link #init}, additionally committing an authenticated state root via a {@link rhizome.core.state.StateAccumulator}. */
+    public static ChainEngine init(NetworkParameters params, Ledger ledger, ChainStore store,
+                                   LedgerSnapshot snapshot, SHA256Hash expectedGenesisHash,
+                                   LongSupplier nowMillis, SignatureVerifier verifier,
+                                   ContractProcessor contractProcessor,
+                                   rhizome.core.box.BoxProcessor boxProcessor,
+                                   rhizome.core.token.TokenProcessor tokenProcessor,
+                                   rhizome.core.state.StateAccumulator stateAccumulator) {
         ChainEngine engine = new ChainEngine(params, ledger, store, nowMillis, verifier,
-            contractProcessor, boxProcessor, tokenProcessor);
+            contractProcessor, boxProcessor, tokenProcessor, stateAccumulator);
+        engine.genesisSnapshot = snapshot;
         if (store.height() == 0) {
             Block genesis = GenesisBlock.initChain(ledger, params, snapshot, expectedGenesisHash);
             store.append(genesis);
@@ -138,7 +155,33 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             throw new IllegalStateException("Stored genesis does not match network parameters and snapshot");
         }
         engine.rebuildDerivedState();
+        engine.seedGenesisStateRoot();
         return engine;
+    }
+
+    /**
+     * Seeds the state accumulator with the genesis ledger (the snapshot balances) at
+     * height {@link GenesisBlock#GENESIS_ID}, so block 2's state root builds on it. Only
+     * supported from genesis: enabling the accumulator on an already-populated chain would
+     * need a full replay, which is rejected here rather than committing a wrong root.
+     */
+    private void seedGenesisStateRoot() {
+        if (stateAccumulator == null || stateAccumulator.isSeeded()) {
+            return;
+        }
+        if (store.height() > GenesisBlock.GENESIS_ID) {
+            throw new IllegalStateException(
+                "state accumulator must be enabled from genesis (chain already at height " + store.height() + ")");
+        }
+        List<rhizome.core.state.StateChange> changes = new ArrayList<>();
+        for (var e : genesisSnapshot.balances().entrySet()) {
+            long bal = e.getValue().amount();
+            if (bal != 0) {
+                changes.add(rhizome.core.state.StateChange.set(
+                    rhizome.core.state.StateKeys.LEDGER, e.getKey().toBytes(), longBytesBE(bal)));
+            }
+        }
+        stateAccumulator.applyBlock(GenesisBlock.GENESIS_ID, changes);
     }
 
     public ExecutionStatus addBlock(Block block) {
@@ -201,11 +244,34 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
                 return INVALID_NONCE;
             }
 
+            java.util.Set<PublicAddress> touched = stateAccumulator == null ? null : new java.util.HashSet<>();
             ExecutionStatus status = Executor.executeBlock(
                 block, ledger, store::hasTransaction, params, verifier,
-                contractProcessor, boxProcessor, tokenProcessor);
+                contractProcessor, boxProcessor, tokenProcessor, touched);
             if (status != SUCCESS) {
                 return status;
+            }
+
+            // Authenticated state root: fold this block's state changes into the accumulator
+            // and require the resulting root to equal the header's. On mismatch the block was
+            // fully applied, so undo it (ledger + processors + accumulator) before rejecting.
+            if (stateAccumulator != null) {
+                long height2 = b.id();
+                byte[] newRoot = stateAccumulator.applyBlock(height2, collectStateChanges(touched, height2));
+                if (!java.util.Arrays.equals(newRoot, b.stateRoot().toBytes())) {
+                    stateAccumulator.revertBlock(height2);
+                    Executor.rollbackBlock(block, ledger, contractProcessor, boxProcessor, height2, params);
+                    if (contractProcessor != null) {
+                        contractProcessor.revertBlock(height2);
+                    }
+                    if (boxProcessor != null) {
+                        boxProcessor.revertBlock(height2);
+                    }
+                    if (tokenProcessor != null) {
+                        tokenProcessor.revertBlock(height2);
+                    }
+                    return INVALID_STATE_ROOT;
+                }
             }
 
             store.append(block);
@@ -250,6 +316,9 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             }
             if (tokenProcessor != null) {
                 tokenProcessor.revertBlock(height); // undo this block's token-state changes
+            }
+            if (stateAccumulator != null) {
+                stateAccumulator.revertBlock(height); // move the state root back one block
             }
             store.pop();
             revertAccountNonces(tip);
@@ -468,6 +537,117 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
     /** Token lifecycle events emitted by the block at {@code height}. */
     public java.util.List<rhizome.core.token.TokenProcessor.TokenEvent> tokenEvents(long height) {
         return tokenProcessor == null ? java.util.List.of() : tokenProcessor.events(height);
+    }
+
+    // ---- authenticated state root ----
+
+    /** The current authenticated state root (32 bytes), or {@code null} if the accumulator is off. */
+    public byte[] stateRoot() {
+        if (stateAccumulator == null) {
+            return null;
+        }
+        lock.lock();
+        try {
+            return stateAccumulator.root();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** A membership proof for a state entry at the current root, or {@code null} if absent / off. */
+    public rhizome.core.state.StateProof stateProof(byte domain, byte[] rawKey) {
+        if (stateAccumulator == null) {
+            return null;
+        }
+        lock.lock();
+        try {
+            return stateAccumulator.prove(domain, rawKey);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * Stamps {@code candidate}'s {@code stateRoot} with the root it would produce, so the
+     * producer can mine a header that commits it. Tentatively applies the block to compute
+     * the root, then rolls the application back — the block is re-applied for real when
+     * submitted through {@link #addBlock}. A no-op when the accumulator is off.
+     */
+    public void stampStateRoot(Block candidate) {
+        if (stateAccumulator == null) {
+            return;
+        }
+        lock.lock();
+        try {
+            var b = (BlockImpl) candidate;
+            java.util.Set<PublicAddress> touched = new java.util.HashSet<>();
+            ExecutionStatus status = Executor.executeBlock(candidate, ledger, store::hasTransaction, params,
+                verifier, contractProcessor, boxProcessor, tokenProcessor, touched);
+            if (status != SUCCESS) {
+                return; // invalid block; leave the state root empty and let addBlock reject it
+            }
+            long h = b.id();
+            byte[] root = stateAccumulator.dryApply(collectStateChanges(touched, h));
+            b.stateRoot(SHA256Hash.of(root));
+            Executor.rollbackBlock(candidate, ledger, contractProcessor, boxProcessor, h, params);
+            if (contractProcessor != null) {
+                contractProcessor.revertBlock(h);
+            }
+            if (boxProcessor != null) {
+                boxProcessor.revertBlock(h);
+            }
+            if (tokenProcessor != null) {
+                tokenProcessor.revertBlock(h);
+            }
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** Gathers a block's committed ledger, box and token changes into state accumulator changes. */
+    private List<rhizome.core.state.StateChange> collectStateChanges(
+            java.util.Set<PublicAddress> touched, long height) {
+        List<rhizome.core.state.StateChange> changes = new ArrayList<>();
+        for (PublicAddress a : touched) {
+            long bal = ledger.hasWallet(a) ? ledger.getWalletValue(a).amount() : 0;
+            byte[] key = a.toBytes();
+            changes.add(bal == 0
+                ? rhizome.core.state.StateChange.delete(rhizome.core.state.StateKeys.LEDGER, key)
+                : rhizome.core.state.StateChange.set(rhizome.core.state.StateKeys.LEDGER, key, longBytesBE(bal)));
+        }
+        if (boxProcessor != null) {
+            for (var m : boxProcessor.changes(height)) {
+                changes.add(m.box() == null
+                    ? rhizome.core.state.StateChange.delete(rhizome.core.state.StateKeys.BOX, m.id())
+                    : rhizome.core.state.StateChange.set(rhizome.core.state.StateKeys.BOX, m.id(), m.box().serialize()));
+            }
+        }
+        if (tokenProcessor != null) {
+            for (var op : tokenProcessor.changes(height)) {
+                if (op instanceof rhizome.core.token.TokenStore.TokenOp.MetaSet ms) {
+                    changes.add(rhizome.core.state.StateChange.set(
+                        rhizome.core.state.StateKeys.TOKEN_META, ms.meta().id(), ms.meta().serialize()));
+                } else if (op instanceof rhizome.core.token.TokenStore.TokenOp.BalanceSet bs) {
+                    byte[] rawKey = concat(bs.tokenId(), bs.address());
+                    changes.add(bs.amount() == 0
+                        ? rhizome.core.state.StateChange.delete(rhizome.core.state.StateKeys.TOKEN_BALANCE, rawKey)
+                        : rhizome.core.state.StateChange.set(rhizome.core.state.StateKeys.TOKEN_BALANCE, rawKey,
+                            longBytesBE(bs.amount())));
+                }
+            }
+        }
+        return changes;
+    }
+
+    private static byte[] longBytesBE(long value) {
+        return rhizome.core.common.Utils.longToBytes(value);
+    }
+
+    private static byte[] concat(byte[] a, byte[] b) {
+        byte[] out = new byte[a.length + b.length];
+        System.arraycopy(a, 0, out, 0, a.length);
+        System.arraycopy(b, 0, out, a.length, b.length);
+        return out;
     }
 
     // ---- derived state ----

@@ -19,10 +19,12 @@ import rhizome.core.ledger.LedgerSnapshot;
 import rhizome.core.ledger.SnapshotLoader;
 import rhizome.core.mempool.MemPool;
 import rhizome.core.box.DefaultBoxProcessor;
+import rhizome.core.state.StateAccumulator;
 import rhizome.core.token.DefaultTokenProcessor;
 import rhizome.persistence.rocksdb.RocksDbBoxStore;
 import rhizome.persistence.rocksdb.RocksDbContractStore;
 import rhizome.persistence.rocksdb.RocksDbNodeStore;
+import rhizome.persistence.rocksdb.RocksDbStateStore;
 import rhizome.persistence.rocksdb.RocksDbTokenStore;
 import rhizome.vm.WasmContractProcessor;
 import rhizome.vm.WasmVm;
@@ -45,6 +47,7 @@ public final class RhizomeNode implements AutoCloseable {
     private RocksDbContractStore contractStore;
     private RocksDbBoxStore boxStore;
     private RocksDbTokenStore tokenStore;
+    private RocksDbStateStore stateStore;
     private ChainEngine engine;
     private MemPool mempool;
     private NodeService service;
@@ -85,16 +88,20 @@ public final class RhizomeNode implements AutoCloseable {
         contractStore = new RocksDbContractStore(config.dataDir() + "/contracts");
         boxStore = new RocksDbBoxStore(config.dataDir() + "/boxes");
         tokenStore = new RocksDbTokenStore(config.dataDir() + "/tokens");
+        stateStore = new RocksDbStateStore(config.dataDir() + "/state");
         verifier = new SignatureVerifier();
         var contractProcessor = new WasmContractProcessor(new WasmVm(), contractStore,
             config.params().maxReorgDepth());
         var boxProcessor = new DefaultBoxProcessor(boxStore, config.params());
         var tokenProcessor = new DefaultTokenProcessor(tokenStore, config.params());
+        // Authenticated state root over ledger + boxes + tokens (committed in each header).
+        var stateAccumulator = new StateAccumulator(stateStore, stateStore, config.params().maxReorgDepth());
         // Contracts read data boxes (Ergo-style data inputs) through the box processor's
         // session-aware view, so a box written earlier in the block is visible.
         contractProcessor.setBoxReader(boxProcessor::get);
         engine = ChainEngine.init(config.params(), store.ledger(), store.chainStore(),
-            snapshot, null, System::currentTimeMillis, verifier, contractProcessor, boxProcessor, tokenProcessor);
+            snapshot, null, System::currentTimeMillis, verifier, contractProcessor, boxProcessor,
+            tokenProcessor, stateAccumulator);
         mempool = new MemPool(config.params(), verifier, engine, config.mempoolSize());
         service = new NodeService(engine, mempool);
         // Expose contract event logs and box lifecycle events (by block height) so agents
@@ -283,6 +290,9 @@ public final class RhizomeNode implements AutoCloseable {
         }
         if (tokenStore != null) {
             tokenStore.close();
+        }
+        if (stateStore != null) {
+            stateStore.close();
         }
     }
 

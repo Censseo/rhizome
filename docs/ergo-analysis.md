@@ -217,11 +217,12 @@ ajuste un paramètre d'un pas borné (`Parameters.scala:158-183`), 90 % sur 32
 ## 4. Proposition d'intégration : des « data boxes » dans Rhizome
 
 > **Statut : implémenté.** Réalisé — data boxes, rente de stockage, `box_read`
-> (data inputs), API `/scan`, dry-run `/call_readonly` (voir
-> [`WHITEPAPER.md`](../WHITEPAPER.md) §5.5) et **tokens natifs**
-> (`TOKEN_MINT`/`TRANSFER`/`BURN`, voir §5.6). Reste en travaux futurs la racine
-> d'état authentifiée (preuves clients légers) et les `dataBoxIds` déclarés dans
-> les transactions. Cette section est conservée comme trace de l'analyse.
+> (data inputs), API `/scan`, dry-run `/call_readonly` (§5.5), **tokens natifs**
+> (`TOKEN_MINT`/`TRANSFER`/`BURN`, §5.6) et la **racine d'état authentifiée**
+> (Sparse Merkle Tree sur ledger + boxes + tokens, preuves clients légers, §5.7).
+> Voir [`WHITEPAPER.md`](../WHITEPAPER.md). Reste en travaux futurs : commit du
+> stockage contractuel dans la racine, snap-sync, paramètres votables, et les
+> `dataBoxIds` déclarés dans les transactions. Trace de l'analyse d'origine.
 
 Design cible : un **objet box natif** à côté des comptes et des contrats — le
 sous-ensemble d'Ergo utile aux agents, sans changer le modèle de ledger.

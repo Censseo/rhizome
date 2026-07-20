@@ -47,6 +47,15 @@ public final class BlockImpl implements Block {
     private SHA256Hash nonce = SHA256Hash.empty();
 
     /**
+     * Authenticated state root after this block (§ state root): a sparse-Merkle commitment
+     * to the ledger, box and token state, so a light client can prove any single entry.
+     * Empty when the producing node runs without the state accumulator; committed in the
+     * header hash only when non-empty, so a stateless block hashes exactly as before.
+     */
+    @Builder.Default
+    private SHA256Hash stateRoot = SHA256Hash.empty();
+
+    /**
      * Hashes of referenced uncle blocks (valid orphans sharing a recent ancestor).
      * Empty for a plain block; the basis of the GHOST fork choice. Committed in the
      * header hash only when non-empty, so an uncle-less block hashes exactly as it
@@ -88,6 +97,12 @@ public final class BlockImpl implements Block {
             buffer.putInt(transactions.size());
             buffer.putLong(timestamp);
             sha256.update(buffer.array());
+
+            // Commit to the state root only when set, so a block produced without the state
+            // accumulator hashes byte-for-byte as it did before the field existed.
+            if (stateRoot != null && !stateRoot.equals(SHA256Hash.empty())) {
+                sha256.update(stateRoot.hash().getArray());
+            }
 
             // Commit to referenced uncles only when present, so an uncle-less block's
             // hash is byte-for-byte what it was before uncles existed.
@@ -131,11 +146,12 @@ public final class BlockImpl implements Block {
         BlockImpl block = (BlockImpl) o;
         return id == block.id && difficulty == block.difficulty && timestamp == block.timestamp &&
             nonce.equals(block.nonce) && merkleRoot.equals(block.merkleRoot) &&
-            lastBlockHash.equals(block.lastBlockHash) && transactions.equals(block.transactions);
+            lastBlockHash.equals(block.lastBlockHash) && transactions.equals(block.transactions) &&
+            Objects.equals(stateRoot, block.stateRoot);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(nonce, id, difficulty, timestamp, merkleRoot, lastBlockHash, transactions);
+        return Objects.hash(nonce, id, difficulty, timestamp, merkleRoot, lastBlockHash, transactions, stateRoot);
     }
 }

@@ -48,5 +48,7 @@ public enum ExecutionStatus {
     TOKEN_ALREADY_EXISTS,
     TOKEN_PAYLOAD_INVALID,
     TOKEN_INSUFFICIENT_BALANCE,
+    // --- authenticated state ---
+    INVALID_STATE_ROOT,
     SUCCESS
 }

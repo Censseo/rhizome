@@ -91,9 +91,12 @@ class BoxApiTest {
         var contracts = new WasmContractProcessor(new WasmVm(), new InMemoryContractStore());
         var boxes = new DefaultBoxProcessor(new InMemoryBoxStore(), params);
         var tokens = new DefaultTokenProcessor(new InMemoryTokenStore(), params);
+        var accumulator = new rhizome.core.state.StateAccumulator(
+            new rhizome.core.state.InMemorySmtNodeStore(),
+            new rhizome.core.state.InMemoryRootStore(), params.maxReorgDepth());
         contracts.setBoxReader(boxes::get);
         engine = ChainEngine.init(params, new InMemoryLedger(), new InMemoryChainStore(),
-            snapshot, null, clock::get, verifier, contracts, boxes, tokens);
+            snapshot, null, clock::get, verifier, contracts, boxes, tokens, accumulator);
         mempool = new MemPool(params, verifier, engine, 1000);
         var node = new NodeService(engine, mempool);
         node.setContracts(contracts);
@@ -148,6 +151,7 @@ class BoxApiTest {
         var tree = new MerkleTree();
         tree.setItems(b.transactions());
         ((BlockImpl) b).merkleRoot(tree.getRootHash());
+        engine.stampStateRoot(b); // the accumulator is wired, so the header must commit the root
         ((BlockImpl) b).nonce(Miner.mineNonce(b.hash(), ((BlockImpl) b).difficulty(), params.powAlgorithm()));
         assertEquals(rhizome.core.mempool.ExecutionStatus.SUCCESS, engine.addBlock(b));
     }
@@ -238,6 +242,28 @@ class BoxApiTest {
 
         assertEquals(404, call(HttpRequest.get(
             "http://x/token?id=" + Utils.bytesToHex(new byte[32])).build()).getCode());
+    }
+
+    @Test
+    void stateEndpointsExposeRootAndProof() throws Exception {
+        mine(List.of(tokenMint(1_000_000, 8, "PNDA", "Panda Coin", 0)));
+
+        HttpResponse st = call(HttpRequest.get("http://x/state").build());
+        assertEquals(200, st.getCode());
+        String root = json(st).getString("stateRoot");
+        assertFalse(root.isEmpty());
+
+        // A ledger proof for the miner (who earned the block reward) verifies against the root.
+        HttpResponse pr = call(HttpRequest.get(
+            "http://x/state/proof?domain=ledger&key=" + miner.toHexString()).build());
+        assertEquals(200, pr.getCode());
+        JSONObject proof = json(pr);
+        assertEquals(root, proof.getString("root"));
+        assertFalse(proof.getString("valueHash").isEmpty());
+
+        // An unknown ledger entry has no proof.
+        assertEquals(404, call(HttpRequest.get(
+            "http://x/state/proof?domain=ledger&key=" + PublicAddress.random().toHexString()).build()).getCode());
     }
 
     @Test

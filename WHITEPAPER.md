@@ -29,12 +29,13 @@ Four goals drive the design:
    GHOST-style fork choice (§9) that credits and rewards orphaned (uncle) work, making
    the fast cadence safe against the orphaning a naïve longest chain suffers.
 
-The node is functional and covered by **286 tests**: consensus, the WASM contract VM
+The node is functional and covered by **300 tests**: consensus, the WASM contract VM
 and its persistence, execution, storage, mempool, HTTP API, block production, P2P
 synchronisation with reorganisation, GHOST uncles, data boxes (agent-facing on-chain
 storage with typed registers, an anti-dust deposit and storage rent), native tokens
-(one-transaction fungible-asset launches), and a wallet that deploys and calls contracts
-and manages boxes and tokens.
+(one-transaction fungible-asset launches), an authenticated state root committed in every
+header (light-client proofs of any ledger, box or token entry), and a wallet that deploys
+and calls contracts and manages boxes and tokens.
 
 ---
 
@@ -103,7 +104,10 @@ hash = H( merkleRoot || lastBlockHash || id || difficulty || numTransactions || 
 (integers big-endian). Unlike the C++ node — whose `getHash` covered only
 `{merkleRoot, lastBlockHash, difficulty, timestamp}`, leaving `id` and the PoW-algorithm
 choice *outside* the preimage — **every header field is committed**. A reordered or
-re-timestamped block yields a different hash, hence an invalid proof of work.
+re-timestamped block yields a different hash, hence an invalid proof of work. Two optional
+fields — the referenced uncles (§3.7) and the authenticated **state root** (§5.7) — are
+folded in only when present, so a plain, stateless block hashes byte-for-byte as it did
+before those features existed.
 
 ### 3.2 Proof of work — Pufferfish2
 
@@ -462,14 +466,8 @@ and discards every write. The wallet gains `box-create`/`update`/`spend`/`show`/
 funds, **persistent addressable memory**, and real-time observability — the full on-chain
 loop.
 
-**Future work — an authenticated state root.** Boxes are not yet committed in the block
-header, so a light client cannot *prove* a box without trusting a node. The next step is a
-state root (an authenticated tree over boxes, balances and contract storage) added to the
-header preimage, whose box leaf commits `(box header, hash(registers))` rather than the raw
-content — keeping inclusion proofs small regardless of box size, exactly the property
-Ergo's 4-KiB limit had to buy. That unlocks light-client proofs, then trust-minimised
-snapshot sync, and finally miner-voted box parameters (rent factor, dust floor) via a
-soft-forkable extension section. Until then the box parameters are consensus constants.
+Boxes are committed in the **authenticated state root** (§5.7), so a light client can prove
+a box against a block header without trusting a node.
 
 ### 5.6 Native tokens
 
@@ -506,6 +504,48 @@ and `GET /tokens?minter=`/`?holder=`; token lifecycle events (`token.minted`/`tr
 `balance`/`list`. Reducing a memecoin launch to a single ~fee-priced transaction is the
 "cheap token launches" goal, met without giving up the composability of contract tokens for
 the cases that need it.
+
+### 5.7 Authenticated state root
+
+Every block header commits a 32-byte **state root** — an authenticated commitment to the
+whole value state (the native ledger, all data boxes, and all token metadata and balances)
+— so a **light client can prove any single state entry against a header** it trusts,
+without holding or trusting a full node. This is the property Ergo buys with its AVL+ tree;
+Rhizome uses a **sparse Merkle tree** keyed by `H(domain ‖ rawKey)`, whose leaf commits
+`H(value)`. Nodes are **content-addressed** (a node is keyed by its own hash), which makes
+them immutable and dedup naturally, and — the useful part — leaves every old root
+resolvable, so reorg reversal is journal-free: reverting a block just moves the current root
+back to the previous block's (kept per height in a small store).
+
+**Determinism.** The root is a function of the binding *set* alone — independent of the
+order changes are applied within a block — because a leaf commits its full key and sits at
+its shortest unique prefix (proven by an order-independence test over shuffled inserts).
+That means the node collecting a block's ledger/box/token changes need not canonicalise
+their order; any node re-deriving the block arrives at the same root.
+
+**Production and validation.** A block a node produces is applied to compute the resulting
+root, which is stamped into the header *before* the proof-of-work is solved, so the PoW
+binds it (the header hash commits the state root when set — a stateless block, produced
+without the accumulator, hashes exactly as before). Every receiving node re-derives the root
+by applying the block and **rejects a header whose committed root doesn't match**, rolling
+the block back fully (ledger, box, token and accumulator state) — a state-root mismatch is a
+first-class block-invalidity, exercised by a tamper test. On a reorg the root rewinds with
+the block.
+
+**Light-client proofs.** `GET /state` returns the current root; `GET /state/proof?domain=…&
+key=…` returns the value hash and the sibling hashes along the path. A client re-derives the
+SMT key from `(domain, rawKey)` and folds the siblings to check it against a root it already
+trusts — the stateless verifier is a few lines and needs nothing else. A genesis seed commits
+the snapshot balances so block 2 builds on them.
+
+Committed today: **ledger balances, boxes, and token metadata/balances** — the "who owns
+what" a light client cares about. Not yet committed (re-derived by re-execution, not proven):
+**contract key/value storage** (the highest-churn state; contracts are provable through their
+box and token effects). Still ahead: **snapshot sync** (a new node downloads a recent state
+tree, its manifest bound to a header-committed root, then a suffix of full blocks — the root
+makes it trust-minimised) and **miner-voted parameters** (rent factor, dust floor, block cost)
+via a soft-forkable extension section. Because the `stateRoot` header field is now fixed in the
+format, adding those needs no further hard fork.
 
 ---
 
@@ -654,7 +694,12 @@ commands; and the **data-box layer** (§5.5) — stable-id, typed-register stora
 with an anti-dust deposit, permissionless miner-collected storage rent, read-only
 `box_read` data inputs for contracts, a persisted per-block undo journal for exact reorg
 reversal, owner/expiry indexes, `GET /box`+`/boxes`, box lifecycle events on the log/SSE
-feed, and wallet `box-*` commands. **286 tests, 0 failures.**
+feed, and wallet `box-*` commands; **native tokens** (§5.6) — `TOKEN_MINT`/`TRANSFER`/`BURN`
+with unique ids, minter/holder indexes, reorg-safe balances, `GET /token(s)` and wallet
+`token-*` commands; and the **authenticated state root** (§5.7) — a sparse-Merkle commitment
+to ledger, box and token state in every header, stamped by the producer and validated by
+every node with full rollback on mismatch, reorg-safe, with `GET /state`+`/state/proof` and a
+stateless light-client verifier. **300 tests, 0 failures.**
 
 **GHOST fork choice.** A fast single longest chain orphans blocks because propagation
 takes a meaningful fraction of the interval (§6.3). A GHOST-style fork choice — the
@@ -696,9 +741,11 @@ level work is an authenticated state root so agents can prove a box to a light c
 
 **Memecoin primitives.** Native tokens (§5.6) make a fungible-asset launch a single
 gas-free transaction — `TOKEN_MINT`/`TRANSFER`/`BURN`, unique unforgeable ids, minter and
-holder indexes, reorg-safe balances — for the common case that needs no custom logic. For
-the cases that do, three reference contracts are implemented and tested through
-consensus: a fungible token (mint, transfer, `transfer` logs), a constant-product AMM
+holder indexes, reorg-safe balances — for the common case that needs no custom logic. Token
+balances and metadata are committed in the authenticated state root (§5.7), so a light
+client can prove a holding against a header. For the cases that need custom logic, three
+reference contracts are implemented and tested through consensus: a fungible token (mint,
+transfer, `transfer` logs), a constant-product AMM
 (`x*y=k` with a 0.3% fee, `swap` logs, exact integer math verified against the same
 formula in the test), and a fair-launch launchpad — a fixed-price, first-come sale where
 a buyer's attached native coin only moves when the tokens are delivered (the launchpad

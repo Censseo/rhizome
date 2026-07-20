@@ -126,6 +126,23 @@ public final class Executor {
                                                ContractProcessor processor,
                                                BoxProcessor boxProcessor,
                                                TokenProcessor tokenProcessor) {
+        return executeBlock(block, ledger, alreadyExecuted, params, verifier,
+            processor, boxProcessor, tokenProcessor, null);
+    }
+
+    /**
+     * As above, additionally collecting into {@code touchedLedger} (when non-null) every
+     * ledger address this block credited or debited — so the caller can read their final
+     * balances to feed the authenticated state accumulator.
+     */
+    public static ExecutionStatus executeBlock(Block block, Ledger ledger,
+                                               Predicate<SHA256Hash> alreadyExecuted,
+                                               NetworkParameters params,
+                                               SignatureVerifier verifier,
+                                               ContractProcessor processor,
+                                               BoxProcessor boxProcessor,
+                                               TokenProcessor tokenProcessor,
+                                               Set<PublicAddress> touchedLedger) {
         var blockImpl = (BlockImpl) block;
         long height = blockImpl.id();
         long expectedReward = params.miningReward(height);
@@ -281,6 +298,13 @@ public final class Executor {
             }
             if (tokenProcessor != null) {
                 tokenProcessor.commit(blockImpl.id());
+            }
+            // Report every touched ledger address (each applied op names its wallet) so the
+            // caller can read final balances for the state accumulator.
+            if (touchedLedger != null) {
+                for (AppliedOp op : applied) {
+                    touchedLedger.add(op.wallet());
+                }
             }
             return SUCCESS;
         } catch (LedgerException e) {

@@ -49,6 +49,11 @@ public interface BoxProcessor {
         return List.of();
     }
 
+    /** Box mutations committed by {@code blockHeight}, for the authenticated state root. */
+    default List<BoxStore.BoxMutation> changes(long blockHeight) {
+        return List.of();
+    }
+
     /** Session-aware read (sees boxes written earlier in the open block): for the VM's {@code box_read}. */
     Box get(byte[] boxId);
 
