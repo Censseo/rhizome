@@ -1,11 +1,7 @@
 package rhizome.core.block;
 
 import static rhizome.core.common.Constants.*;
-import static rhizome.core.common.Crypto.verifyHash;
 
-import java.nio.ByteBuffer;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.List;
 import java.util.ArrayList;
 import java.util.Objects;
@@ -86,53 +82,17 @@ public final class BlockImpl implements Block {
     /**
      * Block header hash.
      *
-     * <p>The preimage commits to every header field:
+     * <p>Delegates to {@link BlockHeader}, the single canonical preimage
+     * definition, so the block and its logical header can never hash
+     * differently. The preimage commits to
      * {@code merkleRoot || lastBlockHash || id || difficulty || numTransactions || timestamp}
-     * (integers big-endian). Pandanite's C++ omitted {@code id} and the
-     * transaction count, which left the PoW-algorithm switch keyed on a value
+     * (integers big-endian), then the optional {@code stateRoot}, {@code vote}
+     * and uncle references only when set. Pandanite's C++ omitted {@code id} and
+     * the transaction count, which left the PoW-algorithm switch keyed on a value
      * the PoW itself did not commit to; the clean chain closes that hole.
      */
     public SHA256Hash hash() {
-        try {
-            MessageDigest sha256 = MessageDigest.getInstance("SHA-256");
-
-            sha256.update(merkleRoot.hash().getArray());
-            sha256.update(lastBlockHash.hash().getArray());
-
-            ByteBuffer buffer = ByteBuffer.allocate(3 * Integer.BYTES + Long.BYTES);
-            buffer.putInt(id);
-            buffer.putInt(difficulty);
-            buffer.putInt(transactions.size());
-            buffer.putLong(timestamp);
-            sha256.update(buffer.array());
-
-            // Commit to the state root only when set, so a block produced without the state
-            // accumulator hashes byte-for-byte as it did before the field existed.
-            if (stateRoot != null && !stateRoot.equals(SHA256Hash.empty())) {
-                sha256.update(stateRoot.hash().getArray());
-            }
-
-            // Commit to the parameter vote only when cast, so an abstaining block is unchanged.
-            if (vote != 0) {
-                sha256.update(ByteBuffer.allocate(Integer.BYTES).putInt(vote).array());
-            }
-
-            // Commit to referenced uncles only when present, so an uncle-less block's
-            // hash is byte-for-byte what it was before uncles existed.
-            if (uncles != null && !uncles.isEmpty()) {
-                ByteBuffer uncleBuf = ByteBuffer.allocate(uncles.size() * Integer.BYTES);
-                for (UncleRef uncle : uncles) {
-                    sha256.update(uncle.hash().hash().getArray());
-                    uncleBuf.putInt(uncle.difficulty());
-                    sha256.update(uncle.miner().toBytes());
-                }
-                sha256.update(uncleBuf.array());
-            }
-
-            return SHA256Hash.of(sha256.digest());
-        } catch (NoSuchAlgorithmException e) {
-            throw new BlockException("SHA-256 algorithm not found", e);
-        }
+        return BlockHeader.of(this).hash();
     }
 
     /**
@@ -141,8 +101,7 @@ public final class BlockImpl implements Block {
      * there is no height-based algorithm switch.
      */
     public boolean verifyNonce(PowAlgorithm powAlgorithm) {
-        boolean usePufferfish = powAlgorithm == PowAlgorithm.PUFFERFISH2;
-        return verifyHash(hash(), nonce, difficulty, usePufferfish, true);
+        return BlockHeader.of(this).verifyNonce(powAlgorithm);
     }
 
     /**
