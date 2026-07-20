@@ -201,7 +201,7 @@ public sealed interface Transaction permits TransactionImpl {
             result.put(CHAIN_ID, transactionImpl.chainId());
             result.put(NONCE, transactionImpl.nonce());
 
-            if (transactionImpl.kind().isContract()) {
+            if (transactionImpl.kind().hasPayload()) {
                 result.put(KIND, transactionImpl.kind().name());
                 result.put(GAS_LIMIT, transactionImpl.gasLimit());
                 result.put(GAS_PRICE, transactionImpl.gasPrice());

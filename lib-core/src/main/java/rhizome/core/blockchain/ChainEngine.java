@@ -54,6 +54,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
     private final LongSupplier nowMillis;
     private final SignatureVerifier verifier;
     private final ContractProcessor contractProcessor;
+    private final rhizome.core.box.BoxProcessor boxProcessor;
     private final OrphanPool orphans = new OrphanPool(256);
     private final ReentrantLock lock = new ReentrantLock();
 
@@ -69,13 +70,15 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
 
     private ChainEngine(NetworkParameters params, Ledger ledger, ChainStore store,
                         LongSupplier nowMillis, SignatureVerifier verifier,
-                        ContractProcessor contractProcessor) {
+                        ContractProcessor contractProcessor,
+                        rhizome.core.box.BoxProcessor boxProcessor) {
         this.params = params;
         this.ledger = ledger;
         this.store = store;
         this.nowMillis = nowMillis;
         this.verifier = verifier;
         this.contractProcessor = contractProcessor;
+        this.boxProcessor = boxProcessor;
     }
 
     /**
@@ -102,7 +105,18 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
                                    LedgerSnapshot snapshot, SHA256Hash expectedGenesisHash,
                                    LongSupplier nowMillis, SignatureVerifier verifier,
                                    ContractProcessor contractProcessor) {
-        ChainEngine engine = new ChainEngine(params, ledger, store, nowMillis, verifier, contractProcessor);
+        return init(params, ledger, store, snapshot, expectedGenesisHash, nowMillis, verifier,
+            contractProcessor, null);
+    }
+
+    /** As {@link #init}, additionally enabling box transactions via a {@link rhizome.core.box.BoxProcessor}. */
+    public static ChainEngine init(NetworkParameters params, Ledger ledger, ChainStore store,
+                                   LedgerSnapshot snapshot, SHA256Hash expectedGenesisHash,
+                                   LongSupplier nowMillis, SignatureVerifier verifier,
+                                   ContractProcessor contractProcessor,
+                                   rhizome.core.box.BoxProcessor boxProcessor) {
+        ChainEngine engine = new ChainEngine(params, ledger, store, nowMillis, verifier,
+            contractProcessor, boxProcessor);
         if (store.height() == 0) {
             Block genesis = GenesisBlock.initChain(ledger, params, snapshot, expectedGenesisHash);
             store.append(genesis);
@@ -174,7 +188,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             }
 
             ExecutionStatus status = Executor.executeBlock(
-                block, ledger, store::hasTransaction, params, verifier, contractProcessor);
+                block, ledger, store::hasTransaction, params, verifier, contractProcessor, boxProcessor);
             if (status != SUCCESS) {
                 return status;
             }
@@ -212,9 +226,12 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
                 throw new IllegalStateException("Cannot pop genesis");
             }
             Block tip = store.tip();
-            Executor.rollbackBlock(tip, ledger, contractProcessor, height, params);
+            Executor.rollbackBlock(tip, ledger, contractProcessor, boxProcessor, height, params);
             if (contractProcessor != null) {
                 contractProcessor.revertBlock(height); // undo this block's contract-state changes
+            }
+            if (boxProcessor != null) {
+                boxProcessor.revertBlock(height); // undo this block's box-state changes
             }
             store.pop();
             revertAccountNonces(tip);
@@ -319,6 +336,52 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         return params;
     }
 
+    // ---- data boxes ----
+
+    /** The box at {@code id} from committed state, or {@code null} (none / boxes disabled). */
+    public rhizome.core.box.Box box(byte[] id) {
+        if (boxProcessor == null) {
+            return null;
+        }
+        lock.lock();
+        try {
+            return boxProcessor.getCommitted(id);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** Box ids owned by {@code owner}, paginated after {@code afterId} (null = start). */
+    public java.util.List<byte[]> boxIdsByOwner(byte[] owner, byte[] afterId, int limit) {
+        if (boxProcessor == null) {
+            return java.util.List.of();
+        }
+        lock.lock();
+        try {
+            return boxProcessor.boxIdsByOwner(owner, afterId, limit);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** Rent-collectable box ids at the next block height, lowest expiry first (block producer). */
+    public java.util.List<byte[]> collectableBoxIds(long height, int limit) {
+        if (boxProcessor == null) {
+            return java.util.List.of();
+        }
+        lock.lock();
+        try {
+            return boxProcessor.collectableBoxIds(height, limit);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** Box lifecycle events emitted by the block at {@code height} (for the agent event feed). */
+    public java.util.List<rhizome.core.box.BoxProcessor.BoxEvent> boxEvents(long height) {
+        return boxProcessor == null ? java.util.List.of() : boxProcessor.events(height);
+    }
+
     // ---- derived state ----
 
     private void rebuildDerivedState() {
@@ -385,7 +448,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         Map<rhizome.core.ledger.PublicAddress, Long> expected = new HashMap<>();
         for (Transaction t : block.transactions()) {
             var tx = (TransactionImpl) t;
-            if (tx.isTransactionFee()) {
+            if (tx.isTransactionFee() || isSelfAuthorized(tx)) {
                 continue;
             }
             long want = expected.computeIfAbsent(tx.from(), a -> nextNonce.getOrDefault(a, 0L));
@@ -397,10 +460,15 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         return SUCCESS;
     }
 
+    /** Self-authorized txs (coinbase and permissionless rent collection) carry no account nonce. */
+    private static boolean isSelfAuthorized(TransactionImpl tx) {
+        return tx.kind() == rhizome.core.transaction.TransactionKind.BOX_COLLECT;
+    }
+
     private void commitAccountNonces(Block block) {
         for (Transaction t : block.transactions()) {
             var tx = (TransactionImpl) t;
-            if (!tx.isTransactionFee()) {
+            if (!tx.isTransactionFee() && !isSelfAuthorized(tx)) {
                 nextNonce.merge(tx.from(), tx.nonce() + 1, Math::max);
             }
         }
@@ -410,7 +478,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         Map<rhizome.core.ledger.PublicAddress, Long> lowest = new HashMap<>();
         for (Transaction t : block.transactions()) {
             var tx = (TransactionImpl) t;
-            if (!tx.isTransactionFee()) {
+            if (!tx.isTransactionFee() && !isSelfAuthorized(tx)) {
                 lowest.merge(tx.from(), tx.nonce(), Math::min);
             }
         }

@@ -25,6 +25,7 @@ public final class WasmContractProcessor implements ContractProcessor {
     private final WasmVm vm;
     private final ContractStore baseStore;
     private final int retainDepth;
+    private volatile BoxReader boxReader;
     private SessionContractStore session;
     private List<ContractReceipt> currentReceipts = new java.util.ArrayList<>();
     private List<ContractLog> currentLogs = new java.util.ArrayList<>();
@@ -51,6 +52,14 @@ public final class WasmContractProcessor implements ContractProcessor {
         this.retainDepth = retainDepth;
     }
 
+    /**
+     * Wires the box reader so contracts can {@code box_read} data boxes (Ergo-style
+     * data inputs). Set once at node assembly, after the box processor exists.
+     */
+    public void setBoxReader(BoxReader boxReader) {
+        this.boxReader = boxReader;
+    }
+
     @Override
     public void begin() {
         session = new SessionContractStore(baseStore);
@@ -67,7 +76,7 @@ public final class WasmContractProcessor implements ContractProcessor {
         ContractResult result = switch (kind) {
             case DEPLOY -> deploy(from, data, nonce, gasLimit);
             case CALL -> call(from, to, data, value, gasLimit);
-            case TRANSFER -> ContractResult.reverted(0, "not a contract transaction");
+            default -> ContractResult.reverted(0, "not a contract transaction");
         };
         currentReceipts.add(new ContractReceipt(result.gasUsed(), result.success()));
         currentLogs.addAll(result.logs());
@@ -130,7 +139,8 @@ public final class WasmContractProcessor implements ContractProcessor {
         }
 
         SessionContractStore frame = new SessionContractStore(parent);
-        PersistentHostState host = new PersistentHostState(frame, contract, callerBytes, input, value);
+        PersistentHostState host =
+            new PersistentHostState(frame, contract, callerBytes, input, value, boxReader);
         List<ContractLog> collected = new java.util.ArrayList<>();
 
         stack.push(contract);

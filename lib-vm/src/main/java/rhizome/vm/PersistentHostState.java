@@ -18,6 +18,7 @@ public final class PersistentHostState implements HostState {
     private final byte[] caller;
     private final byte[] input;
     private final long value;
+    private final BoxReader boxReader;
 
     private final Map<String, byte[]> pending = new HashMap<>();
     private final java.util.List<LogEntry> logs = new java.util.ArrayList<>();
@@ -25,11 +26,17 @@ public final class PersistentHostState implements HostState {
 
     public PersistentHostState(ContractStore store, PublicAddress contract,
                                byte[] caller, byte[] input, long value) {
+        this(store, contract, caller, input, value, null);
+    }
+
+    public PersistentHostState(ContractStore store, PublicAddress contract,
+                               byte[] caller, byte[] input, long value, BoxReader boxReader) {
         this.store = store;
         this.contract = contract;
         this.caller = caller.clone();
         this.input = input.clone();
         this.value = value;
+        this.boxReader = boxReader;
     }
 
     private static String hex(byte[] b) {
@@ -101,6 +108,11 @@ public final class PersistentHostState implements HostState {
     @Override
     public byte[] selfAddress() {
         return contract.toBytes();
+    }
+
+    @Override
+    public rhizome.core.box.Box boxRead(byte[] id) {
+        return boxReader == null ? null : boxReader.read(id);
     }
 
     @Override

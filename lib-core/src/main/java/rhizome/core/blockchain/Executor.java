@@ -8,6 +8,7 @@ import java.util.function.Predicate;
 
 import rhizome.core.block.Block;
 import rhizome.core.block.BlockImpl;
+import rhizome.core.box.BoxProcessor;
 import rhizome.core.crypto.SHA256Hash;
 import rhizome.core.ledger.Ledger;
 import rhizome.core.ledger.LedgerException;
@@ -93,6 +94,21 @@ public final class Executor {
                                                NetworkParameters params,
                                                SignatureVerifier verifier,
                                                ContractProcessor processor) {
+        return executeBlock(block, ledger, alreadyExecuted, params, verifier, processor, null);
+    }
+
+    /**
+     * As above, with a {@link BoxProcessor} for the box transaction kinds
+     * (BOX_CREATE/UPDATE/SPEND/COLLECT). When {@code boxProcessor} is null, box
+     * transactions are rejected. Box state is staged in a per-block session that
+     * commits atomically with the block, exactly like contract state.
+     */
+    public static ExecutionStatus executeBlock(Block block, Ledger ledger,
+                                               Predicate<SHA256Hash> alreadyExecuted,
+                                               NetworkParameters params,
+                                               SignatureVerifier verifier,
+                                               ContractProcessor processor,
+                                               BoxProcessor boxProcessor) {
         var blockImpl = (BlockImpl) block;
         long height = blockImpl.id();
         long expectedReward = params.miningReward(height);
@@ -105,6 +121,7 @@ public final class Executor {
         // --- Pass 1: structural validation, no state touched ---
         Transaction coinbase = null;
         Set<SHA256Hash> seenInBlock = new HashSet<>();
+        int boxCollects = 0;
         for (Transaction t : block.transactions()) {
             var tx = (TransactionImpl) t;
             if (tx.isTransactionFee()) {
@@ -122,6 +139,20 @@ public final class Executor {
             // no contract tx can be mistaken for a transfer.
             if (tx.kind().isContract() && processor == null) {
                 return CONTRACT_EXECUTION_UNAVAILABLE;
+            }
+            if (tx.kind().isBox()) {
+                if (boxProcessor == null || height < params.boxActivationHeight()) {
+                    return BOX_UNAVAILABLE;
+                }
+                // Box ops run no VM and cost no gas; the gas fields are reserved and must
+                // be zero (else the signed preimage could carry hidden, unpriced data).
+                if (tx.gasLimit() != 0 || tx.gasPrice() != 0) {
+                    return BOX_PAYLOAD_INVALID;
+                }
+                if (tx.kind() == rhizome.core.transaction.TransactionKind.BOX_COLLECT
+                    && ++boxCollects > params.maxBoxCollectsPerBlock()) {
+                    return BOX_LIMIT_EXCEEDED;
+                }
             }
             // A negative amount or fee would invert the ledger arithmetic: withdrawing
             // a negative value MINTS money for the sender and deposits drive the
@@ -154,6 +185,9 @@ public final class Executor {
         if (processor != null) {
             processor.begin();
         }
+        if (boxProcessor != null) {
+            boxProcessor.begin();
+        }
         try {
             for (Transaction t : block.transactions()) {
                 var tx = (TransactionImpl) t;
@@ -163,7 +197,14 @@ public final class Executor {
                 if (tx.kind().isContract()) {
                     ExecutionStatus contractStatus = applyContract(tx, ledger, applied, miner, processor);
                     if (contractStatus != SUCCESS) {
-                        return abort(processor, ledger, applied, contractStatus);
+                        return abort(processor, boxProcessor, ledger, applied, contractStatus);
+                    }
+                    continue;
+                }
+                if (tx.kind().isBox()) {
+                    ExecutionStatus boxStatus = applyBox(tx, ledger, applied, miner, boxProcessor, height);
+                    if (boxStatus != SUCCESS) {
+                        return abort(processor, boxProcessor, ledger, applied, boxStatus);
                     }
                     continue;
                 }
@@ -173,14 +214,14 @@ public final class Executor {
                 try {
                     charged = Math.addExact(amount, fee);
                 } catch (ArithmeticException e) {
-                    return abort(processor, ledger, applied, BALANCE_TOO_LOW);
+                    return abort(processor, boxProcessor, ledger, applied, BALANCE_TOO_LOW);
                 }
 
                 if (!ledger.hasWallet(tx.from())) {
-                    return abort(processor, ledger, applied, SENDER_DOES_NOT_EXIST);
+                    return abort(processor, boxProcessor, ledger, applied, SENDER_DOES_NOT_EXIST);
                 }
                 if (ledger.getWalletValue(tx.from()).amount() < charged) {
-                    return abort(processor, ledger, applied, BALANCE_TOO_LOW);
+                    return abort(processor, boxProcessor, ledger, applied, BALANCE_TOO_LOW);
                 }
 
                 withdraw(ledger, applied, tx.from(), new TransactionAmount(charged));
@@ -198,14 +239,17 @@ public final class Executor {
             if (processor != null) {
                 processor.commit(blockImpl.id());
             }
+            if (boxProcessor != null) {
+                boxProcessor.commit(blockImpl.id());
+            }
             return SUCCESS;
         } catch (LedgerException e) {
-            return abort(processor, ledger, applied, BALANCE_TOO_LOW);
+            return abort(processor, boxProcessor, ledger, applied, BALANCE_TOO_LOW);
         } catch (ArithmeticException e) {
             // A deposit that would overflow a wallet's 64-bit balance (Math.addExact
             // in the ledger) must be rejected cleanly, not left as a partial mutation.
             // Underflow is already a LedgerException above; this is the overflow twin.
-            return abort(processor, ledger, applied, BALANCE_OVERFLOW);
+            return abort(processor, boxProcessor, ledger, applied, BALANCE_OVERFLOW);
         }
     }
 
@@ -229,14 +273,67 @@ public final class Executor {
         }
     }
 
-    /** Rolls back applied ledger ops and discards the contract session, then returns the status. */
-    private static ExecutionStatus abort(ContractProcessor processor, Ledger ledger,
-                                         List<AppliedOp> applied, ExecutionStatus status) {
+    /** Rolls back applied ledger ops and discards the contract/box sessions, then returns the status. */
+    private static ExecutionStatus abort(ContractProcessor processor, BoxProcessor boxProcessor,
+                                         Ledger ledger, List<AppliedOp> applied, ExecutionStatus status) {
         rollback(ledger, applied);
         if (processor != null) {
             processor.discard();
         }
+        if (boxProcessor != null) {
+            boxProcessor.discard();
+        }
         return status;
+    }
+
+    /**
+     * Runs one box transaction. The box processor validates and stages the box-state
+     * change (no ledger access); this method then moves value: the fee to the miner,
+     * the locked value out of the sender (CREATE/UPDATE) or the released value back to
+     * the sender (SPEND/COLLECT). Unlike a contract revert, a non-SUCCESS box status
+     * invalidates the block.
+     */
+    private static ExecutionStatus applyBox(TransactionImpl tx, Ledger ledger, List<AppliedOp> applied,
+                                            PublicAddress miner, BoxProcessor boxProcessor, long height) {
+        long amount = tx.amount().amount();
+        long fee = tx.fee().amount();
+        BoxProcessor.BoxResult result =
+            boxProcessor.run(tx.kind(), tx.from(), tx.to(), amount, tx.nonce(), tx.data(), height);
+        if (!result.success()) {
+            return result.status();
+        }
+        long debit;
+        try {
+            debit = Math.addExact(fee, result.debitFrom());
+        } catch (ArithmeticException e) {
+            return INVALID_TRANSACTION_AMOUNT;
+        }
+        // Only a positive debit needs a funded sender; a rent collector taking value out
+        // of a box (debit 0) may have no wallet yet — the deposit below creates it.
+        if (debit > 0) {
+            if (!ledger.hasWallet(tx.from())) {
+                return SENDER_DOES_NOT_EXIST;
+            }
+            if (ledger.getWalletValue(tx.from()).amount() < debit) {
+                return BALANCE_TOO_LOW;
+            }
+            withdraw(ledger, applied, tx.from(), new TransactionAmount(debit));
+        }
+        if (fee > 0) {
+            deposit(ledger, applied, miner, new TransactionAmount(fee));
+        }
+        // Released value goes to the box owner on a SPEND (the signer, tx.from), or to the
+        // collector named in a permissionless BOX_COLLECT (tx.to, whose from is empty).
+        if (result.creditFrom() > 0) {
+            PublicAddress creditTarget = boxCreditTarget(tx);
+            deposit(ledger, applied, creditTarget, new TransactionAmount(result.creditFrom()));
+        }
+        return SUCCESS;
+    }
+
+    /** Who receives value released by a box op: the collector for BOX_COLLECT, else the sender. */
+    private static PublicAddress boxCreditTarget(TransactionImpl tx) {
+        return tx.kind() == rhizome.core.transaction.TransactionKind.BOX_COLLECT ? tx.to() : tx.from();
     }
 
     /**
@@ -318,6 +415,12 @@ public final class Executor {
      */
     public static void rollbackBlock(Block block, Ledger ledger, ContractProcessor processor,
                                      long height, NetworkParameters params) {
+        rollbackBlock(block, ledger, processor, null, height, params);
+    }
+
+    /** As above, also reversing the block's box transactions via the {@link BoxProcessor}. */
+    public static void rollbackBlock(Block block, Ledger ledger, ContractProcessor processor,
+                                     BoxProcessor boxProcessor, long height, NetworkParameters params) {
         List<Transaction> transactions = block.transactions();
         Transaction coinbase = transactions.stream()
             .filter(t -> ((TransactionImpl) t).isTransactionFee())
@@ -330,6 +433,10 @@ public final class Executor {
         List<ContractProcessor.ContractReceipt> receipts =
             processor != null ? processor.receipts(height) : List.of();
         int ri = receipts.size() - 1;
+        // Box receipts (ledger deltas) for this block's box txs, consumed in reverse.
+        List<BoxProcessor.BoxReceipt> boxReceipts =
+            boxProcessor != null ? boxProcessor.receipts(height) : List.of();
+        int bi = boxReceipts.size() - 1;
 
         // Inverse of payUncleRewards: same flat amounts, derived from the committed refs.
         List<rhizome.core.block.UncleRef> uncles = ((BlockImpl) block).uncles();
@@ -355,6 +462,10 @@ public final class Executor {
                 revertContract(ledger, tx, receipts.get(ri--), miner);
                 continue;
             }
+            if (tx.kind().isBox()) {
+                revertBox(ledger, tx, boxReceipts.get(bi--), miner);
+                continue;
+            }
             long fee = tx.fee().amount();
             if (fee > 0) {
                 ledger.revertDeposit(miner, new TransactionAmount(fee));
@@ -378,6 +489,22 @@ public final class Executor {
                 ? Contracts.deriveAddress(tx.from(), tx.nonce()) : tx.to();
             ledger.revertDeposit(target, new TransactionAmount(value));
             ledger.revertSend(tx.from(), new TransactionAmount(value));
+        }
+    }
+
+    /** Inverse of {@link #applyBox}'s ledger effects, using the block's box receipt. */
+    private static void revertBox(Ledger ledger, TransactionImpl tx,
+                                  BoxProcessor.BoxReceipt receipt, PublicAddress miner) {
+        long fee = tx.fee().amount();
+        long debit = fee + receipt.debitFrom();
+        if (receipt.creditFrom() > 0) {
+            ledger.revertDeposit(boxCreditTarget(tx), new TransactionAmount(receipt.creditFrom()));
+        }
+        if (fee > 0) {
+            ledger.revertDeposit(miner, new TransactionAmount(fee));
+        }
+        if (debit > 0) {
+            ledger.revertSend(tx.from(), new TransactionAmount(debit));
         }
     }
 }

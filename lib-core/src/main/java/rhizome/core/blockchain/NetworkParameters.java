@@ -124,6 +124,29 @@ public final class NetworkParameters {
     @lombok.Builder.Default
     private final long nephewRewardDivisor = 32;
 
+    // --- Data boxes ---
+    /** Height at which box transactions become valid (0 = from genesis). */
+    @lombok.Builder.Default
+    private final long boxActivationHeight = 0;
+    /** Maximum serialized size of a box, in bytes. */
+    @lombok.Builder.Default
+    private final int maxBoxSizeBytes = 65_536;
+    /** Maximum number of registers a box may carry. */
+    @lombok.Builder.Default
+    private final int maxBoxRegisters = 6;
+    /** Base units a box must lock per serialized byte (anti-dust; refunded on spend). */
+    @lombok.Builder.Default
+    private final long minValuePerByte = 1;
+    /** Age (in blocks) after which a box may be charged storage rent. */
+    @lombok.Builder.Default
+    private final long storagePeriodBlocks = 6_307_200L; // ~1 year at 5 s
+    /** Storage rent in base units per serialized byte, per storage period. */
+    @lombok.Builder.Default
+    private final long storageFeeFactor = 1;
+    /** Maximum BOX_COLLECT transactions a block may carry (bounds rent-collection work). */
+    @lombok.Builder.Default
+    private final int maxBoxCollectsPerBlock = 32;
+
     /** Reward paid to an included uncle's miner at {@code height}. */
     public long uncleReward(long height) {
         return miningReward(height) * uncleRewardNum / uncleRewardDen;

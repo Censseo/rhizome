@@ -24,6 +24,7 @@ public final class NodeService {
     private volatile java.util.function.Consumer<Transaction> onTransactionAccepted;
     private volatile PeerRegistry peers;
     private volatile java.util.function.LongFunction<List<ContractLog>> logSource;
+    private volatile java.util.function.LongFunction<List<rhizome.core.box.BoxProcessor.BoxEvent>> boxEventSource;
 
     /** Maximum blocks a single /logs catch-up scan spans, so agents poll in bounded chunks. */
     public static final int LOG_SCAN_WINDOW = 128;
@@ -51,10 +52,37 @@ public final class NodeService {
         this.logSource = source;
     }
 
-    /** Event logs emitted by a specific block, or empty if none / no processor wired. */
+    /** Source of box lifecycle events by block height (the box processor). */
+    public void setBoxEventSource(java.util.function.LongFunction<List<rhizome.core.box.BoxProcessor.BoxEvent>> source) {
+        this.boxEventSource = source;
+    }
+
+    /**
+     * Event logs emitted by a block: contract logs plus box lifecycle events (mapped
+     * to the same {@code (contract, topic, data)} shape, with the box owner as contract,
+     * the event type as topic, and the box id as data), so agents watch both on one feed.
+     */
     public List<ContractLog> logsAt(long height) {
-        var source = logSource;
-        return source == null ? List.of() : source.apply(height);
+        var logs = logSource;
+        var boxes = boxEventSource;
+        List<ContractLog> out = new ArrayList<>(logs == null ? List.of() : logs.apply(height));
+        if (boxes != null) {
+            for (var e : boxes.apply(height)) {
+                out.add(new ContractLog(e.owner(), e.type().getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                    e.boxId()));
+            }
+        }
+        return out;
+    }
+
+    /** A box from committed state, or {@code null} if none / boxes disabled. */
+    public rhizome.core.box.Box box(byte[] id) {
+        return engine.box(id);
+    }
+
+    /** Box ids owned by {@code owner}, paginated after {@code afterId} (null = start). */
+    public List<byte[]> boxIdsByOwner(byte[] owner, byte[] afterId, int limit) {
+        return engine.boxIdsByOwner(owner, afterId, limit);
     }
 
     /**

@@ -45,6 +45,16 @@ public final class WalletClient {
         return new JSONObject(sendForString(request)).getString("status");
     }
 
+    /** Raw JSON of a box by id (or the node's error JSON), for the box CLI to print. */
+    public String box(String boxIdHex) {
+        return get("/box?id=" + boxIdHex);
+    }
+
+    /** Raw JSON of the boxes owned by an address. */
+    public String boxesByOwner(PublicAddress owner) {
+        return get("/boxes?owner=" + owner.toHexString());
+    }
+
     private String get(String path) {
         return sendForString(HttpRequest.newBuilder(URI.create(baseUrl + path))
             .timeout(Duration.ofSeconds(15)).GET().build());

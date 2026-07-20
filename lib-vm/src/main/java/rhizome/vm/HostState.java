@@ -42,4 +42,13 @@ public interface HostState {
     default byte[] selfAddress() {
         return new byte[0];
     }
+
+    /**
+     * Reads the {@link rhizome.core.box.Box data box} at {@code id} without consuming
+     * it (Ergo-style data input), or {@code null} if none exists. Sees boxes written
+     * earlier in the same block. Default {@code null} (boxes not wired).
+     */
+    default rhizome.core.box.Box boxRead(byte[] id) {
+        return null;
+    }
 }

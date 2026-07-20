@@ -18,6 +18,8 @@ import rhizome.core.blockchain.SignatureVerifier;
 import rhizome.core.ledger.LedgerSnapshot;
 import rhizome.core.ledger.SnapshotLoader;
 import rhizome.core.mempool.MemPool;
+import rhizome.core.box.DefaultBoxProcessor;
+import rhizome.persistence.rocksdb.RocksDbBoxStore;
 import rhizome.persistence.rocksdb.RocksDbContractStore;
 import rhizome.persistence.rocksdb.RocksDbNodeStore;
 import rhizome.vm.WasmContractProcessor;
@@ -39,6 +41,7 @@ public final class RhizomeNode implements AutoCloseable {
 
     private RocksDbNodeStore store;
     private RocksDbContractStore contractStore;
+    private RocksDbBoxStore boxStore;
     private ChainEngine engine;
     private MemPool mempool;
     private NodeService service;
@@ -77,15 +80,22 @@ public final class RhizomeNode implements AutoCloseable {
 
         store = new RocksDbNodeStore(config.dataDir());
         contractStore = new RocksDbContractStore(config.dataDir() + "/contracts");
+        boxStore = new RocksDbBoxStore(config.dataDir() + "/boxes");
         verifier = new SignatureVerifier();
         var contractProcessor = new WasmContractProcessor(new WasmVm(), contractStore,
             config.params().maxReorgDepth());
+        var boxProcessor = new DefaultBoxProcessor(boxStore, config.params());
+        // Contracts read data boxes (Ergo-style data inputs) through the box processor's
+        // session-aware view, so a box written earlier in the block is visible.
+        contractProcessor.setBoxReader(boxProcessor::get);
         engine = ChainEngine.init(config.params(), store.ledger(), store.chainStore(),
-            snapshot, null, System::currentTimeMillis, verifier, contractProcessor);
+            snapshot, null, System::currentTimeMillis, verifier, contractProcessor, boxProcessor);
         mempool = new MemPool(config.params(), verifier, engine, config.mempoolSize());
         service = new NodeService(engine, mempool);
-        // Expose contract event logs (by block height) so agents can watch on-chain state.
+        // Expose contract event logs and box lifecycle events (by block height) so agents
+        // can watch on-chain state on one feed.
         service.setLogSource(contractProcessor::logs);
+        service.setBoxEventSource(boxProcessor::events);
 
         // Every node keeps a live peer set (seeded from config), serves /peers and
         // accepts announcements, so the network can self-organise from a few seeds.
@@ -259,6 +269,9 @@ public final class RhizomeNode implements AutoCloseable {
         }
         if (contractStore != null) {
             contractStore.close();
+        }
+        if (boxStore != null) {
+            boxStore.close();
         }
     }
 
