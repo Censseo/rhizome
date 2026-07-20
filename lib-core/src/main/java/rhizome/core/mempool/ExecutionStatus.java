@@ -42,5 +42,11 @@ public enum ExecutionStatus {
     BOX_VALUE_TOO_LOW,
     BOX_NOT_EXPIRED,
     BOX_LIMIT_EXCEEDED,
+    // --- native tokens ---
+    TOKEN_UNAVAILABLE,
+    TOKEN_NOT_FOUND,
+    TOKEN_ALREADY_EXISTS,
+    TOKEN_PAYLOAD_INVALID,
+    TOKEN_INSUFFICIENT_BALANCE,
     SUCCESS
 }

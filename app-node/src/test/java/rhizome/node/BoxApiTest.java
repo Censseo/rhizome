@@ -39,6 +39,10 @@ import rhizome.core.ledger.LedgerSnapshot;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.mempool.MemPool;
 import rhizome.core.merkletree.MerkleTree;
+import rhizome.core.token.DefaultTokenProcessor;
+import rhizome.core.token.InMemoryTokenStore;
+import rhizome.core.token.TokenMeta;
+import rhizome.core.token.TokenPayload;
 import rhizome.core.transaction.Transaction;
 import rhizome.core.transaction.TransactionAmount;
 import rhizome.core.transaction.TransactionImpl;
@@ -86,13 +90,15 @@ class BoxApiTest {
         var verifier = new SignatureVerifier();
         var contracts = new WasmContractProcessor(new WasmVm(), new InMemoryContractStore());
         var boxes = new DefaultBoxProcessor(new InMemoryBoxStore(), params);
+        var tokens = new DefaultTokenProcessor(new InMemoryTokenStore(), params);
         contracts.setBoxReader(boxes::get);
         engine = ChainEngine.init(params, new InMemoryLedger(), new InMemoryChainStore(),
-            snapshot, null, clock::get, verifier, contracts, boxes);
+            snapshot, null, clock::get, verifier, contracts, boxes, tokens);
         mempool = new MemPool(params, verifier, engine, 1000);
         var node = new NodeService(engine, mempool);
         node.setContracts(contracts);
         node.setBoxEventSource(boxes::events);
+        node.setTokenEventSource(tokens::events);
         servlet = NodeApi.servlet(eventloop, node);
 
         eventloop.keepAlive(true);
@@ -197,6 +203,41 @@ class BoxApiTest {
             .withBody(new JSONObject().put("scanId", scanId).toString().getBytes(StandardCharsets.UTF_8)).build());
         assertTrue(json(dereg).getBoolean("removed"));
         assertEquals(400, call(HttpRequest.get("http://x/scan/boxes?scanId=" + scanId).build()).getCode());
+    }
+
+    private Transaction tokenMint(long amount, int decimals, String symbol, String name, long nonce) {
+        var tx = TransactionImpl.builder()
+            .from(sender).to(sender).signingKey(key)
+            .amount(new TransactionAmount(0)).fee(new TransactionAmount(0))
+            .chainId(params.chainId()).nonce(nonce).timestamp(1000L + nonce)
+            .kind(TransactionKind.TOKEN_MINT).data(TokenPayload.encodeMint(amount, decimals, symbol, name))
+            .gasLimit(0).gasPrice(0).build();
+        tx.sign(priv);
+        return tx;
+    }
+
+    @Test
+    void tokenEndpointsReturnMetaBalanceAndList() throws Exception {
+        mine(List.of(tokenMint(1_000_000, 8, "PNDA", "Panda Coin", 0)));
+        String id = Utils.bytesToHex(TokenMeta.deriveId(sender, 0));
+
+        HttpResponse meta = call(HttpRequest.get("http://x/token?id=" + id).build());
+        assertEquals(200, meta.getCode());
+        JSONObject m = json(meta);
+        assertEquals("PNDA", m.getString("symbol"));
+        assertEquals("Panda Coin", m.getString("name"));
+        assertEquals(8, m.getInt("decimals"));
+        assertEquals(1_000_000, m.getLong("totalSupply"));
+
+        HttpResponse bal = call(HttpRequest.get(
+            "http://x/token_balance?id=" + id + "&address=" + sender.toHexString()).build());
+        assertEquals(1_000_000, json(bal).getLong("balance"));
+
+        HttpResponse held = call(HttpRequest.get("http://x/tokens?holder=" + sender.toHexString()).build());
+        assertEquals(1, json(held).getJSONArray("tokens").length());
+
+        assertEquals(404, call(HttpRequest.get(
+            "http://x/token?id=" + Utils.bytesToHex(new byte[32])).build()).getCode());
     }
 
     @Test

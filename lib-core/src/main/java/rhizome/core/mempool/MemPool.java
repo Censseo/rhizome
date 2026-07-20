@@ -107,6 +107,10 @@ public final class MemPool {
         if (tx.kind().isBox() && (tx.gasLimit() != 0 || tx.gasPrice() != 0)) {
             return INVALID_TRANSACTION_AMOUNT;
         }
+        // Token ops carry no gas and move no PDN (the token amount is in the payload).
+        if (tx.kind().isToken() && (tx.gasLimit() != 0 || tx.gasPrice() != 0 || tx.amount().amount() != 0)) {
+            return INVALID_TRANSACTION_AMOUNT;
+        }
         if (!PublicAddress.of(tx.signingKey()).equals(tx.from())) {
             return WALLET_SIGNATURE_MISMATCH;
         }

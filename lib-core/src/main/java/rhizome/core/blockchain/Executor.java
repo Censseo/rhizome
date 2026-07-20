@@ -9,6 +9,7 @@ import java.util.function.Predicate;
 import rhizome.core.block.Block;
 import rhizome.core.block.BlockImpl;
 import rhizome.core.box.BoxProcessor;
+import rhizome.core.token.TokenProcessor;
 import rhizome.core.crypto.SHA256Hash;
 import rhizome.core.ledger.Ledger;
 import rhizome.core.ledger.LedgerException;
@@ -109,6 +110,22 @@ public final class Executor {
                                                SignatureVerifier verifier,
                                                ContractProcessor processor,
                                                BoxProcessor boxProcessor) {
+        return executeBlock(block, ledger, alreadyExecuted, params, verifier, processor, boxProcessor, null);
+    }
+
+    /**
+     * As above, with a {@link TokenProcessor} for the native-token kinds
+     * (TOKEN_MINT/TRANSFER/BURN). When {@code tokenProcessor} is null, token
+     * transactions are rejected. Token state is staged in a per-block session that
+     * commits atomically with the block.
+     */
+    public static ExecutionStatus executeBlock(Block block, Ledger ledger,
+                                               Predicate<SHA256Hash> alreadyExecuted,
+                                               NetworkParameters params,
+                                               SignatureVerifier verifier,
+                                               ContractProcessor processor,
+                                               BoxProcessor boxProcessor,
+                                               TokenProcessor tokenProcessor) {
         var blockImpl = (BlockImpl) block;
         long height = blockImpl.id();
         long expectedReward = params.miningReward(height);
@@ -154,6 +171,16 @@ public final class Executor {
                     return BOX_LIMIT_EXCEEDED;
                 }
             }
+            if (tx.kind().isToken()) {
+                if (tokenProcessor == null || height < params.tokenActivationHeight()) {
+                    return TOKEN_UNAVAILABLE;
+                }
+                // Token ops run no VM, cost no gas, and move no PDN — the token amount lives
+                // in the payload, so the gas fields and the PDN amount field must be zero.
+                if (tx.gasLimit() != 0 || tx.gasPrice() != 0 || tx.amount().amount() != 0) {
+                    return TOKEN_PAYLOAD_INVALID;
+                }
+            }
             // A negative amount or fee would invert the ledger arithmetic: withdrawing
             // a negative value MINTS money for the sender and deposits drive the
             // recipient's balance negative. Amounts are conceptually unsigned, so any
@@ -188,6 +215,9 @@ public final class Executor {
         if (boxProcessor != null) {
             boxProcessor.begin();
         }
+        if (tokenProcessor != null) {
+            tokenProcessor.begin();
+        }
         try {
             for (Transaction t : block.transactions()) {
                 var tx = (TransactionImpl) t;
@@ -197,14 +227,21 @@ public final class Executor {
                 if (tx.kind().isContract()) {
                     ExecutionStatus contractStatus = applyContract(tx, ledger, applied, miner, processor);
                     if (contractStatus != SUCCESS) {
-                        return abort(processor, boxProcessor, ledger, applied, contractStatus);
+                        return abort(processor, boxProcessor, tokenProcessor, ledger, applied, contractStatus);
                     }
                     continue;
                 }
                 if (tx.kind().isBox()) {
                     ExecutionStatus boxStatus = applyBox(tx, ledger, applied, miner, boxProcessor, height);
                     if (boxStatus != SUCCESS) {
-                        return abort(processor, boxProcessor, ledger, applied, boxStatus);
+                        return abort(processor, boxProcessor, tokenProcessor, ledger, applied, boxStatus);
+                    }
+                    continue;
+                }
+                if (tx.kind().isToken()) {
+                    ExecutionStatus tokenStatus = applyToken(tx, ledger, applied, miner, tokenProcessor, height);
+                    if (tokenStatus != SUCCESS) {
+                        return abort(processor, boxProcessor, tokenProcessor, ledger, applied, tokenStatus);
                     }
                     continue;
                 }
@@ -214,14 +251,14 @@ public final class Executor {
                 try {
                     charged = Math.addExact(amount, fee);
                 } catch (ArithmeticException e) {
-                    return abort(processor, boxProcessor, ledger, applied, BALANCE_TOO_LOW);
+                    return abort(processor, boxProcessor, tokenProcessor, ledger, applied, BALANCE_TOO_LOW);
                 }
 
                 if (!ledger.hasWallet(tx.from())) {
-                    return abort(processor, boxProcessor, ledger, applied, SENDER_DOES_NOT_EXIST);
+                    return abort(processor, boxProcessor, tokenProcessor, ledger, applied, SENDER_DOES_NOT_EXIST);
                 }
                 if (ledger.getWalletValue(tx.from()).amount() < charged) {
-                    return abort(processor, boxProcessor, ledger, applied, BALANCE_TOO_LOW);
+                    return abort(processor, boxProcessor, tokenProcessor, ledger, applied, BALANCE_TOO_LOW);
                 }
 
                 withdraw(ledger, applied, tx.from(), new TransactionAmount(charged));
@@ -242,14 +279,17 @@ public final class Executor {
             if (boxProcessor != null) {
                 boxProcessor.commit(blockImpl.id());
             }
+            if (tokenProcessor != null) {
+                tokenProcessor.commit(blockImpl.id());
+            }
             return SUCCESS;
         } catch (LedgerException e) {
-            return abort(processor, boxProcessor, ledger, applied, BALANCE_TOO_LOW);
+            return abort(processor, boxProcessor, tokenProcessor, ledger, applied, BALANCE_TOO_LOW);
         } catch (ArithmeticException e) {
             // A deposit that would overflow a wallet's 64-bit balance (Math.addExact
             // in the ledger) must be rejected cleanly, not left as a partial mutation.
             // Underflow is already a LedgerException above; this is the overflow twin.
-            return abort(processor, boxProcessor, ledger, applied, BALANCE_OVERFLOW);
+            return abort(processor, boxProcessor, tokenProcessor, ledger, applied, BALANCE_OVERFLOW);
         }
     }
 
@@ -273,9 +313,10 @@ public final class Executor {
         }
     }
 
-    /** Rolls back applied ledger ops and discards the contract/box sessions, then returns the status. */
+    /** Rolls back applied ledger ops and discards the contract/box/token sessions, then returns the status. */
     private static ExecutionStatus abort(ContractProcessor processor, BoxProcessor boxProcessor,
-                                         Ledger ledger, List<AppliedOp> applied, ExecutionStatus status) {
+                                         TokenProcessor tokenProcessor, Ledger ledger,
+                                         List<AppliedOp> applied, ExecutionStatus status) {
         rollback(ledger, applied);
         if (processor != null) {
             processor.discard();
@@ -283,7 +324,36 @@ public final class Executor {
         if (boxProcessor != null) {
             boxProcessor.discard();
         }
+        if (tokenProcessor != null) {
+            tokenProcessor.discard();
+        }
         return status;
+    }
+
+    /**
+     * Runs one native-token transaction. The token processor validates and stages the
+     * token-state change (no ledger effect); this method moves only the fee to the miner.
+     * A non-SUCCESS token status invalidates the block.
+     */
+    private static ExecutionStatus applyToken(TransactionImpl tx, Ledger ledger, List<AppliedOp> applied,
+                                              PublicAddress miner, TokenProcessor tokenProcessor, long height) {
+        TokenProcessor.TokenResult result =
+            tokenProcessor.run(tx.kind(), tx.from(), tx.to(), tx.nonce(), tx.data(), height);
+        if (!result.success()) {
+            return result.status();
+        }
+        long fee = tx.fee().amount();
+        if (fee > 0) {
+            if (!ledger.hasWallet(tx.from())) {
+                return SENDER_DOES_NOT_EXIST;
+            }
+            if (ledger.getWalletValue(tx.from()).amount() < fee) {
+                return BALANCE_TOO_LOW;
+            }
+            withdraw(ledger, applied, tx.from(), new TransactionAmount(fee));
+            deposit(ledger, applied, miner, new TransactionAmount(fee));
+        }
+        return SUCCESS;
     }
 
     /**
@@ -466,6 +536,10 @@ public final class Executor {
                 revertBox(ledger, tx, boxReceipts.get(bi--), miner);
                 continue;
             }
+            if (tx.kind().isToken()) {
+                revertToken(ledger, tx, miner);
+                continue;
+            }
             long fee = tx.fee().amount();
             if (fee > 0) {
                 ledger.revertDeposit(miner, new TransactionAmount(fee));
@@ -505,6 +579,15 @@ public final class Executor {
         }
         if (debit > 0) {
             ledger.revertSend(tx.from(), new TransactionAmount(debit));
+        }
+    }
+
+    /** Inverse of {@link #applyToken}'s ledger effects: a token op moves only the fee. */
+    private static void revertToken(Ledger ledger, TransactionImpl tx, PublicAddress miner) {
+        long fee = tx.fee().amount();
+        if (fee > 0) {
+            ledger.revertDeposit(miner, new TransactionAmount(fee));
+            ledger.revertSend(tx.from(), new TransactionAmount(fee));
         }
     }
 }

@@ -25,6 +25,7 @@ public final class NodeService {
     private volatile PeerRegistry peers;
     private volatile java.util.function.LongFunction<List<ContractLog>> logSource;
     private volatile java.util.function.LongFunction<List<rhizome.core.box.BoxProcessor.BoxEvent>> boxEventSource;
+    private volatile java.util.function.LongFunction<List<rhizome.core.token.TokenProcessor.TokenEvent>> tokenEventSource;
     private volatile rhizome.core.blockchain.ContractProcessor contracts;
 
     /** Maximum blocks a single /logs catch-up scan spans, so agents poll in bounded chunks. */
@@ -71,6 +72,7 @@ public final class NodeService {
     public List<ContractLog> logsAt(long height) {
         var logs = logSource;
         var boxes = boxEventSource;
+        var tokens = tokenEventSource;
         List<ContractLog> out = new ArrayList<>(logs == null ? List.of() : logs.apply(height));
         if (boxes != null) {
             for (var e : boxes.apply(height)) {
@@ -78,7 +80,38 @@ public final class NodeService {
                     e.boxId()));
             }
         }
+        if (tokens != null) {
+            for (var e : tokens.apply(height)) {
+                out.add(new ContractLog(e.actor(), e.type().getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                    e.tokenId()));
+            }
+        }
         return out;
+    }
+
+    /** Source of token lifecycle events by block height (the token processor). */
+    public void setTokenEventSource(java.util.function.LongFunction<List<rhizome.core.token.TokenProcessor.TokenEvent>> source) {
+        this.tokenEventSource = source;
+    }
+
+    /** Committed metadata for {@code tokenId}, or {@code null}. */
+    public rhizome.core.token.TokenMeta tokenMeta(byte[] tokenId) {
+        return engine.tokenMeta(tokenId);
+    }
+
+    /** Committed balance of {@code tokenId} held by {@code address}. */
+    public long tokenBalance(byte[] tokenId, byte[] address) {
+        return engine.tokenBalance(tokenId, address);
+    }
+
+    /** Token ids minted by {@code minter}, paginated after {@code afterId} (null = start). */
+    public List<byte[]> tokenIdsByMinter(byte[] minter, byte[] afterId, int limit) {
+        return engine.tokenIdsByMinter(minter, afterId, limit);
+    }
+
+    /** Token ids {@code address} holds, paginated after {@code afterId} (null = start). */
+    public List<byte[]> tokenIdsByHolder(byte[] address, byte[] afterId, int limit) {
+        return engine.tokenIdsByHolder(address, afterId, limit);
     }
 
     /** The contract processor, for read-only dry-run calls. */

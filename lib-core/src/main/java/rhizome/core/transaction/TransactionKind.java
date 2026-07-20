@@ -13,13 +13,16 @@ package rhizome.core.transaction;
  * {@code gasLimit}/{@code gasPrice} must be zero).
  */
 public enum TransactionKind {
-    TRANSFER,      // 0
-    DEPLOY,        // 1
-    CALL,          // 2
-    BOX_CREATE,    // 3
-    BOX_UPDATE,    // 4
-    BOX_SPEND,     // 5
-    BOX_COLLECT;   // 6
+    TRANSFER,        // 0
+    DEPLOY,          // 1
+    CALL,            // 2
+    BOX_CREATE,      // 3
+    BOX_UPDATE,      // 4
+    BOX_SPEND,       // 5
+    BOX_COLLECT,     // 6
+    TOKEN_MINT,      // 7
+    TOKEN_TRANSFER,  // 8
+    TOKEN_BURN;      // 9
 
     private static final TransactionKind[] VALUES = values();
 
@@ -42,7 +45,12 @@ public enum TransactionKind {
 
     /** BOX_CREATE/UPDATE/SPEND/COLLECT — routed through the box processor. */
     public boolean isBox() {
-        return ordinal() >= BOX_CREATE.ordinal();
+        return ordinal() >= BOX_CREATE.ordinal() && ordinal() <= BOX_COLLECT.ordinal();
+    }
+
+    /** TOKEN_MINT/TRANSFER/BURN — routed through the token processor. */
+    public boolean isToken() {
+        return ordinal() >= TOKEN_MINT.ordinal();
     }
 
     /**

@@ -147,6 +147,20 @@ public final class NetworkParameters {
     @lombok.Builder.Default
     private final int maxBoxCollectsPerBlock = 32;
 
+    // --- Native tokens ---
+    /** Height at which token transactions become valid (0 = from genesis). */
+    @lombok.Builder.Default
+    private final long tokenActivationHeight = 0;
+    /** Maximum bytes of a token symbol (UTF-8). */
+    @lombok.Builder.Default
+    private final int maxTokenSymbolBytes = 16;
+    /** Maximum bytes of a token name (UTF-8). */
+    @lombok.Builder.Default
+    private final int maxTokenNameBytes = 64;
+    /** Maximum decimals a token may declare. */
+    @lombok.Builder.Default
+    private final int maxTokenDecimals = 18;
+
     /** Reward paid to an included uncle's miner at {@code height}. */
     public long uncleReward(long height) {
         return miningReward(height) * uncleRewardNum / uncleRewardDen;

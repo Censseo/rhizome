@@ -29,11 +29,12 @@ Four goals drive the design:
    GHOST-style fork choice (§9) that credits and rewards orphaned (uncle) work, making
    the fast cadence safe against the orphaning a naïve longest chain suffers.
 
-The node is functional and covered by **265 tests**: consensus, the WASM contract VM
+The node is functional and covered by **286 tests**: consensus, the WASM contract VM
 and its persistence, execution, storage, mempool, HTTP API, block production, P2P
 synchronisation with reorganisation, GHOST uncles, data boxes (agent-facing on-chain
-storage with typed registers, an anti-dust deposit and storage rent), and a wallet that
-deploys and calls contracts and manages boxes.
+storage with typed registers, an anti-dust deposit and storage rent), native tokens
+(one-transaction fungible-asset launches), and a wallet that deploys and calls contracts
+and manages boxes and tokens.
 
 ---
 
@@ -239,12 +240,13 @@ would mint money for the sender and a negative deposit would drive the recipient
 balance below zero.
 
 A transaction has a **kind**: `TRANSFER` (the default, unchanged), the contract kinds
-`DEPLOY` (install contract code) and `CALL` (invoke a contract), or the data-box kinds
-`BOX_CREATE`/`BOX_UPDATE`/`BOX_SPEND`/`BOX_COLLECT` (§5.5). Every non-transfer kind carries
-a variable-length `data` payload and the gas fields (`gasLimit`, `gasPrice`) in its signed
+`DEPLOY` (install contract code) and `CALL` (invoke a contract), the data-box kinds
+`BOX_CREATE`/`BOX_UPDATE`/`BOX_SPEND`/`BOX_COLLECT` (§5.5), or the native-token kinds
+`TOKEN_MINT`/`TOKEN_TRANSFER`/`TOKEN_BURN` (§5.6). Every non-transfer kind carries a
+variable-length `data` payload and the gas fields (`gasLimit`, `gasPrice`) in its signed
 preimage and wire format, so a transfer is byte-for-byte what it was before contracts
-existed; the box kinds reuse that same suffix with the gas fields pinned to zero (box ops
-run no VM). Every transaction is self-delimiting on the wire, so a block still packs
+existed; the box and token kinds reuse that same suffix with the gas fields pinned to zero
+(they run no VM). Every transaction is self-delimiting on the wire, so a block still packs
 variable-length transactions back to back, and the whole block is bounded by
 `maxBlockSizeBytes` (§5.4).
 
@@ -469,6 +471,42 @@ Ergo's 4-KiB limit had to buy. That unlocks light-client proofs, then trust-mini
 snapshot sync, and finally miner-voted box parameters (rent factor, dust floor) via a
 soft-forkable extension section. Until then the box parameters are consensus constants.
 
+### 5.6 Native tokens
+
+A token launch should cost one transaction, not a contract deploy. Rhizome supports
+fungible tokens two ways: as WASM contracts (`token.rs`, §5.4 — for tokens that need custom
+logic) and, for the common case, as a **protocol-level native asset** with no contract and
+no gas. This follows Ergo's native-token idea, but in Rhizome's account model rather than
+Ergo's boxes: a token is an account-based balance map, not a value carried inside UTXOs —
+which fits a chain whose ledger is already account-based and whose boxes are single-owner
+cells, not multi-input/output UTXOs.
+
+**The asset.** A token has a **unique 32-byte id** = `SHA-256(minter ‖ nonce ‖ "rztoken")`
+(unforgeable and non-repeating, like a box id or contract address), a minter, a symbol and
+name, decimals, and a current total supply. Balances are a per-`(token, address)` map held
+alongside the native PDN ledger — not inside boxes.
+
+**Lifecycle.** Three deterministic transaction kinds, gas-free, paid by the ordinary fee:
+
+- `TOKEN_MINT` creates a token — deriving its id from the minter and nonce, recording its
+  metadata, and crediting the whole initial supply to the recipient. There is no way to mint
+  the same id twice (the nonce never repeats), so supply is fixed at issuance unless the
+  token is later burned.
+- `TOKEN_TRANSFER` moves an amount of a token from the sender to `to`, checked against the
+  sender's token balance.
+- `TOKEN_BURN` destroys the sender's tokens, reducing total supply.
+
+A token op moves **no PDN** — the token amount lives in the payload and the PDN `amount`
+field must be zero; only the fee moves, to the miner. Balances live in the token store with
+a **persisted per-block undo journal**, so a reorg reverses token state (and the fee)
+exactly, atomically with the block — the same guarantee boxes and contracts get. Minter and
+holder indexes back the queries `GET /token?id=` (metadata + supply), `GET /token_balance`,
+and `GET /tokens?minter=`/`?holder=`; token lifecycle events (`token.minted`/`transferred`/
+`burned`) join the log/SSE feed; and the wallet gains `token-mint`/`transfer`/`burn`/`show`/
+`balance`/`list`. Reducing a memecoin launch to a single ~fee-priced transaction is the
+"cheap token launches" goal, met without giving up the composability of contract tokens for
+the cases that need it.
+
 ---
 
 ## 6. Networking and performance
@@ -616,7 +654,7 @@ commands; and the **data-box layer** (§5.5) — stable-id, typed-register stora
 with an anti-dust deposit, permissionless miner-collected storage rent, read-only
 `box_read` data inputs for contracts, a persisted per-block undo journal for exact reorg
 reversal, owner/expiry indexes, `GET /box`+`/boxes`, box lifecycle events on the log/SSE
-feed, and wallet `box-*` commands. **265 tests, 0 failures.**
+feed, and wallet `box-*` commands. **286 tests, 0 failures.**
 
 **GHOST fork choice.** A fast single longest chain orphans blocks because propagation
 takes a meaningful fraction of the interval (§6.3). A GHOST-style fork choice — the
@@ -656,7 +694,10 @@ owner-driven `exec` and revocable, per-token-capped session keys. The remaining 
 level work is an authenticated state root so agents can prove a box to a light client
 (§5.5), and gas sponsorship (a third party paying a transaction's gas).
 
-**Memecoin primitives.** Three reference contracts are implemented and tested through
+**Memecoin primitives.** Native tokens (§5.6) make a fungible-asset launch a single
+gas-free transaction — `TOKEN_MINT`/`TRANSFER`/`BURN`, unique unforgeable ids, minter and
+holder indexes, reorg-safe balances — for the common case that needs no custom logic. For
+the cases that do, three reference contracts are implemented and tested through
 consensus: a fungible token (mint, transfer, `transfer` logs), a constant-product AMM
 (`x*y=k` with a 0.3% fee, `swap` logs, exact integer math verified against the same
 formula in the test), and a fair-launch launchpad — a fixed-price, first-come sale where

@@ -55,6 +55,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
     private final SignatureVerifier verifier;
     private final ContractProcessor contractProcessor;
     private final rhizome.core.box.BoxProcessor boxProcessor;
+    private final rhizome.core.token.TokenProcessor tokenProcessor;
     private final OrphanPool orphans = new OrphanPool(256);
     private final ReentrantLock lock = new ReentrantLock();
 
@@ -71,7 +72,8 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
     private ChainEngine(NetworkParameters params, Ledger ledger, ChainStore store,
                         LongSupplier nowMillis, SignatureVerifier verifier,
                         ContractProcessor contractProcessor,
-                        rhizome.core.box.BoxProcessor boxProcessor) {
+                        rhizome.core.box.BoxProcessor boxProcessor,
+                        rhizome.core.token.TokenProcessor tokenProcessor) {
         this.params = params;
         this.ledger = ledger;
         this.store = store;
@@ -79,6 +81,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         this.verifier = verifier;
         this.contractProcessor = contractProcessor;
         this.boxProcessor = boxProcessor;
+        this.tokenProcessor = tokenProcessor;
     }
 
     /**
@@ -115,8 +118,19 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
                                    LongSupplier nowMillis, SignatureVerifier verifier,
                                    ContractProcessor contractProcessor,
                                    rhizome.core.box.BoxProcessor boxProcessor) {
+        return init(params, ledger, store, snapshot, expectedGenesisHash, nowMillis, verifier,
+            contractProcessor, boxProcessor, null);
+    }
+
+    /** As {@link #init}, additionally enabling native-token transactions via a {@link rhizome.core.token.TokenProcessor}. */
+    public static ChainEngine init(NetworkParameters params, Ledger ledger, ChainStore store,
+                                   LedgerSnapshot snapshot, SHA256Hash expectedGenesisHash,
+                                   LongSupplier nowMillis, SignatureVerifier verifier,
+                                   ContractProcessor contractProcessor,
+                                   rhizome.core.box.BoxProcessor boxProcessor,
+                                   rhizome.core.token.TokenProcessor tokenProcessor) {
         ChainEngine engine = new ChainEngine(params, ledger, store, nowMillis, verifier,
-            contractProcessor, boxProcessor);
+            contractProcessor, boxProcessor, tokenProcessor);
         if (store.height() == 0) {
             Block genesis = GenesisBlock.initChain(ledger, params, snapshot, expectedGenesisHash);
             store.append(genesis);
@@ -188,7 +202,8 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             }
 
             ExecutionStatus status = Executor.executeBlock(
-                block, ledger, store::hasTransaction, params, verifier, contractProcessor, boxProcessor);
+                block, ledger, store::hasTransaction, params, verifier,
+                contractProcessor, boxProcessor, tokenProcessor);
             if (status != SUCCESS) {
                 return status;
             }
@@ -232,6 +247,9 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             }
             if (boxProcessor != null) {
                 boxProcessor.revertBlock(height); // undo this block's box-state changes
+            }
+            if (tokenProcessor != null) {
+                tokenProcessor.revertBlock(height); // undo this block's token-state changes
             }
             store.pop();
             revertAccountNonces(tip);
@@ -391,6 +409,65 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
     /** Box lifecycle events emitted by the block at {@code height} (for the agent event feed). */
     public java.util.List<rhizome.core.box.BoxProcessor.BoxEvent> boxEvents(long height) {
         return boxProcessor == null ? java.util.List.of() : boxProcessor.events(height);
+    }
+
+    // ---- native tokens ----
+
+    /** Committed metadata for {@code tokenId}, or {@code null} (none / tokens disabled). */
+    public rhizome.core.token.TokenMeta tokenMeta(byte[] tokenId) {
+        if (tokenProcessor == null) {
+            return null;
+        }
+        lock.lock();
+        try {
+            return tokenProcessor.meta(tokenId);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** Committed balance of {@code tokenId} held by {@code address}. */
+    public long tokenBalance(byte[] tokenId, byte[] address) {
+        if (tokenProcessor == null) {
+            return 0L;
+        }
+        lock.lock();
+        try {
+            return tokenProcessor.balance(tokenId, address);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** Token ids minted by {@code minter}, paginated after {@code afterId} (null = start). */
+    public java.util.List<byte[]> tokenIdsByMinter(byte[] minter, byte[] afterId, int limit) {
+        if (tokenProcessor == null) {
+            return java.util.List.of();
+        }
+        lock.lock();
+        try {
+            return tokenProcessor.tokenIdsByMinter(minter, afterId, limit);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** Token ids {@code address} holds, paginated after {@code afterId} (null = start). */
+    public java.util.List<byte[]> tokenIdsByHolder(byte[] address, byte[] afterId, int limit) {
+        if (tokenProcessor == null) {
+            return java.util.List.of();
+        }
+        lock.lock();
+        try {
+            return tokenProcessor.tokenIdsByHolder(address, afterId, limit);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** Token lifecycle events emitted by the block at {@code height}. */
+    public java.util.List<rhizome.core.token.TokenProcessor.TokenEvent> tokenEvents(long height) {
+        return tokenProcessor == null ? java.util.List.of() : tokenProcessor.events(height);
     }
 
     // ---- derived state ----

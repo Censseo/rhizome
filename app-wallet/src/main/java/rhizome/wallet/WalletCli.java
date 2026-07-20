@@ -43,6 +43,12 @@ public final class WalletCli {
             case "box-show" -> boxShow(args);
             case "box-list" -> boxList(args);
             case "call-readonly" -> callReadonly(args);
+            case "token-mint" -> tokenMint(args);
+            case "token-transfer" -> tokenTransfer(args);
+            case "token-burn" -> tokenBurn(args);
+            case "token-show" -> tokenShow(args);
+            case "token-balance" -> tokenBalance(args);
+            case "token-list" -> tokenList(args);
             default -> {
                 System.err.println("Unknown command: " + args[0]);
                 usage();
@@ -213,6 +219,76 @@ public final class WalletCli {
         System.out.println(new WalletClient(args[1]).callReadonly(PublicAddress.of(args[2]), input));
     }
 
+    // ---- native tokens ----
+
+    private static void tokenMint(String[] args) throws Exception {
+        require(args, 7, "token-mint <nodeUrl> <keyfile> <symbol> <name> <amount> <decimals> [--fee <fee>]");
+        WalletClient client = new WalletClient(args[1]);
+        Wallet wallet = Wallet.load(Path.of(args[2]));
+        String symbol = args[3];
+        String name = args[4];
+        long amount = Long.parseLong(args[5]);
+        int decimals = Integer.parseInt(args[6]);
+        long fee = flagPdn(args, "--fee");
+        byte[] data = rhizome.core.token.TokenPayload.encodeMint(amount, decimals, symbol, name);
+
+        long nonce = client.walletInfo(wallet.address()).nextNonce();
+        var tx = wallet.signedToken(TransactionKind.TOKEN_MINT, wallet.address(), data, fee,
+            client.chainId(), nonce, System.currentTimeMillis());
+        String status = client.submit(tx);
+        System.out.println("token: " + Utils.bytesToHex(
+            rhizome.core.token.TokenMeta.deriveId(wallet.address(), nonce)));
+        System.out.println("status: " + status);
+        if (!"SUCCESS".equals(status)) {
+            System.exit(1);
+        }
+    }
+
+    private static void tokenTransfer(String[] args) throws Exception {
+        require(args, 6, "token-transfer <nodeUrl> <keyfile> <tokenId> <to> <amount> [--fee <fee>]");
+        submitTokenAmount(args, TransactionKind.TOKEN_TRANSFER, PublicAddress.of(args[4]),
+            args[3], Long.parseLong(args[5]));
+    }
+
+    private static void tokenBurn(String[] args) throws Exception {
+        require(args, 5, "token-burn <nodeUrl> <keyfile> <tokenId> <amount> [--fee <fee>]");
+        Wallet wallet = Wallet.load(Path.of(args[2]));
+        submitTokenAmount(args, TransactionKind.TOKEN_BURN, wallet.address(),
+            args[3], Long.parseLong(args[4]));
+    }
+
+    private static void submitTokenAmount(String[] args, TransactionKind kind, PublicAddress to,
+                                          String tokenIdHex, long amount) throws Exception {
+        WalletClient client = new WalletClient(args[1]);
+        Wallet wallet = Wallet.load(Path.of(args[2]));
+        byte[] data = rhizome.core.token.TokenPayload.encodeAmount(Utils.hexStringToByteArray(tokenIdHex), amount);
+        long fee = flagPdn(args, "--fee");
+
+        long nonce = client.walletInfo(wallet.address()).nextNonce();
+        var tx = wallet.signedToken(kind, to, data, fee, client.chainId(), nonce, System.currentTimeMillis());
+        String status = client.submit(tx);
+        System.out.println("token: " + tokenIdHex);
+        System.out.println("status: " + status);
+        if (!"SUCCESS".equals(status)) {
+            System.exit(1);
+        }
+    }
+
+    private static void tokenShow(String[] args) {
+        require(args, 3, "token-show <nodeUrl> <tokenId>");
+        System.out.println(new WalletClient(args[1]).token(args[2]));
+    }
+
+    private static void tokenBalance(String[] args) {
+        require(args, 4, "token-balance <nodeUrl> <tokenId> <address>");
+        System.out.println(new WalletClient(args[1]).tokenBalance(args[2], PublicAddress.of(args[3])));
+    }
+
+    private static void tokenList(String[] args) {
+        require(args, 3, "token-list <nodeUrl> <holderAddr>");
+        System.out.println(new WalletClient(args[1]).tokensByHolder(PublicAddress.of(args[2])));
+    }
+
     /** Collects {@code --reg <type>:<value>} pairs, in order, into box registers. */
     private static java.util.List<rhizome.core.box.BoxRegister> parseRegisters(String[] args) {
         var registers = new java.util.ArrayList<rhizome.core.box.BoxRegister>();
@@ -280,6 +356,12 @@ public final class WalletCli {
               box-show   <nodeUrl> <boxId>
               box-list   <nodeUrl> <ownerAddr>
               call-readonly <nodeUrl> <contract> <hexInput>
+              token-mint     <nodeUrl> <keyfile> <symbol> <name> <amount> <decimals> [--fee <fee>]
+              token-transfer <nodeUrl> <keyfile> <tokenId> <to> <amount> [--fee <fee>]
+              token-burn     <nodeUrl> <keyfile> <tokenId> <amount> [--fee <fee>]
+              token-show     <nodeUrl> <tokenId>
+              token-balance  <nodeUrl> <tokenId> <address>
+              token-list     <nodeUrl> <holderAddr>
               register types: bytes:<hex> i64:<n> bool:<true|false> addr:<hex> hash:<hex> str:<text>""");
     }
 }

@@ -59,6 +59,21 @@ public final class WalletClient {
         return sendForString(request);
     }
 
+    /** Raw JSON of a token's metadata by id. */
+    public String token(String tokenIdHex) {
+        return get("/token?id=" + tokenIdHex);
+    }
+
+    /** Raw JSON of a token balance for an address. */
+    public String tokenBalance(String tokenIdHex, PublicAddress address) {
+        return get("/token_balance?id=" + tokenIdHex + "&address=" + address.toHexString());
+    }
+
+    /** Raw JSON of the tokens held by an address. */
+    public String tokensByHolder(PublicAddress holder) {
+        return get("/tokens?holder=" + holder.toHexString());
+    }
+
     /** Raw JSON of a box by id (or the node's error JSON), for the box CLI to print. */
     public String box(String boxIdHex) {
         return get("/box?id=" + boxIdHex);
