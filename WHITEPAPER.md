@@ -29,13 +29,14 @@ Four goals drive the design:
    GHOST-style fork choice (§9) that credits and rewards orphaned (uncle) work, making
    the fast cadence safe against the orphaning a naïve longest chain suffers.
 
-The node is functional and covered by **300 tests**: consensus, the WASM contract VM
+The node is functional and covered by **304 tests**: consensus, the WASM contract VM
 and its persistence, execution, storage, mempool, HTTP API, block production, P2P
 synchronisation with reorganisation, GHOST uncles, data boxes (agent-facing on-chain
 storage with typed registers, an anti-dust deposit and storage rent), native tokens
 (one-transaction fungible-asset launches), an authenticated state root committed in every
-header (light-client proofs of any ledger, box or token entry), and a wallet that deploys
-and calls contracts and manages boxes and tokens.
+header (light-client proofs of any ledger, box, token or contract entry), miner-voted
+economic parameters, and a wallet that deploys and calls contracts and manages boxes and
+tokens.
 
 ---
 
@@ -104,10 +105,10 @@ hash = H( merkleRoot || lastBlockHash || id || difficulty || numTransactions || 
 (integers big-endian). Unlike the C++ node — whose `getHash` covered only
 `{merkleRoot, lastBlockHash, difficulty, timestamp}`, leaving `id` and the PoW-algorithm
 choice *outside* the preimage — **every header field is committed**. A reordered or
-re-timestamped block yields a different hash, hence an invalid proof of work. Two optional
-fields — the referenced uncles (§3.7) and the authenticated **state root** (§5.7) — are
-folded in only when present, so a plain, stateless block hashes byte-for-byte as it did
-before those features existed.
+re-timestamped block yields a different hash, hence an invalid proof of work. Three optional
+fields — the referenced uncles (§3.7), the authenticated **state root** (§5.7) and the
+miner's parameter **vote** (§5.8) — are folded in only when present, so a plain, stateless,
+abstaining block hashes byte-for-byte as it did before those features existed.
 
 ### 3.2 Proof of work — Pufferfish2
 
@@ -540,12 +541,28 @@ the snapshot balances so block 2 builds on them.
 
 Committed today: **the full state** — ledger balances, boxes, token metadata/balances, and
 **contract code and key/value storage** — so a light client can prove any of them against a
-header (`GET /state/proof?domain=…` covers all six domains). Still ahead: **snapshot sync** (a
+header (`GET /state/proof?domain=…` covers all six domains). Still ahead: **snapshot sync** — a
 new node downloads a recent state tree bound to a header-committed root, then a suffix of full
-blocks — the root makes it trust-minimised; it additionally needs headers-first sync, which the
-current engine does not yet separate) and **miner-voted parameters** (rent factor, dust floor,
-block cost) via a soft-forkable extension section. Because the `stateRoot` header field is now
-fixed in the format, adding those needs no further hard fork.
+blocks (the root makes it trust-minimised). It additionally needs **headers-first sync**, which
+the current engine does not yet separate (difficulty, median-time and cumulative work are
+recomputed from historical block timestamps, so old blocks cannot yet be pruned); that is the
+one remaining prerequisite, and because the `stateRoot` header field is fixed in the format,
+adding it needs no further hard fork.
+
+### 5.8 Miner-voted parameters
+
+The box economic parameters are not frozen: miners **vote** to adjust them within bounds,
+without a hard fork. Each block header carries an `int` **vote** (committed in the header hash
+only when cast, so an abstaining block is unchanged): `±1` for the storage-rent factor, `±2`
+for the anti-dust `minValuePerByte`. At each **voting-epoch** boundary the engine tallies that
+epoch's votes and moves a parameter one bounded step when the net vote exceeds half the epoch
+— the change taking effect the next epoch. The current values are **derived from chain
+history** (like difficulty): kept as a per-epoch-boundary snapshot recomputed from the epoch's
+block votes, so a reorg across a boundary simply drops that snapshot and restores the previous
+values — reorg-safe with no reversible tally. The box processor reads the live values at
+execution time, so every node validates a block with the parameters in force at its height;
+`GET /info` reports them, and a miner sets its vote with `RHIZOME_VOTE`. Only economic
+parameters are votable (not supply or the PoW) — governance over fees, not money.
 
 ---
 
@@ -696,10 +713,12 @@ with an anti-dust deposit, permissionless miner-collected storage rent, read-onl
 reversal, owner/expiry indexes, `GET /box`+`/boxes`, box lifecycle events on the log/SSE
 feed, and wallet `box-*` commands; **native tokens** (§5.6) — `TOKEN_MINT`/`TRANSFER`/`BURN`
 with unique ids, minter/holder indexes, reorg-safe balances, `GET /token(s)` and wallet
-`token-*` commands; and the **authenticated state root** (§5.7) — a sparse-Merkle commitment
-to ledger, box and token state in every header, stamped by the producer and validated by
-every node with full rollback on mismatch, reorg-safe, with `GET /state`+`/state/proof` and a
-stateless light-client verifier. **300 tests, 0 failures.**
+`token-*` commands; the **authenticated state root** (§5.7) — a sparse-Merkle commitment
+to the full state (ledger, boxes, tokens and contract code/storage) in every header, stamped
+by the producer and validated by every node with full rollback on mismatch, reorg-safe, with
+`GET /state`+`/state/proof` and a stateless light-client verifier; and **miner-voted
+parameters** (§5.8) — a header vote, per-epoch tally and reorg-safe derived params for the box
+fee/dust factors. **304 tests, 0 failures.**
 
 **GHOST fork choice.** A fast single longest chain orphans blocks because propagation
 takes a meaningful fraction of the interval (§6.3). A GHOST-style fork choice — the

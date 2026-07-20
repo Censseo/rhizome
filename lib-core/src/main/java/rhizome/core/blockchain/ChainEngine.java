@@ -71,6 +71,14 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
     private final Map<Long, BigInteger> uncleWorkByHeight = new HashMap<>();
     private volatile java.util.function.LongConsumer onBlockApplied;
 
+    /**
+     * Votable box params established at each completed voting-epoch boundary (height →
+     * {storageFeeFactor, minValuePerByte}). The current values are the last entry (or the
+     * defaults); recomputed at each boundary from that epoch's block votes and simply
+     * dropped on a pop, so it is reorg-safe without a reversible tally.
+     */
+    private final java.util.TreeMap<Long, long[]> voteParamsByBoundary = new java.util.TreeMap<>();
+
     private ChainEngine(NetworkParameters params, Ledger ledger, ChainStore store,
                         LongSupplier nowMillis, SignatureVerifier verifier,
                         ContractProcessor contractProcessor,
@@ -279,6 +287,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             totalWork = totalWork.add(BigInteger.TWO.pow(b.difficulty())).add(uncleWork);
             uncleWorkByHeight.put((long) b.id(), uncleWork);
             currentDifficulty = computeDifficultyFromChain();
+            applyVotingAt(b.id()); // tally this epoch's votes if a boundary; effective next block
             if (onBlockApplied != null) {
                 onBlockApplied.accept(b.id()); // fast/non-blocking by contract (see setter)
             }
@@ -322,6 +331,11 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             }
             store.pop();
             revertAccountNonces(tip);
+            // Drop the vote tally established at this height (if it was an epoch boundary),
+            // restoring the previous epoch's params — reorg-safe without a reversible tally.
+            if (voteParamsByBoundary.remove(height) != null) {
+                syncVoteableHolder();
+            }
             BigInteger uncleWork = uncleWorkByHeight.remove(height);
             totalWork = totalWork.subtract(BigInteger.TWO.pow(((BlockImpl) tip).difficulty()));
             if (uncleWork != null) {
@@ -539,6 +553,76 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         return tokenProcessor == null ? java.util.List.of() : tokenProcessor.events(height);
     }
 
+    // ---- miner-voted parameters ----
+
+    /** The votable box params (storageFeeFactor, minValuePerByte) currently in effect. */
+    public long[] voteableParams() {
+        lock.lock();
+        try {
+            return currentVoteParams();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** Current votable params: the last epoch-boundary values, or the network defaults. */
+    private long[] currentVoteParams() {
+        var e = voteParamsByBoundary.lastEntry();
+        return e != null ? e.getValue().clone()
+            : new long[] {params.storageFeeFactor(), params.minValuePerByte()};
+    }
+
+    /** Pushes the current votable params into the box processor's holder (read at execution). */
+    private void syncVoteableHolder() {
+        var holder = boxProcessor == null ? null : boxProcessor.voteableParams();
+        if (holder != null) {
+            long[] p = currentVoteParams();
+            holder.set(p[0], p[1]);
+        }
+    }
+
+    /**
+     * At a voting-epoch boundary, tallies that epoch's block votes and moves each votable
+     * parameter one bounded step if its net vote exceeds half the epoch. Effective from the
+     * next block, so the just-executed boundary block still used the previous values.
+     */
+    private void applyVotingAt(long height) {
+        long epoch = params.votingEpochLength();
+        if (epoch <= 0 || height < epoch || height % epoch != 0) {
+            return;
+        }
+        long netSff = 0;
+        long netMvb = 0;
+        for (long h = height - epoch + 1; h <= height; h++) {
+            int vote = ((BlockImpl) store.blockAt(h)).vote();
+            int paramId = Math.abs(vote);
+            int dir = Integer.signum(vote);
+            if (paramId == VoteableParams.STORAGE_FEE_FACTOR) {
+                netSff += dir;
+            } else if (paramId == VoteableParams.MIN_VALUE_PER_BYTE) {
+                netMvb += dir;
+            }
+        }
+        long threshold = epoch / 2;
+        long[] cur = currentVoteParams();
+        long sff = adjust(cur[0], netSff, threshold, params.storageFeeFactorStep(),
+            params.storageFeeFactorMin(), params.storageFeeFactorMax());
+        long mvb = adjust(cur[1], netMvb, threshold, params.minValuePerByteStep(),
+            params.minValuePerByteMin(), params.minValuePerByteMax());
+        voteParamsByBoundary.put(height, new long[] {sff, mvb});
+        syncVoteableHolder();
+    }
+
+    private static long adjust(long value, long netVotes, long threshold, long step, long min, long max) {
+        if (netVotes > threshold) {
+            return Math.min(max, value + step);
+        }
+        if (netVotes < -threshold) {
+            return Math.max(min, value - step);
+        }
+        return value;
+    }
+
     // ---- authenticated state root ----
 
     /** The current authenticated state root (32 bytes), or {@code null} if the accumulator is off. */
@@ -668,6 +752,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         totalWork = BigInteger.ZERO;
         nextNonce.clear();
         uncleWorkByHeight.clear();
+        voteParamsByBoundary.clear();
         long height = store.height();
         for (long h = GenesisBlock.GENESIS_ID + 1; h <= height; h++) {
             Block block = store.blockAt(h);
@@ -677,8 +762,10 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             BigInteger uncleWork = uncleWorkOf(block);
             uncleWorkByHeight.put(h, uncleWork);
             totalWork = totalWork.add(BigInteger.TWO.pow(((BlockImpl) block).difficulty())).add(uncleWork);
+            applyVotingAt(h); // replay epoch tallies so the votable params are restored
         }
         currentDifficulty = computeDifficultyFromChain();
+        syncVoteableHolder();
     }
 
     /** Sum of 2^difficulty over a block's referenced uncles (from committed difficulties). */

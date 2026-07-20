@@ -56,6 +56,14 @@ public final class BlockImpl implements Block {
     private SHA256Hash stateRoot = SHA256Hash.empty();
 
     /**
+     * The miner's parameter vote for this block (§ miner voting): {@code 0} abstains,
+     * {@code ±1} votes on {@code storageFeeFactor}, {@code ±2} on {@code minValuePerByte}.
+     * Committed in the header hash only when non-zero, so an abstaining block hashes as before.
+     */
+    @Builder.Default
+    private int vote = 0;
+
+    /**
      * Hashes of referenced uncle blocks (valid orphans sharing a recent ancestor).
      * Empty for a plain block; the basis of the GHOST fork choice. Committed in the
      * header hash only when non-empty, so an uncle-less block hashes exactly as it
@@ -104,6 +112,11 @@ public final class BlockImpl implements Block {
                 sha256.update(stateRoot.hash().getArray());
             }
 
+            // Commit to the parameter vote only when cast, so an abstaining block is unchanged.
+            if (vote != 0) {
+                sha256.update(ByteBuffer.allocate(Integer.BYTES).putInt(vote).array());
+            }
+
             // Commit to referenced uncles only when present, so an uncle-less block's
             // hash is byte-for-byte what it was before uncles existed.
             if (uncles != null && !uncles.isEmpty()) {
@@ -147,11 +160,12 @@ public final class BlockImpl implements Block {
         return id == block.id && difficulty == block.difficulty && timestamp == block.timestamp &&
             nonce.equals(block.nonce) && merkleRoot.equals(block.merkleRoot) &&
             lastBlockHash.equals(block.lastBlockHash) && transactions.equals(block.transactions) &&
-            Objects.equals(stateRoot, block.stateRoot);
+            Objects.equals(stateRoot, block.stateRoot) && vote == block.vote;
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(nonce, id, difficulty, timestamp, merkleRoot, lastBlockHash, transactions, stateRoot);
+        return Objects.hash(nonce, id, difficulty, timestamp, merkleRoot, lastBlockHash, transactions,
+            stateRoot, vote);
     }
 }

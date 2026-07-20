@@ -161,6 +161,25 @@ public final class NetworkParameters {
     @lombok.Builder.Default
     private final int maxTokenDecimals = 18;
 
+    // --- Miner-voted parameters ---
+    /** Blocks per voting epoch; at each boundary the epoch's votes are tallied. */
+    @lombok.Builder.Default
+    private final long votingEpochLength = 1024;
+    /** Adjustment step and bounds for the votable {@code storageFeeFactor}. */
+    @lombok.Builder.Default
+    private final long storageFeeFactorStep = 1;
+    @lombok.Builder.Default
+    private final long storageFeeFactorMin = 0;
+    @lombok.Builder.Default
+    private final long storageFeeFactorMax = 1_000;
+    /** Adjustment step and bounds for the votable {@code minValuePerByte}. */
+    @lombok.Builder.Default
+    private final long minValuePerByteStep = 1;
+    @lombok.Builder.Default
+    private final long minValuePerByteMin = 0;
+    @lombok.Builder.Default
+    private final long minValuePerByteMax = 1_000;
+
     /** Reward paid to an included uncle's miner at {@code height}. */
     public long uncleReward(long height) {
         return miningReward(height) * uncleRewardNum / uncleRewardDen;

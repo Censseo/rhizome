@@ -27,10 +27,11 @@ public class BlockDto implements BinarySerializable {
     public final SHA256Hash merkleRoot;
     public final SHA256Hash nonce;
     public final SHA256Hash stateRoot;
+    public final int vote;
 
     public static final int BUFFER_SIZE =
         Integer.BYTES + Long.BYTES + Integer.BYTES + Integer.BYTES
-        + SHA256Hash.SIZE + SHA256Hash.SIZE + SHA256Hash.SIZE + SHA256Hash.SIZE;
+        + SHA256Hash.SIZE + SHA256Hash.SIZE + SHA256Hash.SIZE + SHA256Hash.SIZE + Integer.BYTES;
 
     public BlockDto(
         int id,
@@ -40,7 +41,7 @@ public class BlockDto implements BinarySerializable {
         SHA256Hash lastBlockHash,
         SHA256Hash merkleRoot,
         SHA256Hash nonce) {
-        this(id, timestamp, difficulty, numTransactions, lastBlockHash, merkleRoot, nonce, SHA256Hash.empty());
+        this(id, timestamp, difficulty, numTransactions, lastBlockHash, merkleRoot, nonce, SHA256Hash.empty(), 0);
     }
 
     public BlockDto(
@@ -51,7 +52,8 @@ public class BlockDto implements BinarySerializable {
         SHA256Hash lastBlockHash,
         SHA256Hash merkleRoot,
         SHA256Hash nonce,
-        SHA256Hash stateRoot) {
+        SHA256Hash stateRoot,
+        int vote) {
 
         this.id = id;
         this.timestamp = timestamp;
@@ -61,6 +63,7 @@ public class BlockDto implements BinarySerializable {
         this.merkleRoot = merkleRoot;
         this.nonce = nonce;
         this.stateRoot = stateRoot;
+        this.vote = vote;
     }
 
     @Override
@@ -73,6 +76,7 @@ public class BlockDto implements BinarySerializable {
         BinaryIO.putFixed(buffer, merkleRoot.toBytes(), SHA256Hash.SIZE);
         BinaryIO.putFixed(buffer, nonce.toBytes(), SHA256Hash.SIZE);
         BinaryIO.putFixed(buffer, stateRoot.toBytes(), SHA256Hash.SIZE);
+        buffer.putInt(vote);
     }
 
     public static BlockDto readFrom(ByteBuffer buffer) {
@@ -84,7 +88,9 @@ public class BlockDto implements BinarySerializable {
         SHA256Hash merkleRoot = SHA256Hash.of(BinaryIO.getFixed(buffer, SHA256Hash.SIZE));
         SHA256Hash nonce = SHA256Hash.of(BinaryIO.getFixed(buffer, SHA256Hash.SIZE));
         SHA256Hash stateRoot = SHA256Hash.of(BinaryIO.getFixed(buffer, SHA256Hash.SIZE));
-        return new BlockDto(id, timestamp, difficulty, numTransactions, lastBlockHash, merkleRoot, nonce, stateRoot);
+        int vote = buffer.getInt();
+        return new BlockDto(id, timestamp, difficulty, numTransactions, lastBlockHash, merkleRoot, nonce,
+            stateRoot, vote);
     }
 
     @Override

@@ -29,6 +29,7 @@ public final class BlockProducer {
     private final long targetIntervalMs;
     private final AtomicBoolean running = new AtomicBoolean(false);
     private volatile Consumer<Block> onProduced;
+    private volatile int vote = VoteableParams.ABSTAIN;
     private Thread thread;
 
     public BlockProducer(ChainEngine engine, MemPool mempool, PublicAddress miner, LongSupplier nowMillis) {
@@ -57,6 +58,7 @@ public final class BlockProducer {
     public Optional<Block> produce() {
         Block candidate = BlockAssembler.assemble(engine, mempool, miner, nowMillis.getAsLong());
         var block = (BlockImpl) candidate;
+        block.vote(vote); // the miner's parameter vote (ABSTAIN by default)
         // Commit the authenticated state root this block produces (no-op if the accumulator
         // is off) before solving the PoW, so the header hash binds it.
         engine.stampStateRoot(block);
@@ -77,6 +79,15 @@ public final class BlockProducer {
     /** Sets a listener called with each block this producer mines (e.g. to gossip it). */
     public void setOnProduced(Consumer<Block> listener) {
         this.onProduced = listener;
+    }
+
+    /**
+     * Sets the parameter vote this miner casts on each block it produces (§ miner voting):
+     * {@code 0} abstains, {@code ±1} votes on {@code storageFeeFactor}, {@code ±2} on
+     * {@code minValuePerByte}. Default abstain.
+     */
+    public void setVote(int vote) {
+        this.vote = vote;
     }
 
     /** Starts a background mining loop. Idempotent. */

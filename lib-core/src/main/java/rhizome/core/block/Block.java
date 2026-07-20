@@ -94,6 +94,7 @@ public sealed interface Block permits BlockImpl {
         static final String DIFFICULTY = "difficulty";
         static final String NONCE = "nonce";
         static final String STATE_ROOT = "stateRoot";
+        static final String VOTE = "vote";
         static final String MERKLE_ROOT = "merkleRoot";
         static final String LAST_BLOCK_HASH = "lastBlockHash";
         static final String TRANSACTIONS = "transactions";
@@ -112,7 +113,8 @@ public sealed interface Block permits BlockImpl {
                 blockImpl.lastBlockHash(),
                 blockImpl.merkleRoot(),
                 blockImpl.nonce(),
-                blockImpl.stateRoot()
+                blockImpl.stateRoot(),
+                blockImpl.vote()
             );
         }
     
@@ -141,6 +143,9 @@ public sealed interface Block permits BlockImpl {
             if (!blockImpl.stateRoot().equals(SHA256Hash.empty())) {
                 result.put(STATE_ROOT, blockImpl.stateRoot().toHexString());
             }
+            if (blockImpl.vote() != 0) {
+                result.put(VOTE, blockImpl.vote());
+            }
             JSONArray transactionsArray = new JSONArray();
             for (Transaction transaction : blockImpl.transactions()) {
                 transactionsArray.put(transaction.toJson());
@@ -168,6 +173,7 @@ public sealed interface Block permits BlockImpl {
                 .lastBlockHash(SHA256Hash.of(json.getString(LAST_BLOCK_HASH)))
                 .nonce(SHA256Hash.of(json.getString(NONCE)))
                 .stateRoot(json.has(STATE_ROOT) ? SHA256Hash.of(json.getString(STATE_ROOT)) : SHA256Hash.empty())
+                .vote(json.optInt(VOTE, 0))
                 .transactions(
                     IntStream.range(0, json.getJSONArray(TRANSACTIONS).length())
                         .mapToObj(i -> Transaction.of(json.getJSONArray(TRANSACTIONS).getJSONObject(i)))

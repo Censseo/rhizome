@@ -54,6 +54,15 @@ public interface BoxProcessor {
         return List.of();
     }
 
+    /**
+     * The mutable holder of the miner-votable box parameters ({@code storageFeeFactor},
+     * {@code minValuePerByte}) this processor reads at execution time, or {@code null} if
+     * voting is not wired. The engine updates it at each voting-epoch boundary.
+     */
+    default rhizome.core.blockchain.VoteableParams voteableParams() {
+        return null;
+    }
+
     /** Session-aware read (sees boxes written earlier in the open block): for the VM's {@code box_read}. */
     Box get(byte[] boxId);
 

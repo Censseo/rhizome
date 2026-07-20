@@ -167,6 +167,12 @@ public final class RhizomeNode implements AutoCloseable {
             producer = new BlockProducer(engine, mempool, miner, System::currentTimeMillis,
                 config.blockIntervalMs());
             producer.setOnProduced(broadcaster::broadcastBlock);
+            // Optional parameter vote this miner casts on each block (RHIZOME_VOTE):
+            // ±1 storageFeeFactor, ±2 minValuePerByte, 0/absent = abstain.
+            String vote = System.getenv("RHIZOME_VOTE");
+            if (vote != null && !vote.isBlank()) {
+                producer.setVote(Integer.parseInt(vote.trim()));
+            }
             producer.start();
         });
     }

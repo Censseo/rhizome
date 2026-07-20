@@ -28,6 +28,8 @@ public final class DefaultBoxProcessor implements BoxProcessor {
     private final BoxStore store;
     private final NetworkParameters params;
     private final int retainDepth;
+    /** The miner-votable box params, read at execution time (seeded from the network defaults). */
+    private final rhizome.core.blockchain.VoteableParams voteable;
 
     /** Open block session: box id (hex) -> box, or a present key mapped to null for a delete. */
     private Map<String, Box> session;
@@ -47,6 +49,12 @@ public final class DefaultBoxProcessor implements BoxProcessor {
         this.store = store;
         this.params = params;
         this.retainDepth = retainDepth;
+        this.voteable = rhizome.core.blockchain.VoteableParams.fromDefaults(params);
+    }
+
+    @Override
+    public rhizome.core.blockchain.VoteableParams voteableParams() {
+        return voteable;
     }
 
     @Override
@@ -143,8 +151,8 @@ public final class DefaultBoxProcessor implements BoxProcessor {
             return BoxResult.fail(BOX_NOT_EXPIRED);
         }
         long size = box.serializedSize();
-        long rent = params.storageFeeFactor() * size;
-        long floor = size * params.minValuePerByte();
+        long rent = voteable.storageFeeFactor() * size;
+        long floor = size * voteable.minValuePerByte();
         if (box.value() - rent < floor) {
             // Cannot pay the rent and stay above the dust floor: collect the whole box.
             long collected = box.value();
@@ -163,7 +171,7 @@ public final class DefaultBoxProcessor implements BoxProcessor {
         if (box.serializedSize() > params.maxBoxSizeBytes()) {
             return BoxResult.fail(BOX_PAYLOAD_INVALID);
         }
-        if (value < (long) box.serializedSize() * params.minValuePerByte()) {
+        if (value < (long) box.serializedSize() * voteable.minValuePerByte()) {
             return BoxResult.fail(BOX_VALUE_TOO_LOW);
         }
         return null;

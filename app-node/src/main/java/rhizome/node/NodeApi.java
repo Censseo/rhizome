@@ -71,7 +71,9 @@ public final class NodeApi {
                 .put("network", node.networkName())
                 .put("height", node.blockCount())
                 .put("difficulty", node.difficulty())
-                .put("mempool", node.mempoolSize()))))
+                .put("mempool", node.mempoolSize())
+                .put("storageFeeFactor", node.voteableParams()[0])
+                .put("minValuePerByte", node.voteableParams()[1]))))
             .with(GET, "/peers", req -> ok(json(new JSONObject()
                 .put("peers", new org.json.JSONArray(node.knownPeers())))))
             .with(POST, "/add_peer", req -> req.loadBody(SMALL_BODY).map(body -> guardedResponse(() -> {

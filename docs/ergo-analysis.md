@@ -220,9 +220,12 @@ ajuste un paramètre d'un pas borné (`Parameters.scala:158-183`), 90 % sur 32
 > (data inputs), API `/scan`, dry-run `/call_readonly` (§5.5), **tokens natifs**
 > (`TOKEN_MINT`/`TRANSFER`/`BURN`, §5.6) et la **racine d'état authentifiée**
 > (Sparse Merkle Tree sur ledger + boxes + tokens, preuves clients légers, §5.7).
-> Voir [`WHITEPAPER.md`](../WHITEPAPER.md). Reste en travaux futurs : commit du
-> stockage contractuel dans la racine, snap-sync, paramètres votables, et les
-> `dataBoxIds` déclarés dans les transactions. Trace de l'analyse d'origine.
+> Le stockage contractuel est aussi committé dans la racine (§5.7) et les
+> **paramètres économiques sont votables par les mineurs** (§5.8). Voir
+> [`WHITEPAPER.md`](../WHITEPAPER.md). Reste en travaux futurs : le snap-sync
+> (nécessite un sync headers-first, seul prérequis restant) et les `dataBoxIds`
+> déclarés dans les transactions (largement couverts par `box_read`). Trace de
+> l'analyse d'origine.
 
 Design cible : un **objet box natif** à côté des comptes et des contrats — le
 sous-ensemble d'Ergo utile aux agents, sans changer le modèle de ledger.

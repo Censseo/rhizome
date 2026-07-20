@@ -116,6 +116,11 @@ public final class NodeService {
 
     // ---- authenticated state ----
 
+    /** The current miner-voted box params: {@code [storageFeeFactor, minValuePerByte]}. */
+    public long[] voteableParams() {
+        return engine.voteableParams();
+    }
+
     /** The current authenticated state root, or {@code null} if the accumulator is off. */
     public byte[] stateRoot() {
         return engine.stateRoot();
