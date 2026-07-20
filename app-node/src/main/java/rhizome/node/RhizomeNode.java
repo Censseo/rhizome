@@ -86,6 +86,12 @@ public final class RhizomeNode implements AutoCloseable {
         service = new NodeService(engine, mempool);
         // Expose contract event logs (by block height) so agents can watch on-chain state.
         service.setLogSource(contractProcessor::logs);
+        // Dashboard/agent introspection: deployed code lookup and read-only calls.
+        service.setCodeSource(contractProcessor::codeAt);
+        service.setContractQuery((caller, contract, input, gasLimit) -> {
+            var r = contractProcessor.query(caller, contract, input, gasLimit);
+            return new NodeService.QueryOutcome(r.success(), r.output(), r.gasUsed(), r.error());
+        });
 
         // Every node keeps a live peer set (seeded from config), serves /peers and
         // accepts announcements, so the network can self-organise from a few seeds.
@@ -275,6 +281,12 @@ public final class RhizomeNode implements AutoCloseable {
         String miner = System.getenv("RHIZOME_MINER");
         if (miner != null && !miner.isBlank()) {
             config = config.withMiner(rhizome.core.ledger.PublicAddress.of(miner));
+        }
+        // Producer pacing override, mainly for local devnets (fast blocks behind the
+        // dashboard); consensus rules still bound what other nodes accept.
+        String interval = System.getenv("RHIZOME_BLOCK_INTERVAL_MS");
+        if (interval != null && !interval.isBlank()) {
+            config = config.withBlockIntervalMs(Long.parseLong(interval.trim()));
         }
         String peers = System.getenv("RHIZOME_PEERS");
         if (peers != null && !peers.isBlank()) {

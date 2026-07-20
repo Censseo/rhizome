@@ -24,6 +24,8 @@ public final class NodeService {
     private volatile java.util.function.Consumer<Transaction> onTransactionAccepted;
     private volatile PeerRegistry peers;
     private volatile java.util.function.LongFunction<List<ContractLog>> logSource;
+    private volatile java.util.function.Function<PublicAddress, byte[]> codeSource;
+    private volatile ContractQuery contractQuery;
 
     /** Maximum blocks a single /logs catch-up scan spans, so agents poll in bounded chunks. */
     public static final int LOG_SCAN_WINDOW = 128;
@@ -49,6 +51,37 @@ public final class NodeService {
     /** Source of contract event logs by block height (the contract processor). */
     public void setLogSource(java.util.function.LongFunction<List<ContractLog>> source) {
         this.logSource = source;
+    }
+
+    /** Source of deployed contract code by address (the contract store). */
+    public void setCodeSource(java.util.function.Function<PublicAddress, byte[]> source) {
+        this.codeSource = source;
+    }
+
+    /** Read-only contract execution (no state change), for dashboard/agent introspection. */
+    public void setContractQuery(ContractQuery query) {
+        this.contractQuery = query;
+    }
+
+    /** A read-only contract call: like CALL but against a throwaway state overlay. */
+    @FunctionalInterface
+    public interface ContractQuery {
+        QueryOutcome query(PublicAddress caller, PublicAddress contract, byte[] input, long gasLimit);
+    }
+
+    /** Result of a read-only contract call. */
+    public record QueryOutcome(boolean success, byte[] output, long gasUsed, String error) {}
+
+    /** Deployed code at {@code contract}, or {@code null} if none / no store wired. */
+    public byte[] contractCode(PublicAddress contract) {
+        var source = codeSource;
+        return source == null ? null : source.apply(contract);
+    }
+
+    /** Runs a read-only contract call, or {@code null} if querying is not wired. */
+    public QueryOutcome queryContract(PublicAddress caller, PublicAddress contract, byte[] input, long gasLimit) {
+        var query = contractQuery;
+        return query == null ? null : query.query(caller, contract, input, gasLimit);
     }
 
     /** Event logs emitted by a specific block, or empty if none / no processor wired. */

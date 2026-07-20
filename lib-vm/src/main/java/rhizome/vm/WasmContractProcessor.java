@@ -165,6 +165,28 @@ public final class WasmContractProcessor implements ContractProcessor {
         return new CallOutcome(true, result.output(), collected, null);
     }
 
+    /**
+     * Read-only call against the committed state: executes exactly like a CALL but
+     * on a throwaway overlay, so nothing is written, logged or metered into any
+     * block. This is what serves dashboard/agent introspection (e.g. a token's
+     * {@code balance_of} or an agent wallet's {@code session_of}) without a
+     * transaction.
+     */
+    public QueryResult query(PublicAddress caller, PublicAddress contract, byte[] input, long gasLimit) {
+        GasMeter meter = new GasMeter(gasLimit);
+        CallOutcome outcome = runCall(caller.toBytes(), contract, input, 0, meter,
+            new SessionContractStore(baseStore), new java.util.ArrayDeque<>());
+        return new QueryResult(outcome.success(), outcome.output(), meter.used(), outcome.error());
+    }
+
+    /** Outcome of a read-only {@link #query}: output bytes on success, error otherwise. */
+    public record QueryResult(boolean success, byte[] output, long gasUsed, String error) {}
+
+    /** Deployed code at {@code contract} in the committed state, or {@code null}. */
+    public byte[] codeAt(PublicAddress contract) {
+        return baseStore.getCode(contract);
+    }
+
     @Override
     public void commit(long blockHeight) {
         if (session != null) {

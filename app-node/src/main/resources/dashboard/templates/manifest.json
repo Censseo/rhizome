@@ -1,0 +1,103 @@
+{
+  "comment": "Contract templates bundled with the node dashboard. Types: address = 25-byte hex, u64 = 8 bytes little-endian, bytes = raw hex tail. Payload = selector byte followed by the args in order.",
+  "templates": [
+    {
+      "id": "counter",
+      "name": "Counter",
+      "wasm": "counter.wasm",
+      "source": "counter.rs",
+      "description": "Compteur minimal : chaque appel incrémente un entier en storage et le renvoie. Le \"hello world\" de la VM.",
+      "methods": [
+        { "selector": null, "name": "call", "args": [], "output": "u64", "note": "Pas de sélecteur : tout appel incrémente." }
+      ]
+    },
+    {
+      "id": "token",
+      "name": "Token fongible",
+      "wasm": "token.wasm",
+      "source": "token.rs",
+      "description": "Token fongible minimal (balances, transferts, allowances). Base des memecoins et de l'AMM.",
+      "methods": [
+        { "selector": 0, "name": "init", "args": [ { "name": "supply", "type": "u64" } ], "note": "Une seule fois ; mint tout le supply au caller." },
+        { "selector": 1, "name": "transfer", "args": [ { "name": "to", "type": "address" }, { "name": "amount", "type": "u64" } ] },
+        { "selector": 2, "name": "balance_of", "args": [ { "name": "addr", "type": "address" } ], "view": true, "output": "u64" },
+        { "selector": 3, "name": "approve", "args": [ { "name": "spender", "type": "address" }, { "name": "amount", "type": "u64" } ] },
+        { "selector": 4, "name": "transfer_from", "args": [ { "name": "from", "type": "address" }, { "name": "to", "type": "address" }, { "name": "amount", "type": "u64" } ] }
+      ]
+    },
+    {
+      "id": "agent_wallet",
+      "name": "Agent wallet",
+      "wasm": "agent_wallet.wasm",
+      "source": "agent_wallet.rs",
+      "description": "Account abstraction pour agents IA : le owner pilote des appels arbitraires via le wallet et accorde des session keys plafonnées (budget par token, révocables). L'agent agit dans son budget sans jamais détenir les clés du trésor.",
+      "methods": [
+        { "selector": 0, "name": "init", "args": [], "note": "Le premier caller devient owner — déployer et init dans la foulée." },
+        { "selector": 1, "name": "exec", "args": [ { "name": "target", "type": "address" }, { "name": "payload", "type": "bytes" } ], "note": "Owner uniquement ; le wallet est le caller du callee." },
+        { "selector": 2, "name": "grant_session", "args": [ { "name": "key", "type": "address" }, { "name": "token", "type": "address" }, { "name": "cap", "type": "u64" } ] },
+        { "selector": 3, "name": "revoke_session", "args": [ { "name": "key", "type": "address" } ] },
+        { "selector": 4, "name": "session_transfer", "args": [ { "name": "to", "type": "address" }, { "name": "amount", "type": "u64" } ], "note": "Réservé aux session keys, dans la limite du budget restant." },
+        { "selector": 5, "name": "session_of", "args": [ { "name": "key", "type": "address" } ], "view": true, "output": "session" }
+      ]
+    },
+    {
+      "id": "amm",
+      "name": "AMM (réserves internes)",
+      "wasm": "amm.wasm",
+      "source": "amm.rs",
+      "description": "Teneur de marché x*y=k autonome avec réserves et balances internes.",
+      "methods": [
+        { "selector": 0, "name": "init", "args": [ { "name": "reserveA", "type": "u64" }, { "name": "reserveB", "type": "u64" }, { "name": "userA", "type": "u64" }, { "name": "userB", "type": "u64" } ] },
+        { "selector": 1, "name": "swap_a_for_b", "args": [ { "name": "amountIn", "type": "u64" } ] },
+        { "selector": 2, "name": "swap_b_for_a", "args": [ { "name": "amountIn", "type": "u64" } ] },
+        { "selector": 3, "name": "reserves", "args": [], "view": true, "output": "u64pair" }
+      ]
+    },
+    {
+      "id": "pair",
+      "name": "Paire AMM (2 tokens)",
+      "wasm": "pair.wasm",
+      "source": "pair.rs",
+      "description": "Pool x*y=k adossé à deux contrats token (approve puis add_liquidity/swap).",
+      "methods": [
+        { "selector": 0, "name": "init", "args": [ { "name": "tokenA", "type": "address" }, { "name": "tokenB", "type": "address" } ] },
+        { "selector": 1, "name": "add_liquidity", "args": [ { "name": "amountA", "type": "u64" }, { "name": "amountB", "type": "u64" } ] },
+        { "selector": 2, "name": "swap_a_for_b", "args": [ { "name": "amountIn", "type": "u64" } ] },
+        { "selector": 3, "name": "swap_b_for_a", "args": [ { "name": "amountIn", "type": "u64" } ] },
+        { "selector": 4, "name": "reserves", "args": [], "view": true, "output": "u64pair" }
+      ]
+    },
+    {
+      "id": "launchpad",
+      "name": "Launchpad",
+      "wasm": "launchpad.wasm",
+      "source": "launchpad.rs",
+      "description": "Vente de tokens à taux fixe : buy() avec de la valeur attachée reçoit value × rate tokens.",
+      "methods": [
+        { "selector": 0, "name": "init", "args": [ { "name": "token", "type": "address" }, { "name": "rate", "type": "u64" } ] },
+        { "selector": 1, "name": "buy", "args": [], "note": "Attacher la valeur (champ montant de la transaction CALL)." }
+      ]
+    },
+    {
+      "id": "router",
+      "name": "Router (démo appels imbriqués)",
+      "wasm": "router.wasm",
+      "source": "router.rs",
+      "description": "Transmet un appel à un autre contrat — démonstration des appels contrat-à-contrat.",
+      "methods": [
+        { "selector": 0, "name": "forward", "args": [ { "name": "callee", "type": "address" }, { "name": "payload", "type": "bytes" } ] },
+        { "selector": 1, "name": "call_then_trap", "args": [ { "name": "callee", "type": "address" }, { "name": "payload", "type": "bytes" } ], "note": "Test d'atomicité : l'appel réussit puis revert." }
+      ]
+    },
+    {
+      "id": "emitter",
+      "name": "Emitter (logs)",
+      "wasm": "emitter.wasm",
+      "source": "emitter.rs",
+      "description": "Émet des logs d'événements — utile pour tester le flux SSE.",
+      "methods": [
+        { "selector": null, "name": "call", "args": [ { "name": "payload", "type": "bytes" } ], "note": "Voir la source pour le format exact." }
+      ]
+    }
+  ]
+}
