@@ -394,6 +394,16 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         }
     }
 
+    /** Logical header at the given height (1-based); served without the body for headers-first sync. */
+    public BlockHeader headerAt(long height) {
+        lock.lock();
+        try {
+            return store.headerAt(height);
+        } finally {
+            lock.unlock();
+        }
+    }
+
     /**
      * A timestamp acceptable for the next block: the caller's {@code preferred}
      * time, bumped above the median-time-past floor if a fast cadence would

@@ -17,6 +17,8 @@ import org.json.JSONObject;
 
 import rhizome.core.block.Block;
 import rhizome.core.block.BlockCodec;
+import rhizome.core.block.BlockHeader;
+import rhizome.core.block.HeaderCodec;
 import rhizome.core.blockchain.PeerSource;
 import rhizome.core.crypto.SHA256Hash;
 
@@ -40,6 +42,10 @@ public final class HttpPeerSource implements PeerSource {
     // buffered size is finite instead of whatever a hostile peer chooses to send.
     private static final long BLOCK_STREAM_CAP =
         (long) Constants.BLOCKS_PER_FETCH * Constants.MAX_BLOCK_SIZE_BYTES + 64 * 1024;
+    // Headers are tiny and fixed-ish (≈156 B + a few uncle records); 1 KiB each is a
+    // generous ceiling that still bounds a hostile /headers response hard.
+    private static final long HEADER_STREAM_CAP =
+        (long) Constants.BLOCK_HEADERS_PER_FETCH * 1024 + 64 * 1024;
 
     private final String baseUrl;
     private final HttpClient client;
@@ -70,11 +76,23 @@ public final class HttpPeerSource implements PeerSource {
         return BlockCodec.decodeAll(getBytes("/sync?start=" + start + "&end=" + end, BLOCK_STREAM_CAP));
     }
 
+    @Override
+    public List<BlockHeader> headers(long start, long end) {
+        // A peer predating the /headers endpoint answers 404; surface it as "unsupported"
+        // so the synchronizer falls back to full-block sync (D7) instead of banning.
+        byte[] body = getBytes("/headers?start=" + start + "&end=" + end, HEADER_STREAM_CAP, true);
+        return HeaderCodec.decodeAll(body);
+    }
+
     private String getString(String path, long maxBytes) {
         return new String(getBytes(path, maxBytes), StandardCharsets.UTF_8);
     }
 
     private byte[] getBytes(String path, long maxBytes) {
+        return getBytes(path, maxBytes, false);
+    }
+
+    private byte[] getBytes(String path, long maxBytes, boolean notFoundMeansUnsupported) {
         HttpRequest request = HttpRequest.newBuilder(URI.create(baseUrl + path))
             .timeout(Duration.ofSeconds(30))
             .GET()
@@ -83,6 +101,9 @@ public final class HttpPeerSource implements PeerSource {
             HttpResponse<InputStream> response = client.send(request, HttpResponse.BodyHandlers.ofInputStream());
             if (response.statusCode() != 200) {
                 response.body().close();
+                if (notFoundMeansUnsupported && response.statusCode() == 404) {
+                    throw new UnsupportedOperationException("peer lacks " + path);
+                }
                 throw new IOException("peer " + path + " returned " + response.statusCode());
             }
             try (InputStream in = response.body()) {

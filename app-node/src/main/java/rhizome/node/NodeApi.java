@@ -116,6 +116,7 @@ public final class NodeApi {
             .with(GET, "/logs", req -> guarded(() -> logs(node, req)))
             .with(GET, "/logs/stream", req -> guarded(() -> logStream(sse)))
             .with(GET, "/sync", req -> guarded(() -> sync(node, req)))
+            .with(GET, "/headers", req -> guarded(() -> headers(node, req)))
             .with(POST, "/add_transaction_json", req -> req.loadBody(SMALL_BODY).map(body -> guardedResponse(() -> {
                 Transaction t = Transaction.of(new JSONObject(body.getString(StandardCharsets.UTF_8)));
                 return statusResponse(node.submitTransaction(t));
@@ -498,6 +499,32 @@ public final class NodeApi {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         for (long h = start; h <= cappedEnd; h++) {
             byte[] encoded = BlockCodec.encode(node.block(h));
+            out.write(encoded, 0, encoded.length);
+        }
+        return HttpResponse.ok200()
+            .withHeader(HttpHeaders.CONTENT_TYPE, "application/octet-stream")
+            .withBody(out.toByteArray())
+            .build();
+    }
+
+    /**
+     * Streams a self-framing run of block headers ({@link rhizome.core.block.HeaderCodec}),
+     * the cheap path a headers-first peer validates before downloading any body. Bounded to
+     * {@code BLOCK_HEADERS_PER_FETCH}.
+     */
+    private static HttpResponse headers(NodeService node, HttpRequest req) {
+        long start = parseLong(req.getQueryParameter("start"));
+        long end = parseLong(req.getQueryParameter("end"));
+        if (start < 1 || end < start) {
+            return badRequest("invalid range");
+        }
+        if (end - start + 1 > Constants.BLOCK_HEADERS_PER_FETCH) {
+            return badRequest("range too large (max " + Constants.BLOCK_HEADERS_PER_FETCH + ")");
+        }
+        long cappedEnd = Math.min(end, node.blockCount());
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        for (long h = start; h <= cappedEnd; h++) {
+            byte[] encoded = rhizome.core.block.HeaderCodec.encode(node.header(h));
             out.write(encoded, 0, encoded.length);
         }
         return HttpResponse.ok200()

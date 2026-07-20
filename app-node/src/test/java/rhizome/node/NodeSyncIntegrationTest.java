@@ -12,6 +12,9 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
+import rhizome.core.block.BlockHeader;
 import rhizome.core.block.BlockImpl;
 import rhizome.core.blockchain.ChainEngine;
 import rhizome.core.blockchain.ChainSynchronizer;
@@ -109,5 +112,19 @@ class NodeSyncIntegrationTest {
         assertEquals(6, local.height());
         assertEquals(peer.totalWork(), local.totalWork());
         assertTrue(local.tipHash().equals(peer.blockHash(6)));
+    }
+
+    @Test
+    void servesHeadersThatHashMatchTheBlocks() {
+        var peer = new HttpPeerSource("http://localhost:" + port);
+        List<BlockHeader> hs = peer.headers(1, peer.height());
+        assertEquals(6, hs.size());
+        for (BlockHeader h : hs) {
+            // A header fetched over /headers must hash exactly as the full block does —
+            // the whole point of headers-first: verify PoW/chaining without the body.
+            assertEquals(peer.blockHash(h.id()), h.hash());
+        }
+        // Range is clamped to the tip, so an over-reaching request just returns what exists.
+        assertEquals(6, peer.headers(1, 999).size());
     }
 }

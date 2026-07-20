@@ -247,6 +247,11 @@ public final class NodeService {
         return engine.blockAt(height);
     }
 
+    /** Logical header at the given height — served without the body for headers-first sync. */
+    public rhizome.core.block.BlockHeader header(long height) {
+        return engine.headerAt(height);
+    }
+
     /** Blocks in the inclusive range, already clamped by the caller. */
     public List<Block> blocks(long start, long end) {
         List<Block> out = new ArrayList<>();
