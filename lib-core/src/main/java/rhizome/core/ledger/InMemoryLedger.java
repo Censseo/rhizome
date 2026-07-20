@@ -55,6 +55,11 @@ public final class InMemoryLedger implements Ledger {
         subtract(wallet, amt, "Cannot revert deposit below zero");
     }
 
+    @Override
+    public void forEachBalance(java.util.function.ObjLongConsumer<PublicAddress> consumer) {
+        balances.forEach(consumer::accept);
+    }
+
     private void add(PublicAddress wallet, TransactionAmount amt) {
         long current = getWalletValue(wallet).amount();
         balances.put(wallet, Math.addExact(current, amt.amount()));

@@ -24,9 +24,25 @@ public final class NodeService {
     private volatile java.util.function.Consumer<Transaction> onTransactionAccepted;
     private volatile PeerRegistry peers;
     private volatile java.util.function.LongFunction<List<ContractLog>> logSource;
+    private volatile java.util.function.LongFunction<List<rhizome.core.box.BoxProcessor.BoxEvent>> boxEventSource;
+    private volatile java.util.function.LongFunction<List<rhizome.core.token.TokenProcessor.TokenEvent>> tokenEventSource;
+    private volatile rhizome.core.blockchain.ContractProcessor contracts;
+    private volatile rhizome.core.state.snapshot.StateSource snapshotSource;
+    private volatile MaterializedSnapshot snapshot;
+
+    /** Entry bound per snapshot chunk (bytes are bounded separately by the exporter). */
+    static final int SNAPSHOT_CHUNK_ENTRIES = 4096;
+
+    /** A consistent full-state export frozen at one (pivotHeight, stateRoot) point. */
+    record MaterializedSnapshot(long pivotHeight, byte[] stateRoot, List<byte[]> chunks) {}
 
     /** Maximum blocks a single /logs catch-up scan spans, so agents poll in bounded chunks. */
     public static final int LOG_SCAN_WINDOW = 128;
+
+    /** Maximum boxes a single /scan query examines, so a scan runs in bounded, pollable chunks. */
+    public static final int BOX_SCAN_WINDOW = 512;
+
+    private final ScanRegistry scans = new ScanRegistry();
 
     public NodeService(ChainEngine engine, MemPool mempool) {
         this.engine = engine;
@@ -51,10 +67,130 @@ public final class NodeService {
         this.logSource = source;
     }
 
-    /** Event logs emitted by a specific block, or empty if none / no processor wired. */
+    /** Source of box lifecycle events by block height (the box processor). */
+    public void setBoxEventSource(java.util.function.LongFunction<List<rhizome.core.box.BoxProcessor.BoxEvent>> source) {
+        this.boxEventSource = source;
+    }
+
+    /**
+     * Event logs emitted by a block: contract logs plus box lifecycle events (mapped
+     * to the same {@code (contract, topic, data)} shape, with the box owner as contract,
+     * the event type as topic, and the box id as data), so agents watch both on one feed.
+     */
     public List<ContractLog> logsAt(long height) {
-        var source = logSource;
-        return source == null ? List.of() : source.apply(height);
+        var logs = logSource;
+        var boxes = boxEventSource;
+        var tokens = tokenEventSource;
+        List<ContractLog> out = new ArrayList<>(logs == null ? List.of() : logs.apply(height));
+        if (boxes != null) {
+            for (var e : boxes.apply(height)) {
+                out.add(new ContractLog(e.owner(), e.type().getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                    e.boxId()));
+            }
+        }
+        if (tokens != null) {
+            for (var e : tokens.apply(height)) {
+                out.add(new ContractLog(e.actor(), e.type().getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                    e.tokenId()));
+            }
+        }
+        return out;
+    }
+
+    /** Source of token lifecycle events by block height (the token processor). */
+    public void setTokenEventSource(java.util.function.LongFunction<List<rhizome.core.token.TokenProcessor.TokenEvent>> source) {
+        this.tokenEventSource = source;
+    }
+
+    /** Committed metadata for {@code tokenId}, or {@code null}. */
+    public rhizome.core.token.TokenMeta tokenMeta(byte[] tokenId) {
+        return engine.tokenMeta(tokenId);
+    }
+
+    /** Committed balance of {@code tokenId} held by {@code address}. */
+    public long tokenBalance(byte[] tokenId, byte[] address) {
+        return engine.tokenBalance(tokenId, address);
+    }
+
+    /** Token ids minted by {@code minter}, paginated after {@code afterId} (null = start). */
+    public List<byte[]> tokenIdsByMinter(byte[] minter, byte[] afterId, int limit) {
+        return engine.tokenIdsByMinter(minter, afterId, limit);
+    }
+
+    /** Token ids {@code address} holds, paginated after {@code afterId} (null = start). */
+    public List<byte[]> tokenIdsByHolder(byte[] address, byte[] afterId, int limit) {
+        return engine.tokenIdsByHolder(address, afterId, limit);
+    }
+
+    // ---- authenticated state ----
+
+    /** The current miner-voted box params: {@code [storageFeeFactor, minValuePerByte]}. */
+    public long[] voteableParams() {
+        return engine.voteableParams();
+    }
+
+    /** The current authenticated state root, or {@code null} if the accumulator is off. */
+    public byte[] stateRoot() {
+        return engine.stateRoot();
+    }
+
+    /** A membership proof for a state entry at the current root, or {@code null} if absent / off. */
+    public rhizome.core.state.StateProof stateProof(byte domain, byte[] rawKey) {
+        return engine.stateProof(domain, rawKey);
+    }
+
+    /** The contract processor, for read-only dry-run calls. */
+    public void setContracts(rhizome.core.blockchain.ContractProcessor contracts) {
+        this.contracts = contracts;
+    }
+
+    /** Whether read-only contract calls are available (a contract processor is wired). */
+    public boolean dryRunAvailable() {
+        return contracts != null;
+    }
+
+    /** Runs a read-only CALL against committed state, discarding writes (no ledger effect). */
+    public rhizome.core.blockchain.ContractProcessor.ContractResult dryRun(
+            PublicAddress from, PublicAddress to, byte[] input, long value, long gasLimit) {
+        return contracts.dryRun(from, to, input, value, gasLimit);
+    }
+
+    /** A box from committed state, or {@code null} if none / boxes disabled. */
+    public rhizome.core.box.Box box(byte[] id) {
+        return engine.box(id);
+    }
+
+    /** Box ids owned by {@code owner}, paginated after {@code afterId} (null = start). */
+    public List<byte[]> boxIdsByOwner(byte[] owner, byte[] afterId, int limit) {
+        return engine.boxIdsByOwner(owner, afterId, limit);
+    }
+
+    // ---- box scans (EIP-1) ----
+
+    /** Registers a declarative box scan; returns its node-local id. */
+    public int registerScan(rhizome.core.box.ScanPredicate predicate) {
+        return scans.register(predicate);
+    }
+
+    /** Removes a registered scan; true if it existed. */
+    public boolean deregisterScan(int scanId) {
+        return scans.deregister(scanId);
+    }
+
+    /** The predicate of a registered scan, or {@code null} if the id is unknown. */
+    public rhizome.core.box.ScanPredicate scanPredicate(int scanId) {
+        return scans.get(scanId);
+    }
+
+    /** All registered scans, id → predicate. */
+    public java.util.Map<Integer, rhizome.core.box.ScanPredicate> scans() {
+        return scans.all();
+    }
+
+    /** Evaluates a predicate over committed boxes, one bounded, pollable window at a time. */
+    public rhizome.core.box.BoxProcessor.ScanPage scan(
+            rhizome.core.box.ScanPredicate predicate, byte[] afterId, int limit) {
+        return engine.scanBoxes(predicate, afterId, limit, BOX_SCAN_WINDOW);
     }
 
     /**
@@ -107,6 +243,48 @@ public final class NodeService {
         return engine.height();
     }
 
+    /** Exclusive upper bound of pruned block bodies (0 = archive node). */
+    public long prunedBelow() {
+        return engine.prunedBelow();
+    }
+
+    /** Wires the state source that snapshot materialisation exports from. */
+    public void setSnapshotSource(rhizome.core.state.snapshot.StateSource source) {
+        this.snapshotSource = source;
+    }
+
+    /**
+     * Captures a fresh materialised snapshot of the full committed state under the engine
+     * lock, so every chunk corresponds to the single {@code (height, stateRoot)} pair it
+     * advertises. Replaces any previous snapshot. False when the node cannot export
+     * (no source wired, or no state accumulator producing roots).
+     */
+    public boolean materializeSnapshot() {
+        var source = snapshotSource;
+        if (source == null || engine.stateRoot() == null) {
+            return false;
+        }
+        this.snapshot = engine.withConsistentView(() -> {
+            List<byte[]> encoded = new ArrayList<>();
+            for (var chunk : rhizome.core.state.snapshot.StateSnapshotExporter.export(source, SNAPSHOT_CHUNK_ENTRIES)) {
+                encoded.add(chunk.encode());
+            }
+            return new MaterializedSnapshot(engine.height(), engine.stateRoot(), encoded);
+        });
+        return true;
+    }
+
+    /** The current materialised snapshot, or {@code null} if none has been captured. */
+    MaterializedSnapshot materializedSnapshot() {
+        return snapshot;
+    }
+
+    /** Height of the current materialised snapshot ({@code 0} when none). */
+    public long snapshotPivot() {
+        var snap = snapshot;
+        return snap == null ? 0 : snap.pivotHeight();
+    }
+
     public java.math.BigInteger totalWork() {
         return engine.totalWork();
     }
@@ -117,6 +295,11 @@ public final class NodeService {
 
     public Block block(long height) {
         return engine.blockAt(height);
+    }
+
+    /** Logical header at the given height — served without the body for headers-first sync. */
+    public rhizome.core.block.BlockHeader header(long height) {
+        return engine.headerAt(height);
     }
 
     /** Blocks in the inclusive range, already clamped by the caller. */

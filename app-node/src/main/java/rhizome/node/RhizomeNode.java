@@ -14,12 +14,20 @@ import org.slf4j.LoggerFactory;
 import rhizome.core.blockchain.BlockProducer;
 import rhizome.core.blockchain.ChainEngine;
 import rhizome.core.blockchain.ChainSynchronizer;
+import rhizome.core.blockchain.HeaderSynchronizer;
+import rhizome.core.blockchain.NetworkParameters;
 import rhizome.core.blockchain.SignatureVerifier;
 import rhizome.core.ledger.LedgerSnapshot;
 import rhizome.core.ledger.SnapshotLoader;
 import rhizome.core.mempool.MemPool;
+import rhizome.core.box.DefaultBoxProcessor;
+import rhizome.core.state.StateAccumulator;
+import rhizome.core.token.DefaultTokenProcessor;
+import rhizome.persistence.rocksdb.RocksDbBoxStore;
 import rhizome.persistence.rocksdb.RocksDbContractStore;
 import rhizome.persistence.rocksdb.RocksDbNodeStore;
+import rhizome.persistence.rocksdb.RocksDbStateStore;
+import rhizome.persistence.rocksdb.RocksDbTokenStore;
 import rhizome.vm.WasmContractProcessor;
 import rhizome.vm.WasmVm;
 
@@ -39,6 +47,9 @@ public final class RhizomeNode implements AutoCloseable {
 
     private RocksDbNodeStore store;
     private RocksDbContractStore contractStore;
+    private RocksDbBoxStore boxStore;
+    private RocksDbTokenStore tokenStore;
+    private RocksDbStateStore stateStore;
     private ChainEngine engine;
     private MemPool mempool;
     private NodeService service;
@@ -65,6 +76,38 @@ public final class RhizomeNode implements AutoCloseable {
     private static final int PENALTY_INVALID = 100;
     private static final int PENALTY_REORG_TOO_DEEP = 25;
     private static final int PENALTY_INCOMPATIBLE = 10;
+    /** Safety headroom above the deepest history the engine reads, when pruning. */
+    private static final int PRUNE_MARGIN = 128;
+
+    /**
+     * Retention (in blocks) for this node, from {@code RHIZOME_PRUNE}: absent/0 = archive
+     * (keep every body). A positive value must be at least the deepest history the engine may
+     * read — the reorg window, uncle depth, and the difficulty/median timestamp windows —
+     * plus a safety margin, or the node would prune a body it still needs. Enforced here so a
+     * misconfiguration fails fast at boot rather than mid-reorg.
+     */
+    private static int keepBlocks(NetworkParameters params) {
+        String env = System.getenv("RHIZOME_PRUNE");
+        if (env == null || env.isBlank()) {
+            return 0;
+        }
+        int requested;
+        try {
+            requested = Integer.parseInt(env.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException("RHIZOME_PRUNE must be an integer, was: " + env, e);
+        }
+        if (requested <= 0) {
+            return 0; // archive
+        }
+        int floor = Math.max(Math.max(params.maxReorgDepth(), params.uncleMaxDepth()),
+            Math.max(params.difficultyLookback(), params.medianTimeWindow())) + PRUNE_MARGIN;
+        if (requested < floor) {
+            throw new IllegalArgumentException("RHIZOME_PRUNE=" + requested
+                + " is below the safe floor of " + floor + " blocks (reorg/uncle/difficulty/median windows)");
+        }
+        return requested;
+    }
 
     public RhizomeNode(NodeConfig config) {
         this.config = config;
@@ -75,17 +118,55 @@ public final class RhizomeNode implements AutoCloseable {
             ? SnapshotLoader.fromFile(Path.of(config.snapshotPath().get()))
             : SnapshotLoader.empty(config.params().chainId());
 
-        store = new RocksDbNodeStore(config.dataDir());
+        store = new RocksDbNodeStore(config.dataDir(), keepBlocks(config.params()));
         contractStore = new RocksDbContractStore(config.dataDir() + "/contracts");
+        boxStore = new RocksDbBoxStore(config.dataDir() + "/boxes");
+        tokenStore = new RocksDbTokenStore(config.dataDir() + "/tokens");
+        stateStore = new RocksDbStateStore(config.dataDir() + "/state");
         verifier = new SignatureVerifier();
+
+        // RHIZOME_SYNC=snap on an empty data dir: adopt a peer's verified state snapshot at
+        // a buried pivot instead of replaying history; falls back to full sync when no peer
+        // offers a usable snapshot. The engine boot below then starts at the pivot.
+        if ("snap".equalsIgnoreCase(System.getenv("RHIZOME_SYNC")) && store.chainStore().height() == 0) {
+            for (String peerUrl : config.peers()) {
+                try {
+                    if (SnapshotBootstrap.bootstrap(config.params(), snapshot, store, boxStore, tokenStore,
+                            contractStore, stateStore, new HttpPeerSource(peerUrl), System.currentTimeMillis())) {
+                        break;
+                    }
+                } catch (RuntimeException e) {
+                    log.warn("Snap bootstrap from {} failed: {}", peerUrl, e.toString());
+                }
+            }
+        }
+
         var contractProcessor = new WasmContractProcessor(new WasmVm(), contractStore,
             config.params().maxReorgDepth());
+        var boxProcessor = new DefaultBoxProcessor(boxStore, config.params());
+        var tokenProcessor = new DefaultTokenProcessor(tokenStore, config.params());
+        // Authenticated state root over ledger + boxes + tokens (committed in each header).
+        var stateAccumulator = new StateAccumulator(stateStore, stateStore, config.params().maxReorgDepth());
+        // Contracts read data boxes (Ergo-style data inputs) through the box processor's
+        // session-aware view, so a box written earlier in the block is visible.
+        contractProcessor.setBoxReader(boxProcessor::get);
         engine = ChainEngine.init(config.params(), store.ledger(), store.chainStore(),
-            snapshot, null, System::currentTimeMillis, verifier, contractProcessor);
+            store.nonceStore(), snapshot, null, System::currentTimeMillis, verifier, contractProcessor,
+            boxProcessor, tokenProcessor, stateAccumulator);
         mempool = new MemPool(config.params(), verifier, engine, config.mempoolSize());
         service = new NodeService(engine, mempool);
-        // Expose contract event logs (by block height) so agents can watch on-chain state.
+        // Expose contract event logs and box lifecycle events (by block height) so agents
+        // can watch on-chain state on one feed.
         service.setLogSource(contractProcessor::logs);
+        service.setBoxEventSource(boxProcessor::events);
+        service.setTokenEventSource(tokenProcessor::events);
+        // Read-only dry-run calls (query contract state without a transaction).
+        service.setContracts(contractProcessor);
+        // Snap-sync source: this node can materialise and serve full-state snapshots,
+        // verifiable by peers against the state root committed in the pivot header.
+        service.setSnapshotSource(new rhizome.core.state.snapshot.DomainStateAdapter(
+            store.ledger(), store.nonceStore(), boxStore, tokenStore,
+            new rhizome.vm.ContractStateAdapter(contractStore), null));
 
         // Every node keeps a live peer set (seeded from config), serves /peers and
         // accepts announcements, so the network can self-organise from a few seeds.
@@ -142,6 +223,12 @@ public final class RhizomeNode implements AutoCloseable {
             producer = new BlockProducer(engine, mempool, miner, System::currentTimeMillis,
                 config.blockIntervalMs());
             producer.setOnProduced(broadcaster::broadcastBlock);
+            // Optional parameter vote this miner casts on each block (RHIZOME_VOTE):
+            // ±1 storageFeeFactor, ±2 minValuePerByte, 0/absent = abstain.
+            String vote = System.getenv("RHIZOME_VOTE");
+            if (vote != null && !vote.isBlank()) {
+                producer.setVote(Integer.parseInt(vote.trim()));
+            }
             producer.start();
         });
     }
@@ -157,11 +244,36 @@ public final class RhizomeNode implements AutoCloseable {
             config.syncPeriodMs(), config.syncPeriodMs(), TimeUnit.MILLISECONDS);
         syncScheduler.scheduleWithFixedDelay(discovery::round,
             config.syncPeriodMs(), config.syncPeriodMs(), TimeUnit.MILLISECONDS);
+        // Periodic snapshot materialisation (RHIZOME_SNAPSHOT_EVERY blocks, 0 = never):
+        // recapture once the chain has advanced a full interval past the last pivot, so a
+        // deep-enough snapshot is always on offer for snap-syncing peers.
+        long snapshotEvery = snapshotEveryBlocks();
+        if (snapshotEvery > 0) {
+            syncScheduler.scheduleWithFixedDelay(() -> {
+                if (engine.height() >= service.snapshotPivot() + snapshotEvery && service.materializeSnapshot()) {
+                    log.info("Materialized state snapshot at height {} ({} chunks)",
+                        service.snapshotPivot(), service.materializedSnapshot().chunks().size());
+                }
+            }, config.syncPeriodMs(), config.syncPeriodMs(), TimeUnit.MILLISECONDS);
+        }
+    }
+
+    /** Blocks between snapshot materialisations, from {@code RHIZOME_SNAPSHOT_EVERY} (default ~1 day). */
+    private static long snapshotEveryBlocks() {
+        String env = System.getenv("RHIZOME_SNAPSHOT_EVERY");
+        if (env == null || env.isBlank()) {
+            return 17_280;
+        }
+        try {
+            return Long.parseLong(env.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException("RHIZOME_SNAPSHOT_EVERY must be an integer, was: " + env, e);
+        }
     }
 
     /** One sync round across all known peers; peer failures are isolated. */
     public void syncRound() {
-        var synchronizer = new ChainSynchronizer(engine);
+        var synchronizer = new HeaderSynchronizer(engine);
         for (String peerUrl : registry.snapshot()) {
             if (registry.isBanned(peerUrl)) {
                 continue;
@@ -174,6 +286,8 @@ public final class RhizomeNode implements AutoCloseable {
                     case PEER_INVALID -> penalize(peerUrl, PENALTY_INVALID, "served an invalid chain");
                     case REORG_TOO_DEEP -> penalize(peerUrl, PENALTY_REORG_TOO_DEEP, "reorg past finality");
                     case INCOMPATIBLE -> penalize(peerUrl, PENALTY_INCOMPATIBLE, "wrong network / genesis");
+                    case PEER_PRUNED ->
+                        log.debug("Peer {} pruned the bodies we need; trying another source", peerUrl);
                     case NO_CHANGE -> { /* healthy, nothing to do */ }
                 }
             } catch (HttpPeerSource.PeerUnavailableException e) {
@@ -259,6 +373,15 @@ public final class RhizomeNode implements AutoCloseable {
         }
         if (contractStore != null) {
             contractStore.close();
+        }
+        if (boxStore != null) {
+            boxStore.close();
+        }
+        if (tokenStore != null) {
+            tokenStore.close();
+        }
+        if (stateStore != null) {
+            stateStore.close();
         }
     }
 

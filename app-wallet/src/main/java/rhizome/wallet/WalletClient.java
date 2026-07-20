@@ -45,6 +45,45 @@ public final class WalletClient {
         return new JSONObject(sendForString(request)).getString("status");
     }
 
+    /** Raw JSON of a read-only contract call (dry run) against committed state. */
+    public String callReadonly(PublicAddress contract, byte[] input) {
+        JSONObject body = new JSONObject().put("to", contract.toHexString());
+        if (input.length > 0) {
+            body.put("input", rhizome.core.common.Utils.bytesToHex(input));
+        }
+        HttpRequest request = HttpRequest.newBuilder(URI.create(baseUrl + "/call_readonly"))
+            .timeout(Duration.ofSeconds(30))
+            .header("Content-Type", "application/json")
+            .POST(HttpRequest.BodyPublishers.ofString(body.toString()))
+            .build();
+        return sendForString(request);
+    }
+
+    /** Raw JSON of a token's metadata by id. */
+    public String token(String tokenIdHex) {
+        return get("/token?id=" + tokenIdHex);
+    }
+
+    /** Raw JSON of a token balance for an address. */
+    public String tokenBalance(String tokenIdHex, PublicAddress address) {
+        return get("/token_balance?id=" + tokenIdHex + "&address=" + address.toHexString());
+    }
+
+    /** Raw JSON of the tokens held by an address. */
+    public String tokensByHolder(PublicAddress holder) {
+        return get("/tokens?holder=" + holder.toHexString());
+    }
+
+    /** Raw JSON of a box by id (or the node's error JSON), for the box CLI to print. */
+    public String box(String boxIdHex) {
+        return get("/box?id=" + boxIdHex);
+    }
+
+    /** Raw JSON of the boxes owned by an address. */
+    public String boxesByOwner(PublicAddress owner) {
+        return get("/boxes?owner=" + owner.toHexString());
+    }
+
     private String get(String path) {
         return sendForString(HttpRequest.newBuilder(URI.create(baseUrl + path))
             .timeout(Duration.ofSeconds(15)).GET().build());

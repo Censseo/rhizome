@@ -89,4 +89,36 @@ public final class Wallet {
             .build();
         return t.sign(privateKey);
     }
+
+    /**
+     * Signs a box transaction (BOX_CREATE/UPDATE/SPEND). Box ops run no VM and carry no
+     * gas; {@code value} is the amount locked into the box (CREATE) or a top-up (UPDATE).
+     */
+    public Transaction signedBox(rhizome.core.transaction.TransactionKind kind, PublicAddress to,
+                                 byte[] data, long value, long fee,
+                                 int chainId, long nonce, long timestamp) {
+        Transaction t = rhizome.core.transaction.TransactionImpl.builder()
+            .from(address).to(to)
+            .amount(new TransactionAmount(value)).fee(new TransactionAmount(fee))
+            .timestamp(timestamp).chainId(chainId).nonce(nonce).signingKey(publicKey)
+            .kind(kind).data(data).gasLimit(0).gasPrice(0)
+            .build();
+        return t.sign(privateKey);
+    }
+
+    /**
+     * Signs a native-token transaction (TOKEN_MINT/TRANSFER/BURN). Token ops carry no gas
+     * and move no PDN — the token amount is in {@code data}; {@code to} is the recipient
+     * for mint/transfer (ignored for burn). Only the {@code fee} moves in PDN.
+     */
+    public Transaction signedToken(rhizome.core.transaction.TransactionKind kind, PublicAddress to,
+                                   byte[] data, long fee, int chainId, long nonce, long timestamp) {
+        Transaction t = rhizome.core.transaction.TransactionImpl.builder()
+            .from(address).to(to)
+            .amount(new TransactionAmount(0)).fee(new TransactionAmount(fee))
+            .timestamp(timestamp).chainId(chainId).nonce(nonce).signingKey(publicKey)
+            .kind(kind).data(data).gasLimit(0).gasPrice(0)
+            .build();
+        return t.sign(privateKey);
+    }
 }

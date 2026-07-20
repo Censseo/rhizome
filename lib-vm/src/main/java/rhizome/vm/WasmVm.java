@@ -151,6 +151,22 @@ public final class WasmVm {
             List.of(ValType.I32, ValType.I32), List.of(ValType.I32),
             (Instance inst, long... args) -> new long[] {copyOut(inst, host.selfAddress(), args[0], args[1], gas)});
 
+        // box_read(id_ptr, out_ptr, out_cap) -> i32: reads the 32-byte box id at id_ptr,
+        // copies the serialized box (up to out_cap bytes) to out_ptr and returns its true
+        // length, or -1 if no box exists. A read-only data input — the box is not consumed.
+        HostFunction boxRead = new HostFunction(ENV, "box_read",
+            List.of(ValType.I32, ValType.I32, ValType.I32), List.of(ValType.I32),
+            (Instance inst, long... args) -> {
+                Memory mem = inst.memory();
+                byte[] id = mem.readBytes(asOffset(args[0]), 32);
+                gas.charge(GasSchedule.BOX_READ_BASE);
+                rhizome.core.box.Box box = host.boxRead(id);
+                if (box == null) {
+                    return new long[] {-1L};
+                }
+                return new long[] {copyOut(inst, box.serialize(), args[1], args[2], gas)};
+            });
+
         // call_contract(addr_ptr, addr_len, in_ptr, in_len, out_ptr, out_cap) -> i32:
         // the callee's output length (copied up to out_cap bytes), or -1 if the call
         // failed. The dispatcher runs the callee in its own state frame, so a failed
@@ -172,7 +188,8 @@ public final class WasmVm {
             });
 
         return new HostFunction[] {
-            storageRead, storageWrite, setOutput, emitLog, getCaller, getInput, getValue, getSelf, callContract};
+            storageRead, storageWrite, setOutput, emitLog, getCaller, getInput, getValue, getSelf,
+            callContract, boxRead};
     }
 
     /** Copies {@code src} into contract memory (at most {@code cap} bytes) and returns its true length. */

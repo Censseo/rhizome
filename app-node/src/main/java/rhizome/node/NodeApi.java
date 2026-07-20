@@ -71,7 +71,11 @@ public final class NodeApi {
                 .put("network", node.networkName())
                 .put("height", node.blockCount())
                 .put("difficulty", node.difficulty())
-                .put("mempool", node.mempoolSize()))))
+                .put("mempool", node.mempoolSize())
+                .put("prunedBelow", node.prunedBelow())
+                .put("snapshotPivot", node.snapshotPivot())
+                .put("storageFeeFactor", node.voteableParams()[0])
+                .put("minValuePerByte", node.voteableParams()[1]))))
             .with(GET, "/peers", req -> ok(json(new JSONObject()
                 .put("peers", new org.json.JSONArray(node.knownPeers())))))
             .with(POST, "/add_peer", req -> req.loadBody(SMALL_BODY).map(body -> guardedResponse(() -> {
@@ -93,9 +97,30 @@ public final class NodeApi {
                     .put("balance", node.balance(wallet))
                     .put("nextNonce", node.nextNonce(wallet)));
             }))
+            .with(GET, "/box", req -> guarded(() -> box(node, req)))
+            .with(GET, "/boxes", req -> guarded(() -> boxes(node, req)))
+            .with(POST, "/scan/register", req -> req.loadBody(SMALL_BODY).map(body -> guardedResponse(() -> {
+                int id = node.registerScan(rhizome.core.box.ScanPredicate.fromJson(
+                    new JSONObject(body.getString(StandardCharsets.UTF_8))));
+                return json(new JSONObject().put("scanId", id));
+            })))
+            .with(POST, "/scan/deregister", req -> req.loadBody(SMALL_BODY).map(body -> guardedResponse(() -> {
+                int id = new JSONObject(body.getString(StandardCharsets.UTF_8)).getInt("scanId");
+                return json(new JSONObject().put("removed", node.deregisterScan(id)));
+            })))
+            .with(GET, "/scan/list", req -> guarded(() -> scanList(node)))
+            .with(GET, "/scan/boxes", req -> guarded(() -> scanBoxes(node, req)))
+            .with(GET, "/token", req -> guarded(() -> token(node, req)))
+            .with(GET, "/token_balance", req -> guarded(() -> tokenBalance(node, req)))
+            .with(GET, "/tokens", req -> guarded(() -> tokens(node, req)))
+            .with(GET, "/state", req -> guarded(() -> state(node)))
+            .with(GET, "/state/proof", req -> guarded(() -> stateProof(node, req)))
+            .with(GET, "/state/snapshot/info", req -> guarded(() -> snapshotInfo(node)))
+            .with(GET, "/state/snapshot/chunk", req -> guarded(() -> snapshotChunk(node, req)))
             .with(GET, "/logs", req -> guarded(() -> logs(node, req)))
             .with(GET, "/logs/stream", req -> guarded(() -> logStream(sse)))
             .with(GET, "/sync", req -> guarded(() -> sync(node, req)))
+            .with(GET, "/headers", req -> guarded(() -> headers(node, req)))
             .with(POST, "/add_transaction_json", req -> req.loadBody(SMALL_BODY).map(body -> guardedResponse(() -> {
                 Transaction t = Transaction.of(new JSONObject(body.getString(StandardCharsets.UTF_8)));
                 return statusResponse(node.submitTransaction(t));
@@ -108,6 +133,8 @@ public final class NodeApi {
                 Block block = BlockCodec.decode(body.getArray());
                 return statusResponse(node.submitBlock(block));
             })))
+            .with(POST, "/call_readonly", req -> req.loadBody(TX_BODY).map(body -> guardedResponse(() ->
+                callReadonly(node, new JSONObject(body.getString(StandardCharsets.UTF_8))))))
             .build();
 
         return request -> {
@@ -189,6 +216,265 @@ public final class NodeApi {
             .build();
     }
 
+    /**
+     * Read-only contract call (dry run): {@code POST /call_readonly} with a JSON body
+     * {@code {to, input?, from?, value?, gasLimit?}}. Runs the CALL against committed
+     * state, discards all writes, and returns the would-be result — for querying
+     * contract state without submitting a transaction. 503 if contracts are not wired.
+     */
+    private static HttpResponse callReadonly(NodeService node, JSONObject body) {
+        if (!node.dryRunAvailable()) {
+            return HttpResponse.ofCode(503)
+                .withJson(new JSONObject().put("error", "contracts unavailable").toString()).build();
+        }
+        PublicAddress to = PublicAddress.of(body.getString("to"));
+        PublicAddress from = body.has("from") && !body.getString("from").isEmpty()
+            ? PublicAddress.of(body.getString("from")) : PublicAddress.empty();
+        byte[] input = body.has("input") && !body.getString("input").isEmpty()
+            ? rhizome.core.common.Utils.hexStringToByteArray(body.getString("input")) : new byte[0];
+        long value = body.optLong("value", 0);
+        long gasLimit = body.optLong("gasLimit", 10_000_000L);
+
+        var result = node.dryRun(from, to, input, value, gasLimit);
+        org.json.JSONArray logs = new org.json.JSONArray();
+        for (var log : result.logs()) {
+            logs.put(logJson(log));
+        }
+        return json(new JSONObject()
+            .put("success", result.success())
+            .put("output", hex(result.output()))
+            .put("gasUsed", result.gasUsed())
+            .put("error", result.error() == null ? JSONObject.NULL : result.error())
+            .put("logs", logs));
+    }
+
+    /** A single data box by id: {@code GET /box?id=<hex64>}; 404 if absent. */
+    private static HttpResponse box(NodeService node, HttpRequest req) {
+        byte[] id = rhizome.core.common.Utils.hexStringToByteArray(req.getQueryParameter("id"));
+        if (id.length != 32) {
+            return badRequest("id must be 32 bytes (64 hex chars)");
+        }
+        rhizome.core.box.Box b = node.box(id);
+        if (b == null) {
+            return HttpResponse.ofCode(404)
+                .withJson(new JSONObject().put("error", "box not found").toString())
+                .build();
+        }
+        return json(boxJson(b, node.params().storagePeriodBlocks()));
+    }
+
+    /** Boxes owned by an address: {@code GET /boxes?owner=<hex50>&limit=&after=<boxIdHex>}. */
+    private static HttpResponse boxes(NodeService node, HttpRequest req) {
+        byte[] owner = rhizome.core.common.Utils.hexStringToByteArray(req.getQueryParameter("owner"));
+        if (owner.length != PublicAddress.SIZE) {
+            return badRequest("owner must be 25 bytes (50 hex chars)");
+        }
+        String limitParam = req.getQueryParameter("limit");
+        int limit = limitParam == null ? 50 : Math.min(100, Math.max(1, (int) parseLong(limitParam)));
+        String afterParam = req.getQueryParameter("after");
+        byte[] after = afterParam == null || afterParam.isEmpty()
+            ? null : rhizome.core.common.Utils.hexStringToByteArray(afterParam);
+
+        long period = node.params().storagePeriodBlocks();
+        org.json.JSONArray arr = new org.json.JSONArray();
+        byte[] last = null;
+        for (byte[] id : node.boxIdsByOwner(owner, after, limit)) {
+            rhizome.core.box.Box b = node.box(id);
+            if (b != null) {
+                arr.put(boxJson(b, period));
+            }
+            last = id;
+        }
+        JSONObject result = new JSONObject()
+            .put("owner", rhizome.core.common.Utils.bytesToHex(owner))
+            .put("boxes", arr);
+        if (last != null) {
+            result.put("next", rhizome.core.common.Utils.bytesToHex(last));
+        }
+        return json(result);
+    }
+
+    /** The current authenticated state root: {@code GET /state}. */
+    private static HttpResponse state(NodeService node) {
+        byte[] root = node.stateRoot();
+        return json(new JSONObject().put("stateRoot", root == null ? JSONObject.NULL : hex(root)));
+    }
+
+    /**
+     * A light-client membership proof: {@code GET /state/proof?domain=<d>&key=<hex>}, where
+     * {@code d} is {@code ledger}/{@code box}/{@code token_meta}/{@code token_balance}. Returns
+     * the root, the bound value hash and the sibling hashes; the client re-derives the SMT key
+     * from {@code (domain, key)} and folds the siblings to check it against the root. 404 if absent.
+     */
+    private static HttpResponse stateProof(NodeService node, HttpRequest req) {
+        byte[] root = node.stateRoot();
+        if (root == null) {
+            return HttpResponse.ofCode(503)
+                .withJson(new JSONObject().put("error", "state root unavailable").toString()).build();
+        }
+        Byte domain = stateDomain(req.getQueryParameter("domain"));
+        if (domain == null) {
+            return badRequest("domain must be ledger|box|token_meta|token_balance|contract_code|contract_storage");
+        }
+        byte[] key = rhizome.core.common.Utils.hexStringToByteArray(req.getQueryParameter("key"));
+        rhizome.core.state.StateProof proof = node.stateProof(domain, key);
+        if (proof == null) {
+            return HttpResponse.ofCode(404)
+                .withJson(new JSONObject().put("error", "no such state entry").toString()).build();
+        }
+        org.json.JSONArray siblings = new org.json.JSONArray();
+        for (byte[] s : proof.siblings()) {
+            siblings.put(hex(s));
+        }
+        return json(new JSONObject()
+            .put("root", hex(root))
+            .put("valueHash", hex(proof.valueHash()))
+            .put("siblings", siblings));
+    }
+
+    private static Byte stateDomain(String name) {
+        if (name == null) {
+            return null;
+        }
+        return switch (name) {
+            case "ledger" -> rhizome.core.state.StateKeys.LEDGER;
+            case "box" -> rhizome.core.state.StateKeys.BOX;
+            case "token_meta" -> rhizome.core.state.StateKeys.TOKEN_META;
+            case "token_balance" -> rhizome.core.state.StateKeys.TOKEN_BALANCE;
+            case "contract_code" -> rhizome.core.state.StateKeys.CONTRACT_CODE;
+            case "contract_storage" -> rhizome.core.state.StateKeys.CONTRACT_STORAGE;
+            default -> null;
+        };
+    }
+
+    /** Native token metadata: {@code GET /token?id=<hex64>}; 404 if absent. */
+    private static HttpResponse token(NodeService node, HttpRequest req) {
+        byte[] id = rhizome.core.common.Utils.hexStringToByteArray(req.getQueryParameter("id"));
+        if (id.length != 32) {
+            return badRequest("id must be 32 bytes (64 hex chars)");
+        }
+        rhizome.core.token.TokenMeta meta = node.tokenMeta(id);
+        if (meta == null) {
+            return HttpResponse.ofCode(404)
+                .withJson(new JSONObject().put("error", "token not found").toString()).build();
+        }
+        return json(tokenJson(meta));
+    }
+
+    /** Token balance: {@code GET /token_balance?id=<hex64>&address=<hex50>}. */
+    private static HttpResponse tokenBalance(NodeService node, HttpRequest req) {
+        byte[] id = rhizome.core.common.Utils.hexStringToByteArray(req.getQueryParameter("id"));
+        byte[] address = rhizome.core.common.Utils.hexStringToByteArray(req.getQueryParameter("address"));
+        if (id.length != 32 || address.length != PublicAddress.SIZE) {
+            return badRequest("id must be 32 bytes and address 25 bytes");
+        }
+        return json(new JSONObject()
+            .put("token", hex(id))
+            .put("address", hex(address))
+            .put("balance", node.tokenBalance(id, address)));
+    }
+
+    /** Tokens by minter or holder: {@code GET /tokens?minter=<hex50>} or {@code ?holder=<hex50>}. */
+    private static HttpResponse tokens(NodeService node, HttpRequest req) {
+        String minter = req.getQueryParameter("minter");
+        String holder = req.getQueryParameter("holder");
+        byte[] key;
+        java.util.List<byte[]> ids;
+        if (minter != null) {
+            key = rhizome.core.common.Utils.hexStringToByteArray(minter);
+            ids = node.tokenIdsByMinter(key, null, 100);
+        } else if (holder != null) {
+            key = rhizome.core.common.Utils.hexStringToByteArray(holder);
+            ids = node.tokenIdsByHolder(key, null, 100);
+        } else {
+            return badRequest("provide minter= or holder=");
+        }
+        if (key.length != PublicAddress.SIZE) {
+            return badRequest("address must be 25 bytes (50 hex chars)");
+        }
+        org.json.JSONArray arr = new org.json.JSONArray();
+        for (byte[] id : ids) {
+            rhizome.core.token.TokenMeta meta = node.tokenMeta(id);
+            if (meta != null) {
+                JSONObject entry = tokenJson(meta);
+                if (holder != null) {
+                    entry.put("balance", node.tokenBalance(id, key));
+                }
+                arr.put(entry);
+            }
+        }
+        return json(new JSONObject().put("tokens", arr));
+    }
+
+    private static JSONObject tokenJson(rhizome.core.token.TokenMeta meta) {
+        return new JSONObject()
+            .put("id", hex(meta.id()))
+            .put("minter", meta.minter().toHexString())
+            .put("symbol", meta.symbol())
+            .put("name", meta.name())
+            .put("decimals", meta.decimals())
+            .put("totalSupply", meta.totalSupply())
+            .put("createdHeight", meta.createdHeight());
+    }
+
+    /** Registered box scans: {@code GET /scan/list}. */
+    private static HttpResponse scanList(NodeService node) {
+        org.json.JSONArray arr = new org.json.JSONArray();
+        node.scans().forEach((id, predicate) ->
+            arr.put(new JSONObject().put("scanId", id).put("predicate", predicate.toJson())));
+        return json(new JSONObject().put("scans", arr));
+    }
+
+    /**
+     * Boxes matching a scan: {@code GET /scan/boxes?scanId=N&limit=&after=<boxIdHex>}. The
+     * response's {@code next} cursor (a box id) resumes a bounded scan; absent when done.
+     */
+    private static HttpResponse scanBoxes(NodeService node, HttpRequest req) {
+        rhizome.core.box.ScanPredicate predicate = node.scanPredicate((int) parseLong(req.getQueryParameter("scanId")));
+        if (predicate == null) {
+            return badRequest("unknown scanId");
+        }
+        String limitParam = req.getQueryParameter("limit");
+        int limit = limitParam == null ? 50 : Math.min(100, Math.max(1, (int) parseLong(limitParam)));
+        String afterParam = req.getQueryParameter("after");
+        byte[] after = afterParam == null || afterParam.isEmpty()
+            ? null : rhizome.core.common.Utils.hexStringToByteArray(afterParam);
+
+        long period = node.params().storagePeriodBlocks();
+        var page = node.scan(predicate, after, limit);
+        org.json.JSONArray arr = new org.json.JSONArray();
+        for (rhizome.core.box.Box b : page.matches()) {
+            arr.put(boxJson(b, period));
+        }
+        JSONObject result = new JSONObject().put("boxes", arr);
+        if (page.nextCursor() != null) {
+            result.put("next", hex(page.nextCursor()));
+        }
+        return json(result);
+    }
+
+    private static JSONObject boxJson(rhizome.core.box.Box b, long storagePeriodBlocks) {
+        org.json.JSONArray registers = new org.json.JSONArray();
+        for (rhizome.core.box.BoxRegister r : b.registers()) {
+            JSONObject reg = new JSONObject()
+                .put("type", r.type().name())
+                .put("hex", hex(r.payload()));
+            if (r.type() == rhizome.core.box.BoxRegisterType.STRING) {
+                reg.put("string", new String(r.payload(), StandardCharsets.UTF_8));
+            }
+            registers.put(reg);
+        }
+        return new JSONObject()
+            .put("id", hex(b.id()))
+            .put("owner", b.owner().toHexString())
+            .put("value", b.value())
+            .put("createdHeight", b.createdHeight())
+            .put("rentPaidHeight", b.rentPaidHeight())
+            .put("expiresAtHeight", b.expiryHeight(storagePeriodBlocks))
+            .put("sizeBytes", b.serializedSize())
+            .put("registers", registers);
+    }
+
     private static JSONObject logJson(rhizome.core.blockchain.ContractProcessor.ContractLog log) {
         return new JSONObject()
             .put("contract", log.contract().toHexString())
@@ -213,6 +499,14 @@ public final class NodeApi {
         if (end - start + 1 > Constants.BLOCKS_PER_FETCH) {
             return badRequest("range too large (max " + Constants.BLOCKS_PER_FETCH + ")");
         }
+        // Pruned node: the requested range dips into bodies we have discarded. Answer 410 GONE
+        // with the watermark so the caller sources these blocks (or a snapshot) from an archive.
+        long prunedBelow = node.prunedBelow();
+        if (prunedBelow > 0 && start < prunedBelow) {
+            return HttpResponse.ofCode(410)
+                .withJson(new JSONObject().put("error", "pruned").put("prunedBelow", prunedBelow).toString())
+                .build();
+        }
         long cappedEnd = Math.min(end, node.blockCount());
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         for (long h = start; h <= cappedEnd; h++) {
@@ -222,6 +516,61 @@ public final class NodeApi {
         return HttpResponse.ok200()
             .withHeader(HttpHeaders.CONTENT_TYPE, "application/octet-stream")
             .withBody(out.toByteArray())
+            .build();
+    }
+
+    /**
+     * Streams a self-framing run of block headers ({@link rhizome.core.block.HeaderCodec}),
+     * the cheap path a headers-first peer validates before downloading any body. Bounded to
+     * {@code BLOCK_HEADERS_PER_FETCH}.
+     */
+    private static HttpResponse headers(NodeService node, HttpRequest req) {
+        long start = parseLong(req.getQueryParameter("start"));
+        long end = parseLong(req.getQueryParameter("end"));
+        if (start < 1 || end < start) {
+            return badRequest("invalid range");
+        }
+        if (end - start + 1 > Constants.BLOCK_HEADERS_PER_FETCH) {
+            return badRequest("range too large (max " + Constants.BLOCK_HEADERS_PER_FETCH + ")");
+        }
+        long cappedEnd = Math.min(end, node.blockCount());
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        for (long h = start; h <= cappedEnd; h++) {
+            byte[] encoded = rhizome.core.block.HeaderCodec.encode(node.header(h));
+            out.write(encoded, 0, encoded.length);
+        }
+        return HttpResponse.ok200()
+            .withHeader(HttpHeaders.CONTENT_TYPE, "application/octet-stream")
+            .withBody(out.toByteArray())
+            .build();
+    }
+
+    /** Advertises the materialised state snapshot ({@code 404} when none has been captured). */
+    private static HttpResponse snapshotInfo(NodeService node) {
+        var snap = node.materializedSnapshot();
+        if (snap == null) {
+            return HttpResponse.ofCode(404)
+                .withJson(new JSONObject().put("error", "no snapshot materialized").toString())
+                .build();
+        }
+        return json(new JSONObject()
+            .put("pivotHeight", snap.pivotHeight())
+            .put("stateRoot", rhizome.core.common.Utils.bytesToHex(snap.stateRoot()))
+            .put("chunks", snap.chunks().size()));
+    }
+
+    /** One binary snapshot chunk by index (bounds-checked against the current materialisation). */
+    private static HttpResponse snapshotChunk(NodeService node, HttpRequest req) {
+        var snap = node.materializedSnapshot();
+        int index = (int) parseLong(req.getQueryParameter("index"));
+        if (snap == null || index < 0 || index >= snap.chunks().size()) {
+            return HttpResponse.ofCode(404)
+                .withJson(new JSONObject().put("error", "no such snapshot chunk").toString())
+                .build();
+        }
+        return HttpResponse.ok200()
+            .withHeader(HttpHeaders.CONTENT_TYPE, "application/octet-stream")
+            .withBody(snap.chunks().get(index))
             .build();
     }
 

@@ -9,6 +9,7 @@ import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.LongSupplier;
 
 import rhizome.core.block.Block;
+import rhizome.core.block.BlockHeader;
 import rhizome.core.block.BlockImpl;
 import rhizome.core.block.UncleRef;
 import rhizome.core.crypto.SHA256Hash;
@@ -54,11 +55,15 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
     private final LongSupplier nowMillis;
     private final SignatureVerifier verifier;
     private final ContractProcessor contractProcessor;
+    private final rhizome.core.box.BoxProcessor boxProcessor;
+    private final rhizome.core.token.TokenProcessor tokenProcessor;
+    private final rhizome.core.state.StateAccumulator stateAccumulator;
+    private LedgerSnapshot genesisSnapshot;
     private final OrphanPool orphans = new OrphanPool(256);
     private final ReentrantLock lock = new ReentrantLock();
 
-    /** Next expected account nonce per sender; rebuilt on init, updated on add/pop. */
-    private final Map<rhizome.core.ledger.PublicAddress, Long> nextNonce = new HashMap<>();
+    /** Next expected account nonce per sender; persisted, updated incrementally on add/pop. */
+    private final NonceStore nonceStore;
 
     private BigInteger totalWork = BigInteger.ZERO;
     private int currentDifficulty;
@@ -67,15 +72,31 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
     private final Map<Long, BigInteger> uncleWorkByHeight = new HashMap<>();
     private volatile java.util.function.LongConsumer onBlockApplied;
 
+    /**
+     * Votable box params established at each completed voting-epoch boundary (height →
+     * {storageFeeFactor, minValuePerByte}). The current values are the last entry (or the
+     * defaults); recomputed at each boundary from that epoch's block votes and simply
+     * dropped on a pop, so it is reorg-safe without a reversible tally.
+     */
+    private final java.util.TreeMap<Long, long[]> voteParamsByBoundary = new java.util.TreeMap<>();
+
     private ChainEngine(NetworkParameters params, Ledger ledger, ChainStore store,
+                        NonceStore nonceStore,
                         LongSupplier nowMillis, SignatureVerifier verifier,
-                        ContractProcessor contractProcessor) {
+                        ContractProcessor contractProcessor,
+                        rhizome.core.box.BoxProcessor boxProcessor,
+                        rhizome.core.token.TokenProcessor tokenProcessor,
+                        rhizome.core.state.StateAccumulator stateAccumulator) {
         this.params = params;
         this.ledger = ledger;
         this.store = store;
+        this.nonceStore = nonceStore;
         this.nowMillis = nowMillis;
         this.verifier = verifier;
         this.contractProcessor = contractProcessor;
+        this.boxProcessor = boxProcessor;
+        this.tokenProcessor = tokenProcessor;
+        this.stateAccumulator = stateAccumulator;
     }
 
     /**
@@ -102,7 +123,58 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
                                    LedgerSnapshot snapshot, SHA256Hash expectedGenesisHash,
                                    LongSupplier nowMillis, SignatureVerifier verifier,
                                    ContractProcessor contractProcessor) {
-        ChainEngine engine = new ChainEngine(params, ledger, store, nowMillis, verifier, contractProcessor);
+        return init(params, ledger, store, snapshot, expectedGenesisHash, nowMillis, verifier,
+            contractProcessor, null);
+    }
+
+    /** As {@link #init}, additionally enabling box transactions via a {@link rhizome.core.box.BoxProcessor}. */
+    public static ChainEngine init(NetworkParameters params, Ledger ledger, ChainStore store,
+                                   LedgerSnapshot snapshot, SHA256Hash expectedGenesisHash,
+                                   LongSupplier nowMillis, SignatureVerifier verifier,
+                                   ContractProcessor contractProcessor,
+                                   rhizome.core.box.BoxProcessor boxProcessor) {
+        return init(params, ledger, store, snapshot, expectedGenesisHash, nowMillis, verifier,
+            contractProcessor, boxProcessor, null);
+    }
+
+    /** As {@link #init}, additionally enabling native-token transactions via a {@link rhizome.core.token.TokenProcessor}. */
+    public static ChainEngine init(NetworkParameters params, Ledger ledger, ChainStore store,
+                                   LedgerSnapshot snapshot, SHA256Hash expectedGenesisHash,
+                                   LongSupplier nowMillis, SignatureVerifier verifier,
+                                   ContractProcessor contractProcessor,
+                                   rhizome.core.box.BoxProcessor boxProcessor,
+                                   rhizome.core.token.TokenProcessor tokenProcessor) {
+        return init(params, ledger, store, snapshot, expectedGenesisHash, nowMillis, verifier,
+            contractProcessor, boxProcessor, tokenProcessor, null);
+    }
+
+    /** As {@link #init}, additionally committing an authenticated state root via a {@link rhizome.core.state.StateAccumulator}. */
+    public static ChainEngine init(NetworkParameters params, Ledger ledger, ChainStore store,
+                                   LedgerSnapshot snapshot, SHA256Hash expectedGenesisHash,
+                                   LongSupplier nowMillis, SignatureVerifier verifier,
+                                   ContractProcessor contractProcessor,
+                                   rhizome.core.box.BoxProcessor boxProcessor,
+                                   rhizome.core.token.TokenProcessor tokenProcessor,
+                                   rhizome.core.state.StateAccumulator stateAccumulator) {
+        return init(params, ledger, store, new InMemoryNonceStore(), snapshot, expectedGenesisHash,
+            nowMillis, verifier, contractProcessor, boxProcessor, tokenProcessor, stateAccumulator);
+    }
+
+    /**
+     * As {@link #init}, with a persisted {@link NonceStore} so account nonces survive
+     * restarts and the boot rebuild need not walk historical transaction bodies.
+     */
+    public static ChainEngine init(NetworkParameters params, Ledger ledger, ChainStore store,
+                                   NonceStore nonceStore,
+                                   LedgerSnapshot snapshot, SHA256Hash expectedGenesisHash,
+                                   LongSupplier nowMillis, SignatureVerifier verifier,
+                                   ContractProcessor contractProcessor,
+                                   rhizome.core.box.BoxProcessor boxProcessor,
+                                   rhizome.core.token.TokenProcessor tokenProcessor,
+                                   rhizome.core.state.StateAccumulator stateAccumulator) {
+        ChainEngine engine = new ChainEngine(params, ledger, store, nonceStore, nowMillis, verifier,
+            contractProcessor, boxProcessor, tokenProcessor, stateAccumulator);
+        engine.genesisSnapshot = snapshot;
         if (store.height() == 0) {
             Block genesis = GenesisBlock.initChain(ledger, params, snapshot, expectedGenesisHash);
             store.append(genesis);
@@ -110,7 +182,33 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             throw new IllegalStateException("Stored genesis does not match network parameters and snapshot");
         }
         engine.rebuildDerivedState();
+        engine.seedGenesisStateRoot();
         return engine;
+    }
+
+    /**
+     * Seeds the state accumulator with the genesis ledger (the snapshot balances) at
+     * height {@link GenesisBlock#GENESIS_ID}, so block 2's state root builds on it. Only
+     * supported from genesis: enabling the accumulator on an already-populated chain would
+     * need a full replay, which is rejected here rather than committing a wrong root.
+     */
+    private void seedGenesisStateRoot() {
+        if (stateAccumulator == null || stateAccumulator.isSeeded()) {
+            return;
+        }
+        if (store.height() > GenesisBlock.GENESIS_ID) {
+            throw new IllegalStateException(
+                "state accumulator must be enabled from genesis (chain already at height " + store.height() + ")");
+        }
+        List<rhizome.core.state.StateChange> changes = new ArrayList<>();
+        for (var e : genesisSnapshot.balances().entrySet()) {
+            long bal = e.getValue().amount();
+            if (bal != 0) {
+                changes.add(rhizome.core.state.StateChange.set(
+                    rhizome.core.state.StateKeys.LEDGER, e.getKey().toBytes(), longBytesBE(bal)));
+            }
+        }
+        stateAccumulator.applyBlock(GenesisBlock.GENESIS_ID, changes);
     }
 
     public ExecutionStatus addBlock(Block block) {
@@ -143,7 +241,9 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             if (checkpoint != null && !block.hash().equals(checkpoint)) {
                 return HEADER_HASH_INVALID;
             }
-            Block parent = store.tip();
+            // Parent linkage and pacing need only the parent HEADER — a snap-synced node
+            // holds headers (not bodies) below its pivot, and this path must still work.
+            BlockHeader parent = store.headerAt(height);
             if (!b.lastBlockHash().equals(parent.hash())) {
                 return INVALID_LASTBLOCK_HASH;
             }
@@ -153,7 +253,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             // Consensus rate limit: a block must be at least minBlockTimeSec after its
             // parent. Enforced by every node, so it caps block production for everyone
             // (majority miner included), unlike the producer's local pacing.
-            if (b.timestamp() < ((BlockImpl) parent).timestamp() + params.minBlockTimeSec() * 1000L) {
+            if (b.timestamp() < parent.timestamp() + params.minBlockTimeSec() * 1000L) {
                 return BLOCK_TIMESTAMP_TOO_CLOSE;
             }
             if (b.timestamp() > nowMillis.getAsLong() + params.maxFutureBlockTimeSec() * 1000L) {
@@ -173,17 +273,43 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
                 return INVALID_NONCE;
             }
 
+            java.util.Set<PublicAddress> touched = stateAccumulator == null ? null : new java.util.HashSet<>();
             ExecutionStatus status = Executor.executeBlock(
-                block, ledger, store::hasTransaction, params, verifier, contractProcessor);
+                block, ledger, store::hasTransaction, params, verifier,
+                contractProcessor, boxProcessor, tokenProcessor, touched);
             if (status != SUCCESS) {
                 return status;
             }
 
+            // Authenticated state root: fold this block's state changes into the accumulator
+            // and require the resulting root to equal the header's. On mismatch the block was
+            // fully applied, so undo it (ledger + processors + accumulator) before rejecting.
+            if (stateAccumulator != null) {
+                long height2 = b.id();
+                byte[] newRoot = stateAccumulator.applyBlock(height2, collectStateChanges(block, touched, height2));
+                if (!java.util.Arrays.equals(newRoot, b.stateRoot().toBytes())) {
+                    stateAccumulator.revertBlock(height2);
+                    Executor.rollbackBlock(block, ledger, contractProcessor, boxProcessor, height2, params);
+                    if (contractProcessor != null) {
+                        contractProcessor.revertBlock(height2);
+                    }
+                    if (boxProcessor != null) {
+                        boxProcessor.revertBlock(height2);
+                    }
+                    if (tokenProcessor != null) {
+                        tokenProcessor.revertBlock(height2);
+                    }
+                    return INVALID_STATE_ROOT;
+                }
+            }
+
             store.append(block);
             commitAccountNonces(block);
+            nonceStore.markSyncedThrough(b.id()); // nonces now reflect this new tip
             totalWork = totalWork.add(BigInteger.TWO.pow(b.difficulty())).add(uncleWork);
             uncleWorkByHeight.put((long) b.id(), uncleWork);
             currentDifficulty = computeDifficultyFromChain();
+            applyVotingAt(b.id()); // tally this epoch's votes if a boundary; effective next block
             if (onBlockApplied != null) {
                 onBlockApplied.accept(b.id()); // fast/non-blocking by contract (see setter)
             }
@@ -212,12 +338,27 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
                 throw new IllegalStateException("Cannot pop genesis");
             }
             Block tip = store.tip();
-            Executor.rollbackBlock(tip, ledger, contractProcessor, height, params);
+            Executor.rollbackBlock(tip, ledger, contractProcessor, boxProcessor, height, params);
             if (contractProcessor != null) {
                 contractProcessor.revertBlock(height); // undo this block's contract-state changes
             }
+            if (boxProcessor != null) {
+                boxProcessor.revertBlock(height); // undo this block's box-state changes
+            }
+            if (tokenProcessor != null) {
+                tokenProcessor.revertBlock(height); // undo this block's token-state changes
+            }
+            if (stateAccumulator != null) {
+                stateAccumulator.revertBlock(height); // move the state root back one block
+            }
             store.pop();
             revertAccountNonces(tip);
+            nonceStore.markSyncedThrough(height - 1); // nonces now reflect the tip after the pop
+            // Drop the vote tally established at this height (if it was an epoch boundary),
+            // restoring the previous epoch's params — reorg-safe without a reversible tally.
+            if (voteParamsByBoundary.remove(height) != null) {
+                syncVoteableHolder();
+            }
             BigInteger uncleWork = uncleWorkByHeight.remove(height);
             totalWork = totalWork.subtract(BigInteger.TWO.pow(((BlockImpl) tip).difficulty()));
             if (uncleWork != null) {
@@ -241,7 +382,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
     public SHA256Hash tipHash() {
         lock.lock();
         try {
-            return store.tip().hash();
+            return store.headerAt(store.height()).hash();
         } finally {
             lock.unlock();
         }
@@ -257,6 +398,26 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         }
     }
 
+    /** Logical header at the given height (1-based); served without the body for headers-first sync. */
+    public BlockHeader headerAt(long height) {
+        lock.lock();
+        try {
+            return store.headerAt(height);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** Exclusive upper bound of pruned block bodies ({@code 0} = archive node). See {@link ChainStore#prunedBelow()}. */
+    public long prunedBelow() {
+        lock.lock();
+        try {
+            return store.prunedBelow();
+        } finally {
+            lock.unlock();
+        }
+    }
+
     /**
      * A timestamp acceptable for the next block: the caller's {@code preferred}
      * time, bumped above the median-time-past floor if a fast cadence would
@@ -265,7 +426,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
     public long nextBlockTimestamp(long preferred) {
         lock.lock();
         try {
-            long tipFloor = ((BlockImpl) store.tip()).timestamp() + params.minBlockTimeSec() * 1000L;
+            long tipFloor = store.headerAt(store.height()).timestamp() + params.minBlockTimeSec() * 1000L;
             return Math.max(Math.max(preferred, medianTimePast() + 1), tipFloor);
         } finally {
             lock.unlock();
@@ -294,7 +455,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
     public long nextNonce(rhizome.core.ledger.PublicAddress sender) {
         lock.lock();
         try {
-            return nextNonce.getOrDefault(sender, 0L);
+            return nonceStore.next(sender);
         } finally {
             lock.unlock();
         }
@@ -319,29 +480,397 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         return params;
     }
 
+    /** Current wall-clock (ms) from the engine's time source — the reference for the future-block bound. */
+    public long nowMillis() {
+        return nowMillis.getAsLong();
+    }
+
+    /**
+     * Runs {@code action} while holding the engine lock, so it sees one point-in-time view
+     * across the chain, ledger, nonces and processor state — no block can land mid-read.
+     * Used to capture a consistent state-snapshot export (the whole dump must correspond to
+     * a single {@code (height, stateRoot)} pair). Keep the action bounded: block application
+     * stalls while it runs.
+     */
+    public <T> T withConsistentView(java.util.function.Supplier<T> action) {
+        lock.lock();
+        try {
+            return action.get();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    // ---- data boxes ----
+
+    /** The box at {@code id} from committed state, or {@code null} (none / boxes disabled). */
+    public rhizome.core.box.Box box(byte[] id) {
+        if (boxProcessor == null) {
+            return null;
+        }
+        lock.lock();
+        try {
+            return boxProcessor.getCommitted(id);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** Box ids owned by {@code owner}, paginated after {@code afterId} (null = start). */
+    public java.util.List<byte[]> boxIdsByOwner(byte[] owner, byte[] afterId, int limit) {
+        if (boxProcessor == null) {
+            return java.util.List.of();
+        }
+        lock.lock();
+        try {
+            return boxProcessor.boxIdsByOwner(owner, afterId, limit);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** Evaluates a box scan predicate over committed state (owner-index fast path when anchored). */
+    public rhizome.core.box.BoxProcessor.ScanPage scanBoxes(
+            rhizome.core.box.ScanPredicate predicate, byte[] afterId, int limit, int window) {
+        if (boxProcessor == null) {
+            return new rhizome.core.box.BoxProcessor.ScanPage(java.util.List.of(), null);
+        }
+        // No engine lock: the scan reads only committed box state (thread-safe), so it does
+        // not contend with block production.
+        return boxProcessor.scan(predicate, afterId, limit, window);
+    }
+
+    /** Rent-collectable box ids at the next block height, lowest expiry first (block producer). */
+    public java.util.List<byte[]> collectableBoxIds(long height, int limit) {
+        if (boxProcessor == null) {
+            return java.util.List.of();
+        }
+        lock.lock();
+        try {
+            return boxProcessor.collectableBoxIds(height, limit);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** Box lifecycle events emitted by the block at {@code height} (for the agent event feed). */
+    public java.util.List<rhizome.core.box.BoxProcessor.BoxEvent> boxEvents(long height) {
+        return boxProcessor == null ? java.util.List.of() : boxProcessor.events(height);
+    }
+
+    // ---- native tokens ----
+
+    /** Committed metadata for {@code tokenId}, or {@code null} (none / tokens disabled). */
+    public rhizome.core.token.TokenMeta tokenMeta(byte[] tokenId) {
+        if (tokenProcessor == null) {
+            return null;
+        }
+        lock.lock();
+        try {
+            return tokenProcessor.meta(tokenId);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** Committed balance of {@code tokenId} held by {@code address}. */
+    public long tokenBalance(byte[] tokenId, byte[] address) {
+        if (tokenProcessor == null) {
+            return 0L;
+        }
+        lock.lock();
+        try {
+            return tokenProcessor.balance(tokenId, address);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** Token ids minted by {@code minter}, paginated after {@code afterId} (null = start). */
+    public java.util.List<byte[]> tokenIdsByMinter(byte[] minter, byte[] afterId, int limit) {
+        if (tokenProcessor == null) {
+            return java.util.List.of();
+        }
+        lock.lock();
+        try {
+            return tokenProcessor.tokenIdsByMinter(minter, afterId, limit);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** Token ids {@code address} holds, paginated after {@code afterId} (null = start). */
+    public java.util.List<byte[]> tokenIdsByHolder(byte[] address, byte[] afterId, int limit) {
+        if (tokenProcessor == null) {
+            return java.util.List.of();
+        }
+        lock.lock();
+        try {
+            return tokenProcessor.tokenIdsByHolder(address, afterId, limit);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** Token lifecycle events emitted by the block at {@code height}. */
+    public java.util.List<rhizome.core.token.TokenProcessor.TokenEvent> tokenEvents(long height) {
+        return tokenProcessor == null ? java.util.List.of() : tokenProcessor.events(height);
+    }
+
+    // ---- miner-voted parameters ----
+
+    /** The votable box params (storageFeeFactor, minValuePerByte) currently in effect. */
+    public long[] voteableParams() {
+        lock.lock();
+        try {
+            return currentVoteParams();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** Current votable params: the last epoch-boundary values, or the network defaults. */
+    private long[] currentVoteParams() {
+        var e = voteParamsByBoundary.lastEntry();
+        return e != null ? e.getValue().clone()
+            : new long[] {params.storageFeeFactor(), params.minValuePerByte()};
+    }
+
+    /** Pushes the current votable params into the box processor's holder (read at execution). */
+    private void syncVoteableHolder() {
+        var holder = boxProcessor == null ? null : boxProcessor.voteableParams();
+        if (holder != null) {
+            long[] p = currentVoteParams();
+            holder.set(p[0], p[1]);
+        }
+    }
+
+    /**
+     * At a voting-epoch boundary, tallies that epoch's block votes and moves each votable
+     * parameter one bounded step if its net vote exceeds half the epoch. Effective from the
+     * next block, so the just-executed boundary block still used the previous values.
+     */
+    private void applyVotingAt(long height) {
+        long epoch = params.votingEpochLength();
+        if (epoch <= 0 || height < epoch || height % epoch != 0) {
+            return;
+        }
+        long netSff = 0;
+        long netMvb = 0;
+        for (long h = height - epoch + 1; h <= height; h++) {
+            int vote = store.headerAt(h).vote();
+            int paramId = Math.abs(vote);
+            int dir = Integer.signum(vote);
+            if (paramId == VoteableParams.STORAGE_FEE_FACTOR) {
+                netSff += dir;
+            } else if (paramId == VoteableParams.MIN_VALUE_PER_BYTE) {
+                netMvb += dir;
+            }
+        }
+        long threshold = epoch / 2;
+        long[] cur = currentVoteParams();
+        long sff = adjust(cur[0], netSff, threshold, params.storageFeeFactorStep(),
+            params.storageFeeFactorMin(), params.storageFeeFactorMax());
+        long mvb = adjust(cur[1], netMvb, threshold, params.minValuePerByteStep(),
+            params.minValuePerByteMin(), params.minValuePerByteMax());
+        voteParamsByBoundary.put(height, new long[] {sff, mvb});
+        syncVoteableHolder();
+    }
+
+    private static long adjust(long value, long netVotes, long threshold, long step, long min, long max) {
+        if (netVotes > threshold) {
+            return Math.min(max, value + step);
+        }
+        if (netVotes < -threshold) {
+            return Math.max(min, value - step);
+        }
+        return value;
+    }
+
+    // ---- authenticated state root ----
+
+    /** The current authenticated state root (32 bytes), or {@code null} if the accumulator is off. */
+    public byte[] stateRoot() {
+        if (stateAccumulator == null) {
+            return null;
+        }
+        lock.lock();
+        try {
+            return stateAccumulator.root();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** A membership proof for a state entry at the current root, or {@code null} if absent / off. */
+    public rhizome.core.state.StateProof stateProof(byte domain, byte[] rawKey) {
+        if (stateAccumulator == null) {
+            return null;
+        }
+        lock.lock();
+        try {
+            return stateAccumulator.prove(domain, rawKey);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * Stamps {@code candidate}'s {@code stateRoot} with the root it would produce, so the
+     * producer can mine a header that commits it. Tentatively applies the block to compute
+     * the root, then rolls the application back — the block is re-applied for real when
+     * submitted through {@link #addBlock}. A no-op when the accumulator is off.
+     */
+    public void stampStateRoot(Block candidate) {
+        if (stateAccumulator == null) {
+            return;
+        }
+        lock.lock();
+        try {
+            var b = (BlockImpl) candidate;
+            java.util.Set<PublicAddress> touched = new java.util.HashSet<>();
+            ExecutionStatus status = Executor.executeBlock(candidate, ledger, store::hasTransaction, params,
+                verifier, contractProcessor, boxProcessor, tokenProcessor, touched);
+            if (status != SUCCESS) {
+                return; // invalid block; leave the state root empty and let addBlock reject it
+            }
+            long h = b.id();
+            byte[] root = stateAccumulator.dryApply(collectStateChanges(candidate, touched, h));
+            b.stateRoot(SHA256Hash.of(root));
+            Executor.rollbackBlock(candidate, ledger, contractProcessor, boxProcessor, h, params);
+            if (contractProcessor != null) {
+                contractProcessor.revertBlock(h);
+            }
+            if (boxProcessor != null) {
+                boxProcessor.revertBlock(h);
+            }
+            if (tokenProcessor != null) {
+                tokenProcessor.revertBlock(h);
+            }
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** Gathers a block's committed ledger, nonce, box and token changes into state accumulator changes. */
+    private List<rhizome.core.state.StateChange> collectStateChanges(
+            Block block, java.util.Set<PublicAddress> touched, long height) {
+        List<rhizome.core.state.StateChange> changes = new ArrayList<>();
+        for (PublicAddress a : touched) {
+            long bal = ledger.hasWallet(a) ? ledger.getWalletValue(a).amount() : 0;
+            byte[] key = a.toBytes();
+            changes.add(bal == 0
+                ? rhizome.core.state.StateChange.delete(rhizome.core.state.StateKeys.LEDGER, key)
+                : rhizome.core.state.StateChange.set(rhizome.core.state.StateKeys.LEDGER, key, longBytesBE(bal)));
+        }
+        // Account nonces (⚠ consensus domain 0x07): each sender's next-expected nonce after this
+        // block is max(txNonce)+1 over its transactions — a deterministic function of block content
+        // (sequentiality already validated). Committing it lets a snap-synced node obtain nonces
+        // verifiably (root equality) rather than trusting a peer. Derived from the block, not the
+        // nonce store, because the store is advanced only after this collection runs.
+        java.util.Map<PublicAddress, Long> newNonces = new HashMap<>();
+        for (Transaction t : block.transactions()) {
+            var tx = (TransactionImpl) t;
+            if (!tx.isTransactionFee() && !isSelfAuthorized(tx)) {
+                newNonces.merge(tx.from(), tx.nonce() + 1, Math::max);
+            }
+        }
+        newNonces.forEach((from, nonce) -> changes.add(rhizome.core.state.StateChange.set(
+            rhizome.core.state.StateKeys.ACCOUNT_NONCE, from.toBytes(), longBytesBE(nonce))));
+        if (boxProcessor != null) {
+            for (var m : boxProcessor.changes(height)) {
+                changes.add(m.box() == null
+                    ? rhizome.core.state.StateChange.delete(rhizome.core.state.StateKeys.BOX, m.id())
+                    : rhizome.core.state.StateChange.set(rhizome.core.state.StateKeys.BOX, m.id(), m.box().serialize()));
+            }
+        }
+        if (tokenProcessor != null) {
+            for (var op : tokenProcessor.changes(height)) {
+                if (op instanceof rhizome.core.token.TokenStore.TokenOp.MetaSet ms) {
+                    changes.add(rhizome.core.state.StateChange.set(
+                        rhizome.core.state.StateKeys.TOKEN_META, ms.meta().id(), ms.meta().serialize()));
+                } else if (op instanceof rhizome.core.token.TokenStore.TokenOp.BalanceSet bs) {
+                    byte[] rawKey = concat(bs.tokenId(), bs.address());
+                    changes.add(bs.amount() == 0
+                        ? rhizome.core.state.StateChange.delete(rhizome.core.state.StateKeys.TOKEN_BALANCE, rawKey)
+                        : rhizome.core.state.StateChange.set(rhizome.core.state.StateKeys.TOKEN_BALANCE, rawKey,
+                            longBytesBE(bs.amount())));
+                }
+            }
+        }
+        if (contractProcessor != null) {
+            for (var ch : contractProcessor.changes(height)) {
+                if (ch.code()) {
+                    changes.add(rhizome.core.state.StateChange.set(
+                        rhizome.core.state.StateKeys.CONTRACT_CODE, ch.contract().toBytes(), ch.value()));
+                } else {
+                    byte[] rawKey = concat(ch.contract().toBytes(), ch.key());
+                    changes.add(rhizome.core.state.StateChange.set(
+                        rhizome.core.state.StateKeys.CONTRACT_STORAGE, rawKey, ch.value()));
+                }
+            }
+        }
+        return changes;
+    }
+
+    private static byte[] longBytesBE(long value) {
+        return rhizome.core.common.Utils.longToBytes(value);
+    }
+
+    private static byte[] concat(byte[] a, byte[] b) {
+        byte[] out = new byte[a.length + b.length];
+        System.arraycopy(a, 0, out, 0, a.length);
+        System.arraycopy(b, 0, out, a.length, b.length);
+        return out;
+    }
+
     // ---- derived state ----
 
     private void rebuildDerivedState() {
         totalWork = BigInteger.ZERO;
-        nextNonce.clear();
         uncleWorkByHeight.clear();
+        voteParamsByBoundary.clear();
         long height = store.height();
+        // Work, uncle weight and votes are recomputed from headers alone. Account nonces are
+        // persisted and maintained incrementally, so they are reconstructed from the bodies
+        // only for the heights the nonce store has not yet synced — a fresh column family
+        // (one-time migration from a full archive) or a transient in-memory store at boot. A
+        // persistent store that advanced in lockstep reports the tip, so a normal restart —
+        // even a pruned node's, even one that has never seen an account transaction — reads no
+        // body at all.
+        long nonceSynced = nonceStore.syncedThroughHeight();
+        long backfillFrom = Math.max(GenesisBlock.GENESIS_ID + 1, nonceSynced + 1);
+        if (backfillFrom <= height && backfillFrom <= store.prunedBelow()) {
+            // The nonces we must rebuild live in bodies that have been pruned — an
+            // inconsistent store (a pruned node whose nonces were not persisted). Fail loudly
+            // rather than dying later on a missing body or, worse, undercounting nonces.
+            throw new IllegalStateException(
+                "cannot rebuild account nonces from pruned bodies (synced through " + nonceSynced
+                    + ", pruned below " + store.prunedBelow() + ")");
+        }
         for (long h = GenesisBlock.GENESIS_ID + 1; h <= height; h++) {
-            Block block = store.blockAt(h);
-            commitAccountNonces(block);
+            BlockHeader header = store.headerAt(h);
+            if (h >= backfillFrom) {
+                commitAccountNonces(store.blockAt(h));
+            }
             // Uncle work is recomputed from the committed uncle difficulties, so the
             // cumulative weight is restored exactly even with an empty orphan pool.
-            BigInteger uncleWork = uncleWorkOf(block);
+            BigInteger uncleWork = uncleWorkOf(header);
             uncleWorkByHeight.put(h, uncleWork);
-            totalWork = totalWork.add(BigInteger.TWO.pow(((BlockImpl) block).difficulty())).add(uncleWork);
+            totalWork = totalWork.add(BigInteger.TWO.pow(header.difficulty())).add(uncleWork);
+            applyVotingAt(h); // replay epoch tallies so the votable params are restored
+        }
+        if (height > nonceSynced) {
+            nonceStore.markSyncedThrough(height); // persist the catch-up so the next restart skips it
         }
         currentDifficulty = computeDifficultyFromChain();
+        syncVoteableHolder();
     }
 
-    /** Sum of 2^difficulty over a block's referenced uncles (from committed difficulties). */
-    private static BigInteger uncleWorkOf(Block block) {
+    /** Sum of 2^difficulty over a header's referenced uncles (from committed difficulties). */
+    private static BigInteger uncleWorkOf(BlockHeader header) {
         BigInteger work = BigInteger.ZERO;
-        for (rhizome.core.block.UncleRef uncle : block.uncles()) {
+        for (rhizome.core.block.UncleRef uncle : header.uncles()) {
             work = work.add(BigInteger.TWO.pow(uncle.difficulty()));
         }
         return work;
@@ -360,8 +889,8 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         long height = store.height();
         for (long boundary = lookback; boundary <= height; boundary += lookback) {
             long windowStart = boundary - lookback + 1;
-            long observedMs = ((BlockImpl) store.blockAt(boundary)).timestamp()
-                - ((BlockImpl) store.blockAt(windowStart)).timestamp();
+            long observedMs = store.headerAt(boundary).timestamp()
+                - store.headerAt(windowStart).timestamp();
             difficulty = DifficultyAdjustment.nextDifficulty(
                 params, difficulty, lookback - 1L, observedMs / 1000);
         }
@@ -373,7 +902,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         int window = (int) Math.min(params.medianTimeWindow(), height);
         List<Long> timestamps = new ArrayList<>(window);
         for (long h = height - window + 1; h <= height; h++) {
-            timestamps.add(((BlockImpl) store.blockAt(h)).timestamp());
+            timestamps.add(store.headerAt(h).timestamp());
         }
         timestamps.sort(Long::compare);
         return timestamps.get(timestamps.size() / 2);
@@ -385,10 +914,10 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         Map<rhizome.core.ledger.PublicAddress, Long> expected = new HashMap<>();
         for (Transaction t : block.transactions()) {
             var tx = (TransactionImpl) t;
-            if (tx.isTransactionFee()) {
+            if (tx.isTransactionFee() || isSelfAuthorized(tx)) {
                 continue;
             }
-            long want = expected.computeIfAbsent(tx.from(), a -> nextNonce.getOrDefault(a, 0L));
+            long want = expected.computeIfAbsent(tx.from(), a -> nonceStore.next(a));
             if (tx.nonce() != want) {
                 return INVALID_TRANSACTION_NONCE;
             }
@@ -397,11 +926,16 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         return SUCCESS;
     }
 
+    /** Self-authorized txs (coinbase and permissionless rent collection) carry no account nonce. */
+    private static boolean isSelfAuthorized(TransactionImpl tx) {
+        return tx.kind() == rhizome.core.transaction.TransactionKind.BOX_COLLECT;
+    }
+
     private void commitAccountNonces(Block block) {
         for (Transaction t : block.transactions()) {
             var tx = (TransactionImpl) t;
-            if (!tx.isTransactionFee()) {
-                nextNonce.merge(tx.from(), tx.nonce() + 1, Math::max);
+            if (!tx.isTransactionFee() && !isSelfAuthorized(tx)) {
+                nonceStore.set(tx.from(), Math.max(nonceStore.next(tx.from()), tx.nonce() + 1));
             }
         }
     }
@@ -410,17 +944,13 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         Map<rhizome.core.ledger.PublicAddress, Long> lowest = new HashMap<>();
         for (Transaction t : block.transactions()) {
             var tx = (TransactionImpl) t;
-            if (!tx.isTransactionFee()) {
+            if (!tx.isTransactionFee() && !isSelfAuthorized(tx)) {
                 lowest.merge(tx.from(), tx.nonce(), Math::min);
             }
         }
-        lowest.forEach((sender, nonce) -> {
-            if (nonce == 0) {
-                nextNonce.remove(sender);
-            } else {
-                nextNonce.put(sender, nonce);
-            }
-        });
+        // The block's lowest nonce for a sender becomes the next-expected again; set(_, 0)
+        // clears the entry (that sender's first transaction is being undone).
+        lowest.forEach(nonceStore::set);
     }
 
     private static SHA256Hash computeMerkleRoot(Block block) {
@@ -547,7 +1077,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         java.util.Set<SHA256Hash> recentChain = new java.util.HashSet<>();
         java.util.Set<SHA256Hash> alreadyReferenced = new java.util.HashSet<>();
         for (long ancestor = Math.max(GenesisBlock.GENESIS_ID, h - depth - 1L); ancestor <= tipHeight; ancestor++) {
-            Block onChain = store.blockAt(ancestor);
+            BlockHeader onChain = store.headerAt(ancestor);
             recentChain.add(onChain.hash());
             if (ancestor >= h - depth) {
                 for (UncleRef ref : onChain.uncles()) {
@@ -570,7 +1100,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         if (!ctx.recentChain().contains(uncle.lastBlockHash())) {
             return false; // must fork from a recent main-chain block
         }
-        if (uid <= tipHeight && store.blockAt(uid).hash().equals(uncle.hash())) {
+        if (uid <= tipHeight && store.headerAt(uid).hash().equals(uncle.hash())) {
             return false; // that is the canonical block, not an orphan
         }
         return !ctx.alreadyReferenced().contains(uncle.hash()); // not already credited

@@ -91,6 +91,9 @@ public final class MemPool {
         if (tx.isTransactionFee()) {
             return INVALID_TRANSACTION_NONCE; // coinbase is minted in blocks, never pooled
         }
+        if (tx.kind() == rhizome.core.transaction.TransactionKind.BOX_COLLECT) {
+            return INVALID_TRANSACTION_NONCE; // rent collection is minted in blocks, never pooled
+        }
         if (tx.chainId() != params.chainId()) {
             return INVALID_CHAIN_ID;
         }
@@ -98,6 +101,14 @@ public final class MemPool {
             return INVALID_TRANSACTION_AMOUNT; // negative would mint money / force negative balances
         }
         if (tx.kind().isContract() && (tx.gasLimit() < 0 || tx.gasPrice() < 0)) {
+            return INVALID_TRANSACTION_AMOUNT;
+        }
+        // Box ops run no VM and cost no gas; the gas fields are reserved and must be zero.
+        if (tx.kind().isBox() && (tx.gasLimit() != 0 || tx.gasPrice() != 0)) {
+            return INVALID_TRANSACTION_AMOUNT;
+        }
+        // Token ops carry no gas and move no PDN (the token amount is in the payload).
+        if (tx.kind().isToken() && (tx.gasLimit() != 0 || tx.gasPrice() != 0 || tx.amount().amount() != 0)) {
             return INVALID_TRANSACTION_AMOUNT;
         }
         if (!PublicAddress.of(tx.signingKey()).equals(tx.from())) {

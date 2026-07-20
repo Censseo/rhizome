@@ -5,6 +5,7 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 import rhizome.core.blockchain.ContractProcessor;
+import rhizome.core.blockchain.ContractProcessor.ContractChange;
 import rhizome.core.blockchain.ContractProcessor.ContractLog;
 import rhizome.core.blockchain.Contracts;
 import rhizome.core.ledger.PublicAddress;
@@ -25,6 +26,7 @@ public final class WasmContractProcessor implements ContractProcessor {
     private final WasmVm vm;
     private final ContractStore baseStore;
     private final int retainDepth;
+    private volatile BoxReader boxReader;
     private SessionContractStore session;
     private List<ContractReceipt> currentReceipts = new java.util.ArrayList<>();
     private List<ContractLog> currentLogs = new java.util.ArrayList<>();
@@ -33,6 +35,7 @@ public final class WasmContractProcessor implements ContractProcessor {
     private final Map<Long, List<ContractUndo>> journals = new ConcurrentHashMap<>();
     private final Map<Long, List<ContractReceipt>> receiptsByHeight = new ConcurrentHashMap<>();
     private final Map<Long, List<ContractLog>> logsByHeight = new ConcurrentHashMap<>();
+    private final Map<Long, List<ContractChange>> changesByHeight = new ConcurrentHashMap<>();
     private long lastCommittedHeight = -1;
 
     /** Uses a default retention depth; fine when reorgs are shallow. */
@@ -51,6 +54,14 @@ public final class WasmContractProcessor implements ContractProcessor {
         this.retainDepth = retainDepth;
     }
 
+    /**
+     * Wires the box reader so contracts can {@code box_read} data boxes (Ergo-style
+     * data inputs). Set once at node assembly, after the box processor exists.
+     */
+    public void setBoxReader(BoxReader boxReader) {
+        this.boxReader = boxReader;
+    }
+
     @Override
     public void begin() {
         session = new SessionContractStore(baseStore);
@@ -67,7 +78,7 @@ public final class WasmContractProcessor implements ContractProcessor {
         ContractResult result = switch (kind) {
             case DEPLOY -> deploy(from, data, nonce, gasLimit);
             case CALL -> call(from, to, data, value, gasLimit);
-            case TRANSFER -> ContractResult.reverted(0, "not a contract transaction");
+            default -> ContractResult.reverted(0, "not a contract transaction");
         };
         currentReceipts.add(new ContractReceipt(result.gasUsed(), result.success()));
         currentLogs.addAll(result.logs());
@@ -92,6 +103,22 @@ public final class WasmContractProcessor implements ContractProcessor {
         GasMeter meter = new GasMeter(gasLimit);
         CallOutcome outcome = runCall(caller.toBytes(), contract, input, value, meter,
             session, new java.util.ArrayDeque<>());
+        if (outcome.success()) {
+            return ContractResult.ok(meter.used(), outcome.output(), null, outcome.logs());
+        }
+        return ContractResult.reverted(meter.used(), outcome.error());
+    }
+
+    @Override
+    public ContractResult dryRun(PublicAddress from, PublicAddress to, byte[] input,
+                                 long value, long gasLimit) {
+        // Run against a throwaway session over the committed base store. runCall flushes
+        // its frame into this local session on success; we never flush the local session
+        // to the base store, so nothing persists and the block session is untouched.
+        GasMeter meter = new GasMeter(gasLimit);
+        SessionContractStore scratch = new SessionContractStore(baseStore);
+        CallOutcome outcome = runCall(from.toBytes(), to, input, value, meter,
+            scratch, new java.util.ArrayDeque<>());
         if (outcome.success()) {
             return ContractResult.ok(meter.used(), outcome.output(), null, outcome.logs());
         }
@@ -130,7 +157,8 @@ public final class WasmContractProcessor implements ContractProcessor {
         }
 
         SessionContractStore frame = new SessionContractStore(parent);
-        PersistentHostState host = new PersistentHostState(frame, contract, callerBytes, input, value);
+        PersistentHostState host =
+            new PersistentHostState(frame, contract, callerBytes, input, value, boxReader);
         List<ContractLog> collected = new java.util.ArrayList<>();
 
         stack.push(contract);
@@ -168,7 +196,11 @@ public final class WasmContractProcessor implements ContractProcessor {
     @Override
     public void commit(long blockHeight) {
         if (session != null) {
+            List<ContractChange> changes = session.forwardChanges();
             journals.put(blockHeight, session.flushWithJournal());
+            if (!changes.isEmpty()) {
+                changesByHeight.put(blockHeight, changes);
+            }
             session = null;
         }
         receiptsByHeight.put(blockHeight, currentReceipts);
@@ -199,9 +231,15 @@ public final class WasmContractProcessor implements ContractProcessor {
     }
 
     @Override
+    public List<ContractChange> changes(long blockHeight) {
+        return changesByHeight.getOrDefault(blockHeight, List.of());
+    }
+
+    @Override
     public void revertBlock(long blockHeight) {
         receiptsByHeight.remove(blockHeight);
         logsByHeight.remove(blockHeight);
+        changesByHeight.remove(blockHeight);
         List<ContractUndo> journal = journals.remove(blockHeight);
         if (journal == null) {
             return; // nothing was committed for this height (e.g. a transfer-only block)
@@ -230,6 +268,7 @@ public final class WasmContractProcessor implements ContractProcessor {
             journals.keySet().removeIf(h -> h < cutoff);
             receiptsByHeight.keySet().removeIf(h -> h < cutoff);
             logsByHeight.keySet().removeIf(h -> h < cutoff);
+            changesByHeight.keySet().removeIf(h -> h < cutoff);
         }
     }
 }

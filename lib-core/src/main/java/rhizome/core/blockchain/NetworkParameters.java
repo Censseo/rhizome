@@ -124,6 +124,62 @@ public final class NetworkParameters {
     @lombok.Builder.Default
     private final long nephewRewardDivisor = 32;
 
+    // --- Data boxes ---
+    /** Height at which box transactions become valid (0 = from genesis). */
+    @lombok.Builder.Default
+    private final long boxActivationHeight = 0;
+    /** Maximum serialized size of a box, in bytes. */
+    @lombok.Builder.Default
+    private final int maxBoxSizeBytes = 65_536;
+    /** Maximum number of registers a box may carry. */
+    @lombok.Builder.Default
+    private final int maxBoxRegisters = 6;
+    /** Base units a box must lock per serialized byte (anti-dust; refunded on spend). */
+    @lombok.Builder.Default
+    private final long minValuePerByte = 1;
+    /** Age (in blocks) after which a box may be charged storage rent. */
+    @lombok.Builder.Default
+    private final long storagePeriodBlocks = 6_307_200L; // ~1 year at 5 s
+    /** Storage rent in base units per serialized byte, per storage period. */
+    @lombok.Builder.Default
+    private final long storageFeeFactor = 1;
+    /** Maximum BOX_COLLECT transactions a block may carry (bounds rent-collection work). */
+    @lombok.Builder.Default
+    private final int maxBoxCollectsPerBlock = 32;
+
+    // --- Native tokens ---
+    /** Height at which token transactions become valid (0 = from genesis). */
+    @lombok.Builder.Default
+    private final long tokenActivationHeight = 0;
+    /** Maximum bytes of a token symbol (UTF-8). */
+    @lombok.Builder.Default
+    private final int maxTokenSymbolBytes = 16;
+    /** Maximum bytes of a token name (UTF-8). */
+    @lombok.Builder.Default
+    private final int maxTokenNameBytes = 64;
+    /** Maximum decimals a token may declare. */
+    @lombok.Builder.Default
+    private final int maxTokenDecimals = 18;
+
+    // --- Miner-voted parameters ---
+    /** Blocks per voting epoch; at each boundary the epoch's votes are tallied. */
+    @lombok.Builder.Default
+    private final long votingEpochLength = 1024;
+    /** Adjustment step and bounds for the votable {@code storageFeeFactor}. */
+    @lombok.Builder.Default
+    private final long storageFeeFactorStep = 1;
+    @lombok.Builder.Default
+    private final long storageFeeFactorMin = 0;
+    @lombok.Builder.Default
+    private final long storageFeeFactorMax = 1_000;
+    /** Adjustment step and bounds for the votable {@code minValuePerByte}. */
+    @lombok.Builder.Default
+    private final long minValuePerByteStep = 1;
+    @lombok.Builder.Default
+    private final long minValuePerByteMin = 0;
+    @lombok.Builder.Default
+    private final long minValuePerByteMax = 1_000;
+
     /** Reward paid to an included uncle's miner at {@code height}. */
     public long uncleReward(long height) {
         return miningReward(height) * uncleRewardNum / uncleRewardDen;

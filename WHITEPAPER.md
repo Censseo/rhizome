@@ -29,10 +29,15 @@ Four goals drive the design:
    GHOST-style fork choice (§9) that credits and rewards orphaned (uncle) work, making
    the fast cadence safe against the orphaning a naïve longest chain suffers.
 
-The node is functional and covered by **222 tests**: consensus, the WASM contract VM
+The node is functional and covered by **345 tests**: consensus, the WASM contract VM
 and its persistence, execution, storage, mempool, HTTP API, block production, P2P
-synchronisation with reorganisation, GHOST uncles, and a wallet that deploys and calls
-contracts.
+synchronisation with reorganisation, GHOST uncles, data boxes (agent-facing on-chain
+storage with typed registers, an anti-dust deposit and storage rent), native tokens
+(one-transaction fungible-asset launches), an authenticated state root committed in every
+header (light-client proofs of any ledger, nonce, box, token or contract entry),
+**headers-first sync, pruned nodes, and trust-minimised snapshot bootstrap** (§6.4),
+miner-voted economic parameters, and a wallet that deploys and calls contracts and manages
+boxes and tokens.
 
 ---
 
@@ -101,7 +106,10 @@ hash = H( merkleRoot || lastBlockHash || id || difficulty || numTransactions || 
 (integers big-endian). Unlike the C++ node — whose `getHash` covered only
 `{merkleRoot, lastBlockHash, difficulty, timestamp}`, leaving `id` and the PoW-algorithm
 choice *outside* the preimage — **every header field is committed**. A reordered or
-re-timestamped block yields a different hash, hence an invalid proof of work.
+re-timestamped block yields a different hash, hence an invalid proof of work. Three optional
+fields — the referenced uncles (§3.7), the authenticated **state root** (§5.7) and the
+miner's parameter **vote** (§5.8) — are folded in only when present, so a plain, stateless,
+abstaining block hashes byte-for-byte as it did before those features existed.
 
 ### 3.2 Proof of work — Pufferfish2
 
@@ -237,13 +245,15 @@ Amounts and fees are integers (base units, scale 10 000 → "PDN"). They are con
 would mint money for the sender and a negative deposit would drive the recipient's
 balance below zero.
 
-A transaction has a **kind**: `TRANSFER` (the default, unchanged), `DEPLOY` (install
-contract code) or `CALL` (invoke a contract). Contract kinds additionally carry a
-variable-length `data` payload (code or call input) and a gas budget
-(`gasLimit`, `gasPrice`); these fields are part of the signed preimage and the wire
-format only for contract transactions, so a transfer is byte-for-byte what it was before
-contracts existed. Every transaction is self-delimiting on the wire, so a block still
-packs variable-length transactions back to back, and the whole block is bounded by
+A transaction has a **kind**: `TRANSFER` (the default, unchanged), the contract kinds
+`DEPLOY` (install contract code) and `CALL` (invoke a contract), the data-box kinds
+`BOX_CREATE`/`BOX_UPDATE`/`BOX_SPEND`/`BOX_COLLECT` (§5.5), or the native-token kinds
+`TOKEN_MINT`/`TOKEN_TRANSFER`/`TOKEN_BURN` (§5.6). Every non-transfer kind carries a
+variable-length `data` payload and the gas fields (`gasLimit`, `gasPrice`) in its signed
+preimage and wire format, so a transfer is byte-for-byte what it was before contracts
+existed; the box and token kinds reuse that same suffix with the gas fields pinned to zero
+(they run no VM). Every transaction is self-delimiting on the wire, so a block still packs
+variable-length transactions back to back, and the whole block is bounded by
 `maxBlockSizeBytes` (§5.4).
 
 ### 5.2 Transactional execution
@@ -367,6 +377,193 @@ block is popped — so contract state moves atomically with its block.
 stops adding transactions before crossing it, so a payload-laden block can never be a
 download or storage denial of service.
 
+### 5.5 Data boxes
+
+Contract key/value storage is anonymous and untyped — good for a contract's private
+bookkeeping, poor as a place for an **autonomous agent to keep information other parties
+can find, read and prove**. Rhizome adds a **data box**: a first-class, addressable state
+object, inspired by Ergo's extended-UTXO box but adapted to this chain's account model and
+WASM contracts rather than replacing them. It is the substrate for agent memory,
+directories, and oracles.
+
+**The object.** A box has a **stable 32-byte id** = `SHA-256(creator ‖ nonce ‖ "rzbox")`
+— derived once from the creating account and its nonce (the domain suffix keeps it
+disjoint from a contract address), so an agent references "its memory" or "the oracle box"
+permanently. It carries an **owner** (an account or a contract), a **value** in base units
+locked into the box, its `createdHeight` and `rentPaidHeight`, and up to **six typed
+registers**: `BYTES`, `I64`, `BOOL`, `ADDRESS` (25-byte reference), `HASH32` (content hash
+of an off-chain blob), and `STRING` (UTF-8). The protocol validates each register's shape
+against its tag but attaches no meaning to the value — tags are annotations for readers
+(agents, indexers, wallets). A box serializes to at most **64 KiB**.
+
+This is deliberately **not** Ergo's design in two ways, both because Rhizome's constraints
+differ. First, the id is **stable and the content mutable**, where an Ergo box is
+content-addressed (its id changes on every update, forcing the ecosystem into a singleton-
+NFT pattern to give an oracle a durable identity); with no authenticated-state leaf to
+commit yet, Rhizome has nothing to gain from content-addressing and everything to gain from
+a permanent handle. Second, a box is guarded by its **owner** — an account signature, or the
+approval of the controlling contract — not by a script language: Rhizome already has a
+Turing-complete guard (WASM), so Ergo's "self-replicating box" becomes simply "a box owned
+by a contract," whose transition rules the contract enforces. The 64-KiB ceiling (versus
+Ergo's 4 KiB) follows from the same reasoning: Ergo's limit bounds the size of its AVL+
+inclusion proofs (the box *is* the leaf) and of script execution contexts, neither of which
+applies here — the real bounds are the transaction wire cap (128 KiB) and the 4-MiB block.
+Larger objects use a `HASH32` register over off-chain data, or chunk across boxes.
+
+**Lifecycle.** Four transaction kinds operate on boxes, all deterministic (no VM, no gas —
+paid by the ordinary fee):
+
+- `BOX_CREATE` locks `value` into a new box at the derived id. The value **leaves the
+  ledger** into the box (the chain's total money is now account balances *plus* box values).
+- `BOX_UPDATE` (owner only) replaces the registers, optionally tops up the value, and resets
+  the rent clock — touching a box keeps it alive.
+- `BOX_SPEND` (owner only) destroys the box and returns its value to the owner.
+- `BOX_COLLECT` charges storage rent (below).
+
+**Anti-dust.** A box must lock at least `size × minValuePerByte`, so writing data on-chain
+costs in proportion to the state it occupies from the moment of creation — essential when
+the writers are programs. The locked value is a **refundable deposit**, returned on spend,
+not a fee.
+
+**Storage rent.** After `storagePeriodBlocks` a box becomes collectable. Anyone — in
+practice the miner — may then charge rent of `storageFeeFactor × size`, recreating the box
+with reduced value, its registers, owner and id preserved and its rent clock reset. If the
+charge would drop the value below the dust floor, the whole box is collected and destroyed
+instead: **abandoned state is garbage-collected economically**, and the collected rent
+gives miners a revenue stream that outlives the block subsidy. A box funded at the minimum
+is recycled after roughly one storage period. Rent collection is an *opportunity*, never an
+obligation; a block without it is valid.
+
+`BOX_COLLECT` is **unsigned and self-authorized**, like the coinbase: the block producer
+mints it, crediting the rent to the miner, so no private key is needed to run the
+collector. It is bounded per block (`maxBoxCollectsPerBlock`) and drawn from a
+rent-ordered **expiry index**, so selecting collectable boxes is O(1) per box rather than a
+scan. Because a collect only ever touches an already-expired box and credits a named
+recipient, an unsigned, permissionless collect can neither steal nor forge.
+
+**Data inputs.** A contract reads any box through a `box_read(id)` host call — the box is
+**not consumed** (Ergo's data-input idea) and reads see boxes written earlier in the same
+block. This is the contention-free oracle pattern: an oracle agent updates its box each
+tick; any number of consumer contracts read it in the same block without racing for it, at
+a flat cost, with no cross-contract call.
+
+**Persistence and reorg.** Boxes live in RocksDB with owner and rent-expiry secondary
+indexes and a **persisted per-block undo journal** — unlike the contract store's in-memory
+journals, so box state is exactly restorable on a reorg even after a restart. A box op's
+ledger effects (value locked or released) are reversed from per-block receipts, so a popped
+block rewinds both box state and balances exactly, atomically with the block.
+
+**Observability and tooling.** Box lifecycle events (`box.created`/`updated`/`spent`/
+`collected`) ride the same feed as contract logs — `GET /logs` and the live SSE stream — so
+an agent watches state changes with the machinery it already uses. `GET /box?id=` reads a
+box and `GET /boxes?owner=` lists an account's boxes. For richer queries, a **declarative
+scan** (EIP-1 style) registers a composable predicate over the owner and registers
+(`equals`/`contains`, combined with `and`/`or`) at `POST /scan/register`, then
+`GET /scan/boxes` returns the matching boxes in bounded, cursor-paged windows — using the
+owner index when the predicate is owner-anchored, a full-table page otherwise; scans are
+node-local, not consensus. Contract state is queryable without a transaction via a
+**read-only dry run**, `POST /call_readonly`, which runs a `CALL` against committed state
+and discards every write. The wallet gains `box-create`/`update`/`spend`/`show`/`list` and
+`call-readonly`. Together with the agent wallet (§5.4), an agent on Rhizome has identity,
+funds, **persistent addressable memory**, and real-time observability — the full on-chain
+loop.
+
+Boxes are committed in the **authenticated state root** (§5.7), so a light client can prove
+a box against a block header without trusting a node.
+
+### 5.6 Native tokens
+
+A token launch should cost one transaction, not a contract deploy. Rhizome supports
+fungible tokens two ways: as WASM contracts (`token.rs`, §5.4 — for tokens that need custom
+logic) and, for the common case, as a **protocol-level native asset** with no contract and
+no gas. This follows Ergo's native-token idea, but in Rhizome's account model rather than
+Ergo's boxes: a token is an account-based balance map, not a value carried inside UTXOs —
+which fits a chain whose ledger is already account-based and whose boxes are single-owner
+cells, not multi-input/output UTXOs.
+
+**The asset.** A token has a **unique 32-byte id** = `SHA-256(minter ‖ nonce ‖ "rztoken")`
+(unforgeable and non-repeating, like a box id or contract address), a minter, a symbol and
+name, decimals, and a current total supply. Balances are a per-`(token, address)` map held
+alongside the native PDN ledger — not inside boxes.
+
+**Lifecycle.** Three deterministic transaction kinds, gas-free, paid by the ordinary fee:
+
+- `TOKEN_MINT` creates a token — deriving its id from the minter and nonce, recording its
+  metadata, and crediting the whole initial supply to the recipient. There is no way to mint
+  the same id twice (the nonce never repeats), so supply is fixed at issuance unless the
+  token is later burned.
+- `TOKEN_TRANSFER` moves an amount of a token from the sender to `to`, checked against the
+  sender's token balance.
+- `TOKEN_BURN` destroys the sender's tokens, reducing total supply.
+
+A token op moves **no PDN** — the token amount lives in the payload and the PDN `amount`
+field must be zero; only the fee moves, to the miner. Balances live in the token store with
+a **persisted per-block undo journal**, so a reorg reverses token state (and the fee)
+exactly, atomically with the block — the same guarantee boxes and contracts get. Minter and
+holder indexes back the queries `GET /token?id=` (metadata + supply), `GET /token_balance`,
+and `GET /tokens?minter=`/`?holder=`; token lifecycle events (`token.minted`/`transferred`/
+`burned`) join the log/SSE feed; and the wallet gains `token-mint`/`transfer`/`burn`/`show`/
+`balance`/`list`. Reducing a memecoin launch to a single ~fee-priced transaction is the
+"cheap token launches" goal, met without giving up the composability of contract tokens for
+the cases that need it.
+
+### 5.7 Authenticated state root
+
+Every block header commits a 32-byte **state root** — an authenticated commitment to the
+whole value state (the native ledger, all data boxes, and all token metadata and balances)
+— so a **light client can prove any single state entry against a header** it trusts,
+without holding or trusting a full node. This is the property Ergo buys with its AVL+ tree;
+Rhizome uses a **sparse Merkle tree** keyed by `H(domain ‖ rawKey)`, whose leaf commits
+`H(value)`. Nodes are **content-addressed** (a node is keyed by its own hash), which makes
+them immutable and dedup naturally, and — the useful part — leaves every old root
+resolvable, so reorg reversal is journal-free: reverting a block just moves the current root
+back to the previous block's (kept per height in a small store).
+
+**Determinism.** The root is a function of the binding *set* alone — independent of the
+order changes are applied within a block — because a leaf commits its full key and sits at
+its shortest unique prefix (proven by an order-independence test over shuffled inserts).
+That means the node collecting a block's ledger/box/token changes need not canonicalise
+their order; any node re-deriving the block arrives at the same root.
+
+**Production and validation.** A block a node produces is applied to compute the resulting
+root, which is stamped into the header *before* the proof-of-work is solved, so the PoW
+binds it (the header hash commits the state root when set — a stateless block, produced
+without the accumulator, hashes exactly as before). Every receiving node re-derives the root
+by applying the block and **rejects a header whose committed root doesn't match**, rolling
+the block back fully (ledger, box, token and accumulator state) — a state-root mismatch is a
+first-class block-invalidity, exercised by a tamper test. On a reorg the root rewinds with
+the block.
+
+**Light-client proofs.** `GET /state` returns the current root; `GET /state/proof?domain=…&
+key=…` returns the value hash and the sibling hashes along the path. A client re-derives the
+SMT key from `(domain, rawKey)` and folds the siblings to check it against a root it already
+trusts — the stateless verifier is a few lines and needs nothing else. A genesis seed commits
+the snapshot balances so block 2 builds on them.
+
+Committed today: **the full state** — ledger balances, **account nonces**, boxes, token
+metadata/balances, and **contract code and key/value storage** — so a light client can prove
+any of them against a header (`GET /state/proof?domain=…` covers all seven domains). The
+account-nonce domain (§6.5) was added so a snapshot-bootstrapped node obtains replay-protection
+state **verifiably** rather than on trust — the one deliberate change it makes to every root,
+free while the chain is pre-launch. This root is what makes **snapshot bootstrap**
+trust-minimised: a new node rebuilds a recent state tree and accepts it only when it reproduces
+the root committed in a proof-of-work-validated header (§6.4).
+
+### 5.8 Miner-voted parameters
+
+The box economic parameters are not frozen: miners **vote** to adjust them within bounds,
+without a hard fork. Each block header carries an `int` **vote** (committed in the header hash
+only when cast, so an abstaining block is unchanged): `±1` for the storage-rent factor, `±2`
+for the anti-dust `minValuePerByte`. At each **voting-epoch** boundary the engine tallies that
+epoch's votes and moves a parameter one bounded step when the net vote exceeds half the epoch
+— the change taking effect the next epoch. The current values are **derived from chain
+history** (like difficulty): kept as a per-epoch-boundary snapshot recomputed from the epoch's
+block votes, so a reorg across a boundary simply drops that snapshot and restores the previous
+values — reorg-safe with no reversible tally. The box processor reads the live values at
+execution time, so every node validates a block with the parameters in force at its height;
+`GET /info` reports them, and a miner sets its vote with `RHIZOME_VOTE`. Only economic
+parameters are votable (not supply or the PoW) — governance over fees, not money.
+
 ---
 
 ## 6. Networking and performance
@@ -393,6 +590,10 @@ RPC forks that were tried upstream were non-functional and depended on runtime c
   table, fixing the Pandanite #52 memory leak), each POST body is capped, and the sync
   client **bounds peer response sizes** (a giant `/total_work` string would be an
   O(n²) BigInteger-parse CPU DoS).
+- **Headers-first sync** — initial synchronisation validates the header chain before
+  downloading any body (`/headers`), which turns the anti-DoS work gate from a full-block
+  download into a ~150 B/header one; pruned nodes and snapshot bootstrap build on the same
+  machinery (`/state/snapshot/*`). See §6.4.
 
 ### 6.2 Performance stack (target: 1 block/s)
 
@@ -454,6 +655,96 @@ that lesson twice over: the 5-second interval keeps propagation a small fraction
 cadence, and GHOST (§9) credits and rewards whatever is still orphaned. Dropping toward
 1 s remains possible later, contingent on the relay upgrades above.
 
+### 6.4 Headers-first sync, pruned nodes, and snapshot bootstrap
+
+Initial sync happens in two phases: **validate the header chain first, download bodies
+second**. A block header carries its whole proof-of-work preimage plus its uncle
+references, so a `BlockHeader` verifies its own PoW without the body — headers are the
+canonical hash carrier, and `BlockImpl.hash()` delegates to them, so the two can never
+diverge. Nodes serve `GET /headers?start=&end=` (a self-framing binary stream, ~150 B per
+header versus up to 4 MiB for a full block).
+
+**The state machine.** The synchroniser (`HeaderSynchronizer`, subsuming the older
+block-based one) finds the common ancestor on headers, then downloads the contested range's
+headers and validates them **statelessly** (`HeaderChain`): id continuity, hash chaining,
+per-header PoW, the difficulty recomputed from header timestamps, median-time-past, the
+future bound, and structural uncle limits. It returns the branch's **cumulative work** —
+each header's `2^difficulty` plus its committed uncle difficulties, which live inside the
+PoW preimage and so cannot be inflated. Only when that proven work strictly exceeds the
+local branch does it enter body sync: fetch bodies in batches, **verify each against its
+already-validated header** (hash equality) before execution, with the same restore-on-
+failure and orphan-registration a reorg always had.
+
+The payoff is the anti-DoS gate. Previously a peer that merely *claimed* huge total work
+cost us a full-block download before we could refute it; now it costs a bounded **header**
+download (capped per round), after which the work gate refuses it without a single body
+fetched. A peer that predates `/headers` (a 404) transparently falls back to the old
+full-block path — the change is additive, no wire format changed.
+
+For this to work the engine had to stop reading historical **bodies** for its derived state.
+Difficulty, median-time, uncle work and vote tallies now read only `headerAt(h)`; account
+nonces — the one piece of derived state at transaction granularity — are **persisted** in a
+`nonces` column family, advanced in lockstep with the chain and watermarked by height, so a
+restart rebuilds derived state in `O(headers)` and never re-reads a body (§6.5).
+
+**Pruned nodes.** With the body dependency gone, a node configured with `RHIZOME_PRUNE=N`
+keeps only the most recent `N` block bodies (plus genesis, all headers, and the transaction
+index), discarding each body as it falls out of the window — an amortised `O(1)` delete in
+the same write batch as the append. `N` is floored at boot to at least the deepest history
+the engine can read (reorg window, uncle depth, difficulty and median-time windows) plus a
+margin, so pruning can never remove a body a reorg still needs. A pruned node mines,
+validates, serves every header and its recent bodies, and restarts correctly; `/sync` for a
+discarded range answers **410 Gone** with the prune watermark (advertised on `/info`), and
+the synchroniser routes deep body requests to an archive peer instead of penalising the
+pruned one.
+
+**Snapshot bootstrap (snap-sync).** A brand-new node can skip replaying history entirely.
+Its trust reduces to exactly what full validation gives, in four steps (the model is Ergo's
+bootstrap §8, adapted to a sparse-Merkle root):
+
+1. **Genesis is built locally** from the network parameters and balance snapshot — chain
+   identity is never taken from a peer.
+2. **Every header** from genesis to the peer tip is validated under full PoW, so the state
+   root committed in any header carries the chain's whole accumulated work.
+3. The node picks a **pivot** buried at least `maxReorgDepth` under the peer tip. Because
+   every node refuses reorgs deeper than that (§3.7), the imported state can never be forced
+   to unwind — no "de-import" path is ever needed.
+4. It downloads the state **snapshot** at the pivot and rebuilds the sparse-Merkle tree from
+   it, accepting the state **only when it reproduces the pivot header's committed root**.
+   Any tampered, dropped or duplicated entry changes the rebuilt root and the whole import is
+   refused with the stores untouched.
+
+The snapshot itself is a flat per-domain dump — for each of the seven state domains, a paged
+run of `(rawKey, value)` chunks. Unlike Ergo's AVL+ manifest-and-subtree scheme, **it
+carries no tree structure**: the sparse-Merkle root is a function of the binding *set* alone
+(§5.7), so the importer can insert chunks in any order and the single final root equality
+verifies the lot. Servers **materialise** a consistent snapshot periodically
+(`RHIZOME_SNAPSHOT_EVERY` blocks) under a point-in-time lock and advertise
+`(pivotHeight, stateRoot, chunkCount)` on `GET /state/snapshot/info`, serving chunks by index.
+Secondary indexes (box owner/expiry, token minter/holder) are **recomputed locally** from the
+verified values, never transferred — an untrusted index cannot be smuggled in. After import
+the node holds genesis, headers to the pivot (body-less, marked pruned), and the full pivot
+state; ordinary headers-first sync then pulls only the body suffix above the pivot. A
+snap-synced node is a first-class citizen from the first block: it validates, serves, and
+proves state entries against the root like any other.
+
+### 6.5 Account nonces as authenticated state
+
+Sequential per-account nonces are the replay-protection rule, and they are the only derived
+state computed at *transaction* granularity rather than from headers. Two needs converge on
+persisting them. **Pruning:** without historical bodies a node cannot reconstruct nonces at
+boot, so they live in a persistent store, updated on every add and pop and watermarked by the
+height through which they are current — a persistent store reports the tip, so a restart (even
+a pruned node's, even a chain that has never seen an account transaction) reads no body;
+reconstructing nonces from bodies that lie below the prune watermark is refused loudly rather
+than silently under-counting. **Snapshot bootstrap:** a bootstrapped node must obtain nonces
+*verifiably*, or it could not validate the next block's nonce rule. So the account nonce is a
+committed state domain (`ACCOUNT_NONCE`, key = address, value = next nonce): each sender's
+`max(txNonce)+1` over the block is folded into the state root, derived from block content
+(sequentiality already checked) so producer and validators agree. This is the chantier's one
+consensus change — it alters every state root, hence must land while the chain is pre-launch;
+after launch the same change would need a height-activated fork.
+
 ---
 
 ## 7. Security model
@@ -507,10 +798,28 @@ ledger of a synchronised Pandanite node.
 (`addBlock`/`popBlock`, nonces, work, difficulty); RocksDB storage; mempool; HTTP API;
 block production; synchronisation + reorg by cumulative work; wallet CLI; gossip & peer
 discovery; hardening (checkpoints, finality, bounded rate limiting, ban-score, block-size
-cap); a full security review; and the **WASM smart-contract layer** — a Chicory-backed
+cap); a full security review; the **WASM smart-contract layer** — a Chicory-backed
 metered VM, a persistent contract store, `DEPLOY`/`CALL` transactions with gas fees,
 atomic per-block contract state with exact reorg reversal, and wallet `deploy`/`call`
-commands. **222 tests, 0 failures.**
+commands; and the **data-box layer** (§5.5) — stable-id, typed-register storage objects
+with an anti-dust deposit, permissionless miner-collected storage rent, read-only
+`box_read` data inputs for contracts, a persisted per-block undo journal for exact reorg
+reversal, owner/expiry indexes, `GET /box`+`/boxes`, box lifecycle events on the log/SSE
+feed, and wallet `box-*` commands; **native tokens** (§5.6) — `TOKEN_MINT`/`TRANSFER`/`BURN`
+with unique ids, minter/holder indexes, reorg-safe balances, `GET /token(s)` and wallet
+`token-*` commands; the **authenticated state root** (§5.7) — a sparse-Merkle commitment
+to the full state (ledger, boxes, tokens and contract code/storage) in every header, stamped
+by the producer and validated by every node with full rollback on mismatch, reorg-safe, with
+`GET /state`+`/state/proof` and a stateless light-client verifier; and **miner-voted
+parameters** (§5.8) — a header vote, per-epoch tally and reorg-safe derived params for the box
+fee/dust factors; and **headers-first sync, pruning and snapshot bootstrap** (§6.4) — a
+first-class `BlockHeader`/`HeaderCodec`, a stateless `HeaderChain` validator, a
+`HeaderSynchronizer` whose work gate refuses a lying peer on headers alone, persisted account
+nonces plus an `ACCOUNT_NONCE` state domain (§6.5) so the engine's derived state is header-only,
+configurable body pruning (`RHIZOME_PRUNE`) with a `/sync` 410 and a `prunedBelow` advert, and
+trust-minimised snap-sync (`RHIZOME_SYNC=snap`) — periodic per-domain snapshot materialisation,
+`/state/snapshot/*`, and a bootstrap that adopts a peer's state at a buried pivot only when it
+reproduces a PoW-validated header's root. **345 tests, 0 failures.**
 
 **GHOST fork choice.** A fast single longest chain orphans blocks because propagation
 takes a meaningful fraction of the interval (§6.3). A GHOST-style fork choice — the
@@ -541,13 +850,23 @@ end:
 **Autonomous-agent primitives.** Contract event logs are implemented (see §5):
 contracts `emit_log`, the processor collects them per block reorg-safely, and the node
 serves them by height, by a pollable height cursor, and by live SSE push at
-`/logs/stream` (§5.4) — so agents follow on-chain state in real time. Account
-abstraction is covered by the agent wallet (§5.4): contract accounts with owner-driven
-`exec` and revocable, per-token-capped session keys. Gas sponsorship (a third party
-paying a transaction's gas) remains protocol-level future work.
+`/logs/stream` (§5.4) — so agents follow on-chain state in real time. **Persistent
+addressable memory** is covered by data boxes (§5.5): typed-register storage objects an
+agent creates, updates and proves, read contention-free by any contract via `box_read`,
+kept honest by an anti-dust deposit and storage rent that recycles the memory of dead
+agents. Account abstraction is covered by the agent wallet (§5.4): contract accounts with
+owner-driven `exec` and revocable, per-token-capped session keys — and any of that state is
+provable to a light client against the authenticated root (§5.7), which a snap-synced or
+pruned agent node can rely on without holding history (§6.4). The remaining protocol-level
+work is gas sponsorship (a third party paying a transaction's gas).
 
-**Memecoin primitives.** Three reference contracts are implemented and tested through
-consensus: a fungible token (mint, transfer, `transfer` logs), a constant-product AMM
+**Memecoin primitives.** Native tokens (§5.6) make a fungible-asset launch a single
+gas-free transaction — `TOKEN_MINT`/`TRANSFER`/`BURN`, unique unforgeable ids, minter and
+holder indexes, reorg-safe balances — for the common case that needs no custom logic. Token
+balances and metadata are committed in the authenticated state root (§5.7), so a light
+client can prove a holding against a header. For the cases that need custom logic, three
+reference contracts are implemented and tested through consensus: a fungible token (mint,
+transfer, `transfer` logs), a constant-product AMM
 (`x*y=k` with a 0.3% fee, `swap` logs, exact integer math verified against the same
 formula in the test), and a fair-launch launchpad — a fixed-price, first-come sale where
 a buyer's attached native coin only moves when the tokens are delivered (the launchpad
@@ -575,3 +894,9 @@ node is required); a public multi-node testnet.
   #29 (Merkle), #37 (Ed25519 malleability), #52 (rate-limiter leak).
 - Fossilised incidents: `pandanite/invalid.json`, `blacklist.txt`, `config.cpp`
   `bannedHashes`, the `blockchain.cpp` difficulty hack (blocks 536100–536200).
+- Design lineage: [Ergo](https://github.com/ergoplatform/ergo) — the extended-UTXO
+  **box** model (adapted to account-based **data boxes**, §5.5), the **authenticated
+  state root** with light-client proofs (an AVL+ tree there, a sparse Merkle tree here,
+  §5.7), and the **buried-pivot snapshot bootstrap** (Ergo's §8 bootstrapping, adapted to
+  an order-independent sparse-Merkle root with flat per-domain dumps rather than an AVL+
+  manifest, §6.4). The EIP-1 wallet **scan** predicate model informs `/scan` (§5.5).
