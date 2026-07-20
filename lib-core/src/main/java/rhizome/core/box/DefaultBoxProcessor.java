@@ -266,6 +266,33 @@ public final class DefaultBoxProcessor implements BoxProcessor {
         return store.boxIdsByOwner(owner, afterId, limit);
     }
 
+    @Override
+    public ScanPage scan(ScanPredicate predicate, byte[] afterId, int limit, int window) {
+        byte[] owner = predicate.ownerAnchor();
+        List<byte[]> candidates = owner != null
+            ? store.boxIdsByOwner(owner, afterId, window)
+            : store.boxIdsFrom(afterId, window);
+
+        List<Box> matches = new ArrayList<>();
+        byte[] lastExamined = null;
+        boolean brokeAtLimit = false;
+        for (byte[] id : candidates) {
+            lastExamined = id;
+            Box box = store.get(id);
+            if (box != null && predicate.test(box)) {
+                matches.add(box);
+                if (matches.size() >= limit) {
+                    brokeAtLimit = true;
+                    break;
+                }
+            }
+        }
+        // A cursor is returned when more candidates may remain: we stopped at the match
+        // limit mid-window, or we consumed a full window (there could be more beyond it).
+        byte[] cursor = brokeAtLimit || candidates.size() == window ? lastExamined : null;
+        return new ScanPage(matches, cursor);
+    }
+
     private void pruneOld() {
         long cutoff = lastCommittedHeight - retainDepth;
         if (cutoff > 0) {

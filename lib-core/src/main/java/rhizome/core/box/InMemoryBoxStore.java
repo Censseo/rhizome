@@ -110,6 +110,26 @@ public final class InMemoryBoxStore implements BoxStore {
         return out;
     }
 
+    @Override
+    public List<byte[]> boxIdsFrom(byte[] afterId, int limit) {
+        List<byte[]> ids = new ArrayList<>();
+        for (Box box : boxes.values()) {
+            ids.add(box.id());
+        }
+        ids.sort((a, b) -> Arrays.compareUnsigned(a, b));
+        List<byte[]> out = new ArrayList<>();
+        for (byte[] id : ids) {
+            if (afterId != null && Arrays.compareUnsigned(id, afterId) <= 0) {
+                continue;
+            }
+            if (out.size() >= limit) {
+                break;
+            }
+            out.add(id);
+        }
+        return out;
+    }
+
     private static String hex(byte[] b) {
         return Utils.bytesToHex(b);
     }

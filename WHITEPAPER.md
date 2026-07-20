@@ -29,7 +29,7 @@ Four goals drive the design:
    GHOST-style fork choice (§9) that credits and rewards orphaned (uncle) work, making
    the fast cadence safe against the orphaning a naïve longest chain suffers.
 
-The node is functional and covered by **254 tests**: consensus, the WASM contract VM
+The node is functional and covered by **265 tests**: consensus, the WASM contract VM
 and its persistence, execution, storage, mempool, HTTP API, block production, P2P
 synchronisation with reorganisation, GHOST uncles, data boxes (agent-facing on-chain
 storage with typed registers, an anti-dust deposit and storage rent), and a wallet that
@@ -448,10 +448,17 @@ block rewinds both box state and balances exactly, atomically with the block.
 **Observability and tooling.** Box lifecycle events (`box.created`/`updated`/`spent`/
 `collected`) ride the same feed as contract logs — `GET /logs` and the live SSE stream — so
 an agent watches state changes with the machinery it already uses. `GET /box?id=` reads a
-box and `GET /boxes?owner=` lists an account's boxes; the wallet gains
-`box-create`/`update`/`spend`/`show`/`list`. Together with the agent wallet (§5.4), an agent
-on Rhizome has identity, funds, **persistent addressable memory**, and real-time
-observability — the full on-chain loop.
+box and `GET /boxes?owner=` lists an account's boxes. For richer queries, a **declarative
+scan** (EIP-1 style) registers a composable predicate over the owner and registers
+(`equals`/`contains`, combined with `and`/`or`) at `POST /scan/register`, then
+`GET /scan/boxes` returns the matching boxes in bounded, cursor-paged windows — using the
+owner index when the predicate is owner-anchored, a full-table page otherwise; scans are
+node-local, not consensus. Contract state is queryable without a transaction via a
+**read-only dry run**, `POST /call_readonly`, which runs a `CALL` against committed state
+and discards every write. The wallet gains `box-create`/`update`/`spend`/`show`/`list` and
+`call-readonly`. Together with the agent wallet (§5.4), an agent on Rhizome has identity,
+funds, **persistent addressable memory**, and real-time observability — the full on-chain
+loop.
 
 **Future work — an authenticated state root.** Boxes are not yet committed in the block
 header, so a light client cannot *prove* a box without trusting a node. The next step is a
@@ -609,7 +616,7 @@ commands; and the **data-box layer** (§5.5) — stable-id, typed-register stora
 with an anti-dust deposit, permissionless miner-collected storage rent, read-only
 `box_read` data inputs for contracts, a persisted per-block undo journal for exact reorg
 reversal, owner/expiry indexes, `GET /box`+`/boxes`, box lifecycle events on the log/SSE
-feed, and wallet `box-*` commands. **254 tests, 0 failures.**
+feed, and wallet `box-*` commands. **265 tests, 0 failures.**
 
 **GHOST fork choice.** A fast single longest chain orphans blocks because propagation
 takes a meaningful fraction of the interval (§6.3). A GHOST-style fork choice — the

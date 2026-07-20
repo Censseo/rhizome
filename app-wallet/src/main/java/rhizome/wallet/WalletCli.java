@@ -42,6 +42,7 @@ public final class WalletCli {
             case "box-spend" -> boxSpend(args);
             case "box-show" -> boxShow(args);
             case "box-list" -> boxList(args);
+            case "call-readonly" -> callReadonly(args);
             default -> {
                 System.err.println("Unknown command: " + args[0]);
                 usage();
@@ -206,6 +207,12 @@ public final class WalletCli {
         System.out.println(new WalletClient(args[1]).boxesByOwner(PublicAddress.of(args[2])));
     }
 
+    private static void callReadonly(String[] args) {
+        require(args, 4, "call-readonly <nodeUrl> <contract> <hexInput>");
+        byte[] input = args[3].isEmpty() ? new byte[0] : Utils.hexStringToByteArray(args[3]);
+        System.out.println(new WalletClient(args[1]).callReadonly(PublicAddress.of(args[2]), input));
+    }
+
     /** Collects {@code --reg <type>:<value>} pairs, in order, into box registers. */
     private static java.util.List<rhizome.core.box.BoxRegister> parseRegisters(String[] args) {
         var registers = new java.util.ArrayList<rhizome.core.box.BoxRegister>();
@@ -272,6 +279,7 @@ public final class WalletCli {
               box-spend  <nodeUrl> <keyfile> <boxId> [--fee <fee>]
               box-show   <nodeUrl> <boxId>
               box-list   <nodeUrl> <ownerAddr>
+              call-readonly <nodeUrl> <contract> <hexInput>
               register types: bytes:<hex> i64:<n> bool:<true|false> addr:<hex> hash:<hex> str:<text>""");
     }
 }

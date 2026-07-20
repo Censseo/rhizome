@@ -95,6 +95,17 @@ public final class NodeApi {
             }))
             .with(GET, "/box", req -> guarded(() -> box(node, req)))
             .with(GET, "/boxes", req -> guarded(() -> boxes(node, req)))
+            .with(POST, "/scan/register", req -> req.loadBody(SMALL_BODY).map(body -> guardedResponse(() -> {
+                int id = node.registerScan(rhizome.core.box.ScanPredicate.fromJson(
+                    new JSONObject(body.getString(StandardCharsets.UTF_8))));
+                return json(new JSONObject().put("scanId", id));
+            })))
+            .with(POST, "/scan/deregister", req -> req.loadBody(SMALL_BODY).map(body -> guardedResponse(() -> {
+                int id = new JSONObject(body.getString(StandardCharsets.UTF_8)).getInt("scanId");
+                return json(new JSONObject().put("removed", node.deregisterScan(id)));
+            })))
+            .with(GET, "/scan/list", req -> guarded(() -> scanList(node)))
+            .with(GET, "/scan/boxes", req -> guarded(() -> scanBoxes(node, req)))
             .with(GET, "/logs", req -> guarded(() -> logs(node, req)))
             .with(GET, "/logs/stream", req -> guarded(() -> logStream(sse)))
             .with(GET, "/sync", req -> guarded(() -> sync(node, req)))
@@ -110,6 +121,8 @@ public final class NodeApi {
                 Block block = BlockCodec.decode(body.getArray());
                 return statusResponse(node.submitBlock(block));
             })))
+            .with(POST, "/call_readonly", req -> req.loadBody(TX_BODY).map(body -> guardedResponse(() ->
+                callReadonly(node, new JSONObject(body.getString(StandardCharsets.UTF_8))))))
             .build();
 
         return request -> {
@@ -191,6 +204,38 @@ public final class NodeApi {
             .build();
     }
 
+    /**
+     * Read-only contract call (dry run): {@code POST /call_readonly} with a JSON body
+     * {@code {to, input?, from?, value?, gasLimit?}}. Runs the CALL against committed
+     * state, discards all writes, and returns the would-be result — for querying
+     * contract state without submitting a transaction. 503 if contracts are not wired.
+     */
+    private static HttpResponse callReadonly(NodeService node, JSONObject body) {
+        if (!node.dryRunAvailable()) {
+            return HttpResponse.ofCode(503)
+                .withJson(new JSONObject().put("error", "contracts unavailable").toString()).build();
+        }
+        PublicAddress to = PublicAddress.of(body.getString("to"));
+        PublicAddress from = body.has("from") && !body.getString("from").isEmpty()
+            ? PublicAddress.of(body.getString("from")) : PublicAddress.empty();
+        byte[] input = body.has("input") && !body.getString("input").isEmpty()
+            ? rhizome.core.common.Utils.hexStringToByteArray(body.getString("input")) : new byte[0];
+        long value = body.optLong("value", 0);
+        long gasLimit = body.optLong("gasLimit", 10_000_000L);
+
+        var result = node.dryRun(from, to, input, value, gasLimit);
+        org.json.JSONArray logs = new org.json.JSONArray();
+        for (var log : result.logs()) {
+            logs.put(logJson(log));
+        }
+        return json(new JSONObject()
+            .put("success", result.success())
+            .put("output", hex(result.output()))
+            .put("gasUsed", result.gasUsed())
+            .put("error", result.error() == null ? JSONObject.NULL : result.error())
+            .put("logs", logs));
+    }
+
     /** A single data box by id: {@code GET /box?id=<hex64>}; 404 if absent. */
     private static HttpResponse box(NodeService node, HttpRequest req) {
         byte[] id = rhizome.core.common.Utils.hexStringToByteArray(req.getQueryParameter("id"));
@@ -233,6 +278,42 @@ public final class NodeApi {
             .put("boxes", arr);
         if (last != null) {
             result.put("next", rhizome.core.common.Utils.bytesToHex(last));
+        }
+        return json(result);
+    }
+
+    /** Registered box scans: {@code GET /scan/list}. */
+    private static HttpResponse scanList(NodeService node) {
+        org.json.JSONArray arr = new org.json.JSONArray();
+        node.scans().forEach((id, predicate) ->
+            arr.put(new JSONObject().put("scanId", id).put("predicate", predicate.toJson())));
+        return json(new JSONObject().put("scans", arr));
+    }
+
+    /**
+     * Boxes matching a scan: {@code GET /scan/boxes?scanId=N&limit=&after=<boxIdHex>}. The
+     * response's {@code next} cursor (a box id) resumes a bounded scan; absent when done.
+     */
+    private static HttpResponse scanBoxes(NodeService node, HttpRequest req) {
+        rhizome.core.box.ScanPredicate predicate = node.scanPredicate((int) parseLong(req.getQueryParameter("scanId")));
+        if (predicate == null) {
+            return badRequest("unknown scanId");
+        }
+        String limitParam = req.getQueryParameter("limit");
+        int limit = limitParam == null ? 50 : Math.min(100, Math.max(1, (int) parseLong(limitParam)));
+        String afterParam = req.getQueryParameter("after");
+        byte[] after = afterParam == null || afterParam.isEmpty()
+            ? null : rhizome.core.common.Utils.hexStringToByteArray(afterParam);
+
+        long period = node.params().storagePeriodBlocks();
+        var page = node.scan(predicate, after, limit);
+        org.json.JSONArray arr = new org.json.JSONArray();
+        for (rhizome.core.box.Box b : page.matches()) {
+            arr.put(boxJson(b, period));
+        }
+        JSONObject result = new JSONObject().put("boxes", arr);
+        if (page.nextCursor() != null) {
+            result.put("next", hex(page.nextCursor()));
         }
         return json(result);
     }

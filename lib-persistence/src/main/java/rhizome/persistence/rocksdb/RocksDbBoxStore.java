@@ -181,6 +181,25 @@ public final class RocksDbBoxStore implements BoxStore, AutoCloseable {
         return out;
     }
 
+    @Override
+    public List<byte[]> boxIdsFrom(byte[] afterId, int limit) {
+        List<byte[]> out = new ArrayList<>();
+        try (RocksIterator it = db.newIterator(boxesCf)) {
+            if (afterId == null) {
+                it.seekToFirst();
+            } else {
+                it.seek(afterId);
+                if (it.isValid() && Arrays.equals(it.key(), afterId)) {
+                    it.next(); // exclusive of the cursor
+                }
+            }
+            for (; it.isValid() && out.size() < limit; it.next()) {
+                out.add(it.key());
+            }
+        }
+        return out;
+    }
+
     // ---- index maintenance ----
 
     private void writeBox(WriteBatch batch, Box box) throws RocksDBException {

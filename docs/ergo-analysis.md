@@ -216,10 +216,12 @@ ajuste un paramètre d'un pas borné (`Parameters.scala:158-183`), 90 % sur 32
 
 ## 4. Proposition d'intégration : des « data boxes » dans Rhizome
 
-> **Statut : implémenté.** La proposition ci-dessous a été réalisée (phase 1 +
-> rente) et la conception de référence vit désormais dans
-> [`WHITEPAPER.md`](../WHITEPAPER.md) §5.5. Cette section est conservée comme
-> trace de l'analyse qui y a mené.
+> **Statut : implémenté.** La proposition ci-dessous a été réalisée — data boxes,
+> rente de stockage, `box_read` (data inputs), API `/scan` (prédicats déclaratifs)
+> et dry-run `/call_readonly` — et la conception de référence vit désormais dans
+> [`WHITEPAPER.md`](../WHITEPAPER.md) §5.5. Reste en travaux futurs la racine d'état
+> authentifiée (preuves clients légers) et les `dataBoxIds` déclarés dans les
+> transactions. Cette section est conservée comme trace de l'analyse qui y a mené.
 
 Design cible : un **objet box natif** à côté des comptes et des contrats — le
 sous-ensemble d'Ergo utile aux agents, sans changer le modèle de ledger.

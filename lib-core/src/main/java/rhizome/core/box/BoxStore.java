@@ -41,6 +41,9 @@ public interface BoxStore {
     /** Box ids owned by {@code owner}, paginated after {@code afterId} (null = from start). */
     List<byte[]> boxIdsByOwner(byte[] owner, byte[] afterId, int limit);
 
+    /** All box ids in id order, after {@code afterId} (null = start), at most {@code limit} (full-table scan page). */
+    List<byte[]> boxIdsFrom(byte[] afterId, int limit);
+
     /** One box change in a block: write {@code box}, or delete {@code id} when {@code box} is null. */
     record BoxMutation(byte[] id, Box box) {
         public static BoxMutation write(Box box) {

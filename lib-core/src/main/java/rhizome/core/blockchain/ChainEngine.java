@@ -364,6 +364,17 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         }
     }
 
+    /** Evaluates a box scan predicate over committed state (owner-index fast path when anchored). */
+    public rhizome.core.box.BoxProcessor.ScanPage scanBoxes(
+            rhizome.core.box.ScanPredicate predicate, byte[] afterId, int limit, int window) {
+        if (boxProcessor == null) {
+            return new rhizome.core.box.BoxProcessor.ScanPage(java.util.List.of(), null);
+        }
+        // No engine lock: the scan reads only committed box state (thread-safe), so it does
+        // not contend with block production.
+        return boxProcessor.scan(predicate, afterId, limit, window);
+    }
+
     /** Rent-collectable box ids at the next block height, lowest expiry first (block producer). */
     public java.util.List<byte[]> collectableBoxIds(long height, int limit) {
         if (boxProcessor == null) {

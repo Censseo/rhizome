@@ -62,6 +62,17 @@ public interface BoxProcessor {
     List<byte[]> boxIdsByOwner(byte[] owner, byte[] afterId, int limit);
 
     /**
+     * Evaluates {@code predicate} against committed boxes: examines at most {@code window}
+     * boxes from {@code afterId} (using the owner index when the predicate is owner-anchored,
+     * else a full-table page), returning up to {@code limit} matches and a cursor to
+     * continue (null when the scan reached the end).
+     */
+    ScanPage scan(ScanPredicate predicate, byte[] afterId, int limit, int window);
+
+    /** One page of a scan: the matched boxes and the cursor to resume from (null = done). */
+    record ScanPage(List<Box> matches, byte[] nextCursor) {}
+
+    /**
      * Outcome of one box op. {@code debitFrom} is withdrawn from the sender (into the
      * box) on top of the fee; {@code creditFrom} is deposited to the sender (out of the
      * box). {@code boxId} identifies the affected box.

@@ -45,6 +45,20 @@ public final class WalletClient {
         return new JSONObject(sendForString(request)).getString("status");
     }
 
+    /** Raw JSON of a read-only contract call (dry run) against committed state. */
+    public String callReadonly(PublicAddress contract, byte[] input) {
+        JSONObject body = new JSONObject().put("to", contract.toHexString());
+        if (input.length > 0) {
+            body.put("input", rhizome.core.common.Utils.bytesToHex(input));
+        }
+        HttpRequest request = HttpRequest.newBuilder(URI.create(baseUrl + "/call_readonly"))
+            .timeout(Duration.ofSeconds(30))
+            .header("Content-Type", "application/json")
+            .POST(HttpRequest.BodyPublishers.ofString(body.toString()))
+            .build();
+        return sendForString(request);
+    }
+
     /** Raw JSON of a box by id (or the node's error JSON), for the box CLI to print. */
     public String box(String boxIdHex) {
         return get("/box?id=" + boxIdHex);

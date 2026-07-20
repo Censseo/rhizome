@@ -96,6 +96,8 @@ public final class RhizomeNode implements AutoCloseable {
         // can watch on-chain state on one feed.
         service.setLogSource(contractProcessor::logs);
         service.setBoxEventSource(boxProcessor::events);
+        // Read-only dry-run calls (query contract state without a transaction).
+        service.setContracts(contractProcessor);
 
         // Every node keeps a live peer set (seeded from config), serves /peers and
         // accepts announcements, so the network can self-organise from a few seeds.

@@ -25,9 +25,15 @@ public final class NodeService {
     private volatile PeerRegistry peers;
     private volatile java.util.function.LongFunction<List<ContractLog>> logSource;
     private volatile java.util.function.LongFunction<List<rhizome.core.box.BoxProcessor.BoxEvent>> boxEventSource;
+    private volatile rhizome.core.blockchain.ContractProcessor contracts;
 
     /** Maximum blocks a single /logs catch-up scan spans, so agents poll in bounded chunks. */
     public static final int LOG_SCAN_WINDOW = 128;
+
+    /** Maximum boxes a single /scan query examines, so a scan runs in bounded, pollable chunks. */
+    public static final int BOX_SCAN_WINDOW = 512;
+
+    private final ScanRegistry scans = new ScanRegistry();
 
     public NodeService(ChainEngine engine, MemPool mempool) {
         this.engine = engine;
@@ -75,6 +81,22 @@ public final class NodeService {
         return out;
     }
 
+    /** The contract processor, for read-only dry-run calls. */
+    public void setContracts(rhizome.core.blockchain.ContractProcessor contracts) {
+        this.contracts = contracts;
+    }
+
+    /** Whether read-only contract calls are available (a contract processor is wired). */
+    public boolean dryRunAvailable() {
+        return contracts != null;
+    }
+
+    /** Runs a read-only CALL against committed state, discarding writes (no ledger effect). */
+    public rhizome.core.blockchain.ContractProcessor.ContractResult dryRun(
+            PublicAddress from, PublicAddress to, byte[] input, long value, long gasLimit) {
+        return contracts.dryRun(from, to, input, value, gasLimit);
+    }
+
     /** A box from committed state, or {@code null} if none / boxes disabled. */
     public rhizome.core.box.Box box(byte[] id) {
         return engine.box(id);
@@ -83,6 +105,34 @@ public final class NodeService {
     /** Box ids owned by {@code owner}, paginated after {@code afterId} (null = start). */
     public List<byte[]> boxIdsByOwner(byte[] owner, byte[] afterId, int limit) {
         return engine.boxIdsByOwner(owner, afterId, limit);
+    }
+
+    // ---- box scans (EIP-1) ----
+
+    /** Registers a declarative box scan; returns its node-local id. */
+    public int registerScan(rhizome.core.box.ScanPredicate predicate) {
+        return scans.register(predicate);
+    }
+
+    /** Removes a registered scan; true if it existed. */
+    public boolean deregisterScan(int scanId) {
+        return scans.deregister(scanId);
+    }
+
+    /** The predicate of a registered scan, or {@code null} if the id is unknown. */
+    public rhizome.core.box.ScanPredicate scanPredicate(int scanId) {
+        return scans.get(scanId);
+    }
+
+    /** All registered scans, id → predicate. */
+    public java.util.Map<Integer, rhizome.core.box.ScanPredicate> scans() {
+        return scans.all();
+    }
+
+    /** Evaluates a predicate over committed boxes, one bounded, pollable window at a time. */
+    public rhizome.core.box.BoxProcessor.ScanPage scan(
+            rhizome.core.box.ScanPredicate predicate, byte[] afterId, int limit) {
+        return engine.scanBoxes(predicate, afterId, limit, BOX_SCAN_WINDOW);
     }
 
     /**

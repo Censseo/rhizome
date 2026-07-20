@@ -107,6 +107,22 @@ public final class WasmContractProcessor implements ContractProcessor {
         return ContractResult.reverted(meter.used(), outcome.error());
     }
 
+    @Override
+    public ContractResult dryRun(PublicAddress from, PublicAddress to, byte[] input,
+                                 long value, long gasLimit) {
+        // Run against a throwaway session over the committed base store. runCall flushes
+        // its frame into this local session on success; we never flush the local session
+        // to the base store, so nothing persists and the block session is untouched.
+        GasMeter meter = new GasMeter(gasLimit);
+        SessionContractStore scratch = new SessionContractStore(baseStore);
+        CallOutcome outcome = runCall(from.toBytes(), to, input, value, meter,
+            scratch, new java.util.ArrayDeque<>());
+        if (outcome.success()) {
+            return ContractResult.ok(meter.used(), outcome.output(), null, outcome.logs());
+        }
+        return ContractResult.reverted(meter.used(), outcome.error());
+    }
+
     /** Result of one call frame: callee output and the logs that survived (both empty on failure). */
     private record CallOutcome(boolean success, byte[] output, List<ContractLog> logs, String error) {
         static CallOutcome fail(String error) {
