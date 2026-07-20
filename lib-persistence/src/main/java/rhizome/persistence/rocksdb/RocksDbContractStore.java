@@ -110,6 +110,27 @@ public final class RocksDbContractStore implements ContractStore, AutoCloseable 
     }
 
     @Override
+    public void forEachCode(java.util.function.BiConsumer<PublicAddress, byte[]> consumer) {
+        try (org.rocksdb.RocksIterator it = db.newIterator(codeCf)) {
+            for (it.seekToFirst(); it.isValid(); it.next()) {
+                consumer.accept(PublicAddress.of(it.key()), it.value());
+            }
+        }
+    }
+
+    @Override
+    public void forEachStorage(StorageConsumer consumer) {
+        // Storage keys are contract address(25) ‖ key.
+        try (org.rocksdb.RocksIterator it = db.newIterator(storageCf)) {
+            for (it.seekToFirst(); it.isValid(); it.next()) {
+                byte[] slot = it.key();
+                consumer.accept(PublicAddress.of(java.util.Arrays.copyOfRange(slot, 0, PublicAddress.SIZE)),
+                    java.util.Arrays.copyOfRange(slot, PublicAddress.SIZE, slot.length), it.value());
+            }
+        }
+    }
+
+    @Override
     public void close() {
         defaultCf.close();
         codeCf.close();

@@ -44,6 +44,14 @@ public interface BoxStore {
     /** All box ids in id order, after {@code afterId} (null = start), at most {@code limit} (full-table scan page). */
     List<byte[]> boxIdsFrom(byte[] afterId, int limit);
 
+    /**
+     * Visits every live box — the state-snapshot export path. Optional: stores that never
+     * serve snapshots may leave the unsupported default.
+     */
+    default void forEachBox(java.util.function.Consumer<Box> consumer) {
+        throw new UnsupportedOperationException("this box store does not support enumeration");
+    }
+
     /** One box change in a block: write {@code box}, or delete {@code id} when {@code box} is null. */
     record BoxMutation(byte[] id, Box box) {
         public static BoxMutation write(Box box) {

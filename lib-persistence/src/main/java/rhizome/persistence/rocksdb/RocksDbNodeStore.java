@@ -429,6 +429,15 @@ public final class RocksDbNodeStore implements AutoCloseable {
                 throw new LedgerException("Failed to write wallet value", e);
             }
         }
+
+        @Override
+        public void forEachBalance(java.util.function.ObjLongConsumer<PublicAddress> consumer) {
+            try (RocksIterator it = db.newIterator(ledgerCf)) {
+                for (it.seekToFirst(); it.isValid(); it.next()) {
+                    consumer.accept(PublicAddress.of(it.key()), bytesToLong(it.value()));
+                }
+            }
+        }
     }
 
     // ---- NonceStore view (next expected account nonce per sender) ----

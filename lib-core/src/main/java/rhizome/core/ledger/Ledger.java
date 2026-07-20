@@ -21,4 +21,12 @@ public interface Ledger {
     void deposit(PublicAddress wallet, TransactionAmount amt);
 
     void revertDeposit(PublicAddress wallet, TransactionAmount amt);
+
+    /**
+     * Visits every stored {@code (wallet, balance)} pair — the state-snapshot export path.
+     * Optional: stores that never serve snapshots may leave the unsupported default.
+     */
+    default void forEachBalance(java.util.function.ObjLongConsumer<PublicAddress> consumer) {
+        throw new UnsupportedOperationException("this ledger does not support enumeration");
+    }
 }

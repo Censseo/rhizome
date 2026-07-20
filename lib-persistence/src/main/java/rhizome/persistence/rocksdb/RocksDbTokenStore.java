@@ -298,6 +298,27 @@ public final class RocksDbTokenStore implements TokenStore, AutoCloseable {
     }
 
     @Override
+    public void forEachMeta(java.util.function.Consumer<TokenMeta> consumer) {
+        try (RocksIterator it = db.newIterator(metaCf)) {
+            for (it.seekToFirst(); it.isValid(); it.next()) {
+                consumer.accept(TokenMeta.deserialize(it.value()));
+            }
+        }
+    }
+
+    @Override
+    public void forEachBalance(BalanceConsumer consumer) {
+        // Balance keys are tokenId(32) ‖ address(25).
+        try (RocksIterator it = db.newIterator(balanceCf)) {
+            for (it.seekToFirst(); it.isValid(); it.next()) {
+                byte[] key = it.key();
+                consumer.accept(Arrays.copyOfRange(key, 0, 32), Arrays.copyOfRange(key, 32, key.length),
+                    bytesToLong(it.value(), 0));
+            }
+        }
+    }
+
+    @Override
     public void close() {
         defaultCf.close();
         metaCf.close();

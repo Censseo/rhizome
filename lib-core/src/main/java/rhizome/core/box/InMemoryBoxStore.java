@@ -130,6 +130,11 @@ public final class InMemoryBoxStore implements BoxStore {
         return out;
     }
 
+    @Override
+    public void forEachBox(java.util.function.Consumer<Box> consumer) {
+        boxes.values().forEach(consumer);
+    }
+
     private static String hex(byte[] b) {
         return Utils.bytesToHex(b);
     }

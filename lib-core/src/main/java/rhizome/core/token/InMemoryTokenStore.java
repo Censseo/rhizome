@@ -123,6 +123,20 @@ public final class InMemoryTokenStore implements TokenStore {
         return out;
     }
 
+    @Override
+    public void forEachMeta(java.util.function.Consumer<TokenMeta> consumer) {
+        metas.values().forEach(consumer);
+    }
+
+    @Override
+    public void forEachBalance(BalanceConsumer consumer) {
+        // Balance keys are hex(tokenId(32)) + hex(address(25)): 64 + 50 hex chars.
+        balances.forEach((key, amount) -> consumer.accept(
+            Utils.hexStringToByteArray(key.substring(0, 64)),
+            Utils.hexStringToByteArray(key.substring(64)),
+            amount));
+    }
+
     private static String balanceKey(byte[] tokenId, byte[] address) {
         return hex(tokenId) + hex(address);
     }

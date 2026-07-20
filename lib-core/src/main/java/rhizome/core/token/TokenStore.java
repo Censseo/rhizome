@@ -30,6 +30,24 @@ public interface TokenStore {
     /** Token ids {@code address} holds a positive balance of, paginated after {@code afterId}. */
     List<byte[]> tokenIdsByHolder(byte[] address, byte[] afterId, int limit);
 
+    /**
+     * Visits every token's metadata — the state-snapshot export path. Optional: stores that
+     * never serve snapshots may leave the unsupported default.
+     */
+    default void forEachMeta(java.util.function.Consumer<TokenMeta> consumer) {
+        throw new UnsupportedOperationException("this token store does not support enumeration");
+    }
+
+    /** Visits every stored {@code (tokenId, address, amount)} balance — the snapshot export path. */
+    default void forEachBalance(BalanceConsumer consumer) {
+        throw new UnsupportedOperationException("this token store does not support enumeration");
+    }
+
+    @FunctionalInterface
+    interface BalanceConsumer {
+        void accept(byte[] tokenId, byte[] address, long amount);
+    }
+
     /** One token change in a block. */
     sealed interface TokenOp {
         /** Writes token metadata (mint, or a supply update on burn). */

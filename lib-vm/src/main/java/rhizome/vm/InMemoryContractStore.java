@@ -54,4 +54,26 @@ public final class InMemoryContractStore implements ContractStore {
     public void deleteStorage(PublicAddress contract, byte[] key) {
         storage.remove(slot(contract, key));
     }
+
+    @Override
+    public void forEachCode(java.util.function.BiConsumer<PublicAddress, byte[]> consumer) {
+        code.forEach((addrHex, c) -> consumer.accept(PublicAddress.of(unhex(addrHex)), c.clone()));
+    }
+
+    @Override
+    public void forEachStorage(StorageConsumer consumer) {
+        storage.forEach((slot, value) -> {
+            int sep = slot.indexOf(':');
+            consumer.accept(PublicAddress.of(unhex(slot.substring(0, sep))),
+                unhex(slot.substring(sep + 1)), value.clone());
+        });
+    }
+
+    private static byte[] unhex(String hex) {
+        byte[] out = new byte[hex.length() / 2];
+        for (int i = 0; i < out.length; i++) {
+            out[i] = (byte) Integer.parseInt(hex.substring(i * 2, i * 2 + 2), 16);
+        }
+        return out;
+    }
 }

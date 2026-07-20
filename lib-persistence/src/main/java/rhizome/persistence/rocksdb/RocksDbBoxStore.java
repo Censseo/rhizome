@@ -297,6 +297,15 @@ public final class RocksDbBoxStore implements BoxStore, AutoCloseable {
     }
 
     @Override
+    public void forEachBox(java.util.function.Consumer<Box> consumer) {
+        try (RocksIterator it = db.newIterator(boxesCf)) {
+            for (it.seekToFirst(); it.isValid(); it.next()) {
+                consumer.accept(Box.deserialize(it.value()));
+            }
+        }
+    }
+
+    @Override
     public void close() {
         defaultCf.close();
         boxesCf.close();
