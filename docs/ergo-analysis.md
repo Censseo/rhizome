@@ -229,7 +229,9 @@ Box {
   creationHeight: int
   registers     : R0..R5 — 6 slots byte[] avec tag de type minimal
                   (BYTES / INT / LONG / ADDRESS / HASH), remplissage dense
-  // taille totale sérialisée ≤ 4096 octets (comme Ergo)
+  // taille totale sérialisée ≤ 64 KiB (le plafond de 4 Ko d'Ergo borne la
+  // taille des preuves AVL+ et des contextes de script — contraintes qui ne
+  // s'appliquent pas ici, cf. spec-boxes.md §3.4)
 }
 ```
 
@@ -302,7 +304,8 @@ scanne), autant le prévoir d'emblée.
 ### 4.6 Ce que ça apporte aux agents, concrètement
 
 - **Mémoire persistante adressable** : un agent écrit un souvenir/état dans une
-  box (≤ 4 Ko ; au-delà : hash on-chain + blob off-chain), le retrouve par id,
+  box (≤ 64 KiB — un embedding, un document, un état sérialisé ; au-delà :
+  hash on-chain + blob off-chain, ou chunking multi-boxes), le retrouve par id,
   le prouve à un tiers (une fois le state root en place).
 - **Tableaux d'affichage / annuaires** : registre d'agents (box par agent :
   endpoint, clé publique, capacités), places de marché de services — lisibles

@@ -85,12 +85,12 @@ liste **entièrement** (pas d'update partiel en v1).
 
 | Tag | Nom | Contrainte sur `len` | Usage type |
 |---|---|---|---|
-| 0 | `BYTES` | 0..4032 | blob libre, données sérialisées |
+| 0 | `BYTES` | bornée par la taille de box | blob libre, données sérialisées, embeddings |
 | 1 | `I64` | exactement 8 | compteur, timestamp, prix |
 | 2 | `BOOL` | exactement 1 (0x00/0x01) | flag |
 | 3 | `ADDRESS` | exactement 25 | référence à un compte/contrat |
 | 4 | `HASH32` | exactement 32 | hash de contenu off-chain, box id |
-| 5 | `STRING` | 0..4032, UTF-8 valide | nom, URL, endpoint d'agent |
+| 5 | `STRING` | bornée par la taille de box, UTF-8 valide | nom, URL, endpoint d'agent, document |
 
 Les tags sont **validés structurellement** (longueur, UTF-8 pour STRING) mais le
 protocole n'attache aucune sémantique aux valeurs — ce sont des annotations pour
@@ -102,9 +102,31 @@ version, pas silencieusement.
 
 | Constante | Valeur | Commentaire |
 |---|---|---|
-| `MAX_BOX_SIZE_BYTES` | **4096** | taille sérialisée totale (§3.1), comme Ergo. Au-delà : hash on-chain (`HASH32`) + blob off-chain. |
+| `MAX_BOX_SIZE_BYTES` | **65 536 (64 KiB)** | taille sérialisée totale (§3.1) |
 | `maxBoxRegisters` | 6 | |
-| taille max d'un registre | bornée par la box (≤ 4032 utiles) | pas de plafond individuel, comme Ergo |
+| taille max d'un registre | bornée par la box | pas de plafond individuel, comme Ergo |
+
+**Pourquoi 64 KiB et pas les 4 KiB d'Ergo.** Chez Ergo la box sérialisée est la
+valeur de la feuille de l'arbre AVL+ authentifié : chaque preuve d'inclusion ou
+de modification transporte la box entière, et les boxes entrent dans les
+contextes d'exécution des scripts — le plafond de 4 KiB borne la taille des
+preuves et le coût de validation. Aucune de ces contraintes ne s'applique à
+Rhizome : pas de scripts de garde, pas d'état authentifié en Phase 1, et quand
+le state root arrivera (Phase 4), la feuille committera
+`(en-tête de box, SHA256(registres))` plutôt que le contenu — les preuves
+restent petites quelle que soit la taille des boxes, le contenu étant servi à
+part et vérifié contre son hash. Les bornes effectives sont le wire
+(`MAX_DATA` = 128 KiB par transaction) et le bloc (4 MiB) : une box pleine
+occupe 1.6 % d'un bloc. 64 KiB loge un embedding (1536 × float32 = 6 KiB), un
+document de plusieurs pages ou un état d'agent sérialisé — les cas que 4 KiB
+excluait. Le coût, lui, reste linéaire : caution et rente sont par octet (§4),
+donc une grosse box paie 16 fois plus qu'une box de 4 KiB.
+
+**Au-delà de 64 KiB** — deux patterns, sans changement de protocole :
+1. *hash + off-chain* : registre `HASH32` = SHA256 du blob, le blob vit hors
+   chaîne (IPFS, serveur d'agent) ; l'intégrité est on-chain, pas la donnée ;
+2. *chunking* : une box manifeste (`BYTES` = liste de box ids) + N boxes chunk —
+   la rente recycle l'ensemble naturellement, chunk par chunk.
 
 ## 4. Paramètres réseau (ajouts à `NetworkParameters`)
 
@@ -125,9 +147,9 @@ Valeurs proposées pour `cleanMainnet()` (placeholders à calibrer, comme le
 | Paramètre | Valeur | Justification |
 |---|---|---|
 | `boxActivationHeight` | fixée au déploiement | cf. §10 |
-| `minValuePerByte` | **5** (0.0005 PDN/octet) | une box pleine (4 Ko) verrouille ~2 PDN, une petite box de 200 o ~0.1 PDN. Remboursé au spend — c'est une caution, pas un coût. |
+| `minValuePerByte` | **1** (0.0001 PDN/octet) | une petite box de 200 o verrouille 0.02 PDN, 4 Ko ~0.4 PDN, une box pleine (64 Ko) ~6.6 PDN. Remboursé au spend — c'est une caution, pas un coût. |
 | `storagePeriodBlocks` | **6 307 200** (~1 an à 5 s) | Ergo prend 4 ans ; pour une chaîne d'agents on veut un GC plus agressif, sans pour autant harceler les utilisateurs. |
-| `storageFeeFactor` | **3** (0.0003 PDN/octet/an) | une box pleine paie ~1.2 PDN/an. Une box financée au minimum (5/octet) tombe sous le plancher dust après ~1 période : l'abandon se recycle en ~1 an. |
+| `storageFeeFactor` | **1** (0.0001 PDN/octet/an) | 4 Ko paient ~0.4 PDN/an, une box pleine ~6.6 PDN/an — l'occupation d'état à long terme reste chère au volume. Une box financée au minimum (1/octet) tombe sous le plancher dust après exactement 1 période : l'abandon se recycle en ~1 an. |
 | `maxBoxCollectsPerBlock` | **32** | borne le coût de validation ; l'index d'expiration (§7) rend la sélection O(1) par box. |
 
 Ces paramètres sont des constantes de consensus en Phase 1 ; ils deviendront
@@ -396,7 +418,9 @@ box_read(idPtr: i32, outPtr: i32, outCap: i32) -> i32
 - Absente → retourne **-1**, rien n'est écrit.
 - Présente → écrit la forme sérialisée §3.1 dans `outPtr` (tronquée à `outCap`,
   pattern des host functions existantes) et retourne la taille totale. Le
-  contrat appelle typiquement deux fois (taille puis lecture), ou alloue 4096.
+  contrat appelle typiquement deux fois (taille puis lecture) — allouer
+  systématiquement 64 KiB serait une page WASM entière pour souvent quelques
+  centaines d'octets.
 - Gas : `BOX_READ_BASE = 100` + `PER_BYTE × min(taille, outCap)` (aligné sur le
   `dataInputCost` d'Ergo : lire doit rester bon marché).
 - `HostState` gagne `Box boxRead(byte[] id)` (défaut : `null`), câblé par
