@@ -241,7 +241,9 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             if (checkpoint != null && !block.hash().equals(checkpoint)) {
                 return HEADER_HASH_INVALID;
             }
-            Block parent = store.tip();
+            // Parent linkage and pacing need only the parent HEADER — a snap-synced node
+            // holds headers (not bodies) below its pivot, and this path must still work.
+            BlockHeader parent = store.headerAt(height);
             if (!b.lastBlockHash().equals(parent.hash())) {
                 return INVALID_LASTBLOCK_HASH;
             }
@@ -251,7 +253,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             // Consensus rate limit: a block must be at least minBlockTimeSec after its
             // parent. Enforced by every node, so it caps block production for everyone
             // (majority miner included), unlike the producer's local pacing.
-            if (b.timestamp() < ((BlockImpl) parent).timestamp() + params.minBlockTimeSec() * 1000L) {
+            if (b.timestamp() < parent.timestamp() + params.minBlockTimeSec() * 1000L) {
                 return BLOCK_TIMESTAMP_TOO_CLOSE;
             }
             if (b.timestamp() > nowMillis.getAsLong() + params.maxFutureBlockTimeSec() * 1000L) {
@@ -380,7 +382,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
     public SHA256Hash tipHash() {
         lock.lock();
         try {
-            return store.tip().hash();
+            return store.headerAt(store.height()).hash();
         } finally {
             lock.unlock();
         }
@@ -424,7 +426,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
     public long nextBlockTimestamp(long preferred) {
         lock.lock();
         try {
-            long tipFloor = ((BlockImpl) store.tip()).timestamp() + params.minBlockTimeSec() * 1000L;
+            long tipFloor = store.headerAt(store.height()).timestamp() + params.minBlockTimeSec() * 1000L;
             return Math.max(Math.max(preferred, medianTimePast() + 1), tipFloor);
         } finally {
             lock.unlock();
@@ -481,6 +483,22 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
     /** Current wall-clock (ms) from the engine's time source — the reference for the future-block bound. */
     public long nowMillis() {
         return nowMillis.getAsLong();
+    }
+
+    /**
+     * Runs {@code action} while holding the engine lock, so it sees one point-in-time view
+     * across the chain, ledger, nonces and processor state — no block can land mid-read.
+     * Used to capture a consistent state-snapshot export (the whole dump must correspond to
+     * a single {@code (height, stateRoot)} pair). Keep the action bounded: block application
+     * stalls while it runs.
+     */
+    public <T> T withConsistentView(java.util.function.Supplier<T> action) {
+        lock.lock();
+        try {
+            return action.get();
+        } finally {
+            lock.unlock();
+        }
     }
 
     // ---- data boxes ----

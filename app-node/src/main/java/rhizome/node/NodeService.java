@@ -27,6 +27,14 @@ public final class NodeService {
     private volatile java.util.function.LongFunction<List<rhizome.core.box.BoxProcessor.BoxEvent>> boxEventSource;
     private volatile java.util.function.LongFunction<List<rhizome.core.token.TokenProcessor.TokenEvent>> tokenEventSource;
     private volatile rhizome.core.blockchain.ContractProcessor contracts;
+    private volatile rhizome.core.state.snapshot.StateSource snapshotSource;
+    private volatile MaterializedSnapshot snapshot;
+
+    /** Entry bound per snapshot chunk (bytes are bounded separately by the exporter). */
+    static final int SNAPSHOT_CHUNK_ENTRIES = 4096;
+
+    /** A consistent full-state export frozen at one (pivotHeight, stateRoot) point. */
+    record MaterializedSnapshot(long pivotHeight, byte[] stateRoot, List<byte[]> chunks) {}
 
     /** Maximum blocks a single /logs catch-up scan spans, so agents poll in bounded chunks. */
     public static final int LOG_SCAN_WINDOW = 128;
@@ -238,6 +246,43 @@ public final class NodeService {
     /** Exclusive upper bound of pruned block bodies (0 = archive node). */
     public long prunedBelow() {
         return engine.prunedBelow();
+    }
+
+    /** Wires the state source that snapshot materialisation exports from. */
+    public void setSnapshotSource(rhizome.core.state.snapshot.StateSource source) {
+        this.snapshotSource = source;
+    }
+
+    /**
+     * Captures a fresh materialised snapshot of the full committed state under the engine
+     * lock, so every chunk corresponds to the single {@code (height, stateRoot)} pair it
+     * advertises. Replaces any previous snapshot. False when the node cannot export
+     * (no source wired, or no state accumulator producing roots).
+     */
+    public boolean materializeSnapshot() {
+        var source = snapshotSource;
+        if (source == null || engine.stateRoot() == null) {
+            return false;
+        }
+        this.snapshot = engine.withConsistentView(() -> {
+            List<byte[]> encoded = new ArrayList<>();
+            for (var chunk : rhizome.core.state.snapshot.StateSnapshotExporter.export(source, SNAPSHOT_CHUNK_ENTRIES)) {
+                encoded.add(chunk.encode());
+            }
+            return new MaterializedSnapshot(engine.height(), engine.stateRoot(), encoded);
+        });
+        return true;
+    }
+
+    /** The current materialised snapshot, or {@code null} if none has been captured. */
+    MaterializedSnapshot materializedSnapshot() {
+        return snapshot;
+    }
+
+    /** Height of the current materialised snapshot ({@code 0} when none). */
+    public long snapshotPivot() {
+        var snap = snapshot;
+        return snap == null ? 0 : snap.pivotHeight();
     }
 
     public java.math.BigInteger totalWork() {

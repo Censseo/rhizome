@@ -43,4 +43,20 @@ public interface PeerSource {
     default long prunedBelow() {
         return 0;
     }
+
+    /**
+     * The peer's materialised state snapshot: the height it was taken at, the state root it
+     * must rebuild to (which the importer checks against our PoW-validated header at that
+     * height), and how many chunks to fetch. {@code null} when the peer has none.
+     */
+    default SnapshotInfo snapshotInfo() {
+        return null;
+    }
+
+    /** One snapshot chunk (encoded {@link rhizome.core.state.snapshot.SnapshotChunk}) by index. */
+    default byte[] snapshotChunk(int index) {
+        throw new UnsupportedOperationException("peer does not serve state snapshots");
+    }
+
+    record SnapshotInfo(long pivotHeight, byte[] stateRoot, int chunkCount) {}
 }

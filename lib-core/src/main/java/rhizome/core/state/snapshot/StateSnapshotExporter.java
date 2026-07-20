@@ -22,26 +22,42 @@ public final class StateSnapshotExporter {
         StateKeys.TOKEN_BALANCE, StateKeys.CONTRACT_CODE, StateKeys.CONTRACT_STORAGE
     };
 
+    /** Default byte bound per chunk (a chunk flushes once it crosses this). */
+    public static final int DEFAULT_CHUNK_BYTES = 1 << 20;
+
     private StateSnapshotExporter() {}
 
-    /** Dumps every domain of {@code source} into chunks of at most {@code maxEntriesPerChunk}. */
+    /** As {@link #export(StateSource, int, int)} with the default ~1 MiB byte bound. */
     public static List<SnapshotChunk> export(StateSource source, int maxEntriesPerChunk) {
-        if (maxEntriesPerChunk <= 0) {
-            throw new IllegalArgumentException("maxEntriesPerChunk must be positive");
+        return export(source, maxEntriesPerChunk, DEFAULT_CHUNK_BYTES);
+    }
+
+    /**
+     * Dumps every domain of {@code source} into chunks of at most {@code maxEntriesPerChunk}
+     * entries, flushing early once a chunk crosses {@code maxBytesPerChunk} (a single
+     * oversized entry — e.g. large contract code — still lands whole in its own chunk).
+     */
+    public static List<SnapshotChunk> export(StateSource source, int maxEntriesPerChunk, int maxBytesPerChunk) {
+        if (maxEntriesPerChunk <= 0 || maxBytesPerChunk <= 0) {
+            throw new IllegalArgumentException("chunk bounds must be positive");
         }
         List<SnapshotChunk> chunks = new ArrayList<>();
+        long[] bufferedBytes = {0};
         for (byte domain : DOMAINS) {
             List<SnapshotChunk.Entry> buffer = new ArrayList<>();
             source.forEach(domain, (key, value) -> {
                 buffer.add(new SnapshotChunk.Entry(key, value));
-                if (buffer.size() >= maxEntriesPerChunk) {
+                bufferedBytes[0] += key.length + value.length;
+                if (buffer.size() >= maxEntriesPerChunk || bufferedBytes[0] >= maxBytesPerChunk) {
                     chunks.add(new SnapshotChunk(domain, new ArrayList<>(buffer)));
                     buffer.clear();
+                    bufferedBytes[0] = 0;
                 }
             });
             if (!buffer.isEmpty()) {
                 chunks.add(new SnapshotChunk(domain, buffer));
             }
+            bufferedBytes[0] = 0;
         }
         return chunks;
     }

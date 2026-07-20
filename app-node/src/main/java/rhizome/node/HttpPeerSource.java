@@ -83,6 +83,26 @@ public final class HttpPeerSource implements PeerSource {
     }
 
     @Override
+    public SnapshotInfo snapshotInfo() {
+        try {
+            JSONObject info = new JSONObject(new String(
+                getBytes("/state/snapshot/info", SCALAR_CAP, true), StandardCharsets.UTF_8));
+            return new SnapshotInfo(info.getLong("pivotHeight"),
+                rhizome.core.common.Utils.hexStringToByteArray(info.getString("stateRoot")),
+                info.getInt("chunks"));
+        } catch (UnsupportedOperationException noSnapshot) {
+            return null; // peer has no materialised snapshot (404) — not an error
+        }
+    }
+
+    @Override
+    public byte[] snapshotChunk(int index) {
+        // Chunks are ~1 MiB by construction; the cap only bounds a hostile response
+        // (one oversized entry — big contract code — may push a chunk past the target).
+        return getBytes("/state/snapshot/chunk?index=" + index, 16L * 1024 * 1024);
+    }
+
+    @Override
     public List<BlockHeader> headers(long start, long end) {
         // A peer predating the /headers endpoint answers 404; surface it as "unsupported"
         // so the synchronizer falls back to full-block sync (D7) instead of banning.

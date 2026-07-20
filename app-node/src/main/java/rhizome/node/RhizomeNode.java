@@ -145,6 +145,11 @@ public final class RhizomeNode implements AutoCloseable {
         service.setTokenEventSource(tokenProcessor::events);
         // Read-only dry-run calls (query contract state without a transaction).
         service.setContracts(contractProcessor);
+        // Snap-sync source: this node can materialise and serve full-state snapshots,
+        // verifiable by peers against the state root committed in the pivot header.
+        service.setSnapshotSource(new rhizome.core.state.snapshot.DomainStateAdapter(
+            store.ledger(), store.nonceStore(), boxStore, tokenStore,
+            new rhizome.vm.ContractStateAdapter(contractStore), null));
 
         // Every node keeps a live peer set (seeded from config), serves /peers and
         // accepts announcements, so the network can self-organise from a few seeds.
@@ -222,6 +227,31 @@ public final class RhizomeNode implements AutoCloseable {
             config.syncPeriodMs(), config.syncPeriodMs(), TimeUnit.MILLISECONDS);
         syncScheduler.scheduleWithFixedDelay(discovery::round,
             config.syncPeriodMs(), config.syncPeriodMs(), TimeUnit.MILLISECONDS);
+        // Periodic snapshot materialisation (RHIZOME_SNAPSHOT_EVERY blocks, 0 = never):
+        // recapture once the chain has advanced a full interval past the last pivot, so a
+        // deep-enough snapshot is always on offer for snap-syncing peers.
+        long snapshotEvery = snapshotEveryBlocks();
+        if (snapshotEvery > 0) {
+            syncScheduler.scheduleWithFixedDelay(() -> {
+                if (engine.height() >= service.snapshotPivot() + snapshotEvery && service.materializeSnapshot()) {
+                    log.info("Materialized state snapshot at height {} ({} chunks)",
+                        service.snapshotPivot(), service.materializedSnapshot().chunks().size());
+                }
+            }, config.syncPeriodMs(), config.syncPeriodMs(), TimeUnit.MILLISECONDS);
+        }
+    }
+
+    /** Blocks between snapshot materialisations, from {@code RHIZOME_SNAPSHOT_EVERY} (default ~1 day). */
+    private static long snapshotEveryBlocks() {
+        String env = System.getenv("RHIZOME_SNAPSHOT_EVERY");
+        if (env == null || env.isBlank()) {
+            return 17_280;
+        }
+        try {
+            return Long.parseLong(env.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException("RHIZOME_SNAPSHOT_EVERY must be an integer, was: " + env, e);
+        }
     }
 
     /** One sync round across all known peers; peer failures are isolated. */

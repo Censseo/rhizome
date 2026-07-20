@@ -73,6 +73,7 @@ public final class NodeApi {
                 .put("difficulty", node.difficulty())
                 .put("mempool", node.mempoolSize())
                 .put("prunedBelow", node.prunedBelow())
+                .put("snapshotPivot", node.snapshotPivot())
                 .put("storageFeeFactor", node.voteableParams()[0])
                 .put("minValuePerByte", node.voteableParams()[1]))))
             .with(GET, "/peers", req -> ok(json(new JSONObject()
@@ -114,6 +115,8 @@ public final class NodeApi {
             .with(GET, "/tokens", req -> guarded(() -> tokens(node, req)))
             .with(GET, "/state", req -> guarded(() -> state(node)))
             .with(GET, "/state/proof", req -> guarded(() -> stateProof(node, req)))
+            .with(GET, "/state/snapshot/info", req -> guarded(() -> snapshotInfo(node)))
+            .with(GET, "/state/snapshot/chunk", req -> guarded(() -> snapshotChunk(node, req)))
             .with(GET, "/logs", req -> guarded(() -> logs(node, req)))
             .with(GET, "/logs/stream", req -> guarded(() -> logStream(sse)))
             .with(GET, "/sync", req -> guarded(() -> sync(node, req)))
@@ -539,6 +542,35 @@ public final class NodeApi {
         return HttpResponse.ok200()
             .withHeader(HttpHeaders.CONTENT_TYPE, "application/octet-stream")
             .withBody(out.toByteArray())
+            .build();
+    }
+
+    /** Advertises the materialised state snapshot ({@code 404} when none has been captured). */
+    private static HttpResponse snapshotInfo(NodeService node) {
+        var snap = node.materializedSnapshot();
+        if (snap == null) {
+            return HttpResponse.ofCode(404)
+                .withJson(new JSONObject().put("error", "no snapshot materialized").toString())
+                .build();
+        }
+        return json(new JSONObject()
+            .put("pivotHeight", snap.pivotHeight())
+            .put("stateRoot", rhizome.core.common.Utils.bytesToHex(snap.stateRoot()))
+            .put("chunks", snap.chunks().size()));
+    }
+
+    /** One binary snapshot chunk by index (bounds-checked against the current materialisation). */
+    private static HttpResponse snapshotChunk(NodeService node, HttpRequest req) {
+        var snap = node.materializedSnapshot();
+        int index = (int) parseLong(req.getQueryParameter("index"));
+        if (snap == null || index < 0 || index >= snap.chunks().size()) {
+            return HttpResponse.ofCode(404)
+                .withJson(new JSONObject().put("error", "no such snapshot chunk").toString())
+                .build();
+        }
+        return HttpResponse.ok200()
+            .withHeader(HttpHeaders.CONTENT_TYPE, "application/octet-stream")
+            .withBody(snap.chunks().get(index))
             .build();
     }
 
