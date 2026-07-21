@@ -58,6 +58,9 @@ offline against your own node:
   node's `minValuePerByte`. Native tokens (mint/transfer/burn, holdings) live
   in the Wallet page. Both activate from the `GET /features` flags, so a node
   built without those layers keeps the pages dormant.
+- **Conscience / Le Fil** — the chain's resident agent (`WHITEPAPER.md` §10): a paid
+  inbox to talk to it, and its public feed. Dormant mockups until `GET /features`
+  announces `conscience: <address>`.
 
 A quick local playground:
 

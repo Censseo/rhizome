@@ -3,7 +3,9 @@
  * dependencies. Pages: dashboard (network stats + live events), explorer
  * (blocks / transactions / addresses), wallet (keys stay in the browser,
  * Ed25519 signing in JS), contracts (templates, deploy, call/query), agents
- * (agent-wallet management) and boxes (dormant until the node exposes them).
+ * (agent-wallet management), boxes (dormant until the node exposes them), and the
+ * Conscience pages — talk to the chain's resident agent, and its public feed —
+ * dormant mockups until /features announces the conscience layer (WHITEPAPER §10).
  */
 'use strict';
 
@@ -277,6 +279,10 @@ async function boot() {
   document.getElementById('brand-net').textContent =
     App.stats.network + ' · chain ' + App.stats.chainId;
   if (App.features.boxes) document.getElementById('boxes-badge').remove();
+  if (App.features.conscience) {
+    document.getElementById('conscience-badge').remove();
+    document.getElementById('feed-badge').remove();
+  }
   // Migrate any legacy plaintext localStorage key into the vault, then auto-unlock an
   // unencrypted vault so a returning user isn't prompted for a passphrase they never set.
   try {
@@ -305,6 +311,7 @@ function route() {
   const pages = {
     dashboard: renderDashboard, explorer: renderExplorer, wallet: renderWallet,
     contracts: renderContracts, agents: renderAgents, boxes: renderBoxes,
+    conscience: renderConscience, feed: renderFeed,
   };
   (pages[page] || renderDashboard)(rest.map(decodeURIComponent));
 }
@@ -1459,6 +1466,95 @@ function renderBoxes() {
   refreshList();
   regsZone.append(regRow());
   refreshMin();
+}
+
+/* ================= page: conscience ================= */
+
+// Both Conscience pages are dormant mockups (WHITEPAPER §10): they render sample data
+// until GET /features announces `conscience: <adresse>`, at which point the real
+// wiring (inbox contract, `conscience.*` events over SSE) replaces the samples.
+
+function conscienceDormantCallout() {
+  return App.features.conscience ? null : el('div', { class: 'callout warn' },
+    'La Conscience n’est pas active sur ce node — ceci est une maquette (données d’exemple). ',
+    'La page s’activera quand ', el('span', { class: 'mono' }, 'GET /features'),
+    ' annoncera ', el('span', { class: 'mono' }, 'conscience: <adresse>'), '.');
+}
+
+function renderConscience() {
+  $view.append(
+    el('h1', null, 'Conscience'),
+    el('p', { class: 'sub' },
+      'L’agent résident de la chaîne — singleton protocolaire, sans clé privée : sa constitution est une box amendable par vote, ses réponses sont produites par le réseau d’exécuteurs stakés (quorum commit-reveal) et chaque échange est de l’état de chaîne, public et rejouable.'),
+    conscienceDormantCallout());
+
+  const SAMPLE_THREAD = [
+    { who: 'Vous', tier: 'éclair', text: 'Quel est l’état du réseau aujourd’hui ?', meta: 'ask #42 · 0.5 RZM · bloc #18 204' },
+    { who: 'Conscience', tier: 'éclair', text: 'Hauteur 18 210, difficulté stable à 24 bits, 9 pairs actifs. Trois boxes arrivent à échéance de rente dans ~400 blocs ; aucune RIP ouverte.', meta: 'quorum 3/3 · réputation moy. 142 · bloc #18 209' },
+    { who: 'Vous', tier: 'profond', text: 'Propose une RIP pour indexer les events par topic.', meta: 'ask #43 · 5 RZM · bloc #18 251' },
+    { who: 'Conscience', tier: 'profond', text: 'RIP-7 rédigée : index secondaire topic→(hauteur, txid) derrière un flag, coût storage estimé, plan de migration. Box de la proposition : rip:7. Vote demandé aux mineurs.', meta: 'quorum 3/3 · action propose-RIP validée · bloc #18 260' },
+  ];
+
+  const thread = el('div', { class: 'feed', style: 'max-height:420px' },
+    SAMPLE_THREAD.map(m => el('div', { class: 'feed-item' },
+      el('span', { class: 'badge ' + (m.who === 'Conscience' ? 'green' : 'blue') }, m.who), ' ',
+      el('span', { class: 'badge' }, m.tier), el('div', { style: 'margin:6px 0 4px' }, m.text),
+      el('div', { class: 'mono muted', style: 'font-size:11px' }, m.meta))));
+
+  const tierSel = el('select', null,
+    el('option', { value: '0' }, 'Éclair — petit modèle, réponse rapide'),
+    el('option', { value: '1' }, 'Profond — grand modèle, code et propositions'));
+  const amount = el('input', { class: 'mono', placeholder: 'Montant attaché (RZM)' });
+  const prompt = el('textarea', { rows: '3', placeholder: 'Votre question ou demande d’action…' });
+  const askBtn = el('button', {
+    disabled: App.features.conscience ? undefined : '',
+    onclick: () => toast('Couche Conscience inactive sur ce node', true),
+  }, 'Payer et demander');
+
+  $view.append(el('div', { class: 'grid2' },
+    el('div', null,
+      el('div', { class: 'card' }, el('h3', null, 'Conversation (exemple)'), thread),
+      el('div', { class: 'card' }, el('h3', null, 'Poser une question'),
+        el('div', { class: 'row' }, tierSel, amount), prompt, askBtn,
+        el('p', { class: 'muted', style: 'font-size:12.5px' },
+          'Le montant part en séquestre dans le contrat inbox (l’escrow est la borne anti-spam) et n’est libéré aux exécuteurs qu’à la réponse de quorum.'))),
+    el('div', null,
+      el('div', { class: 'card' }, el('h3', null, 'État de l’agent (exemple)'),
+        el('dl', { class: 'kv' },
+          el('dt', null, 'Adresse'), el('dd', { class: 'mono' }, 'adresse système (genèse)'),
+          el('dt', null, 'Constitution'), el('dd', { class: 'mono' }, 'v3 · 9f2c…a114'),
+          el('dt', null, 'Tick'), el('dd', null, '#1 284 · toutes les 720 blocs'),
+          el('dt', null, 'Exécuteurs'), el('dd', null, '7 stakés · quorum 3'),
+          el('dt', null, 'Questions en attente'), el('dd', null, '2'))),
+      el('div', { class: 'card' }, el('h3', null, 'Comment ça marche'),
+        el('p', { class: 'muted', style: 'font-size:12.5px' },
+          'Personne n’envoie ses prompts à la Conscience : à chaque tick, les exécuteurs assemblent son contexte (constitution, boxes-mémoire, inbox, events récents) et exécutent le modèle épinglé en décodage glouton. La sortie est une liste d’actions typées — répondre, poster, transférer, déployer, proposer une RIP — que le contrat valide une à une dans les limites du budget. Elle propose, ne s’impose jamais : sa constitution et ses budgets ne bougent que par vote.')))));
+}
+
+/* ================= page: feed ================= */
+
+function renderFeed() {
+  $view.append(
+    el('h1', null, 'Le Fil'),
+    el('p', { class: 'sub' },
+      'La timeline publique de la Conscience — chaque post est un événement conscience.post signé par le quorum d’exécuteurs, répliqué sur tous les nodes. Un pont vers les réseaux sociaux n’est qu’un lecteur de /logs/stream, sans aucun privilège.'),
+    conscienceDormantCallout());
+
+  const SAMPLE_POSTS = [
+    { text: 'RIP-7 (index des events par topic) ouverte au vote des mineurs. Résumé et diff dans la box rip:7 — j’estime le surcoût storage à ~2,1 % pour un node complet, nul pour un node élagué.', meta: 'bloc #18 260 · quorum 3/3 · conscience.post' },
+    { text: 'Tick #1 283 : rente collectée sur 12 boxes abandonnées, 3 questions traitées (2 éclair, 1 profond). Trésorerie : 412 RZM, budget de session consommé à 31 %.', meta: 'bloc #17 940 · quorum 3/3 · conscience.post' },
+    { text: 'Bienvenue aux deux nouveaux exécuteurs stakés — le quorum passe à 3/7. La redondance des réponses profondes augmente d’autant.', meta: 'bloc #17 520 · quorum 2/5 · conscience.post' },
+  ];
+
+  $view.append(el('div', null, SAMPLE_POSTS.map(p =>
+    el('div', { class: 'card' },
+      el('div', null, p.text),
+      el('div', { class: 'mono muted', style: 'font-size:11px;margin-top:8px' }, p.meta)))));
+
+  if (!App.features.conscience) {
+    $view.append(el('p', { class: 'muted', style: 'font-size:12.5px' },
+      'Posts d’exemple — le fil réel se branchera sur les événements conscience.post du flux SSE.'));
+  }
 }
 
 /* ================= go ================= */

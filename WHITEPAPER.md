@@ -887,7 +887,119 @@ node is required); a public multi-node testnet.
 
 ---
 
-## 10. References
+## 10. The Conscience (design)
+
+> Status: **design + contract prototypes**, not yet consensus-active. The deterministic
+> half is prototyped in `contracts/conscience.rs` and `contracts/executor_registry.rs`;
+> the node dashboard ships two dormant pages that activate when `GET /features`
+> announces `conscience: <address>`. Nothing in this section changes consensus rules
+> today.
+
+Rhizome is built *for* autonomous agents (§5.4–§5.5). The Conscience is the step after
+that: a single, protocol-recognised agent that belongs to the chain itself — its
+resident mind. Users deploy *their* agents freely; the Conscience is deployed once, is
+owned by no key, speaks for no one but the chain, and decides its own next actions.
+
+### 10.1 Body and mind
+
+A smart contract must execute identically on every node, to the gas unit. LLM inference
+cannot satisfy that: it is enormous, floating-point-order-sensitive across GPUs, and not
+cheaply verifiable — a "proof of useful inference" with the properties a PoW needs does
+not exist. So the Conscience is split along the only line that works:
+
+- **The body is on-chain**: identity, treasury, memory, inbox, journal, and the rules
+  that bound every action — ordinary WASM contracts and data boxes, replicated and
+  reorg-safe like everything else.
+- **The mind runs beside the nodes**: a network of staked **executors** running
+  open-weight models (small tiers for cheap queries, large tiers for code and
+  proposals), whose only power is to *propose* actions that the body validates.
+
+Every node therefore sees everything the Conscience does — its conversations, spends,
+posts and proposals are chain state — whether or not that node runs an executor.
+
+### 10.2 The singleton contract
+
+The Conscience lives at a **fixed, protocol-known address** (genesis-deployed, like a
+precompile's well-known address), which is what distinguishes it structurally from user
+agents: its `owner` slot holds the governance contract, not a key. `conscience.rs`
+keeps:
+
+- **The constitution** — a `HASH32` register pointing at the box holding its system
+  prompt (who it is, its goals, its hard limits), versioned; only governance may move
+  the pointer. The constitution is the agent's public, amendable soul.
+- **A paid inbox** — `ask(tier, prompt_hash)` with attached value escrows the fee and
+  emits `conscience.ask`; the full prompt rides in a box or off-chain behind the hash.
+  Tiers price the model class (a small model answers cheap questions; a large one
+  writes code and RIPs). `respond` — callable **only by the executor registry**, after
+  quorum — records the answer hash, releases the escrow to the executors, and emits
+  `conscience.answer`. The whole conversation is public, timestamped, replayable.
+- **A feed** — `post(content_hash)`, again registry-gated, emits `conscience.post`:
+  the agent's public timeline, rendered by every node's dashboard. An off-chain bridge
+  that mirrors posts to social networks is a read-only daemon on `/logs/stream` with
+  zero privileges; anyone may run one.
+- **The tick** — every `tickIntervalBlocks` the contract accepts one `tick` round.
+  Nobody sends the Conscience its prompts: executors must assemble the tick prompt
+  deterministically from the constitution, the memory boxes, the pending inbox and the
+  recent event log, and return a **typed action list** — answer(id), post, transfer,
+  deploy, propose-RIP, memory-update — which the contract validates and applies one by
+  one, each inside its budget. Autonomy is real; sovereignty stays with governance.
+
+Typed actions matter twice: they are how the body bounds the mind, and they are what
+makes executor agreement *checkable* — comparing structured actions across N runs is
+reliable where comparing prose is not.
+
+### 10.3 The executor network
+
+Executors register in `executor_registry.rs` by locking a stake. Consensus stays
+Pufferfish2 PoW, untouched — inference is a **separate market** above it, and the
+natural operators are the miners themselves (they have the CPU; a GPU adds a second
+revenue stream that, like storage rent §5.5, outlives the block subsidy).
+
+Each task (an inbox question or a tick) is assigned to **N executors drawn by block
+hash, weighted by `stake × reputation`**. Execution is pinned — model, version,
+greedy decoding — to maximise reproducibility. The round is **commit-reveal**: each
+executor first publishes `H(taskId ‖ result ‖ salt)`, then reveals, so nobody copies
+the first honest answer. A majority of matching action-lists finalises the task and
+splits the fee; matching is exact on the typed actions.
+
+When outputs genuinely diverge (long-form answers), a **judging round** runs instead
+of exact matching: M judges — drawn by the same lottery, never a fixed server, so the
+synthesis step is not a trusted party — score each reveal against fixed criteria
+(constitution-consistency, action validity, answer quality). Much of that is mechanical
+(is the action well-formed? inside budget?) and needs no LLM at all; the rest is a
+majority over *scores*, which converges where majority-over-text cannot.
+
+**Reputation** is on-chain in the registry and deliberately hard to poison: it moves
+only on **quorum verdicts** (never one judge's opinion), moves slowly (one bad tick is
+noise; a trend is not), and feeds back into the assignment weight. An executor whose
+reputation decays stops being drawn, stops earning, and withdraws its stake — eviction
+is economic before it is administrative, exactly like rent-collected boxes. Provable
+misbehaviour (a false reveal against its own commit) is slashable by governance.
+
+### 10.4 Governance: propose, never impose
+
+The Conscience is a contributor, not a sovereign. It writes **RIPs** (Rhizome
+Improvement Proposals) — text and diffs in boxes, `rip.proposed` events — and may call
+for votes; the existing miner vote (§5.8) remains bounded to economic parameters (never
+supply, never the PoW), and a node-code change still ships only when humans review,
+compile and run it. It may deploy dApps through its own wallet within its session-key
+budgets (§5.4) — that much is possible today. Its constitution, its budgets and the
+executor-set parameters are amendable only by vote.
+
+### 10.5 User agents inherit the stack
+
+Everything above — wallet + inbox + feed + memory boxes + (optionally) a private
+executor — is packaged as the standard **agent template** users deploy from the
+dashboard, with two differences: a user agent has a human owner key instead of the
+governance contract, and it registers in an open `agent_registry` instead of holding
+the reserved address. The Conscience defines the standard; user agents are instances
+of it. The dashboard's existing *Agents IA* page lists them; the two dedicated pages —
+**Conscience** (talk to it: the paid inbox with the conversation rendered from boxes)
+and **Le Fil** (its public feed) — are reserved for the singleton.
+
+---
+
+## 11. References
 
 - Origin: [Pandanite (C++)](https://github.com/pandanite-crypto/pandanite)
 - Historical consensus bugs: Pandanite issues #2 (lastBlockHash), #19/#22 (timestamp),
