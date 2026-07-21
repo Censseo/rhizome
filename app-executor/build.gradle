@@ -1,0 +1,19 @@
+plugins {
+    id 'application'
+}
+
+dependencies {
+    // Reuses the wallet's transaction building and the node client — the executor
+    // is just another signer that watches the log stream and drives contract calls.
+    implementation project(':lib-core')
+    implementation project(':lib-net')
+    implementation project(':app-wallet')
+}
+
+application {
+    mainClass = 'rhizome.executor.ExecutorDaemon'
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+}

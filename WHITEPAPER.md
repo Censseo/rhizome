@@ -976,6 +976,25 @@ reputation decays stops being drawn, stops earning, and withdraws its stake — 
 is economic before it is administrative, exactly like rent-collected boxes. Provable
 misbehaviour (a false reveal against its own commit) is slashable by governance.
 
+**What the constitution pins.** "Model, version, greedy decoding" has to be exact, or
+honest executors disagree and no quorum forms. The constitution therefore pins, per
+tier, a runtime fingerprint the daemon (`app-executor`) checks before it will serve:
+
+| Tier | Runtime | Pinned in the constitution | Quorum rule |
+|---|---|---|---|
+| **Éclair** (small, e.g. Gemma-class) | `llama.cpp` on **CPU**, `Ollama` acceptable at MVP | weights digest (GGUF file hash / Ollama model digest), runtime build id, `temperature=0`, fixed seed, context length | **exact match** of the typed action list |
+| **Profond** (large, e.g. Kimi-class) | `vLLM` on GPU | weights revision, server version, decoding params | **judged** M/N (above) |
+
+The split is forced by determinism, not preference. Integer-quantised weights on CPU
+reproduce the same tokens across machines, so the éclair tier can demand byte-identical
+action lists and settle by exact match — cheap and unforgeable. GPU stacks do not:
+floating-point reduction order, kernel selection and (in vLLM) batch composition all
+perturb the logits, so two honest large-model runs may pick a different token at some
+step. The profond tier therefore never promises identical bytes; it routes through the
+judging round, which is exactly why that round exists. A pleasing consequence for the
+original "miners provide CPU *and* GPU" intent: the CPU that mines Pufferfish2 also
+serves the éclair tier, and a GPU earns on the profond tier — one machine, two markets.
+
 ### 10.4 Governance: propose, never impose
 
 The Conscience is a contributor, not a sovereign. It writes **RIPs** (Rhizome
