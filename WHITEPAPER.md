@@ -840,12 +840,19 @@ end:
 - **Weighting.** The referenced uncle work (`2^difficulty`) folds into the cumulative
   chain weight and survives pop and restart from the committed difficulties alone. The
   block assembler cites eligible orphans automatically when producing a block.
-- **Rewards.** An included uncle pays its miner a flat fraction of the block reward
+- **Rewards.** An included uncle pays its miner a fraction of the block reward
   (`uncleRewardNum/uncleRewardDen`, default 1/2) and the nephew a bonus per uncle
-  (`miningReward/nephewRewardDivisor`, default 1/32). Both are fresh issuance, but every
-  uncle is a real proof-of-work block, so nothing is minted without matching work. The
-  amounts are flat (not distance-scaled), so they are derivable from the committed uncle
-  refs alone and reorg reversal is exact.
+  (`miningReward/nephewRewardDivisor`, default 1/32), each **scaled to the uncle's proven
+  work**: the base amount is halved once for every bit the uncle's difficulty falls short
+  of the including (nephew) block's difficulty (`base × 2^(uncleDifficulty − nephewDifficulty)`,
+  an exact integer shift). An uncle mined at the chain's contemporaneous difficulty earns
+  the full fraction; a much easier orphan earns essentially nothing. This keeps issuance
+  matched to work — a *flat* reward would let a miner staple cheap minimum-difficulty
+  orphans onto a real high-difficulty block and roughly double emission for negligible
+  hashing — while remaining deterministic and derivable from the committed uncle and
+  nephew difficulties alone, so reorg reversal is exact. Both are fresh issuance, but every
+  uncle is a real proof-of-work block and its reward is proportional to that work, so
+  nothing is minted without matching work.
 
 **Autonomous-agent primitives.** Contract event logs are implemented (see §5):
 contracts `emit_log`, the processor collects them per block reorg-safely, and the node
