@@ -177,14 +177,17 @@ public final class HeaderChain {
             if (!seen.add(ref.hash())) {
                 return null; // duplicate uncle within one block
             }
-            // Defense-in-depth against the BigInteger.TWO.pow(difficulty) OOM/blow-up.
-            // Difficulty is a leading-zero-bit count, so it is bounded by maxDifficulty;
-            // reject an out-of-range value rather than fold pow(2^31) into the total. This
-            // mirrors the header decode bound (uncleWork also runs on locally-held headers)
-            // and is a pure safety bound — not a new consensus rule — so it can never reject
-            // an uncle the engine's validateUncles would accept.
+            // An uncle's claimed work must be real and cannot exceed the contemporaneous
+            // chain difficulty: bound it to [minDifficulty, header.difficulty()]. Without
+            // this, a peer could commit uncles at difficulty maxDifficulty (255) on a
+            // cheaply-mined minDifficulty branch and inflate its headers-only claimed work
+            // toward 2^255 per header, defeating the anti-DoS work gate the headers-first
+            // sync relies on. This is the SAME bound ChainEngine.uncleEligible enforces
+            // (nephewDifficulty = the including block's own difficulty), so header-sync
+            // validation, block validation and mining all agree — a value outside the range
+            // is rejected by every path and can never split the chain.
             int d = ref.difficulty();
-            if (d < 0 || d > params.maxDifficulty()) {
+            if (d < params.minDifficulty() || d > header.difficulty()) {
                 return null;
             }
             work = work.add(BigInteger.TWO.pow(d));

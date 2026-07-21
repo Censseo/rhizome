@@ -45,6 +45,13 @@ public class Crypto {
     }
     
     public static boolean checkSignature(byte[] bytes, byte[] signature, PublicKey publicKey) {
+        // An absent/empty public key (e.g. an all-zero signing key decoded to PublicKey.empty())
+        // has no Ed25519 parameters: signer.init(false, null) would NPE inside BouncyCastle. A
+        // missing key is definitionally an invalid signature, so return false rather than throw —
+        // the security primitive must fail closed on attacker-controlled input (audit M4).
+        if (publicKey == null || publicKey.get() == null || signature == null) {
+            return false;
+        }
         Ed25519Signer signer = new Ed25519Signer();
         signer.init(false, publicKey.get());
         signer.update(bytes, 0, bytes.length);
@@ -169,6 +176,13 @@ public class Crypto {
     }
 
     public static boolean checkLeadingZeroBits(SHA256Hash hash, int challengeSize) {
+        // A non-positive challenge means "no work required" — every hash would pass. That is
+        // never a legitimate PoW target (minDifficulty is always >= 1), and accepting it let a
+        // zero-difficulty block satisfy verifyNonce with no work at all. Refuse it outright so
+        // no reward or chain weight can ever be minted without matching work.
+        if (challengeSize <= 0) {
+            return false;
+        }
         byte[] a = hash.hash().getArray();
         int bytes = challengeSize / 8;
         for (int i = 0; i < bytes; i++) {

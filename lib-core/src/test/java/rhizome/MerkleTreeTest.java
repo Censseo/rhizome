@@ -9,8 +9,8 @@ import rhizome.core.transaction.Transaction;
 import rhizome.core.user.User;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static rhizome.core.common.Crypto.concatHashes;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -26,10 +26,11 @@ class MerkleTreeTest {
         items.add(a);
         m.setItems(items);
         var proof = m.getMerkleProof(a);
-        assertEquals(proof.get().left().hash(), a.hash());
-        assertEquals(proof.get().right().hash(), a.hash());
-        SHA256Hash ha = a.hash();
-        assertEquals(proof.get().hash(), concatHashes(ha, ha, false, false));
+        // A single-transaction tree's root is the leaf itself (domain-separated), with no sibling —
+        // no artificial self-doubling, matching the standard single-leaf Merkle convention.
+        SHA256Hash leafA = MerkleTree.leafHash(a.hash());
+        assertEquals(leafA, proof.get().hash());
+        assertEquals(leafA, m.getRootHash());
     }
 
     private boolean checkProofRecursive(HashTree hashTree) {
@@ -37,7 +38,7 @@ class MerkleTreeTest {
             // fringe node
             return true;
         } else {
-            if (!concatHashes(hashTree.left().hash(), hashTree.right().hash(), false, false).equals(hashTree.hash())) return false;
+            if (!MerkleTree.nodeHash(hashTree.left().hash(), hashTree.right().hash()).equals(hashTree.hash())) return false;
             return checkProofRecursive(hashTree.left()) && checkProofRecursive(hashTree.right());
         }
     }
@@ -56,9 +57,26 @@ class MerkleTreeTest {
         items.add(c);
         m.setItems(items);
         var proof = m.getMerkleProof(a);
-        
-        assertEquals(concatHashes(proof.get().left().hash(), proof.get().right().hash(), false, false), proof.get().hash());
+
+        assertEquals(MerkleTree.nodeHash(proof.get().left().hash(), proof.get().right().hash()), proof.get().hash());
         assertTrue(checkProofRecursive(proof.get()));
+    }
+
+    @Test
+    void emptyTreeHasDefinedRoot() {
+        // An empty item list must yield a defined root, not an NPE (audit L8).
+        MerkleTree m = new MerkleTree();
+        m.setItems(new ArrayList<>());
+        assertEquals(SHA256Hash.empty(), m.getRootHash());
+    }
+
+    @Test
+    void leafAndNodeDomainsAreSeparated() {
+        // A 64-byte internal-node preimage must not be reinterpretable as a leaf (second-preimage,
+        // audit M5): the leaf and node hashes of the same bytes must differ.
+        User miner = User.create();
+        SHA256Hash h = miner.mine().hash();
+        assertNotEquals(MerkleTree.leafHash(h), MerkleTree.nodeHash(h, h));
     }
 
     @Test

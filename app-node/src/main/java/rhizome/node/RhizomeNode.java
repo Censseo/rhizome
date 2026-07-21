@@ -116,12 +116,17 @@ public final class RhizomeNode implements AutoCloseable {
     }
 
     public synchronized void start() throws IOException {
-        // Block SSRF-prone (loopback / private / metadata) peer hosts on internet-exposed
-        // mainnet; testnet/devnets peer over localhost so they stay permissive. Computed here
-        // because the snap-sync bootstrap below already fetches from peers.
+        // Block SSRF-prone (loopback / private / metadata) peer hosts on any internet-exposed
+        // node — mainnet, or any network whose advertised self URL is not loopback — so a
+        // publicly-reachable testnet is protected too (audit L2), not just mainnet. A node that
+        // advertises itself over localhost (the default; local dev/test) stays permissive so it
+        // can peer over 127.0.0.1, and RHIZOME_ALLOW_PRIVATE_PEERS=true forces it off explicitly.
+        // Computed here because the snap-sync bootstrap below already fetches from peers.
+        boolean mainnet =
+            config.params().networkName().toLowerCase(java.util.Locale.ROOT).contains("mainnet");
         this.blockPrivatePeers =
-            config.params().networkName().toLowerCase(java.util.Locale.ROOT).contains("mainnet")
-            && !"true".equalsIgnoreCase(System.getenv("RHIZOME_ALLOW_PRIVATE_PEERS"));
+            !"true".equalsIgnoreCase(System.getenv("RHIZOME_ALLOW_PRIVATE_PEERS"))
+            && (mainnet || !advertisesLoopback(config.selfUrl()));
 
         LedgerSnapshot snapshot = config.snapshotPath().isPresent()
             ? SnapshotLoader.fromFile(Path.of(config.snapshotPath().get()))
@@ -235,7 +240,7 @@ public final class RhizomeNode implements AutoCloseable {
     }
 
     private void startGossip() {
-        broadcaster = new PeerBroadcaster(registry::snapshot);
+        broadcaster = new PeerBroadcaster(registry::snapshot, blockPrivatePeers);
         // Re-broadcast blocks/transactions accepted from RPC (flood; loops terminate
         // because a peer that already has an item rejects it and won't gossip on).
         service.setOnBlockAccepted(broadcaster::broadcastBlock);
@@ -255,6 +260,21 @@ public final class RhizomeNode implements AutoCloseable {
             }
             producer.start();
         });
+    }
+
+    /** Whether {@code selfUrl}'s host is a loopback name/literal (local dev/test), by host string
+     *  alone (no DNS). Non-loopback (a real advertised host) means the node is internet-facing. */
+    private static boolean advertisesLoopback(String selfUrl) {
+        try {
+            String host = java.net.URI.create(selfUrl).getHost();
+            if (host == null) {
+                return false;
+            }
+            host = host.toLowerCase(java.util.Locale.ROOT);
+            return host.equals("localhost") || host.equals("::1") || host.startsWith("127.");
+        } catch (RuntimeException e) {
+            return false; // unparseable self URL: treat as internet-facing (filter on)
+        }
     }
 
     private void startNetworkLoops() {

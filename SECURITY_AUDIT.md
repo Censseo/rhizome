@@ -9,6 +9,16 @@ l'entrée réseau (HTTP `/submit`, `/add_transaction`, `/add_peer`, `/sync`, `/h
 de ledger/état, et vérification adverse des chemins d'acceptation de blocs, de récompense, et d'exécution
 de contrats. Les deux findings critiques ont été reconfirmés directement dans le code.
 
+> **✅ Statut de remédiation (2026-07-21).** **Tous les findings ci-dessous ont été corrigés**
+> sur la branche `claude/blockchain-security-audit-roroin`, en trois commits (consensus/VM critiques ;
+> P2P/wallet/API/robustesse ; + ce rapport). Points saillants : plancher/plafond de difficulté d'oncle
+> partagé par les trois chemins de fork-choice (C1/H2/L15) et `checkLeadingZeroBits` rejetant une
+> difficulté nulle ; cap de profondeur d'appel WASM déterministe via une `InterpreterMachine`
+> sous-classée + pile d'exécution fixe (C2) ; BouncyCastle 1.78.1 (H1) ; DNS déporté de l'event-loop et
+> broadcast épinglé (H3/M1) ; clé wallet en `0600` (H5) ; `MerkleTree` à séparation de domaine (M5) ;
+> rate-limiter pondéré (M2) ; et une CI GitHub Actions (I1). **Suite de tests : 374 tests, tous verts.**
+> Chaque correctif porte un commentaire référençant son identifiant d'audit dans le code.
+>
 > **État général.** Le code a déjà subi plusieurs passes de durcissement (audits antérieurs C1–C3, H1–H7,
 > L2, L4 ; commentaires `audit M5/M8/M11` dans les décodeurs). Les invariants centraux — liaison
 > signature↔émetteur, anti-rejeu (chainId + nonces séquentiels + hash de contenu sans signature),

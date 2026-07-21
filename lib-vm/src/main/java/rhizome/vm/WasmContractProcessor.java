@@ -91,6 +91,13 @@ public final class WasmContractProcessor implements ContractProcessor {
         if (gasUsed > gasLimit) {
             return ContractResult.reverted(gasLimit, "out of gas for deploy");
         }
+        // Reject oversized, malformed, or non-deterministic (float/SIMD) code at deploy so it
+        // never enters on-chain state, rather than only discovering it on every later call.
+        try {
+            WasmVm.validateCode(code);
+        } catch (Throwable e) {
+            return ContractResult.reverted(gasUsed, "invalid contract code: " + e.getMessage());
+        }
         session.putCode(address, code);
         return ContractResult.ok(gasUsed, new byte[0], address);
     }
@@ -101,8 +108,10 @@ public final class WasmContractProcessor implements ContractProcessor {
     private ContractResult call(PublicAddress caller, PublicAddress contract, byte[] input,
                                 long value, long gasLimit) {
         GasMeter meter = new GasMeter(gasLimit);
-        CallOutcome outcome = runCall(caller.toBytes(), contract, input, value, meter,
-            session, new java.util.ArrayDeque<>());
+        // The whole call tree runs on a fixed-stack thread so recursion depth is bounded by a
+        // network constant, not the host JVM's -Xss (see WasmVm.onBoundedStack).
+        CallOutcome outcome = WasmVm.onBoundedStack(() -> runCall(caller.toBytes(), contract, input,
+            value, meter, session, new java.util.ArrayDeque<>()));
         if (outcome.success()) {
             return ContractResult.ok(meter.used(), outcome.output(), null, outcome.logs());
         }
@@ -117,8 +126,8 @@ public final class WasmContractProcessor implements ContractProcessor {
         // to the base store, so nothing persists and the block session is untouched.
         GasMeter meter = new GasMeter(gasLimit);
         SessionContractStore scratch = new SessionContractStore(baseStore);
-        CallOutcome outcome = runCall(from.toBytes(), to, input, value, meter,
-            scratch, new java.util.ArrayDeque<>());
+        CallOutcome outcome = WasmVm.onBoundedStack(() -> runCall(from.toBytes(), to, input, value,
+            meter, scratch, new java.util.ArrayDeque<>()));
         if (outcome.success()) {
             return ContractResult.ok(meter.used(), outcome.output(), null, outcome.logs());
         }

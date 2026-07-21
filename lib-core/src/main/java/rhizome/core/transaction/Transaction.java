@@ -224,7 +224,7 @@ public sealed interface Transaction permits TransactionImpl {
         public Transaction fromJson(JSONObject json) {
             var builder = TransactionImpl.builder()
                 .timestamp(json.getLong(TIMESTAMP))
-                .fee(new TransactionAmount(json.getInt(FEE)))
+                .fee(new TransactionAmount(json.getLong(FEE)))
                 .chainId(json.optInt(CHAIN_ID, 0))
                 .nonce(json.optLong(NONCE, 0))
                 .to(PublicAddress.of(json.getString(TO)));
@@ -238,12 +238,12 @@ public sealed interface Transaction permits TransactionImpl {
 
         
             if (json.getString("from").isEmpty()) {
-                builder.amount(new TransactionAmount(json.getInt(AMOUNT)))
+                builder.amount(new TransactionAmount(json.getLong(AMOUNT)))
                     .isTransactionFee(true);
             } else {
                 builder.from(PublicAddress.of(json.getString(FROM)))
                     .signature(TransactionSignature.of(json.getString(SIGNATURE)))
-                    .amount(new TransactionAmount(json.getInt(AMOUNT)))
+                    .amount(new TransactionAmount(json.getLong(AMOUNT)))
                     .isTransactionFee(false)
                     .signingKey(PublicKey.of(json.getString(SIGNING_KEY)));
             }   

@@ -21,6 +21,10 @@ import java.util.*;
 @Builder
 public final class FloodDiscovery implements DiscoveryService {
 
+	/** Upper bound on tracked discovered addresses, so a peer returning large/duplicate lists
+	 *  each round cannot grow this list without limit (audit L14). */
+	private static final int MAX_DISCOVERED = 4096;
+
 	private final PeerSystem peerSystem;
 	private final List<InetSocketAddress> discovered = new ArrayList<>();
 	@Builder.Default private Map<Object, Peer> totalDiscovered = Collections.emptyMap();
@@ -74,8 +78,16 @@ public final class FloodDiscovery implements DiscoveryService {
 		// Keep local track of the instance's old discovered addresses
 		List<InetSocketAddress> old = new ArrayList<>(this.discovered);
 
-		// Add the new discovered addresses to the instance list
-		this.discovered.addAll(discovered);
+		// Add only new, distinct addresses, up to a hard cap — a peer returning a large or
+		// duplicate-laden list each round must not grow this list without bound (audit L14).
+		for (InetSocketAddress address : discovered) {
+			if (this.discovered.size() >= MAX_DISCOVERED) {
+				break;
+			}
+			if (!this.discovered.contains(address)) {
+				this.discovered.add(address);
+			}
+		}
 
 		// Copy the old discovered peers maps to the new total discovered peers
 		Map<Object, Peer> newTotalDiscovered = new HashMap<>(totalDiscovered);

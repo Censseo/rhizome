@@ -160,10 +160,11 @@ public final class ChainSynchronizer {
         return true;
     }
 
-    private static BigInteger verifiedWork(List<Block> branch) {
+    private BigInteger verifiedWork(List<Block> branch) {
         BigInteger work = BigInteger.ZERO;
         for (Block block : branch) {
-            work = work.add(BigInteger.TWO.pow(((BlockImpl) block).difficulty()));
+            var b = (BlockImpl) block;
+            work = work.add(BigInteger.TWO.pow(b.difficulty())).add(uncleWork(b));
         }
         return work;
     }
@@ -171,7 +172,29 @@ public final class ChainSynchronizer {
     private BigInteger localWorkAboveFork(long forkHeight) {
         BigInteger work = BigInteger.ZERO;
         for (long h = forkHeight + 1; h <= engine.height(); h++) {
-            work = work.add(BigInteger.TWO.pow(((BlockImpl) engine.blockAt(h)).difficulty()));
+            var b = (BlockImpl) engine.blockAt(h);
+            work = work.add(BigInteger.TWO.pow(b.difficulty())).add(uncleWork(b));
+        }
+        return work;
+    }
+
+    /**
+     * Committed uncle work for a block, bounded exactly as ChainEngine/HeaderChain bound it:
+     * each uncle contributes {@code 2^difficulty} only when its difficulty is in
+     * {@code [minDifficulty, block.difficulty()]}. Folding uncle work in keeps this fork-choice
+     * comparison consistent with the engine's cumulative-work accounting (a block with an
+     * out-of-range uncle is rejected at addBlock, so ignoring such a ref here cannot make the
+     * synchroniser adopt a branch the engine would refuse, nor let unproven uncle work inflate
+     * the decision).
+     */
+    private BigInteger uncleWork(BlockImpl block) {
+        BigInteger work = BigInteger.ZERO;
+        int minDifficulty = engine.params().minDifficulty();
+        for (rhizome.core.block.UncleRef ref : block.uncles()) {
+            int d = ref.difficulty();
+            if (d >= minDifficulty && d <= block.difficulty()) {
+                work = work.add(BigInteger.TWO.pow(d));
+            }
         }
         return work;
     }

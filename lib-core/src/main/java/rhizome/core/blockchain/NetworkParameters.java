@@ -65,6 +65,14 @@ public final class NetworkParameters {
     private final int maxTransactionsPerBlock;
 
     /**
+     * Minimum fee a poolable transaction must pay (0 = no floor, the default). A configured floor
+     * lets an operator reject free transactions at mempool admission (the previously-unused
+     * {@code TRANSACTION_FEE_TOO_LOW} status); it is a local admission policy, not a consensus rule.
+     */
+    @lombok.Builder.Default
+    private final long minFee = 0L;
+
+    /**
      * Maximum serialized block size in bytes. Bounds a block's cost to download,
      * store and validate — critical now that contract transactions carry
      * variable-length payloads (without it a single block could be gigabytes).

@@ -43,6 +43,7 @@ public final class PeerBroadcaster implements AutoCloseable {
     private static final int DEDUP_WINDOW = 2048;
 
     private final Supplier<Collection<String>> peers;
+    private final boolean blockPrivateHosts;
     private final HttpClient http;
     private final ExecutorService pool;
     private final Set<String> recentlySent = Collections.newSetFromMap(
@@ -54,8 +55,9 @@ public final class PeerBroadcaster implements AutoCloseable {
         }));
 
     /** {@code peers} is queried on each broadcast, so it can reflect a live peer set. */
-    public PeerBroadcaster(Supplier<Collection<String>> peers) {
+    public PeerBroadcaster(Supplier<Collection<String>> peers, boolean blockPrivateHosts) {
         this.peers = peers;
+        this.blockPrivateHosts = blockPrivateHosts;
         this.http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build();
         // Bounded queue + discard-oldest: newest blocks/txs win, memory stays capped even if
         // several peers are slow/unresponsive. Each task holds one item body reference.
@@ -92,11 +94,22 @@ public final class PeerBroadcaster implements AutoCloseable {
 
     private void post(String path, byte[] body) {
         for (String peer : peers.get()) {
-            pool.execute(() -> sendQuietly(peer + path, body));
+            pool.execute(() -> sendQuietly(peer, path, body));
         }
     }
 
-    private void sendQuietly(String url, byte[] body) {
+    private void sendQuietly(String peer, String path, byte[] body) {
+        // Pin the peer to a freshly-resolved, validated IP before every send, exactly as the
+        // sync/PEX paths do (PeerHosts.pin). Without this, gossip re-resolved the hostname at
+        // send time, so a peer admitted with a public IP could flip DNS to 127.0.0.1 /
+        // 169.254.169.254 / an RFC1918 host and receive our POSTs — a blind SSRF (audit M1).
+        String url;
+        try {
+            url = PeerHosts.pin(peer, blockPrivateHosts) + path;
+        } catch (SecurityException e) {
+            log.debug("broadcast to {} refused (non-routable / rebind): {}", peer, e.toString());
+            return;
+        }
         HttpRequest request = HttpRequest.newBuilder(URI.create(url))
             .timeout(Duration.ofSeconds(10))
             .header("Content-Type", "application/octet-stream")

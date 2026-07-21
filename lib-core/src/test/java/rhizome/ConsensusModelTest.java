@@ -54,16 +54,20 @@ class ConsensusModelTest {
 
     @Test
     void verifyNonceRespectsPowAlgorithm() {
-        // Difficulty 0: every nonce satisfies the leading-zero check, so this
-        // exercises algorithm routing (incl. a real Pufferfish2 run) without mining.
-        var b = (BlockImpl) BlockImpl.builder()
-            .id(1).timestamp(1000).difficulty(0)
-            .merkleRoot(SHA256Hash.empty())
-            .lastBlockHash(SHA256Hash.empty())
-            .nonce(SHA256Hash.empty())
-            .build();
-        assertTrue(b.verifyNonce(PowAlgorithm.SHA256));
-        assertTrue(b.verifyNonce(PowAlgorithm.PUFFERFISH2));
+        // A block mined at a low (but non-zero) difficulty under each algorithm verifies under
+        // that same algorithm — exercising algorithm routing (incl. a real Pufferfish2 run).
+        // Difficulty 0 is no longer a valid shortcut: checkLeadingZeroBits rejects a non-positive
+        // challenge so no block can satisfy the PoW with zero work (audit C1).
+        for (PowAlgorithm algo : new PowAlgorithm[] {PowAlgorithm.SHA256, PowAlgorithm.PUFFERFISH2}) {
+            var b = (BlockImpl) BlockImpl.builder()
+                .id(1).timestamp(1000).difficulty(1)
+                .merkleRoot(SHA256Hash.empty())
+                .lastBlockHash(SHA256Hash.empty())
+                .nonce(SHA256Hash.empty())
+                .build();
+            b.nonce(rhizome.core.blockchain.Miner.mineNonce(b.hash(), b.difficulty(), algo));
+            assertTrue(b.verifyNonce(algo));
+        }
     }
 
     @Test

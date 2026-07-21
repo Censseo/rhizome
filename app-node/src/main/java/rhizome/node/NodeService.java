@@ -45,6 +45,19 @@ public final class NodeService {
 
     private final ScanRegistry scans = new ScanRegistry();
 
+    /**
+     * Off-loop worker for peer admission. Admitting a peer resolves DNS (ban check, routability,
+     * subnet bucket); that blocking work must never run on the ActiveJ event-loop thread that
+     * serves {@code /add_peer}, or a peer whose hostname resolves slowly (or times out) would
+     * freeze the entire node. Daemon so it never holds the JVM open.
+     */
+    private final java.util.concurrent.ExecutorService peerAdmission =
+        java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+            Thread t = new Thread(r, "rhizome-peer-admit");
+            t.setDaemon(true);
+            return t;
+        });
+
     public NodeService(ChainEngine engine, MemPool mempool) {
         this.engine = engine;
         this.mempool = mempool;
@@ -244,9 +257,23 @@ public final class NodeService {
         return peers == null ? java.util.List.of() : peers.snapshot();
     }
 
-    /** Registers a peer that announced itself; returns true if newly added. */
-    public boolean addPeer(String url) {
-        return peers != null && peers.add(url);
+    /**
+     * Queues a self-announced peer ({@code /add_peer}) for admission on the off-loop worker and
+     * returns immediately. Admission resolves DNS, which must not block the event-loop (see
+     * {@link #peerAdmission}); the registry decides off-loop whether the peer is actually added.
+     */
+    public void addPeer(String url) {
+        PeerRegistry registry = peers;
+        if (registry == null) {
+            return;
+        }
+        peerAdmission.execute(() -> {
+            try {
+                registry.add(url);
+            } catch (RuntimeException e) {
+                // Best-effort: a malformed or unresolvable peer is simply not added.
+            }
+        });
     }
 
     public NetworkParameters params() {

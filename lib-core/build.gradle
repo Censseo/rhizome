@@ -6,5 +6,5 @@ dependencies {
     // https://mvnrepository.com/artifact/org.bouncycastle/bcprov-jdk18on
     // Exposed as `api` because crypto types (PublicKey, PrivateKey) surface
     // BouncyCastle types in lib-core's public API.
-    api 'org.bouncycastle:bcprov-jdk18on:1.76'
+    api 'org.bouncycastle:bcprov-jdk18on:1.78.1'
 }

@@ -136,10 +136,15 @@ class HeaderChainTest {
     void rejectsInvalidProofOfWork() {
         for (int i = 0; i < 7; i++) mineOnEngine();
         BlockHeader good = engine.headerAt(7);
-        // Correct difficulty and parent, but a bogus nonce: fails PoW.
-        BlockHeader tampered = new BlockHeader(good.id(), good.timestamp(), good.difficulty(),
-            good.numTransactions(), good.lastBlockHash(), good.merkleRoot(), SHA256Hash.random(),
-            good.stateRoot(), good.vote(), good.uncles());
+        // Correct difficulty and parent, but a bogus nonce: fails PoW. Pick a nonce that
+        // genuinely does not satisfy the target (at low test difficulty a single random nonce
+        // could accidentally pass, making the assertion flaky) so the check is deterministic.
+        BlockHeader tampered;
+        do {
+            tampered = new BlockHeader(good.id(), good.timestamp(), good.difficulty(),
+                good.numTransactions(), good.lastBlockHash(), good.merkleRoot(), SHA256Hash.random(),
+                good.stateRoot(), good.vote(), good.uncles());
+        } while (tampered.verifyNonce(params.powAlgorithm()));
         HeaderChain.Result r = HeaderChain.validate(params, engine::headerAt, 6, List.of(tampered), clock.get());
         assertEquals(HeaderChain.Rejection.INVALID_POW, r.rejection());
     }
