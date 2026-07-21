@@ -63,8 +63,10 @@ public final class WasmVm {
         WasmModule module;
         try {
             module = Parser.parse(wasmCode);
+            rejectFloatingPoint(module);
         } catch (Throwable e) {
-            // Malformed bytecode never reaches instantiation — deterministic revert.
+            // Malformed bytecode (or a module using non-deterministic float opcodes) never
+            // reaches instantiation — deterministic revert.
             return ExecResult.reverted(gas.used(), "invalid module: " + e.getMessage());
         }
         ImportValues imports = ImportValues.builder()
@@ -137,6 +139,29 @@ public final class WasmVm {
                 }
             }
             default -> { }
+        }
+    }
+
+    /**
+     * Rejects any module that uses f32/f64 opcodes. WASM leaves NaN payloads and some float
+     * results implementation-defined, so a contract doing floating-point could make two nodes
+     * on different runtimes diverge (audit L4). Contracts are integer-only by construction, so
+     * refusing float opcodes at load removes the non-determinism outright rather than relying on
+     * every node running the exact same runtime build.
+     */
+    private static void rejectFloatingPoint(WasmModule module) {
+        var code = module.codeSection();
+        if (code == null) {
+            return;
+        }
+        for (int i = 0; i < code.functionBodyCount(); i++) {
+            for (var instruction : code.getFunctionBody(i).instructions()) {
+                String op = instruction.opcode().name();
+                if (op.startsWith("F32_") || op.startsWith("F64_")) {
+                    throw new IllegalArgumentException(
+                        "floating-point opcode " + op + " is not allowed (non-deterministic)");
+                }
+            }
         }
     }
 

@@ -916,10 +916,19 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         long height = store.height();
         for (long boundary = lookback; boundary <= height; boundary += lookback) {
             long windowStart = boundary - lookback + 1;
+            // Exclude the genesis interval from the first window: genesis carries an artificial
+            // timestamp (genesisTimestamp, conventionally 0), so measuring from it would treat
+            // "epoch → first real block" as one block interval and crater the difficulty of the
+            // first retarget. Start the measurement at the first real block instead (audit L2).
+            long measureStart = Math.max(windowStart, GenesisBlock.GENESIS_ID + 1);
+            long intervals = boundary - measureStart;
+            if (intervals <= 0) {
+                continue; // not enough real blocks in this window yet
+            }
             long observedMs = store.headerAt(boundary).timestamp()
-                - store.headerAt(windowStart).timestamp();
+                - store.headerAt(measureStart).timestamp();
             difficulty = DifficultyAdjustment.nextDifficulty(
-                params, difficulty, lookback - 1L, observedMs / 1000);
+                params, difficulty, intervals, observedMs / 1000);
         }
         return difficulty;
     }

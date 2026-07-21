@@ -113,12 +113,20 @@ public final class HeaderChain {
 
             prevHash = header.hash();
             expectedId++;
-            // A completed retarget window seals the difficulty for the next block.
+            // A completed retarget window seals the difficulty for the next block. This MUST
+            // match ChainEngine.computeDifficultyFromChain exactly, including excluding the
+            // genesis interval from the first window (audit L2) — otherwise header-sync
+            // validation and the engine's own mining disagree and every synced chain is
+            // rejected as PEER_INVALID at the first retarget.
             if (h % lookback == 0) {
                 long windowStart = h - lookback + 1;
-                long observedMs = at.apply(h).timestamp() - at.apply(windowStart).timestamp();
-                expectedDifficulty = DifficultyAdjustment.nextDifficulty(
-                    params, expectedDifficulty, lookback - 1L, observedMs / 1000);
+                long measureStart = Math.max(windowStart, GenesisBlock.GENESIS_ID + 1);
+                long intervals = h - measureStart;
+                if (intervals > 0) {
+                    long observedMs = at.apply(h).timestamp() - at.apply(measureStart).timestamp();
+                    expectedDifficulty = DifficultyAdjustment.nextDifficulty(
+                        params, expectedDifficulty, intervals, observedMs / 1000);
+                }
             }
         }
         return Result.ok(work);
@@ -130,8 +138,14 @@ public final class HeaderChain {
         int difficulty = params.genesisDifficulty();
         for (long boundary = lookback; boundary <= tip; boundary += lookback) {
             long windowStart = boundary - lookback + 1;
-            long observedMs = at.apply(boundary).timestamp() - at.apply(windowStart).timestamp();
-            difficulty = DifficultyAdjustment.nextDifficulty(params, difficulty, lookback - 1L, observedMs / 1000);
+            // Mirror ChainEngine.computeDifficultyFromChain: exclude the genesis interval (audit L2).
+            long measureStart = Math.max(windowStart, GenesisBlock.GENESIS_ID + 1);
+            long intervals = boundary - measureStart;
+            if (intervals <= 0) {
+                continue;
+            }
+            long observedMs = at.apply(boundary).timestamp() - at.apply(measureStart).timestamp();
+            difficulty = DifficultyAdjustment.nextDifficulty(params, difficulty, intervals, observedMs / 1000);
         }
         return difficulty;
     }

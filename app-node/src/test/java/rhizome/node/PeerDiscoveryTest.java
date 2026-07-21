@@ -23,8 +23,12 @@ class PeerDiscoveryTest {
     @TempDir
     Path tempDir;
 
+    // Instant-mining profile. maxDifficulty is capped low so mining stays feasible even after
+    // the retarget: with a 50 ms cadence far under the 90 s target, difficulty legitimately
+    // rises (the genesis-timestamp fix, audit L2, no longer masks that), and an uncapped
+    // testnet ceiling would let it climb until the miner starves the node's I/O.
     private static final NetworkParameters FAST = NetworkParameters.testnet().toBuilder()
-        .powAlgorithm(PowAlgorithm.SHA256).genesisDifficulty(3).build();
+        .powAlgorithm(PowAlgorithm.SHA256).genesisDifficulty(3).minDifficulty(3).maxDifficulty(16).build();
 
     private static int freePort() throws Exception {
         try (ServerSocket s = new ServerSocket(0)) {
