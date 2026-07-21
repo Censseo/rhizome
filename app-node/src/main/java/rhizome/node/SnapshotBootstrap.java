@@ -50,6 +50,16 @@ final class SnapshotBootstrap {
 
     private static final Logger log = LoggerFactory.getLogger(SnapshotBootstrap.class);
 
+    /**
+     * Hard cap on the number of snapshot chunks a peer may advertise. {@code chunkCount} arrives
+     * verbatim from an untrusted peer's {@code /info} JSON; pre-sizing {@code new ArrayList<>(n)}
+     * with {@code Integer.MAX_VALUE} allocates a multi-gigabyte backing array and OOMs a
+     * bootstrapping node before a single chunk is fetched or the root is verified. This bound (each
+     * chunk carries many bindings, so even a full-chain snapshot is far under it) makes the pre-size
+     * safe, matching the length bounds the block/tx codecs already apply before allocating.
+     */
+    private static final int MAX_SNAPSHOT_CHUNKS = 1_000_000;
+
     private SnapshotBootstrap() {}
 
     /**
@@ -103,6 +113,10 @@ final class SnapshotBootstrap {
             return false;
         }
 
+        if (info.chunkCount() < 0 || info.chunkCount() > MAX_SNAPSHOT_CHUNKS) {
+            log.warn("Snapshot advertises an out-of-range chunk count ({}); refusing", info.chunkCount());
+            return false;
+        }
         List<SnapshotChunk> chunks = new ArrayList<>(info.chunkCount());
         try {
             for (int i = 0; i < info.chunkCount(); i++) {

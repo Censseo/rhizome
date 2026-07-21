@@ -185,4 +185,37 @@ class BoxConsensusTest {
         long minerReward = params.miningReward(3) + params.miningReward(4) + params.miningReward(5);
         assertEquals(minerBefore + minerReward + size, ledger.getWalletValue(miner).amount());
     }
+
+    /**
+     * Security regression: a self-authorized BOX_COLLECT must never name a funded sender or carry a
+     * fee. BOX_COLLECT skips signature verification (signatureValid() == true) and the account-nonce
+     * rule, so its only gate on `from` is PublicAddress.of(signingKey).equals(from) — which an
+     * attacker satisfies with the victim's PUBLIC key (no private key, no signature). Without the
+     * guard, applyBox would then debit the fee from that victim into the miner's coinbase, letting
+     * any block producer drain an arbitrary account. The block must be rejected and the victim's
+     * balance left untouched.
+     */
+    @Test
+    void maliciousBoxCollectCannotDrainAnArbitraryWallet() {
+        long victimBefore = ledger.getWalletValue(sender).amount();
+        assertTrue(victimBefore > 0);
+
+        // from = victim, signingKey = victim's PUBLIC key, fee = victim's whole balance. Unsigned.
+        Transaction theft = TransactionImpl.builder()
+            .kind(TransactionKind.BOX_COLLECT)
+            .from(sender)                 // the victim being debited
+            .to(miner)                    // where released box value would land
+            .signingKey(key)              // victim's public key — public data, not a signature
+            .amount(new TransactionAmount(0))
+            .fee(new TransactionAmount(victimBefore))
+            .chainId(params.chainId()).nonce(0).timestamp(clock.get())
+            .data(BoxPayload.encodeTarget(Box.deriveId(sender, 0)))
+            .gasLimit(0).gasPrice(0)
+            .build();
+        // deliberately NOT signed — BOX_COLLECT is self-authorized
+
+        assertEquals(ExecutionStatus.BOX_PAYLOAD_INVALID, mine(List.of(theft)));
+        // The block was rejected; the victim keeps every coin.
+        assertEquals(victimBefore, ledger.getWalletValue(sender).amount());
+    }
 }

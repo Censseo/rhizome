@@ -43,6 +43,30 @@ public final class WasmVm {
     private static final int MAX_CONTRACT_PAGES = 1024;
 
     /**
+     * Hard cap on linear memory summed across a whole contract call TREE (pages, 64 KiB each).
+     * {@link #MAX_CONTRACT_PAGES} bounds one Instance, but a chain of {@link
+     * WasmContractProcessor#MAX_CALL_DEPTH} distinct contracts holds that many Instances alive at
+     * once (each parent is suspended inside its {@code call_contract} while the child runs), so the
+     * per-instance cap alone permitted depth × 64 MiB of concurrently-allocated memory. Whether that
+     * allocation succeeds or throws {@link OutOfMemoryError} depends on each node's {@code -Xmx} —
+     * a large-heap node returns OK, a small-heap node reverts with out-of-gas — which forks
+     * consensus and crashes memory-constrained validators. This tree-wide budget (tracked in {@link
+     * #TREE_PAGES}, charged in {@link #reserveTreePages}) makes the ceiling a deterministic network
+     * constant enforced before any host OOM, exactly as the call-depth cap is tree-wide.
+     */
+    private static final long TREE_MAX_PAGES = MAX_CONTRACT_PAGES;
+
+    /**
+     * Linear-memory pages currently reserved across the active call tree on this thread. A tree runs
+     * entirely on one {@link #onBoundedStack} thread (nested {@code call_contract} frames reuse it),
+     * so a thread-local running total sums every live Instance's memory. Each {@link #execute} frame
+     * reserves its pages on allocation/grow and releases exactly those in a {@code finally}, so the
+     * total tracks concurrent (nested) allocation and drops back on unwind — balanced even if the
+     * thread is reused.
+     */
+    private static final ThreadLocal<long[]> TREE_PAGES = ThreadLocal.withInitial(() -> new long[1]);
+
+    /**
      * Hard cap on deployed contract code size (bytes). Bounds the one-time deploy validation and
      * every per-call parse (a cache miss) so a multi-megabyte module cannot be used to amplify
      * node CPU, and bounds on-chain state growth. Comfortably above the bundled templates.
@@ -105,19 +129,23 @@ public final class WasmVm {
             .addFunction(hostFunctions(host, gas, calls))
             .build();
 
+        // Pages this frame reserves from the tree-wide budget (initial memory + every memory.grow);
+        // released in the finally so the budget tracks concurrent nesting and unwinds on return.
+        long[] frameAdded = new long[1];
         try {
             Instance instance = Instance.builder(module)
                 .withImportValues(imports)
                 .withStart(false)
-                // Cap and meter linear memory so a contract cannot allocate gigabytes.
-                .withMemoryFactory(limits -> boundedMemory(limits, gas))
+                // Cap and meter linear memory so a contract cannot allocate gigabytes — per-instance
+                // AND tree-wide (see TREE_MAX_PAGES) so nested calls cannot sum past the budget.
+                .withMemoryFactory(limits -> boundedMemory(limits, gas, frameAdded))
                 // Deterministic WASM call-depth cap: traps unbounded recursion at a fixed depth
                 // on every node, replacing the JVM-stack-dependent StackOverflowError that would
                 // otherwise fork consensus (see DepthLimitedInterpreterMachine).
                 .withMachineFactory(DepthLimitedInterpreterMachine::new)
                 // Meter every instruction; bulk-memory / memory.grow are charged by their
                 // runtime operand, not a flat 1, so O(N) work cannot cost O(1) gas.
-                .withUnsafeExecutionListener((instruction, stack) -> meter(instruction, stack, gas))
+                .withUnsafeExecutionListener((instruction, stack) -> meter(instruction, stack, gas, frameAdded))
                 .build();
 
             ExportFunction call = instance.export(ENTRY);
@@ -146,7 +174,27 @@ public final class WasmVm {
                 return ExecResult.outOfGas(gas.limit());
             }
             return ExecResult.reverted(gas.used(), e.getMessage());
+        } finally {
+            // Release this frame's share of the tree-wide page budget, whether it returned, reverted
+            // or trapped — so sequential (non-nested) calls on the same thread don't leak pages.
+            TREE_PAGES.get()[0] -= frameAdded[0];
         }
+    }
+
+    /**
+     * Reserves {@code pages} from the tree-wide linear-memory budget, throwing (deterministic revert)
+     * if the whole call tree would exceed {@link #TREE_MAX_PAGES}. Charged before the allocation so a
+     * small-heap node never has to reach {@link OutOfMemoryError}; the numeric cap is identical on
+     * every node, so the outcome cannot depend on the host's heap size.
+     */
+    private static void reserveTreePages(long pages, long[] frameAdded) {
+        long[] tree = TREE_PAGES.get();
+        if (tree[0] + pages > TREE_MAX_PAGES) {
+            throw new IllegalStateException("contract call tree exceeds linear-memory budget: "
+                + (tree[0] + pages) + " pages (max " + TREE_MAX_PAGES + ")");
+        }
+        tree[0] += pages;
+        frameAdded[0] += pages;
     }
 
     /**
@@ -255,12 +303,15 @@ public final class WasmVm {
      * one) pays for it and can never exceed the cap. Rejecting an oversized initial declaration
      * here reverts the call rather than allocating gigabytes before the gas meter runs.
      */
-    private static Memory boundedMemory(MemoryLimits requested, GasMeter gas) {
+    private static Memory boundedMemory(MemoryLimits requested, GasMeter gas, long[] frameAdded) {
         int initial = requested.initialPages();
         if (initial > MAX_CONTRACT_PAGES) {
             throw new IllegalArgumentException("contract declares too much initial memory: "
                 + initial + " pages (max " + MAX_CONTRACT_PAGES + ")");
         }
+        // Tree-wide reservation first: a fixed numeric cap, so a nested chain of contracts cannot
+        // sum past TREE_MAX_PAGES no matter the host heap (the fork/OOM vector this closes).
+        reserveTreePages(initial, frameAdded);
         gas.charge((long) initial * GasSchedule.MEMORY_PER_PAGE);
         int max = Math.min(Math.max(requested.maximumPages(), initial), MAX_CONTRACT_PAGES);
         return new ByteBufferMemory(new MemoryLimits(initial, max));
@@ -273,7 +324,7 @@ public final class WasmVm {
      * (the count on top of the value stack when this fires, before execution), so they are
      * charged by that operand — otherwise a single instruction could memset megabytes for 1 gas.
      */
-    private static void meter(Instruction instruction, MStack stack, GasMeter gas) {
+    private static void meter(Instruction instruction, MStack stack, GasMeter gas, long[] frameAdded) {
         gas.charge(GasSchedule.PER_INSTRUCTION);
         switch (instruction.opcode()) {
             case MEMORY_FILL, MEMORY_COPY, MEMORY_INIT, TABLE_FILL, TABLE_COPY, TABLE_INIT -> {
@@ -284,7 +335,16 @@ public final class WasmVm {
                     gas.charge((stack.peek() & 0xFFFF_FFFFL) * GasSchedule.PER_BYTE);
                 }
             }
-            case MEMORY_GROW, TABLE_GROW -> {
+            case MEMORY_GROW -> {
+                if (stack.size() > 0) {
+                    long requested = stack.peek() & 0xFFFF_FFFFL;
+                    gas.charge(requested * GasSchedule.MEMORY_PER_PAGE);
+                    // Count growth against the tree-wide budget too, before Chicory allocates it, so
+                    // a grow chain across nested contracts cannot exceed TREE_MAX_PAGES on any heap.
+                    reserveTreePages(requested, frameAdded);
+                }
+            }
+            case TABLE_GROW -> {
                 if (stack.size() > 0) {
                     gas.charge((stack.peek() & 0xFFFF_FFFFL) * GasSchedule.MEMORY_PER_PAGE);
                 }
@@ -344,10 +404,14 @@ public final class WasmVm {
                 if (value == null) {
                     return new long[] {-1L};
                 }
+                // Charge for the FULL value length, not just the copied bytes: host.storageRead
+                // already materialised and cloned the whole value (O(valueLen) work), so metering
+                // only `copied` let a caller pass out_cap = 0 and force repeated full loads of a
+                // large value for the flat base cost — the same undercharge box_read was fixed for.
+                gas.charge((long) value.length * GasSchedule.PER_BYTE);
                 int outPtr = asOffset(args[2]);
                 int outCap = asLen(args[3]);
                 int copied = Math.min(value.length, outCap);
-                gas.charge((long) copied * GasSchedule.PER_BYTE);
                 if (copied > 0) {
                     mem.write(outPtr, value, 0, copied);
                 }

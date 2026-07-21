@@ -4,8 +4,10 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Random;
-import java.util.concurrent.ConcurrentHashMap;
 import java.math.BigInteger;
 
 import org.bouncycastle.crypto.AsymmetricCipherKeyPair;
@@ -64,29 +66,43 @@ public class Crypto {
         return keyGen.generateKeyPair();
     }
 
-    private static final ConcurrentHashMap<SHA256Hash, SHA256Hash> pufferfishCache = new ConcurrentHashMap<>();
+    /**
+     * Bounded LRU of Pufferfish2 results. The cache key is SHA-256(target ‖ nonce) where both are
+     * fully attacker-controlled on every PoW verification path (addBlock, registerOrphan, header
+     * sync, fork-choice branch validation all pass useCache=true). An unbounded map therefore grew
+     * one permanent entry per distinct block/header the node ever verified — a free remote
+     * memory-exhaustion vector (feed /submit a stream of blocks with fresh nonces). Cap it like
+     * OrphanPool/MemPool so it can never itself be a growth vector; the miner (useCache=false)
+     * never populates it, so caching only ever helped repeat verification of the same input.
+     */
+    private static final int PUFFERFISH_CACHE_MAX = 4096;
+    private static final Map<SHA256Hash, SHA256Hash> pufferfishCache =
+        Collections.synchronizedMap(new LinkedHashMap<>(512, 0.75f, true) {
+            @Override
+            protected boolean removeEldestEntry(Map.Entry<SHA256Hash, SHA256Hash> eldest) {
+                return size() > PUFFERFISH_CACHE_MAX;
+            }
+        });
 
     public static SHA256Hash PUFFERFISH(byte[] input, boolean useCache) {
         SHA256Hash inputHash = SHA256Hash.of(input);
-        
+
         if (useCache) {
-            // Implement cache retrieval logic here
             SHA256Hash cachedHash = pufferfishCache.get(inputHash);
             if (cachedHash != null) {
                 return cachedHash;
             }
         }
-        
+
         byte[] hash = new byte[PufferfishConstants.PF_HASHSPACE];
         hash = PufferfishAlgorithm.compute(input);
-        
+
         SHA256Hash finalHash = SHA256(hash); // Assuming SHA256 is standard SHA-256 hash
-        
+
         if (useCache) {
-            // Implement cache storage logic here
             pufferfishCache.put(inputHash, finalHash);
         }
-        
+
         return finalHash;
     }
 
