@@ -234,4 +234,69 @@ class BlockUnclesTest {
     private long balance(PublicAddress a) {
         return ledger.hasWallet(a) ? ledger.getWalletValue(a).amount() : 0L;
     }
+
+    private static long balanceOf(InMemoryLedger l, PublicAddress a) {
+        return l.hasWallet(a) ? l.getWalletValue(a).amount() : 0L;
+    }
+
+    /** A mined block at an explicit difficulty (so an orphan can fall below the nephew's). */
+    private static BlockImpl mineAt(NetworkParameters p, AtomicLong clk, long height, SHA256Hash parent,
+                                    List<UncleRef> uncles, int salt, PublicAddress coinbaseTo, int difficulty) {
+        var b = (BlockImpl) BlockImpl.builder().id((int) height)
+            .timestamp(clk.addAndGet(1000L + salt)).difficulty(difficulty)
+            .lastBlockHash(parent).uncles(new java.util.ArrayList<>(uncles)).build();
+        b.addTransaction(Transaction.of(coinbaseTo, new TransactionAmount(p.miningReward(height))));
+        var tree = new MerkleTree();
+        tree.setItems(b.transactions());
+        b.merkleRoot(tree.getRootHash());
+        b.nonce(Miner.mineNonce(b.hash(), b.difficulty(), p.powAlgorithm()));
+        return b;
+    }
+
+    /**
+     * Security regression: payUncleRewards scales each uncle/nephew reward to the uncle's proven
+     * work (base >>> deficit, audit C1), so the pop MUST reverse the same scaled amount. Reverting
+     * the flat base over-subtracted on every reorg touching a sub-difficulty uncle, throwing
+     * LedgerException mid-revert (corrupt ledger) or silently destroying coins and forking the
+     * state root. This exercises a genuine deficit (>0), which the deficit-0 tests above never hit.
+     */
+    @Test
+    void subDifficultyUncleRewardIsScaledAndExactlyReversedOnPop() {
+        NetworkParameters p = NetworkParameters.testnet().toBuilder()
+            .powAlgorithm(PowAlgorithm.SHA256).genesisDifficulty(5).minDifficulty(3).build();
+        AtomicLong clk = new AtomicLong(2_000_000L);
+        InMemoryLedger led = new InMemoryLedger();
+        ChainEngine eng = ChainEngine.init(p, led, new InMemoryChainStore(),
+            new LedgerSnapshot("t", 0, p.chainId()), null, clk::get);
+
+        // height 2 at difficulty 5
+        eng.addBlock(mineAt(p, clk, eng.height() + 1, eng.tipHash(), List.of(), 7,
+            PublicAddress.random(), eng.difficulty()));
+
+        // A sub-difficulty (3) orphan sibling of the tip: deficit vs the difficulty-5 nephew.
+        PublicAddress uncleMiner = PublicAddress.random();
+        SHA256Hash grandparent = eng.blockAt(eng.height() - 1).hash();
+        BlockImpl orphan = mineAt(p, clk, eng.height(), grandparent, List.of(), 500, uncleMiner, 3);
+        eng.registerOrphan(orphan);
+
+        long nephewHeight = eng.height() + 1;
+        int deficit = eng.difficulty() - orphan.difficulty(); // 5 - 3 = 2
+        long scaledUncle = p.uncleReward(nephewHeight) >>> deficit;
+        long scaledNephew = p.nephewReward(nephewHeight) >>> deficit;
+        // The scaling must genuinely reduce the reward, else this test could not distinguish the bug.
+        assertTrue(scaledUncle > 0 && scaledUncle < p.uncleReward(nephewHeight));
+
+        long uncleBefore = balanceOf(led, uncleMiner);
+        UncleRef uref = new UncleRef(orphan.hash(), orphan.difficulty(), uncleMiner);
+        PublicAddress nephewMiner = PublicAddress.random();
+        assertEquals(ExecutionStatus.SUCCESS, eng.addBlock(mineAt(p, clk, nephewHeight, eng.tipHash(),
+            List.of(uref), 7, nephewMiner, eng.difficulty())));
+        assertEquals(uncleBefore + scaledUncle, balanceOf(led, uncleMiner));
+        assertEquals(p.miningReward(nephewHeight) + scaledNephew, balanceOf(led, nephewMiner));
+
+        // The pop must reverse EXACTLY the scaled amounts; the flat-base revert threw or corrupted.
+        eng.popBlock();
+        assertEquals(uncleBefore, balanceOf(led, uncleMiner));
+        assertEquals(0L, balanceOf(led, nephewMiner));
+    }
 }

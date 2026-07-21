@@ -149,6 +149,12 @@ public final class SparseMerkleTree {
     public static boolean verify(byte[] root, byte[] key, byte[] valueHash, StateProof proof) {
         byte[] h = leafHash(key, valueHash);
         List<byte[]> siblings = proof.siblings();
+        // A key is 256 bits, so a real proof has at most 256 siblings. An over-long attacker-supplied
+        // proof would drive bit(key, depth) past the key's bit width and throw — a light client
+        // verifying an untrusted proof must get a clean `false`, not an exception (audit L3).
+        if (siblings.size() > KEY_BITS) {
+            return false;
+        }
         for (int depth = siblings.size() - 1; depth >= 0; depth--) {
             byte[] sib = siblings.get(depth);
             h = bit(key, depth) == 0 ? innerHash(h, sib) : innerHash(sib, h);
@@ -164,6 +170,14 @@ public final class SparseMerkleTree {
         byte[] bytes = store.get(hash);
         if (bytes == null) {
             throw new IllegalStateException("missing SMT node " + rhizome.core.common.Utils.bytesToHex(hash));
+        }
+        // A node is exactly type(1) + 32 + 32 = 65 bytes. Rejecting any other length stops
+        // Arrays.copyOfRange from silently zero-padding a truncated/corrupt node into a valid-looking
+        // one (the authentication guarantee otherwise quietly assumes the store never returns a
+        // wrong-length blob) (audit L4).
+        if (bytes.length != 65) { // type(1) + 32 + 32, matching the copyOfRange bounds below
+            throw new IllegalStateException("corrupt SMT node (" + bytes.length + " bytes) for "
+                + rhizome.core.common.Utils.bytesToHex(hash));
         }
         if (bytes[0] == LEAF) {
             return new Node(true, Arrays.copyOfRange(bytes, 1, 33), Arrays.copyOfRange(bytes, 33, 65), null, null);

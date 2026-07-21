@@ -183,9 +183,24 @@ public final class Executor {
                 if (tx.gasLimit() != 0 || tx.gasPrice() != 0) {
                     return BOX_PAYLOAD_INVALID;
                 }
-                if (tx.kind() == rhizome.core.transaction.TransactionKind.BOX_COLLECT
-                    && ++boxCollects > params.maxBoxCollectsPerBlock()) {
-                    return BOX_LIMIT_EXCEEDED;
+                if (tx.kind() == rhizome.core.transaction.TransactionKind.BOX_COLLECT) {
+                    if (++boxCollects > params.maxBoxCollectsPerBlock()) {
+                        return BOX_LIMIT_EXCEEDED;
+                    }
+                    // BOX_COLLECT is self-authorized: signatureValid() returns true unconditionally
+                    // and the account-nonce rule is skipped (ChainEngine.isSelfAuthorized). Its only
+                    // gate on `from` is PublicAddress.of(signingKey).equals(from) at pass end, which
+                    // an attacker satisfies with the victim's PUBLIC key (from=victim, signingKey=
+                    // victim's pubkey) — no private key, no signature. Without this guard applyBox
+                    // would then debit `fee + debitFrom` from that `from`, letting any block producer
+                    // mint an unsigned rent collector whose fee drains an arbitrary victim's balance
+                    // into the miner's coinbase. An honest collector (BlockAssembler) always carries
+                    // an empty `from` and zero value/fee, so require exactly that: a self-authorized
+                    // tx may never name a funded sender or move sender value.
+                    if (!tx.from().equals(PublicAddress.empty())
+                        || tx.fee().amount() != 0 || tx.amount().amount() != 0) {
+                        return BOX_PAYLOAD_INVALID;
+                    }
                 }
             }
             if (tx.kind().isToken()) {
@@ -559,12 +574,22 @@ public final class Executor {
             boxProcessor != null ? boxProcessor.receipts(height) : List.of();
         int bi = boxReceipts.size() - 1;
 
-        // Inverse of payUncleRewards: same flat amounts, derived from the committed refs.
+        // Exact inverse of payUncleRewards. That path scales each reward to the uncle's PROVEN
+        // work — base >>> (nephewDifficulty - ref.difficulty()) via scaleRewardToWork (audit C1) —
+        // so the revert MUST recompute the identical per-uncle deficit and scale the same way.
+        // Reverting the flat base instead (the pre-C1 amount) over-subtracts by base-(base>>>deficit)
+        // per sub-difficulty uncle on every reorg/pop, which either throws LedgerException mid-revert
+        // (leaving a partially reverted, corrupted ledger) or silently destroys coins and forks the
+        // state root from nodes that only ever applied the block. Guards mirror the apply side's >0.
         List<rhizome.core.block.UncleRef> uncles = ((BlockImpl) block).uncles();
         if (!uncles.isEmpty()) {
-            long uncleReward = params.uncleReward(height);
-            long nephewReward = params.nephewReward(height);
+            long baseUncleReward = params.uncleReward(height);
+            long baseNephewReward = params.nephewReward(height);
+            int nephewDifficulty = ((BlockImpl) block).difficulty();
             for (rhizome.core.block.UncleRef ref : uncles) {
+                int deficit = nephewDifficulty - ref.difficulty();
+                long uncleReward = scaleRewardToWork(baseUncleReward, deficit);
+                long nephewReward = scaleRewardToWork(baseNephewReward, deficit);
                 if (nephewReward > 0) {
                     ledger.revertDeposit(miner, new TransactionAmount(nephewReward));
                 }

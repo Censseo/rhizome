@@ -122,7 +122,15 @@ public class TransactionDto implements BinarySerializable {
         PublicAddress to = PublicAddress.of(BinaryIO.getFixed(buffer, PublicAddress.SIZE));
         long amount = buffer.getLong();
         long fee = buffer.getLong();
-        boolean isTransactionFee = buffer.get() != 0;
+        // Canonical decode: writeTo emits exactly 0 or 1, so a byte in 2..255 is a non-canonical
+        // encoding of the same logical transaction (255 wire forms for one flag). Harmless for the
+        // txid today (it hashes the boolean, not the raw byte) but a latent malleability source if
+        // any future code ever hashes the raw bytes — reject it so the wire form is unique (audit L1).
+        int feeFlag = buffer.get() & 0xFF;
+        if (feeFlag > 1) {
+            throw new IllegalArgumentException("non-canonical isTransactionFee byte: " + feeFlag);
+        }
+        boolean isTransactionFee = feeFlag != 0;
         int chainId = buffer.getInt();
         long nonce = buffer.getLong();
         byte kind = buffer.get();

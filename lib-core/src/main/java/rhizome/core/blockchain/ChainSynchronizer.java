@@ -39,6 +39,9 @@ public final class ChainSynchronizer {
     /** Extra blocks fetched beyond the fork depth during pre-validation. */
     static final int PREFETCH_EXTRA = 2 * Constants.BLOCKS_PER_FETCH;
 
+    /** Hard cap on exponential-probe steps in the ancestor search, so it stays O(log height). */
+    private static final int MAX_ANCESTOR_PROBES = 64;
+
     private final ChainEngine engine;
 
     public ChainSynchronizer(ChainEngine engine) {
@@ -61,16 +64,62 @@ public final class ChainSynchronizer {
         return reorg(peer, forkHeight);
     }
 
-    /** Highest height at which our block and the peer's agree, walking down from the shared tip. */
+    /**
+     * Highest height at which our block and the peer's agree. Block-locator search — exponential
+     * probes down from the shared tip to bracket the fork, then a binary search inside — so it costs
+     * O(log height) peer round-trips instead of one per block (audit M6). This fallback path fetches
+     * a FULL block per probe (peer.blockHash → GET /block, up to ~1 MiB), so the linear walk let a
+     * peer that 404s /headers (forcing this fallback) tie up a sync thread for height×latency by
+     * never matching; the logarithmic locator caps that at ~O(log height) fetches. Agreement is
+     * monotonic on a coherent chain (blocks match up to the fork and diverge after), which makes the
+     * search exact — the same locator HeaderSynchronizer uses.
+     */
     private long findCommonAncestor(PeerSource peer) {
-        long h = Math.min(engine.height(), peer.height());
-        while (h >= GenesisBlock.GENESIS_ID) {
-            if (engine.blockAt(h).hash().equals(peer.blockHash(h))) {
-                return h;
-            }
-            h--;
+        long top = Math.min(engine.height(), peer.height());
+        if (top < GenesisBlock.GENESIS_ID) {
+            return GenesisBlock.GENESIS_ID - 1;
         }
-        return GenesisBlock.GENESIS_ID - 1; // no common block, not even genesis
+        if (agrees(peer, top)) {
+            return top; // peer simply extends our chain
+        }
+        // Phase 1: exponential backoff to bracket the fork between a known match (low) and a
+        // known mismatch (high).
+        long high = top;   // known mismatch
+        long low = -1;     // known match (none yet)
+        long step = 1;
+        long h = top - 1;
+        int probes = 0;
+        while (h >= GenesisBlock.GENESIS_ID && probes < MAX_ANCESTOR_PROBES) {
+            probes++;
+            if (agrees(peer, h)) {
+                low = h;
+                break;
+            }
+            high = h;
+            if (h == GenesisBlock.GENESIS_ID) {
+                break; // genesis itself differs: no common block, not even genesis
+            }
+            long next = h - step;
+            step <<= 1;
+            h = Math.max(next, GenesisBlock.GENESIS_ID);
+        }
+        if (low < 0) {
+            return GenesisBlock.GENESIS_ID - 1; // no common block, not even genesis
+        }
+        // Phase 2: binary search for the highest match in (low, high).
+        while (high - low > 1) {
+            long mid = low + (high - low) / 2;
+            if (agrees(peer, mid)) {
+                low = mid;
+            } else {
+                high = mid;
+            }
+        }
+        return low;
+    }
+
+    private boolean agrees(PeerSource peer, long h) {
+        return engine.blockAt(h).hash().equals(peer.blockHash(h));
     }
 
     private boolean applyRange(PeerSource peer, long from, long to) {
@@ -160,41 +209,30 @@ public final class ChainSynchronizer {
         return true;
     }
 
+    /**
+     * Verified proof-of-work above the fork for the peer's branch. Counts each block's own
+     * {@code 2^difficulty} ONLY — deliberately NOT the uncle work (audit M4). A branch block's uncle
+     * refs are unverified at this stateless stage (validateUncles runs only during addBlock, after
+     * the pop), so an attacker who mined only ~1/3 of the honest work could pad each branch block
+     * with in-range fake uncle refs, inflate claimed work ~3×, pass this gate, and force an expensive
+     * pop/restore cycle before the fakes are finally rejected. Comparing only PoW-verified base work
+     * on both sides removes the inflation lever; a branch that is genuinely heavier has more base
+     * work in every practical case, and the authoritative GHOST accounting (with validated uncle
+     * work) still runs in the engine once the branch is applied.
+     */
     private BigInteger verifiedWork(List<Block> branch) {
         BigInteger work = BigInteger.ZERO;
         for (Block block : branch) {
-            var b = (BlockImpl) block;
-            work = work.add(BigInteger.TWO.pow(b.difficulty())).add(uncleWork(b));
+            work = work.add(BigInteger.TWO.pow(((BlockImpl) block).difficulty()));
         }
         return work;
     }
 
+    /** Local PoW above the fork, base work only — the symmetric counterpart of {@link #verifiedWork}. */
     private BigInteger localWorkAboveFork(long forkHeight) {
         BigInteger work = BigInteger.ZERO;
         for (long h = forkHeight + 1; h <= engine.height(); h++) {
-            var b = (BlockImpl) engine.blockAt(h);
-            work = work.add(BigInteger.TWO.pow(b.difficulty())).add(uncleWork(b));
-        }
-        return work;
-    }
-
-    /**
-     * Committed uncle work for a block, bounded exactly as ChainEngine/HeaderChain bound it:
-     * each uncle contributes {@code 2^difficulty} only when its difficulty is in
-     * {@code [minDifficulty, block.difficulty()]}. Folding uncle work in keeps this fork-choice
-     * comparison consistent with the engine's cumulative-work accounting (a block with an
-     * out-of-range uncle is rejected at addBlock, so ignoring such a ref here cannot make the
-     * synchroniser adopt a branch the engine would refuse, nor let unproven uncle work inflate
-     * the decision).
-     */
-    private BigInteger uncleWork(BlockImpl block) {
-        BigInteger work = BigInteger.ZERO;
-        int minDifficulty = engine.params().minDifficulty();
-        for (rhizome.core.block.UncleRef ref : block.uncles()) {
-            int d = ref.difficulty();
-            if (d >= minDifficulty && d <= block.difficulty()) {
-                work = work.add(BigInteger.TWO.pow(d));
-            }
+            work = work.add(BigInteger.TWO.pow(((BlockImpl) engine.blockAt(h)).difficulty()));
         }
         return work;
     }
