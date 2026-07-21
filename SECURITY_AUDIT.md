@@ -288,11 +288,19 @@ gas-metered bulk-memory ops, per-instance memory cap).
 
 ---
 
-## 7. Changes in this pass
+## 7. Changes made
 
-Fixed **C1, C2, H1, H2, M1, M2** across `Executor.java`, `ChainEngine`
-(validated), `Crypto.java`, `WasmVm.java`, `SnapshotBootstrap.java`, with two new
-consensus regression tests. **382/382 tests pass.** The remaining Documented
-findings are left for follow-up as they either exceed the minimal-blast-radius
-set for a security patch (H3/H4/M3/M4/M5/M6 touch networking/VM validation
-hot-paths and want their own tests) or are template-level (T1–T4).
+**First commit** — the exploitable consensus/DoS defects: **C1, C2, H1, H2, M1,
+M2** across `Executor.java`, `ChainEngine` (validated), `Crypto.java`,
+`WasmVm.java`, `SnapshotBootstrap.java`, with two consensus regression tests.
+
+**Second commit** — the remaining actionable findings: **H3, H4, M3, M4, M5, M6**
+(net/VM hardness) and **L1, L3, L4** across `ChainEngine.java`, `NodeApi.java`,
+`WasmVm.java`, `ChainSynchronizer.java`, `TransactionDto.java`,
+`SparseMerkleTree.java`, plus **T2** (`token.rs` recompiled to `token.wasm`), with
+a table-cap regression test.
+
+**383/383 tests pass.** Still open by design: **T1/T3/T4** (need a
+constructor-at-deploy protocol change or an LP/ABI redesign) and **L2/L6/L7** (a
+decode-strictness / deployment trade-off left to the operator), all detailed in §3.
+

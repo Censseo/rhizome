@@ -74,6 +74,25 @@ public final class WasmVm {
     static final int MAX_CODE_SIZE = 256 * 1024;
 
     /**
+     * Hard cap on a module's declared table size (entries). A table's {@code initial} count forces
+     * Chicory to eagerly allocate a reference array of that many entries at INSTANTIATION — before
+     * the gas listener runs, so it is completely unmetered. Chicory's own limit is 10,000,000
+     * entries (~80 MiB per table), which a few-byte module can declare and which lands, unmetered and
+     * heap-dependent, at instantiation (audit H4). This tighter cap keeps that eager allocation a
+     * small deterministic network constant (&lt; 1 MiB), independent of Chicory's version; the bundled
+     * templates declare a single tiny table. (Chicory already bounds function locals to 50,000.)
+     */
+    static final long MAX_TABLE_ENTRIES = 65_536;
+
+    /**
+     * Hard cap on a function's local-variable count (defence in depth). Chicory already rejects
+     * &gt; 50 000 locals at parse, but the interpreter allocates a locals array per activation, so a
+     * deep recursion of a high-locals function still spikes heap; this tighter bound keeps that
+     * product small. Far above what a compiled Rust contract uses.
+     */
+    static final int MAX_FUNCTION_LOCALS = 8_192;
+
+    /**
      * Fixed stack size (bytes) for the dedicated contract-execution thread. Large enough to hold
      * {@link DepthLimitedInterpreterMachine#MAX_WASM_CALL_DEPTH} interpreter frames on every node,
      * so the deterministic depth trap always fires before a JVM {@code StackOverflowError}, and
@@ -278,6 +297,7 @@ public final class WasmVm {
         }
         WasmModule module = Parser.parse(wasmCode);
         rejectNonDeterministic(module);
+        rejectOversizedAllocations(module);
         synchronized (MODULE_CACHE) {
             MODULE_CACHE.put(key, module);
         }
@@ -377,6 +397,39 @@ public final class WasmVm {
                     throw new IllegalArgumentException(
                         "non-deterministic opcode " + instruction.opcode().name()
                         + " is not allowed (float/SIMD)");
+                }
+            }
+        }
+    }
+
+    /**
+     * Rejects modules whose declared table or locals sizes would force an unmetered, heap-dependent
+     * allocation at instantiation/execution (audit H4). Table {@code initial} entries are allocated
+     * eagerly by Chicory when the Instance is built — before any gas is charged — so an oversized
+     * declaration is refused here at parse/deploy, making the ceiling a deterministic network
+     * constant instead of a per-node OOM. Function locals are bounded as defence in depth (Chicory
+     * already caps them at 50 000 during parse).
+     */
+    private static void rejectOversizedAllocations(WasmModule module) {
+        var tables = module.tableSection();
+        if (tables != null) {
+            for (int i = 0; i < tables.tableCount(); i++) {
+                // Only the initial (min) count is allocated eagerly at instantiation; table.grow is
+                // metered by its operand (see meter), so a large max ceiling is already priced.
+                long initial = tables.getTable(i).limits().min();
+                if (initial > MAX_TABLE_ENTRIES) {
+                    throw new IllegalArgumentException("contract declares too large a table: "
+                        + initial + " entries (max " + MAX_TABLE_ENTRIES + ")");
+                }
+            }
+        }
+        var code = module.codeSection();
+        if (code != null) {
+            for (int i = 0; i < code.functionBodyCount(); i++) {
+                int locals = code.getFunctionBody(i).localTypes().size();
+                if (locals > MAX_FUNCTION_LOCALS) {
+                    throw new IllegalArgumentException("contract function declares too many locals: "
+                        + locals + " (max " + MAX_FUNCTION_LOCALS + ")");
                 }
             }
         }
@@ -486,11 +539,10 @@ public final class WasmVm {
                 if (box == null) {
                     return new long[] {-1L};
                 }
-                // Charge for the full serialized size — serialize() is O(box size) work — before
-                // copying out. Metering only the copied bytes let a caller pass out_cap = 0 and
-                // force repeated full serialization of a large box for the flat base cost.
+                // serialize() is O(box size) work; copyOut now charges the full serialized length
+                // (a caller passing out_cap = 0 is still billed for the whole box, not just copied
+                // bytes), so no separate length charge is needed here beyond the base.
                 byte[] serialized = box.serialize();
-                gas.charge((long) serialized.length * GasSchedule.PER_BYTE);
                 return new long[] {copyOut(inst, serialized, args[1], args[2], gas)};
             });
 
@@ -521,10 +573,16 @@ public final class WasmVm {
             callContract, boxRead};
     }
 
-    /** Copies {@code src} into contract memory (at most {@code cap} bytes) and returns its true length. */
+    /**
+     * Copies {@code src} into contract memory (at most {@code cap} bytes) and returns its true length.
+     * Charges for the FULL source length, not just the copied bytes: the host already produced the
+     * whole {@code src} (e.g. cloning the call input), so billing only {@code copied} let a caller
+     * pass {@code cap = 0} and force that O(src) work for near-zero gas in a loop (audit M3, the same
+     * undercharge fixed for storage_read/box_read).
+     */
     private static long copyOut(Instance inst, byte[] src, long ptr, long cap, GasMeter gas) {
+        gas.charge((long) src.length * GasSchedule.PER_BYTE); // meter the full source, before the write
         int copied = Math.min(src.length, asLen(cap));
-        gas.charge((long) copied * GasSchedule.PER_BYTE); // meter before the write
         if (copied > 0) {
             inst.memory().write(asOffset(ptr), src, 0, copied);
         }

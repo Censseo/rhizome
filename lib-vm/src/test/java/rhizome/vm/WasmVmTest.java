@@ -2,6 +2,7 @@ package rhizome.vm;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
@@ -77,6 +78,21 @@ class WasmVmTest {
         // Too little gas to finish: the emitted log must not survive a non-OK execution.
         ExecResult r = vm.execute(EMITTER, new MapHostState(new byte[0], new byte[0], 0), new GasMeter(50));
         assertTrue(r.logs().isEmpty());
+    }
+
+    @Test
+    void rejectsModuleDeclaringAnOversizedTable() {
+        // A 100,000-entry table is accepted by Chicory (its own cap is 10M) but forces an eager,
+        // unmetered ~0.8 MiB reference array at instantiation; our tighter deploy-time cap refuses it
+        // so the allocation stays a small deterministic network constant (audit H4). 100000 = LEB128
+        // A0 8D 06.
+        byte[] mod = new byte[] {
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00,          // wasm header
+            0x04, 0x06, 0x01, 0x70, 0x00,                            // table section: 1 table, funcref, min-only
+            (byte) 0xA0, (byte) 0x8D, 0x06                           // min = 100,000 (LEB128)
+        };
+        var ex = assertThrows(IllegalArgumentException.class, () -> WasmVm.validateCode(mod));
+        assertTrue(ex.getMessage().contains("table"), ex.getMessage());
     }
 
     @Test

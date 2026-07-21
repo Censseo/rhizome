@@ -94,7 +94,8 @@ fn do_transfer(from: &[u8; ADDR_LEN], to: &[u8; ADDR_LEN], amount: u64) -> bool 
 
 /// Entry point. input[0] is the method selector:
 ///   0 = init(supply u64)                    — once; mints the whole supply to the caller
-///   1 = transfer(to[25], amt u64)           — moves caller's balance; silent no-op if short
+///   1 = transfer(to[25], amt u64)           — moves caller's balance; TRAPS if short, so composing
+///       contracts observe the failure through call_contract's -1 (not a silent no-op)
 ///   2 = balance_of(addr[25])                — balance as 8 LE bytes via set_output
 ///   3 = approve(spender[25], amt u64)       — lets spender pull up to amt from the caller
 ///   4 = transfer_from(from[25], to[25], amt) — spends the caller's allowance; TRAPS on
@@ -120,7 +121,11 @@ pub extern "C" fn call() {
         }
         1 => {
             let to = read_addr(&input, 1);
-            do_transfer(&caller, &to, read_u64_at(&input, 1 + ADDR_LEN));
+            // Trap on an insufficient balance (audit T2). Returning a silent no-op let composing
+            // contracts (pair.pay, agent_wallet.pay, launchpad) that check call_contract >= 0 believe
+            // a payout succeeded when zero tokens moved — losing swapper funds or burning a session
+            // budget with no transfer. transfer_from (selector 4) already traps; transfer must too.
+            if !do_transfer(&caller, &to, read_u64_at(&input, 1 + ADDR_LEN)) { fail(); }
         }
         2 => {
             let addr = read_addr(&input, 1);

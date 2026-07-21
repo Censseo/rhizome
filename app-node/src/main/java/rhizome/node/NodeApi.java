@@ -4,6 +4,8 @@ import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.Callable;
 
+import io.activej.bytebuf.ByteBuf;
+import io.activej.csp.supplier.ChannelSuppliers;
 import io.activej.http.AsyncServlet;
 import io.activej.http.HttpHeader;
 import io.activej.http.HttpHeaders;
@@ -213,6 +215,13 @@ public final class NodeApi {
     private static final int SCAN_COST_PER_BLOCKS = 20;
     /** Rate-limit cost of a /call_readonly, which runs the VM up to MAX_READONLY_GAS. */
     private static final int CALL_READONLY_COST = 25;
+    /**
+     * Rate-limit cost of a /submit. Accepting a block runs consensus validation and, for a
+     * plausible recent sibling, one memory-hard Pufferfish2 hash (registerOrphan) — far dearer than
+     * a flat read. Weighted so a single IP cannot drive thousands of block validations/hashes per
+     * window (audit H3); still generous for honest block propagation (~1 block / few seconds).
+     */
+    private static final int SUBMIT_COST = 8;
     /** Result cap for /address_txs so a busy address cannot produce an unbounded body. */
     private static final int ADDRESS_TXS_MAX = 100;
     /** Block-range size cap for /blocks. */
@@ -454,6 +463,9 @@ public final class NodeApi {
         }
         if ("/call_readonly".equals(path)) {
             return CALL_READONLY_COST;
+        }
+        if ("/submit".equals(path)) {
+            return SUBMIT_COST;
         }
         // /sync and /headers were left at cost 1 by the M2 fix, yet they are the heaviest read
         // endpoints: /sync reads and buffers up to BLOCKS_PER_FETCH full blocks (each up to
@@ -867,14 +879,24 @@ public final class NodeApi {
                 .build();
         }
         long cappedEnd = Math.min(end, node.blockCount());
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        for (long h = start; h <= cappedEnd; h++) {
-            byte[] encoded = BlockCodec.encode(node.block(h));
-            out.write(encoded, 0, encoded.length);
-        }
+        // Stream the window block-by-block instead of buffering it (audit M5): materialising up to
+        // BLOCKS_PER_FETCH × MAX_BLOCK_SIZE in a ByteArrayOutputStream and then copying it again via
+        // toByteArray() peaked at ~2× the window in memory on the event loop, so a few concurrent
+        // full-window /sync requests could OOM the node. Each block is encoded lazily as the response
+        // is flushed; the on-the-wire bytes are the identical self-framing concatenation the client
+        // (BlockCodec.decodeStreamed) already parses. Bounded to one block in memory at a time.
+        java.util.Iterator<ByteBuf> blocks = new java.util.Iterator<>() {
+            private long h = start;
+            @Override public boolean hasNext() {
+                return h <= cappedEnd;
+            }
+            @Override public ByteBuf next() {
+                return ByteBuf.wrapForReading(BlockCodec.encode(node.block(h++)));
+            }
+        };
         return HttpResponse.ok200()
             .withHeader(HttpHeaders.CONTENT_TYPE, "application/octet-stream")
-            .withBody(out.toByteArray())
+            .withBodyStream(ChannelSuppliers.ofIterator(blocks))
             .build();
     }
 

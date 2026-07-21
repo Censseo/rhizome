@@ -1030,11 +1030,30 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
     public void registerOrphan(Block block) {
         lock.lock();
         try {
-            // Only blocks that carry real proof of work at (at least) the minimum difficulty
-            // are retained. A zero- or sub-minimum-difficulty block is worthless as an uncle
-            // and would otherwise let an attacker seed the pool with free, forgeable "work".
-            if (((BlockImpl) block).difficulty() >= params.minDifficulty()
-                    && block.verifyNonce(params.powAlgorithm())) {
+            var b = (BlockImpl) block;
+            // Cheap, allocation-free pre-checks BEFORE the memory-hard verifyNonce (audit H3): the
+            // Pufferfish2 hash is expensive by design, so `/submit` must not let an attacker force one
+            // per throwaway block. A block can only ever become a valid uncle if it is a recent
+            // sibling — its height within the uncle-depth window of our tip, and its parent our known
+            // canonical block at height-1 (exactly what uncleEligible later requires). Garbage with a
+            // random parent or an out-of-window height is dropped here for a few comparisons instead
+            // of a hash. This also removes the double-hash: a would-be next block (id = tip+1) that
+            // failed addBlock's own verifyNonce has id > tip and is rejected below without re-hashing.
+            long tip = store.height();
+            int depth = params.uncleMaxDepth();
+            int uid = b.id();
+            if (b.difficulty() < params.minDifficulty()) {
+                return; // worthless as an uncle; also forgeable free "work"
+            }
+            if (uid <= GenesisBlock.GENESIS_ID || uid > tip || uid < tip - depth + 1) {
+                return; // not a recent past sibling of a block we could still build on
+            }
+            if (!store.headerAt(uid - 1).hash().equals(b.lastBlockHash())) {
+                return; // must fork from our known main-chain parent at height uid-1
+            }
+            // Only now the memory-hard proof-of-work check, on a block that is at least a
+            // structurally-plausible recent sibling.
+            if (block.verifyNonce(params.powAlgorithm())) {
                 orphans.put(block);
             }
         } finally {
