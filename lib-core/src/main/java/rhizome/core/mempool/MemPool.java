@@ -110,6 +110,11 @@ public final class MemPool {
         if (tx.amount().amount() < 0 || tx.fee().amount() < 0) {
             return INVALID_TRANSACTION_AMOUNT; // negative would mint money / force negative balances
         }
+        // Optional minimum-fee floor (0 = disabled, the default), so an operator can refuse free
+        // transactions at admission rather than have the pool fill with zero-fee spam (audit L5).
+        if (params.minFee() > 0 && tx.fee().amount() < params.minFee() && !tx.isTransactionFee()) {
+            return TRANSACTION_FEE_TOO_LOW;
+        }
         if (tx.kind().isContract() && (tx.gasLimit() < 0 || tx.gasPrice() < 0)) {
             return INVALID_TRANSACTION_AMOUNT;
         }

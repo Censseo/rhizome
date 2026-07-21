@@ -1013,7 +1013,11 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
     public void registerOrphan(Block block) {
         lock.lock();
         try {
-            if (block.verifyNonce(params.powAlgorithm())) {
+            // Only blocks that carry real proof of work at (at least) the minimum difficulty
+            // are retained. A zero- or sub-minimum-difficulty block is worthless as an uncle
+            // and would otherwise let an attacker seed the pool with free, forgeable "work".
+            if (((BlockImpl) block).difficulty() >= params.minDifficulty()
+                    && block.verifyNonce(params.powAlgorithm())) {
                 orphans.put(block);
             }
         } finally {
@@ -1061,7 +1065,10 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             if (uncleMiner == null || !uncleMiner.equals(ref.miner())) {
                 return null; // committed miner must match the real orphan (no reward redirection)
             }
-            if (!uncleEligible(uncle, h, depth, tipHeight, ctx)) {
+            // The nephew's difficulty caps how much work any uncle it references can claim,
+            // and minDifficulty floors it — see uncleEligible. block.difficulty() is the
+            // including block's own difficulty.
+            if (!uncleEligible(uncle, h, depth, tipHeight, ctx, block.difficulty())) {
                 return null;
             }
             uncleWork = uncleWork.add(BigInteger.TWO.pow(ref.difficulty()));
@@ -1087,7 +1094,11 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
                     break;
                 }
                 PublicAddress orphanMiner = blockMiner(orphan);
-                if (orphanMiner != null && uncleEligible(orphan, h, depth, tipHeight, ctx)) {
+                // The block being produced at height h will carry the current difficulty;
+                // only reference orphans whose difficulty fits [minDifficulty, currentDifficulty]
+                // so the produced block passes its own validateUncles check.
+                if (orphanMiner != null
+                        && uncleEligible(orphan, h, depth, tipHeight, ctx, currentDifficulty)) {
                     out.add(new UncleRef(orphan.hash(), ((BlockImpl) orphan).difficulty(), orphanMiner));
                 }
             }
@@ -1124,10 +1135,22 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         return new UncleContext(recentChain, alreadyReferenced);
     }
 
-    /** Whether {@code uncle} is a valid uncle for a block at height {@code h}. */
-    private boolean uncleEligible(Block uncle, int h, int depth, long tipHeight, UncleContext ctx) {
+    /**
+     * Whether {@code uncle} is a valid uncle for a block at height {@code h} whose own
+     * difficulty is {@code nephewDifficulty}. The uncle's difficulty must lie in
+     * {@code [minDifficulty, nephewDifficulty]}: no zero-/sub-minimum-work uncle earns a
+     * reward, and none can be credited more work than the contemporaneous chain difficulty.
+     * The same bound is enforced in HeaderChain.uncleWork so mining, block validation and
+     * headers-first sync all agree.
+     */
+    private boolean uncleEligible(Block uncle, int h, int depth, long tipHeight, UncleContext ctx,
+                                  int nephewDifficulty) {
         if (!uncle.verifyNonce(params.powAlgorithm())) {
             return false; // bad PoW
+        }
+        int ud = ((BlockImpl) uncle).difficulty();
+        if (ud < params.minDifficulty() || ud > nephewDifficulty) {
+            return false; // work must be real and not inflated beyond the nephew's difficulty
         }
         int uid = uncle.id();
         if (uid >= h || uid < h - depth) {

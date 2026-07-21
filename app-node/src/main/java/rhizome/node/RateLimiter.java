@@ -48,6 +48,16 @@ public final class RateLimiter {
 
     /** Records a request from {@code client}; returns false if it is over the limit. */
     public boolean allow(String client) {
+        return allow(client, 1);
+    }
+
+    /**
+     * Records a request from {@code client} that costs {@code cost} units of budget, returning
+     * false if it takes the client over the window limit. Weighting expensive endpoints (deep
+     * chain scans, VM dry-runs) by their true cost stops one client from driving orders of
+     * magnitude more work than a flat per-request budget would imply (audit M2).
+     */
+    public boolean allow(String client, int cost) {
         long now = nowMillis.getAsLong();
         Window window = clients.get(client);
         if (window == null) {
@@ -55,20 +65,20 @@ public final class RateLimiter {
                 // Fail closed: meter every untracked client against one shared bucket rather
                 // than allowing them all unlimited (which an IP-spray could exploit to disable
                 // rate limiting globally). Conservative but bounded.
-                return count(overflow, now);
+                return count(overflow, now, cost);
             }
             window = clients.computeIfAbsent(client, k -> new Window(now));
         }
-        return count(window, now);
+        return count(window, now, cost);
     }
 
-    private boolean count(Window window, long now) {
+    private boolean count(Window window, long now, int cost) {
         synchronized (window) {
             if (now - window.start >= windowMs) {
                 window.start = now;
                 window.count.set(0);
             }
-            return window.count.incrementAndGet() <= maxRequestsPerWindow;
+            return window.count.addAndGet(Math.max(1, cost)) <= maxRequestsPerWindow;
         }
     }
 

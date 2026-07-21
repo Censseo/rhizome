@@ -13,6 +13,8 @@ import io.activej.http.RoutingServlet;
 import io.activej.promise.Promise;
 import io.activej.reactor.Reactor;
 import org.json.JSONObject;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import rhizome.core.block.Block;
 import rhizome.core.block.BlockCodec;
@@ -36,6 +38,8 @@ import static io.activej.http.HttpMethod.POST;
  * payloads use the fixed-layout codec.
  */
 public final class NodeApi {
+
+    private static final Logger log = LoggerFactory.getLogger(NodeApi.class);
 
     private static final int SMALL_BODY = 8 * 1024;                 // tx / peer announcements
     // A single transaction body may be a contract deploy/call carrying up to MAX_DATA
@@ -172,7 +176,7 @@ public final class NodeApi {
             .build();
 
         return request -> {
-            if (!limiter.allow(clientKey(request))) {
+            if (!limiter.allow(clientKey(request), requestCost(request))) {
                 return HttpResponse.ofCode(429)
                     .withJson(new JSONObject().put("error", "rate limited").toString())
                     .toPromise();
@@ -187,8 +191,13 @@ public final class NodeApi {
                     .withJson(new JSONObject().put("error", "cross-origin request refused").toString())
                     .toPromise();
             }
-            // Convert any handler failure (incl. body-size overflow) into a clean response.
-            return routing.serve(request).map(r -> r, e -> badRequest(e.getClass().getSimpleName()));
+            // Convert any handler failure (incl. body-size overflow) into a clean, generic
+            // response; the detail is logged server-side only, never reflected to the client
+            // (audit L3 — reflected exception text leaks internal detail for reconnaissance).
+            return routing.serve(request).map(r -> r, e -> {
+                log.debug("request handling failed: {}", e.toString());
+                return badRequest("bad request");
+            });
         };
     }
 
@@ -198,7 +207,12 @@ public final class NodeApi {
     private static final int STATS_WINDOW = 32;
     /** Default and maximum tip-backward scan depth for /transaction and /address_txs. */
     private static final int SCAN_DEPTH_DEFAULT = 250;
-    private static final int SCAN_DEPTH_MAX = 2000;
+    private static final int SCAN_DEPTH_MAX = 1000;
+    /** Rate-limit units per this many blocks scanned, so a deep scan draws proportionally more
+     *  of the per-window budget than a flat 1 (audit M2). */
+    private static final int SCAN_COST_PER_BLOCKS = 20;
+    /** Rate-limit cost of a /call_readonly, which runs the VM up to MAX_READONLY_GAS. */
+    private static final int CALL_READONLY_COST = 25;
     /** Result cap for /address_txs so a busy address cannot produce an unbounded body. */
     private static final int ADDRESS_TXS_MAX = 100;
     /** Block-range size cap for /blocks. */
@@ -411,6 +425,37 @@ public final class NodeApi {
         return HttpResponse.ofCode(404)
             .withJson(new JSONObject().put("error", message).toString())
             .build();
+    }
+
+    /**
+     * Rate-limit cost of a request. Cheap endpoints cost 1; the deep chain scans and the VM
+     * dry-run cost proportionally more so a single client cannot drive orders of magnitude more
+     * work than the flat per-request budget implies (audit M2).
+     */
+    private static int requestCost(HttpRequest request) {
+        String path;
+        try {
+            path = request.getPath();
+        } catch (RuntimeException e) {
+            return 1;
+        }
+        if ("/transaction".equals(path) || "/address_txs".equals(path)) {
+            int depth = SCAN_DEPTH_DEFAULT;
+            try {
+                String d = request.getQueryParameter("depth");
+                if (d != null && !d.isEmpty()) {
+                    depth = Integer.parseInt(d.trim());
+                }
+            } catch (RuntimeException ignored) {
+                // malformed depth: the handler will reject it; charge the default cost
+            }
+            depth = Math.max(1, Math.min(depth, SCAN_DEPTH_MAX));
+            return Math.max(1, depth / SCAN_COST_PER_BLOCKS);
+        }
+        if ("/call_readonly".equals(path)) {
+            return CALL_READONLY_COST;
+        }
+        return 1;
     }
 
     private static String clientKey(HttpRequest request) {
@@ -869,7 +914,9 @@ public final class NodeApi {
         try {
             return action.call();
         } catch (Exception e) {
-            return badRequest(e.getClass().getSimpleName() + ": " + e.getMessage());
+            // Generic client message; detail is logged server-side only (audit L3).
+            log.debug("request rejected: {}", e.toString());
+            return badRequest("bad request");
         }
     }
 

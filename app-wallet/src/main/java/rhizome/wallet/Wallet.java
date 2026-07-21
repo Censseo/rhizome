@@ -75,7 +75,38 @@ public final class Wallet {
         String plaintext = toJson().toString(2);
         char[] pass = passphrase();
         String content = pass == null ? plaintext : WalletKeystore.encrypt(plaintext, pass);
-        Files.writeString(keyFile, content, StandardCharsets.UTF_8);
+        writeOwnerOnly(keyFile, content);
+    }
+
+    /**
+     * Writes the key file so it is readable only by its owner (mode {@code 0600}), never briefly
+     * world-readable. Without this the file inherited the process umask (typically {@code 0644}),
+     * so any local user could read an unencrypted Ed25519 seed and steal the funds (audit H5). On
+     * POSIX the file is created (or a temp file is created then atomically moved) with owner-only
+     * permissions; on non-POSIX filesystems it falls back to the {@code File} permission API.
+     */
+    private static void writeOwnerOnly(Path keyFile, String content) throws IOException {
+        try {
+            var ownerOnly = java.nio.file.attribute.PosixFilePermissions.fromString("rw-------");
+            Path dir = keyFile.toAbsolutePath().getParent();
+            Path tmp = Files.createTempFile(dir, ".wallet", ".tmp",
+                java.nio.file.attribute.PosixFilePermissions.asFileAttribute(ownerOnly));
+            try {
+                Files.writeString(tmp, content, StandardCharsets.UTF_8);
+                Files.move(tmp, keyFile, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            } catch (IOException e) {
+                Files.deleteIfExists(tmp);
+                throw e;
+            }
+        } catch (UnsupportedOperationException nonPosix) {
+            // Non-POSIX (e.g. Windows): best-effort owner-only via the File API.
+            Files.writeString(keyFile, content, StandardCharsets.UTF_8);
+            java.io.File f = keyFile.toFile();
+            f.setReadable(false, false);
+            f.setWritable(false, false);
+            f.setReadable(true, true);
+            f.setWritable(true, true);
+        }
     }
 
     public static Wallet load(Path keyFile) throws IOException {

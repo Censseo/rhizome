@@ -26,7 +26,11 @@ import org.json.JSONObject;
 final class WalletKeystore {
 
     private static final String MARKER = "rhizome-keystore";
-    private static final int ITERATIONS = 200_000;
+    // OWASP 2023 floor for PBKDF2-HMAC-SHA256. The chosen count is stored in each envelope's
+    // "iter" field and read back on decrypt, so raising it here stays backward compatible with
+    // files sealed at the old count (audit L4). A memory-hard KDF (scrypt/argon2id) would be
+    // stronger still and is the recommended follow-up.
+    private static final int ITERATIONS = 600_000;
     private static final int SALT_LEN = 16;
     private static final int IV_LEN = 12;
     private static final int KEY_BITS = 256;

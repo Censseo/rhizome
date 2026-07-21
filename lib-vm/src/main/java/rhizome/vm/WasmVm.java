@@ -43,6 +43,35 @@ public final class WasmVm {
     private static final int MAX_CONTRACT_PAGES = 1024;
 
     /**
+     * Hard cap on deployed contract code size (bytes). Bounds the one-time deploy validation and
+     * every per-call parse (a cache miss) so a multi-megabyte module cannot be used to amplify
+     * node CPU, and bounds on-chain state growth. Comfortably above the bundled templates.
+     */
+    static final int MAX_CODE_SIZE = 256 * 1024;
+
+    /**
+     * Fixed stack size (bytes) for the dedicated contract-execution thread. Large enough to hold
+     * {@link DepthLimitedInterpreterMachine#MAX_WASM_CALL_DEPTH} interpreter frames on every node,
+     * so the deterministic depth trap always fires before a JVM {@code StackOverflowError}, and
+     * independent of the host's {@code -Xss}.
+     */
+    static final long EXEC_STACK_BYTES = 64L * 1024 * 1024;
+
+    /**
+     * Parsed, validated modules keyed by SHA-256 of their code. Parsing and the float/SIMD scan are
+     * O(code size); caching amortises them across repeated calls to the same contract. Node-local
+     * and purely a performance cache — it never changes execution results — with a bounded size so
+     * it cannot itself be a memory-growth vector.
+     */
+    private static final java.util.LinkedHashMap<String, WasmModule> MODULE_CACHE =
+        new java.util.LinkedHashMap<>(64, 0.75f, true) {
+            @Override
+            protected boolean removeEldestEntry(java.util.Map.Entry<String, WasmModule> eldest) {
+                return size() > 256;
+            }
+        };
+
+    /**
      * Handles a contract-to-contract call requested via the {@code call_contract}
      * host function. Returns the callee's output on success, or {@code null} when
      * the call failed (unknown contract, revert, depth or reentrancy limit) — the
@@ -62,10 +91,13 @@ public final class WasmVm {
     public ExecResult execute(byte[] wasmCode, HostState host, GasMeter gas, ContractCallHandler calls) {
         WasmModule module;
         try {
-            module = Parser.parse(wasmCode);
-            rejectFloatingPoint(module);
+            // Parse + non-determinism validation are cached by code identity: without this,
+            // every CALL re-parsed the whole module and re-scanned every instruction (O(code)
+            // work) unpriced, so a large module could be spammed to amplify node CPU. Deploy
+            // also caps code size, so a cache miss is bounded work.
+            module = moduleFor(wasmCode);
         } catch (Throwable e) {
-            // Malformed bytecode (or a module using non-deterministic float opcodes) never
+            // Malformed bytecode (or a module using non-deterministic float/SIMD opcodes) never
             // reaches instantiation — deterministic revert.
             return ExecResult.reverted(gas.used(), "invalid module: " + e.getMessage());
         }
@@ -79,6 +111,10 @@ public final class WasmVm {
                 .withStart(false)
                 // Cap and meter linear memory so a contract cannot allocate gigabytes.
                 .withMemoryFactory(limits -> boundedMemory(limits, gas))
+                // Deterministic WASM call-depth cap: traps unbounded recursion at a fixed depth
+                // on every node, replacing the JVM-stack-dependent StackOverflowError that would
+                // otherwise fork consensus (see DepthLimitedInterpreterMachine).
+                .withMachineFactory(DepthLimitedInterpreterMachine::new)
                 // Meter every instruction; bulk-memory / memory.grow are charged by their
                 // runtime operand, not a flat 1, so O(N) work cannot cost O(1) gas.
                 .withUnsafeExecutionListener((instruction, stack) -> meter(instruction, stack, gas))
@@ -88,16 +124,110 @@ public final class WasmVm {
             call.apply();
             return ExecResult.ok(host.output(), host.logs(), gas.used());
         } catch (StackOverflowError | OutOfMemoryError e) {
-            // Runaway recursion / allocation. The exact depth or heap at which a given JVM
-            // trips is host-specific, so letting this surface as a node-local outcome would
-            // FORK consensus (one node reverts, another crashes). Normalize it to a
-            // deterministic full-gas out-of-gas that every node computes identically.
+            // Runaway allocation, or (defence in depth) recursion that somehow outran the
+            // deterministic depth cap. The exact heap/stack at which a given JVM trips is
+            // host-specific, so letting this surface as a node-local outcome would FORK
+            // consensus. Normalize it to a deterministic full-gas out-of-gas.
             return ExecResult.outOfGas(gas.limit());
         } catch (Throwable e) {
+            if (isDepthExceeded(e)) {
+                // Deterministic: every node traps at the same depth after the same instruction
+                // stream, so gas.used() here is identical network-wide.
+                return ExecResult.reverted(gas.used(), "call depth limit exceeded");
+            }
             if (isOutOfGas(e)) {
                 return ExecResult.outOfGas(gas.used());
             }
             return ExecResult.reverted(gas.used(), e.getMessage());
+        }
+    }
+
+    /**
+     * Runs {@code task} on a dedicated thread with a fixed, generous stack ({@link #EXEC_STACK_BYTES}).
+     * A contract's whole call tree (including nested {@code call_contract} frames) executes on this
+     * one thread, so the JVM stack size is a fixed network constant rather than the host's {@code -Xss}
+     * — the missing half of the deterministic-recursion guarantee: the fixed stack is always large
+     * enough to hold {@link DepthLimitedInterpreterMachine#MAX_WASM_CALL_DEPTH} frames, so the
+     * deterministic depth trap always fires before any real {@code StackOverflowError}.
+     */
+    public static <T> T onBoundedStack(java.util.function.Supplier<T> task) {
+        java.util.concurrent.atomic.AtomicReference<T> result = new java.util.concurrent.atomic.AtomicReference<>();
+        java.util.concurrent.atomic.AtomicReference<Throwable> error = new java.util.concurrent.atomic.AtomicReference<>();
+        Thread t = new Thread(null, () -> {
+            try {
+                result.set(task.get());
+            } catch (Throwable e) {
+                error.set(e);
+            }
+        }, "rhizome-wasm", EXEC_STACK_BYTES);
+        t.start();
+        try {
+            t.join();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("contract execution interrupted", e);
+        }
+        Throwable e = error.get();
+        if (e != null) {
+            if (e instanceof RuntimeException re) {
+                throw re;
+            }
+            if (e instanceof Error er) {
+                throw er;
+            }
+            throw new IllegalStateException("contract execution failed", e);
+        }
+        return result.get();
+    }
+
+    private static boolean isDepthExceeded(Throwable e) {
+        for (Throwable t = e; t != null; t = t.getCause()) {
+            if (t instanceof WasmCallDepthExceeded) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Validates contract code at deploy time: size cap, parse, and non-determinism (float/SIMD)
+     * scan. Throws on rejection; on success the module is parsed and cached for later calls.
+     */
+    public static void validateCode(byte[] wasmCode) {
+        if (wasmCode.length > MAX_CODE_SIZE) {
+            throw new IllegalArgumentException(
+                "contract code too large: " + wasmCode.length + " > " + MAX_CODE_SIZE);
+        }
+        moduleFor(wasmCode);
+    }
+
+    /** Returns the parsed, validated module for {@code wasmCode}, parsing on a cache miss. */
+    private static WasmModule moduleFor(byte[] wasmCode) {
+        String key = sha256Hex(wasmCode);
+        synchronized (MODULE_CACHE) {
+            WasmModule cached = MODULE_CACHE.get(key);
+            if (cached != null) {
+                return cached;
+            }
+        }
+        WasmModule module = Parser.parse(wasmCode);
+        rejectNonDeterministic(module);
+        synchronized (MODULE_CACHE) {
+            MODULE_CACHE.put(key, module);
+        }
+        return module;
+    }
+
+    private static String sha256Hex(byte[] data) {
+        try {
+            byte[] d = java.security.MessageDigest.getInstance("SHA-256").digest(data);
+            StringBuilder sb = new StringBuilder(d.length * 2);
+            for (byte b : d) {
+                sb.append(Character.forDigit((b >> 4) & 0xF, 16)).append(Character.forDigit(b & 0xF, 16));
+            }
+            return sb.toString();
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 unavailable", e);
         }
     }
 
@@ -143,23 +273,29 @@ public final class WasmVm {
     }
 
     /**
-     * Rejects any module that uses f32/f64 opcodes. WASM leaves NaN payloads and some float
-     * results implementation-defined, so a contract doing floating-point could make two nodes
-     * on different runtimes diverge (audit L4). Contracts are integer-only by construction, so
-     * refusing float opcodes at load removes the non-determinism outright rather than relying on
-     * every node running the exact same runtime build.
+     * Rejects any module that uses non-deterministic opcodes: scalar floating point (f32/f64) and
+     * the entire SIMD/vector family (v128, including the vector-float lanes f32x4/f64x2). WASM
+     * leaves NaN payloads and some float results implementation-defined, so a contract doing float
+     * or vector-float maths could make two nodes on different runtime builds diverge (audit L4).
+     * The previous check only matched the {@code F32_}/{@code F64_} prefixes, so vector-float
+     * opcodes such as {@code F32x4_ADD} slipped through — this uses an uppercased match against the
+     * float and lane-shape families so the whole class is refused rather than relying on the
+     * runtime happening to leave SIMD unimplemented. Contracts are integer-only by construction.
      */
-    private static void rejectFloatingPoint(WasmModule module) {
+    private static void rejectNonDeterministic(WasmModule module) {
         var code = module.codeSection();
         if (code == null) {
             return;
         }
         for (int i = 0; i < code.functionBodyCount(); i++) {
             for (var instruction : code.getFunctionBody(i).instructions()) {
-                String op = instruction.opcode().name();
-                if (op.startsWith("F32_") || op.startsWith("F64_")) {
+                String op = instruction.opcode().name().toUpperCase(java.util.Locale.ROOT);
+                if (op.startsWith("F32") || op.startsWith("F64") || op.startsWith("V128")
+                        || op.contains("X16_") || op.contains("X8_")
+                        || op.contains("X4_") || op.contains("X2_")) {
                     throw new IllegalArgumentException(
-                        "floating-point opcode " + op + " is not allowed (non-deterministic)");
+                        "non-deterministic opcode " + instruction.opcode().name()
+                        + " is not allowed (float/SIMD)");
                 }
             }
         }
@@ -265,7 +401,12 @@ public final class WasmVm {
                 if (box == null) {
                     return new long[] {-1L};
                 }
-                return new long[] {copyOut(inst, box.serialize(), args[1], args[2], gas)};
+                // Charge for the full serialized size — serialize() is O(box size) work — before
+                // copying out. Metering only the copied bytes let a caller pass out_cap = 0 and
+                // force repeated full serialization of a large box for the flat base cost.
+                byte[] serialized = box.serialize();
+                gas.charge((long) serialized.length * GasSchedule.PER_BYTE);
+                return new long[] {copyOut(inst, serialized, args[1], args[2], gas)};
             });
 
         // call_contract(addr_ptr, addr_len, in_ptr, in_len, out_ptr, out_cap) -> i32:

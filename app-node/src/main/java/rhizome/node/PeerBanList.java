@@ -73,6 +73,27 @@ public final class PeerBanList {
     }
 
     /**
+     * Secondary ban key: the peer's hostname (no DNS), prefixed so it never collides with an IP
+     * {@link #hostKey}. A ban is mirrored onto this key so an attacker cannot dodge it by flipping
+     * the hostname's DNS to a fresh IP between the offence and re-admission (audit L1) — the
+     * hostname still matches. Rotating both name and IP is the inherent Sybil limit, out of scope.
+     */
+    static String nameKey(String peerUrl) {
+        if (peerUrl == null) {
+            return "name:";
+        }
+        try {
+            String host = URI.create(peerUrl.trim()).getHost();
+            if (host != null && !host.isEmpty()) {
+                return "name:" + host.toLowerCase();
+            }
+        } catch (IllegalArgumentException ignored) {
+            // not a URI: fall through to the trimmed raw form
+        }
+        return "name:" + peerUrl.trim().toLowerCase();
+    }
+
+    /**
      * Records {@code points} of misbehaviour against a peer. Returns true if the
      * peer is now banned (either it just crossed the threshold or was already
      * within an active ban window).
@@ -97,9 +118,25 @@ public final class PeerBanList {
             if (entry.score >= banThreshold) {
                 entry.bannedUntil = now + banMillis;
                 entry.score = 0; // start clean once the ban lifts
+                mirrorToName(peerUrl, entry.bannedUntil, now);
                 return true;
             }
             return false;
+        }
+    }
+
+    /** Mirrors a ban onto the hostname key so a DNS rebind to a new IP cannot dodge it (L1). */
+    private void mirrorToName(String peerUrl, long bannedUntil, long now) {
+        String key = nameKey(peerUrl);
+        Entry entry = entries.get(key);
+        if (entry == null) {
+            if (entries.size() >= maxTracked && !sweep(now)) {
+                return; // tracking full: best-effort, the IP-key ban still applies
+            }
+            entry = entries.computeIfAbsent(key, k -> new Entry(now));
+        }
+        synchronized (entry) {
+            entry.bannedUntil = Math.max(entry.bannedUntil, bannedUntil);
         }
     }
 
@@ -109,8 +146,13 @@ public final class PeerBanList {
     }
 
     public boolean isBanned(String peerUrl) {
-        Entry entry = entries.get(hostKey(peerUrl));
-        return entry != null && nowMillis.getAsLong() < entry.bannedUntil;
+        long now = nowMillis.getAsLong();
+        return activeBan(hostKey(peerUrl), now) || activeBan(nameKey(peerUrl), now);
+    }
+
+    private boolean activeBan(String key, long now) {
+        Entry entry = entries.get(key);
+        return entry != null && now < entry.bannedUntil;
     }
 
     private void decay(Entry entry, long now) {

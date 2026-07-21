@@ -34,7 +34,21 @@ public sealed interface ScanPredicate {
         return null;
     }
 
+    /** Max nesting of and/or predicates accepted from untrusted JSON, so a deeply nested
+     *  predicate cannot blow the Java stack at parse or evaluation time (audit L9). */
+    int MAX_PREDICATE_DEPTH = 32;
+    /** Max children of a single and/or, bounding a wide (non-deep) predicate. */
+    int MAX_PREDICATE_PARTS = 64;
+
     static ScanPredicate fromJson(JSONObject o) {
+        return fromJson(o, 0);
+    }
+
+    private static ScanPredicate fromJson(JSONObject o, int depth) {
+        if (depth > MAX_PREDICATE_DEPTH) {
+            throw new IllegalArgumentException(
+                "scan predicate nested too deep (max " + MAX_PREDICATE_DEPTH + ")");
+        }
         String type = o.getString("type");
         return switch (type) {
             case "owner" -> new OwnerEquals(Utils.hexStringToByteArray(o.getString("owner")));
@@ -42,20 +56,24 @@ public sealed interface ScanPredicate {
                 Utils.hexStringToByteArray(o.getString("value")));
             case "registerContains" -> new RegisterContains(o.getInt("index"),
                 Utils.hexStringToByteArray(o.getString("value")));
-            case "and" -> new And(parts(o));
-            case "or" -> new Or(parts(o));
+            case "and" -> new And(parts(o, depth));
+            case "or" -> new Or(parts(o, depth));
             default -> throw new IllegalArgumentException("unknown scan predicate: " + type);
         };
     }
 
-    private static List<ScanPredicate> parts(JSONObject o) {
+    private static List<ScanPredicate> parts(JSONObject o, int depth) {
         JSONArray arr = o.getJSONArray("parts");
         if (arr.isEmpty()) {
             throw new IllegalArgumentException("and/or requires at least one part");
         }
+        if (arr.length() > MAX_PREDICATE_PARTS) {
+            throw new IllegalArgumentException(
+                "and/or has too many parts (max " + MAX_PREDICATE_PARTS + ")");
+        }
         List<ScanPredicate> parts = new ArrayList<>(arr.length());
         for (int i = 0; i < arr.length(); i++) {
-            parts.add(fromJson(arr.getJSONObject(i)));
+            parts.add(fromJson(arr.getJSONObject(i), depth + 1));
         }
         return parts;
     }
