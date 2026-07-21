@@ -47,7 +47,12 @@ public final class PeerBanList {
         this.nowMillis = nowMillis;
     }
 
-    /** Extracts the ban key (host) from a peer URL, falling back to the raw string. */
+    /**
+     * Ban key for a peer URL: the host's resolved IP address when it resolves, else the
+     * hostname. Keying by IP means a peer cannot dodge a ban by rotating the DNS name it
+     * advertises (all names for one address share the ban); it falls back to the hostname
+     * (and finally the raw string) when resolution is unavailable.
+     */
     static String hostKey(String peerUrl) {
         if (peerUrl == null) {
             return "";
@@ -55,7 +60,11 @@ public final class PeerBanList {
         try {
             String host = URI.create(peerUrl.trim()).getHost();
             if (host != null && !host.isEmpty()) {
-                return host.toLowerCase();
+                try {
+                    return java.net.InetAddress.getByName(host).getHostAddress();
+                } catch (java.net.UnknownHostException unresolved) {
+                    return host.toLowerCase();
+                }
             }
         } catch (IllegalArgumentException ignored) {
             // not a URI: fall through to the trimmed raw form

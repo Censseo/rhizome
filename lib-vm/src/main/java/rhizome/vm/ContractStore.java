@@ -38,6 +38,23 @@ public interface ContractStore {
         throw new UnsupportedOperationException("this contract store does not support enumeration");
     }
 
+    // ---- Optional persistent per-block undo journal (audit M9) ----
+    // A durable store (RocksDB) persists each block's contract undo journal so a reorg that
+    // follows a process restart can still be reversed exactly, instead of relying only on the
+    // processor's in-memory journals (lost on crash). Default no-ops: the in-memory store keeps
+    // its journals in RAM, and enumeration-only/light stores need none.
+
+    /** Persists the serialized undo journal for {@code height} (durable stores only). */
+    default void putJournal(long height, byte[] serialized) { }
+
+    /** The persisted undo journal for {@code height}, or {@code null} if none (or not durable). */
+    default byte[] getJournal(long height) {
+        return null;
+    }
+
+    /** Drops the persisted journal for {@code height}. */
+    default void deleteJournal(long height) { }
+
     @FunctionalInterface
     interface StorageConsumer {
         void accept(PublicAddress contract, byte[] key, byte[] value);

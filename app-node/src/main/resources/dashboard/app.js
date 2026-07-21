@@ -114,20 +114,122 @@ function clearPage() {
 
 function every(ms, fn) { fn(); pageTimers.push(setInterval(fn, ms)); }
 
-/* ================= wallet state (browser-side keys) ================= */
+/* ================= wallet vault (browser-side keys) =================
+ * Keys live in IndexedDB (not localStorage), encrypted at rest with a passphrase via
+ * WebCrypto (PBKDF2-SHA256 → AES-256-GCM) when a secure context is available (https or
+ * localhost — where a wallet should be used). Over a plain-http remote node WebCrypto's
+ * subtle API is unavailable; there we fall back to storing the seed unencrypted and warn
+ * loudly. The decrypted seed is held only in memory after unlock and never rendered unless
+ * the user explicitly reveals it.
+ */
 
-const WalletStore = {
-  seed() {
-    const hex = localStorage.getItem('rz.wallet.seed');
-    return hex ? RzTx.hexToBytes(hex) : null;
+const CRYPTO_OK = !!(self.crypto && self.crypto.subtle && self.isSecureContext);
+const VAULT_DB = 'rhizome-wallet';
+const VAULT_STORE = 'vault';
+const VAULT_KEY = 'seed';
+const LEGACY_KEY = 'rz.wallet.seed';
+
+function idb() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(VAULT_DB, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(VAULT_STORE);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function idbGet(key) {
+  const db = await idb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(VAULT_STORE, 'readonly').objectStore(VAULT_STORE).get(key);
+    tx.onsuccess = () => resolve(tx.result || null);
+    tx.onerror = () => reject(tx.error);
+  });
+}
+async function idbPut(key, value) {
+  const db = await idb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(VAULT_STORE, 'readwrite').objectStore(VAULT_STORE).put(value, key);
+    tx.onsuccess = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+async function idbDel(key) {
+  const db = await idb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(VAULT_STORE, 'readwrite').objectStore(VAULT_STORE).delete(key);
+    tx.onsuccess = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function aesKey(passphrase, salt) {
+  const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(passphrase),
+    'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey(
+    { name: 'PBKDF2', salt, iterations: 200000, hash: 'SHA-256' },
+    base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+}
+async function encryptSeed(seed, passphrase) {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await aesKey(passphrase, salt);
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, seed));
+  return { v: 1, enc: 'aes-gcm', salt: [...salt], iv: [...iv], ct: [...ct] };
+}
+async function decryptSeed(rec, passphrase) {
+  const key = await aesKey(passphrase, new Uint8Array(rec.salt));
+  const pt = await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: new Uint8Array(rec.iv) }, key, new Uint8Array(rec.ct));
+  return new Uint8Array(pt);
+}
+
+/** Persistent, encrypted key vault (IndexedDB). */
+const Vault = {
+  async record() { return idbGet(VAULT_KEY); },
+  async exists() { return (await this.record()) != null; },
+  async isEncrypted() { const r = await this.record(); return !!(r && r.enc); },
+  /** Stores a seed, encrypting it under {@code passphrase} when a secure context allows it. */
+  async store(seed, passphrase) {
+    if (CRYPTO_OK && passphrase) {
+      await idbPut(VAULT_KEY, await encryptSeed(seed, passphrase));
+    } else {
+      await idbPut(VAULT_KEY, { v: 1, enc: null, seed: [...seed] });
+    }
   },
-  save(seedBytes) { localStorage.setItem('rz.wallet.seed', RzTx.bytesToHex(seedBytes)); },
-  forget() { localStorage.removeItem('rz.wallet.seed'); },
+  /** Returns the seed bytes, decrypting with {@code passphrase} if the record is encrypted. */
+  async open(passphrase) {
+    const r = await this.record();
+    if (!r) throw new Error('aucun wallet enregistré');
+    if (r.enc) return decryptSeed(r, passphrase);
+    return new Uint8Array(r.seed);
+  },
+  async forget() { await idbDel(VAULT_KEY); },
+};
+
+// In-memory unlocked state: the decrypted seed lives here only after unlock, so the many
+// synchronous seed()/address() callers keep working without touching storage.
+const WalletStore = {
+  _seed: null,
+  seed() { return this._seed; },
+  setUnlocked(seedBytes) { this._seed = seedBytes; },
+  lock() { this._seed = null; },
   address() {
-    const seed = this.seed();
-    return seed ? RzTx.bytesToHex(RzTx.addressFromPublicKey(RzCrypto.ed25519Public(seed))) : null;
+    return this._seed
+      ? RzTx.bytesToHex(RzTx.addressFromPublicKey(RzCrypto.ed25519Public(this._seed))) : null;
   },
 };
+
+/** One-time migration of a pre-existing plaintext localStorage seed into the vault. */
+async function migrateLegacyWallet() {
+  const hex = localStorage.getItem(LEGACY_KEY);
+  if (!hex) return;
+  try {
+    if (!(await Vault.exists())) {
+      await Vault.store(RzTx.hexToBytes(hex), null); // unencrypted for now; user can re-encrypt
+    }
+    localStorage.removeItem(LEGACY_KEY);
+  } catch (e) { /* leave legacy key in place if migration fails */ }
+}
 
 const AgentStore = {
   list() { return JSON.parse(localStorage.getItem('rz.agents') || '[]'); },
@@ -175,6 +277,14 @@ async function boot() {
   document.getElementById('brand-net').textContent =
     App.stats.network + ' · chain ' + App.stats.chainId;
   if (App.features.boxes) document.getElementById('boxes-badge').remove();
+  // Migrate any legacy plaintext localStorage key into the vault, then auto-unlock an
+  // unencrypted vault so a returning user isn't prompted for a passphrase they never set.
+  try {
+    await migrateLegacyWallet();
+    if ((await Vault.exists()) && !(await Vault.isEncrypted())) {
+      WalletStore.setUnlocked(await Vault.open(null));
+    }
+  } catch (e) { /* vault unavailable; wallet page will surface it */ }
   setInterval(async () => {
     try {
       App.stats = await api('/stats');
@@ -461,36 +571,90 @@ async function renderAddressDetail(address) {
 
 /* ================= page: wallet ================= */
 
-function renderWallet() {
+async function renderWallet() {
   $view.append(el('h1', null, 'Wallet'),
-    el('p', { class: 'sub' }, 'Les clés restent dans ce navigateur (localStorage) — le node ne les voit jamais. La signature Ed25519 est faite localement.'));
+    el('p', { class: 'sub' }, 'Les clés restent dans ce navigateur (IndexedDB, chiffrées par une passphrase) — le node ne les voit jamais. La signature Ed25519 est faite localement.'));
 
-  if (!WalletStore.seed()) {
-    const importInput = el('input', { class: 'mono', placeholder: 'Clé privée (64 hex)…' });
-    $view.append(
-      el('div', { class: 'grid2' },
-        el('div', { class: 'card' }, el('h3', null, 'Créer un wallet'),
-          el('p', { class: 'muted' }, 'Génère une nouvelle clé Ed25519 aléatoire dans le navigateur.'),
-          el('button', {
-            onclick: () => { WalletStore.save(RzCrypto.randomSeed()); route(); },
-          }, 'Générer une clé')),
-        el('div', { class: 'card' }, el('h3', null, 'Importer une clé'),
-          el('label', { class: 'f' }, 'Clé privée (seed Ed25519, 32 octets hex)'),
-          importInput,
-          el('button', {
-            class: 'secondary', onclick: () => {
-              try {
-                const seed = RzTx.hexToBytes(importInput.value);
-                if (seed.length !== 32) throw new Error('32 octets attendus');
-                WalletStore.save(seed); route();
-              } catch (e) { toast('Clé invalide : ' + e.message, true); }
-            },
-          }, 'Importer'))),
-      el('div', { class: 'callout warn' },
-        'Un wallet navigateur convient aux tests et petits montants. Pour un trésor, préférez le wallet CLI et un fichier de clé hors-ligne.'));
+  if (WalletStore.seed()) { renderWalletUnlocked(); return; }
+
+  let exists = false;
+  let encrypted = false;
+  try {
+    exists = await Vault.exists();
+    encrypted = exists && await Vault.isEncrypted();
+  } catch (e) {
+    $view.append(el('div', { class: 'callout warn' }, 'Stockage du wallet indisponible : ' + e.message));
     return;
   }
 
+  // Existing encrypted wallet → ask for the passphrase to unlock.
+  if (exists && encrypted) {
+    const pass = el('input', { type: 'password', placeholder: 'Passphrase' });
+    const out = el('div');
+    const unlock = async () => {
+      try {
+        WalletStore.setUnlocked(await Vault.open(pass.value));
+        route();
+      } catch (e) {
+        out.replaceChildren(el('div', { class: 'result-box err' }, 'Passphrase incorrecte ou clé corrompue.'));
+      }
+    };
+    pass.addEventListener('keydown', e => { if (e.key === 'Enter') unlock(); });
+    $view.append(el('div', { class: 'card' }, el('h3', null, 'Déverrouiller le wallet'),
+      el('label', { class: 'f' }, 'Passphrase'), pass,
+      el('button', { onclick: unlock }, 'Déverrouiller'), out,
+      el('details', null, el('summary', null, 'Oublier ce wallet'),
+        el('button', {
+          class: 'danger', onclick: async () => {
+            if (confirm('Oublier la clé de ce navigateur ? Sans sauvegarde, les fonds sont perdus.')) {
+              await Vault.forget(); WalletStore.lock(); route();
+            }
+          },
+        }, 'Oublier la clé'))));
+    return;
+  }
+
+  // No wallet yet → create or import, encrypting with a passphrase when the context allows it.
+  const importInput = el('input', { class: 'mono', placeholder: 'Clé privée (64 hex)…' });
+  const passCreate = el('input', { type: 'password', placeholder: 'Passphrase' });
+  const passImport = el('input', { type: 'password', placeholder: 'Passphrase' });
+  async function persistAndUnlock(seed, passphrase) {
+    if (CRYPTO_OK && !passphrase) throw new Error('choisissez une passphrase');
+    await Vault.store(seed, passphrase);
+    WalletStore.setUnlocked(seed);
+    route();
+  }
+  $view.append(
+    el('div', { class: 'grid2' },
+      el('div', { class: 'card' }, el('h3', null, 'Créer un wallet'),
+        el('p', { class: 'muted' }, 'Génère une nouvelle clé Ed25519 aléatoire dans le navigateur.'),
+        CRYPTO_OK ? el('label', { class: 'f' }, 'Passphrase (chiffre la clé au repos)') : null,
+        CRYPTO_OK ? passCreate : null,
+        el('button', {
+          onclick: async () => {
+            try { await persistAndUnlock(RzCrypto.randomSeed(), passCreate.value); }
+            catch (e) { toast(e.message, true); }
+          },
+        }, 'Générer une clé')),
+      el('div', { class: 'card' }, el('h3', null, 'Importer une clé'),
+        el('label', { class: 'f' }, 'Clé privée (seed Ed25519, 32 octets hex)'), importInput,
+        CRYPTO_OK ? el('label', { class: 'f' }, 'Passphrase (chiffre la clé au repos)') : null,
+        CRYPTO_OK ? passImport : null,
+        el('button', {
+          class: 'secondary', onclick: async () => {
+            try {
+              const seed = RzTx.hexToBytes(importInput.value);
+              if (seed.length !== 32) throw new Error('32 octets attendus');
+              await persistAndUnlock(seed, passImport.value);
+            } catch (e) { toast('Clé invalide : ' + e.message, true); }
+          },
+        }, 'Importer'))),
+    el('div', { class: 'callout warn' }, CRYPTO_OK
+      ? 'La clé est chiffrée au repos (AES-256-GCM, passphrase via PBKDF2). Pour un trésor, préférez le wallet CLI et un fichier de clé hors-ligne.'
+      : 'Contexte non sécurisé (http distant) : le chiffrement du navigateur est indisponible et la clé serait stockée en clair. Ouvrez le dashboard via https ou http://localhost pour activer le chiffrement au repos.'));
+}
+
+function renderWalletUnlocked() {
   const address = WalletStore.address();
   const balanceTile = el('div', { class: 'v' }, '…');
   const nonceTile = el('div', { class: 'v' }, '…');
@@ -539,17 +703,43 @@ function renderWallet() {
         },
       }, 'Signer et envoyer'), resultZone),
     App.features.tokens ? tokensCard(address) : null,
-    el('details', null, el('summary', null, 'Exporter / oublier la clé'),
-      el('div', { class: 'card' },
-        el('label', { class: 'f' }, 'Clé privée (à sauvegarder en lieu sûr)'),
-        el('input', { class: 'mono', readonly: '', value: RzTx.bytesToHex(WalletStore.seed()) }),
-        el('button', {
-          class: 'danger', onclick: () => {
-            if (confirm('Oublier la clé de ce navigateur ? Sans sauvegarde, les fonds sont perdus.')) {
-              WalletStore.forget(); route();
-            }
-          },
-        }, 'Oublier la clé'))));
+    el('div', { class: 'row', style: 'margin-top:12px' },
+      el('button', { class: 'secondary', onclick: () => { WalletStore.lock(); route(); } }, 'Verrouiller')),
+    walletSecurityCard());
+}
+
+/** Key-security controls: reveal (opt-in), (re)encrypt with a passphrase, forget. */
+function walletSecurityCard() {
+  const seedReveal = el('div');
+  const passSet = el('input', { type: 'password', placeholder: 'Nouvelle passphrase' });
+  return el('details', null, el('summary', null, 'Sécurité de la clé'),
+    el('div', { class: 'card' },
+      el('p', { class: 'muted' }, 'La clé n’est jamais affichée automatiquement. Révélez-la seulement pour la sauvegarder hors-ligne.'),
+      el('button', {
+        class: 'secondary', onclick: () => {
+          seedReveal.replaceChildren(el('input', { class: 'mono', readonly: '',
+            value: RzTx.bytesToHex(WalletStore.seed()) }));
+        },
+      }, 'Révéler la clé privée'), seedReveal,
+      CRYPTO_OK ? el('label', { class: 'f' }, '(Re)chiffrer / changer la passphrase') : null,
+      CRYPTO_OK ? passSet : null,
+      CRYPTO_OK ? el('button', {
+        class: 'secondary', onclick: async () => {
+          try {
+            if (!passSet.value) throw new Error('passphrase vide');
+            await Vault.store(WalletStore.seed(), passSet.value);
+            passSet.value = '';
+            toast('Clé chiffrée dans ce navigateur.');
+          } catch (e) { toast(e.message, true); }
+        },
+      }, 'Chiffrer') : null,
+      el('button', {
+        class: 'danger', style: 'margin-top:10px', onclick: async () => {
+          if (confirm('Oublier la clé de ce navigateur ? Sans sauvegarde, les fonds sont perdus.')) {
+            await Vault.forget(); WalletStore.lock(); route();
+          }
+        },
+      }, 'Oublier la clé')));
 }
 
 /**

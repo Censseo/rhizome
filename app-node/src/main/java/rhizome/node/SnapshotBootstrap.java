@@ -123,6 +123,11 @@ final class SnapshotBootstrap {
             log.warn("Snapshot verification failed: {}", e.getMessage());
             return false;
         }
+        // From here on we mutate several independent stores that commit separately. Mark the
+        // bootstrap in progress so an interrupted seed is detected at the next boot instead of
+        // running on half-written, inconsistent state (audit M8). The marker lives in the node
+        // store and is cleared only after the final commit below succeeds.
+        store.beginBootstrap();
         adapter.flush(pivot);
         stateStore.putRoot(pivot, committedRoot.toBytes());
 
@@ -131,6 +136,7 @@ final class SnapshotBootstrap {
         store.chainStore().append(genesis);
         store.bootstrapHeaders(headers.subList(0, (int) (pivot - 1)));
         store.nonceStore().markSyncedThrough(pivot);
+        store.endBootstrap();
 
         log.info("Snap-sync bootstrap complete: pivot={} stateRoot={} ({} chunks); body sync resumes above pivot",
             pivot, committedRoot.toHexString(), chunks.size());

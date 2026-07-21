@@ -33,8 +33,10 @@ public class Crypto {
             signer.update(message, 0, message.length);
             return signer.generateSignature();
         } catch (Exception e) {
-            e.printStackTrace();
-            return new byte[0];
+            // Never return an empty/garbage signature on failure: that used to let a
+            // signing fault surface only much later as a rejected transaction, masking
+            // key-corruption bugs and risking broadcast of an unsigned tx (audit M11).
+            throw new IllegalStateException("Ed25519 signing failed", e);
         }
     }
 
@@ -156,16 +158,14 @@ public class Crypto {
     }
 
     public static SHA256Hash concatHashes(SHA256Hash a, SHA256Hash b, boolean usePufferFish, boolean useCache) {
-        // Assuming SHA256 is a method that takes a byte array and returns a SHA256Hash object
-        // Pufferfish and caching functionality would need to be implemented within the SHA256 method.
+        // Proof-of-work hash over (target ‖ nonce). The consensus-critical part is that
+        // usePufferFish is HONORED: on a PUFFERFISH2 network the header must be verified
+        // (and mined) with the memory-hard Pufferfish2 function, not plain SHA-256 — that
+        // is the whole ASIC-resistance property. See PowAlgorithm / NetworkParameters.
         byte[] data = new byte[64];
         System.arraycopy(a.hash().getArray(), 0, data, 0, 32);
         System.arraycopy(b.hash().getArray(), 0, data, 32, 32);
-        
-        // Instead of 'usePufferFish' and 'useCache' which are not standard,
-        // you'd typically call a standard Java SHA-256 implementation here.
-        // If 'usePufferFish' refers to a custom hashing algorithm, you'd need to implement it accordingly.
-        return SHA256(data);
+        return usePufferFish ? PUFFERFISH(data, useCache) : SHA256(data);
     }
 
     public static boolean checkLeadingZeroBits(SHA256Hash hash, int challengeSize) {

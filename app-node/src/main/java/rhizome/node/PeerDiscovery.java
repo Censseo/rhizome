@@ -24,15 +24,23 @@ public final class PeerDiscovery {
 
     private static final Logger log = LoggerFactory.getLogger(PeerDiscovery.class);
     private static final int MAX_FAILURES = 3;
+    /** Cap on peers ingested from a single peer's PEX response per round (anti gossip-amplification/eclipse). */
+    private static final int MAX_PEX_PER_PEER = 16;
 
     private final PeerRegistry registry;
     private final String selfUrl;
+    private final boolean blockPrivateHosts;
     private final HttpClient http;
     private final Map<String, Integer> failures = new ConcurrentHashMap<>();
 
     public PeerDiscovery(PeerRegistry registry, String selfUrl) {
+        this(registry, selfUrl, false);
+    }
+
+    public PeerDiscovery(PeerRegistry registry, String selfUrl, boolean blockPrivateHosts) {
         this.registry = registry;
         this.selfUrl = selfUrl;
+        this.blockPrivateHosts = blockPrivateHosts;
         this.http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build();
     }
 
@@ -55,14 +63,19 @@ public final class PeerDiscovery {
     }
 
     private List<String> fetchPeers(String peer) throws Exception {
+        // Pin the peer to its resolved IP (and refuse non-routable hosts on mainnet) so a DNS
+        // rebind cannot point this fetch at an internal service (SSRF).
+        String pinned = PeerHosts.pin(peer, blockPrivateHosts);
         HttpResponse<String> resp = http.send(
-            HttpRequest.newBuilder(URI.create(peer + "/peers")).timeout(Duration.ofSeconds(10)).GET().build(),
+            HttpRequest.newBuilder(URI.create(pinned + "/peers")).timeout(Duration.ofSeconds(10)).GET().build(),
             HttpResponse.BodyHandlers.ofString());
         if (resp.statusCode() != 200) {
             throw new IllegalStateException("/peers -> " + resp.statusCode());
         }
         JSONArray arr = new JSONObject(resp.body()).getJSONArray("peers");
-        return arr.toList().stream().map(Object::toString).toList();
+        // Bound how many addresses one peer can contribute per round, so a single malicious
+        // peer cannot flood the registry with sybil URLs (PEX amplification / eclipse).
+        return arr.toList().stream().map(Object::toString).limit(MAX_PEX_PER_PEER).toList();
     }
 
     private void announceTo(String peer) throws Exception {
@@ -70,8 +83,9 @@ public final class PeerDiscovery {
             return;
         }
         String body = new JSONObject().put("url", selfUrl).toString();
+        String pinned = PeerHosts.pin(peer, blockPrivateHosts);
         http.send(
-            HttpRequest.newBuilder(URI.create(peer + "/add_peer"))
+            HttpRequest.newBuilder(URI.create(pinned + "/add_peer"))
                 .timeout(Duration.ofSeconds(10))
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(body)).build(),

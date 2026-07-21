@@ -22,6 +22,14 @@ public final class Constants {
 
     // Blocks
     public static final int MAX_TRANSACTIONS_PER_BLOCK = 25000;
+    /**
+     * Hard upper bound on the uncle count a decoder will accept before allocating, a
+     * loose anti-DoS guard (an attacker-controlled 4-byte count must not size a
+     * multi-GB list). Consensus enforces the real, per-network {@code maxUnclesPerBlock}
+     * (2) later; this only stops the decode-time OOM and is set comfortably above any
+     * plausible parameter.
+     */
+    public static final int MAX_UNCLES_PER_BLOCK = 128;
     /** Max serialized block size (4 MiB): fits a full transfer block and bounds contract payloads. */
     public static final int MAX_BLOCK_SIZE_BYTES = 4 * 1024 * 1024;
     public static final int PUFFERFISH_START_BLOCK = 124500;

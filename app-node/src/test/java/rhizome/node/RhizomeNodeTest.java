@@ -19,8 +19,10 @@ class RhizomeNodeTest {
     @TempDir
     Path tempDir;
 
+    // Instant-mining profile with a low maxDifficulty so mining stays feasible even once the
+    // retarget legitimately raises difficulty for the 50 ms cadence (see audit L2).
     private static final NetworkParameters FAST = NetworkParameters.testnet().toBuilder()
-        .powAlgorithm(PowAlgorithm.SHA256).genesisDifficulty(3).build();
+        .powAlgorithm(PowAlgorithm.SHA256).genesisDifficulty(3).minDifficulty(3).maxDifficulty(16).build();
 
     private static int freePort() throws Exception {
         try (ServerSocket s = new ServerSocket(0)) {

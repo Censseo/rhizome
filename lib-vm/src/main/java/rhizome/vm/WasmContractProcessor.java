@@ -202,7 +202,11 @@ public final class WasmContractProcessor implements ContractProcessor {
     public void commit(long blockHeight) {
         if (session != null) {
             List<ContractChange> changes = session.forwardChanges();
-            journals.put(blockHeight, session.flushWithJournal());
+            List<ContractUndo> journal = session.flushWithJournal();
+            journals.put(blockHeight, journal);
+            // Persist the journal too (durable stores only), so a reorg after a restart can be
+            // reversed exactly rather than depending on this RAM map surviving (audit M9).
+            baseStore.putJournal(blockHeight, encodeJournal(journal));
             if (!changes.isEmpty()) {
                 changesByHeight.put(blockHeight, changes);
             }
@@ -247,7 +251,13 @@ public final class WasmContractProcessor implements ContractProcessor {
         changesByHeight.remove(blockHeight);
         List<ContractUndo> journal = journals.remove(blockHeight);
         if (journal == null) {
-            return; // nothing was committed for this height (e.g. a transfer-only block)
+            // Not in memory (e.g. this process restarted after the block committed): fall back
+            // to the durable journal so the reorg can still be reversed exactly (audit M9).
+            byte[] persisted = baseStore.getJournal(blockHeight);
+            if (persisted == null) {
+                return; // nothing was committed for this height (e.g. a transfer-only block)
+            }
+            journal = decodeJournal(persisted);
         }
         // Apply in reverse so repeated writes to the same key restore the earliest prior.
         for (int i = journal.size() - 1; i >= 0; i--) {
@@ -264,13 +274,76 @@ public final class WasmContractProcessor implements ContractProcessor {
                 baseStore.putStorage(u.contract(), u.key(), u.prior());
             }
         }
+        baseStore.deleteJournal(blockHeight);
+    }
+
+    // ---- persistent journal codec (audit M9) ----
+    // Layout: count(4) then per entry: isCode(1) | contract(25) | keyLen(4,-1=null) | key
+    //         | priorLen(4,-1=null) | prior.
+
+    private static byte[] encodeJournal(List<ContractUndo> journal) {
+        int size = Integer.BYTES;
+        for (ContractUndo u : journal) {
+            size += 1 + rhizome.core.ledger.PublicAddress.SIZE + Integer.BYTES
+                + (u.key() == null ? 0 : u.key().length) + Integer.BYTES
+                + (u.prior() == null ? 0 : u.prior().length);
+        }
+        java.nio.ByteBuffer b = java.nio.ByteBuffer.allocate(size);
+        b.putInt(journal.size());
+        for (ContractUndo u : journal) {
+            b.put((byte) (u.isCode() ? 1 : 0));
+            b.put(u.contract().toBytes());
+            putNullable(b, u.key());
+            putNullable(b, u.prior());
+        }
+        return b.array();
+    }
+
+    private static List<ContractUndo> decodeJournal(byte[] bytes) {
+        java.nio.ByteBuffer b = java.nio.ByteBuffer.wrap(bytes);
+        int count = b.getInt();
+        List<ContractUndo> journal = new java.util.ArrayList<>(Math.max(0, count));
+        for (int i = 0; i < count; i++) {
+            boolean isCode = b.get() != 0;
+            byte[] addr = new byte[rhizome.core.ledger.PublicAddress.SIZE];
+            b.get(addr);
+            byte[] key = getNullable(b);
+            byte[] prior = getNullable(b);
+            journal.add(new ContractUndo(isCode, rhizome.core.ledger.PublicAddress.of(addr), key, prior));
+        }
+        return journal;
+    }
+
+    private static void putNullable(java.nio.ByteBuffer b, byte[] value) {
+        if (value == null) {
+            b.putInt(-1);
+        } else {
+            b.putInt(value.length);
+            b.put(value);
+        }
+    }
+
+    private static byte[] getNullable(java.nio.ByteBuffer b) {
+        int len = b.getInt();
+        if (len < 0) {
+            return null;
+        }
+        byte[] out = new byte[len];
+        b.get(out);
+        return out;
     }
 
     /** Drops journals buried deeper than the retention depth (unreachable by any reorg). */
     private void pruneOldJournals() {
         long cutoff = lastCommittedHeight - retainDepth;
         if (cutoff > 0) {
-            journals.keySet().removeIf(h -> h < cutoff);
+            journals.keySet().removeIf(h -> {
+                if (h < cutoff) {
+                    baseStore.deleteJournal(h); // drop the durable copy too
+                    return true;
+                }
+                return false;
+            });
             receiptsByHeight.keySet().removeIf(h -> h < cutoff);
             logsByHeight.keySet().removeIf(h -> h < cutoff);
             changesByHeight.keySet().removeIf(h -> h < cutoff);

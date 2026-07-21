@@ -78,12 +78,22 @@ public final class MemPool {
         this.maxPerSender = maxPerSender;
     }
 
-    /** Maximum this transaction can debit its sender: value + fee, or value + full gas budget. */
+    /**
+     * Maximum this transaction can debit its sender: value + fee, or value + full gas budget.
+     * Overflow saturates to {@link Long#MAX_VALUE} instead of throwing: an overflowing
+     * {@code gasLimit*gasPrice} used to escape {@code addTransaction} as an unhandled
+     * ArithmeticException (audit M7); now it just reads as "more than any balance" and the
+     * caller's balance check rejects it (BALANCE_TOO_LOW).
+     */
     private static long maxSpend(TransactionImpl tx) {
-        if (tx.kind().isContract()) {
-            return tx.amount().amount() + Math.multiplyExact(tx.gasLimit(), tx.gasPrice());
+        try {
+            if (tx.kind().isContract()) {
+                return Math.addExact(tx.amount().amount(), Math.multiplyExact(tx.gasLimit(), tx.gasPrice()));
+            }
+            return Math.addExact(tx.amount().amount(), tx.fee().amount());
+        } catch (ArithmeticException overflow) {
+            return Long.MAX_VALUE;
         }
-        return tx.amount().amount() + tx.fee().amount();
     }
 
     public ExecutionStatus addTransaction(Transaction transaction) {

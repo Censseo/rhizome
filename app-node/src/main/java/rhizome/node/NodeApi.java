@@ -5,6 +5,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.concurrent.Callable;
 
 import io.activej.http.AsyncServlet;
+import io.activej.http.HttpHeader;
 import io.activej.http.HttpHeaders;
 import io.activej.http.HttpRequest;
 import io.activej.http.HttpResponse;
@@ -40,6 +41,24 @@ public final class NodeApi {
     // A single transaction body may be a contract deploy/call carrying up to MAX_DATA
     // bytes of payload (plus the kind tag and gas fields), so size the cap for that.
     private static final int TX_BODY = TransactionDto.BUFFER_SIZE + 1 + 20 + TransactionDto.MAX_DATA + 1024;
+
+    /** Server-side ceiling on a read-only dry-run's gas: bounds free, unauthenticated VM compute. */
+    private static final long MAX_READONLY_GAS = 50_000_000L;
+
+    // Security headers for the browser-facing dashboard. The SPA loads only same-origin
+    // scripts/styles (no inline <script>), talks only to its own node (fetch + SSE), and
+    // uses inline style attributes — hence 'unsafe-inline' for style only. frame-ancestors
+    // 'none' + X-Frame-Options DENY block clickjacking; a restrictive CSP contains any
+    // injected markup and stops an attacker's inline script from reading wallet keys.
+    private static final HttpHeader H_CSP = HttpHeaders.of("Content-Security-Policy");
+    private static final HttpHeader H_XFO = HttpHeaders.of("X-Frame-Options");
+    private static final HttpHeader H_XCTO = HttpHeaders.of("X-Content-Type-Options");
+    private static final HttpHeader H_REFERRER = HttpHeaders.of("Referrer-Policy");
+    private static final HttpHeader H_ORIGIN = HttpHeaders.of("Origin");
+    private static final HttpHeader H_HOST = HttpHeaders.of("Host");
+    private static final String DASHBOARD_CSP =
+        "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
+        + "script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
     private NodeApi() {}
 
@@ -156,6 +175,16 @@ public final class NodeApi {
             if (!limiter.allow(clientKey(request))) {
                 return HttpResponse.ofCode(429)
                     .withJson(new JSONObject().put("error", "rate limited").toString())
+                    .toPromise();
+            }
+            // CSRF / DNS-rebinding guard on state-changing requests: a browser attaches an
+            // Origin header on cross-site POSTs, so reject any POST whose Origin is not this
+            // node's own host. Peer and CLI clients send no Origin and are unaffected, so P2P
+            // submit/gossip keeps working; the check fails open if headers can't be read, so
+            // it can never block the dashboard's own same-origin requests.
+            if (request.getMethod() == POST && isCrossOriginPost(request)) {
+                return HttpResponse.ofCode(403)
+                    .withJson(new JSONObject().put("error", "cross-origin request refused").toString())
                     .toPromise();
             }
             // Convert any handler failure (incl. body-size overflow) into a clean response.
@@ -347,8 +376,35 @@ public final class NodeApi {
     private static HttpResponse asset(DashboardAssets.Asset asset) {
         return HttpResponse.ok200()
             .withHeader(HttpHeaders.CONTENT_TYPE, asset.contentType())
+            .withHeader(H_CSP, DASHBOARD_CSP)
+            .withHeader(H_XFO, "DENY")
+            .withHeader(H_XCTO, "nosniff")
+            .withHeader(H_REFERRER, "no-referrer")
             .withBody(asset.bytes())
             .build();
+    }
+
+    /**
+     * True when a POST carries a browser {@code Origin} header whose authority differs from
+     * the request's {@code Host} — i.e. a cross-site request. Fails open (returns false) if
+     * either header is absent or unparseable, so non-browser peers and the dashboard's own
+     * same-origin requests are never blocked.
+     */
+    private static boolean isCrossOriginPost(HttpRequest request) {
+        try {
+            String origin = request.getHeader(H_ORIGIN);
+            if (origin == null || origin.isEmpty()) {
+                return false;
+            }
+            String host = request.getHeader(H_HOST);
+            if (host == null || host.isEmpty()) {
+                return false;
+            }
+            String authority = java.net.URI.create(origin).getAuthority();
+            return authority == null || !authority.equalsIgnoreCase(host);
+        } catch (RuntimeException e) {
+            return false;
+        }
     }
 
     private static HttpResponse notFound(String message) {
@@ -363,7 +419,21 @@ public final class NodeApi {
         // of returning null; treat any such request as a single "local" bucket.
         try {
             java.net.InetAddress addr = request.getRemoteAddress();
-            return addr != null ? addr.getHostAddress() : "local";
+            if (addr == null) {
+                return "local";
+            }
+            byte[] b = addr.getAddress();
+            if (b.length == 16) {
+                // Key IPv6 clients by their /64 prefix: a single allocation hands out 2^64
+                // addresses, so keying by the full address would let one host spray the
+                // client table and (pre-fail-closed) evade the limiter (audit M1).
+                StringBuilder sb = new StringBuilder("v6:");
+                for (int i = 0; i < 8; i++) {
+                    sb.append(Character.forDigit((b[i] >> 4) & 0xF, 16)).append(Character.forDigit(b[i] & 0xF, 16));
+                }
+                return sb.toString();
+            }
+            return addr.getHostAddress();
         } catch (RuntimeException e) {
             return "local";
         }
@@ -442,7 +512,9 @@ public final class NodeApi {
         byte[] input = body.has("input") && !body.getString("input").isEmpty()
             ? rhizome.core.common.Utils.hexStringToByteArray(body.getString("input")) : new byte[0];
         long value = body.optLong("value", 0);
-        long gasLimit = body.optLong("gasLimit", 10_000_000L);
+        // Clamp the caller-supplied gas: a dry-run is free and unauthenticated, so an
+        // unbounded gasLimit would let anyone burn arbitrary node CPU. Bound it server-side.
+        long gasLimit = Math.min(Math.max(1L, body.optLong("gasLimit", 10_000_000L)), MAX_READONLY_GAS);
 
         var result = node.dryRun(from, to, input, value, gasLimit);
         org.json.JSONArray logs = new org.json.JSONArray();

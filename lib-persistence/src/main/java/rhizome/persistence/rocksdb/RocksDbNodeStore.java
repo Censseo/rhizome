@@ -23,6 +23,7 @@ import rhizome.core.blockchain.ChainStore;
 import rhizome.core.crypto.SHA256Hash;
 import rhizome.core.ledger.Ledger;
 import rhizome.core.ledger.LedgerException;
+import rhizome.persistence.PersistenceException;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.transaction.Transaction;
 import rhizome.core.transaction.TransactionAmount;
@@ -58,6 +59,8 @@ public final class RocksDbNodeStore implements AutoCloseable {
     private static final byte[] HEIGHT_KEY = "height".getBytes();
     private static final byte[] PRUNED_BELOW_KEY = "prunedBelow".getBytes();
     private static final byte[] NONCE_HEIGHT_KEY = "nonceHeight".getBytes();
+    /** Set while a snap-sync bootstrap is seeding the several stores; cleared only on success. */
+    private static final byte[] BOOTSTRAP_KEY = "bootstrapInProgress".getBytes();
 
     private static final long GENESIS_HEIGHT = 1L;
 
@@ -217,6 +220,38 @@ public final class RocksDbNodeStore implements AutoCloseable {
     /** Persisted next-nonce-per-sender, so the engine need not replay bodies at boot. */
     public rhizome.core.blockchain.NonceStore nonceStore() {
         return new RocksNonceStore();
+    }
+
+    /**
+     * Marks that a snap-sync bootstrap has begun seeding the several independent stores
+     * (ledger, boxes, tokens, state, contracts, chain). Because those commit separately, a
+     * crash between them leaves the node inconsistent; the marker lets boot detect that and
+     * refuse to run on half-seeded data rather than silently diverging (audit M8).
+     */
+    public void beginBootstrap() {
+        try {
+            db.put(metaCf, writeOptions, BOOTSTRAP_KEY, new byte[] {1});
+        } catch (RocksDBException e) {
+            throw new PersistenceException("failed to set bootstrap marker", e);
+        }
+    }
+
+    /** Clears the bootstrap marker after every store has been seeded and committed. */
+    public void endBootstrap() {
+        try {
+            db.delete(metaCf, writeOptions, BOOTSTRAP_KEY);
+        } catch (RocksDBException e) {
+            throw new PersistenceException("failed to clear bootstrap marker", e);
+        }
+    }
+
+    /** True if a previous bootstrap did not finish — the on-disk state must be treated as inconsistent. */
+    public boolean bootstrapInProgress() {
+        try {
+            return db.get(metaCf, BOOTSTRAP_KEY) != null;
+        } catch (RocksDBException e) {
+            throw new PersistenceException("failed to read bootstrap marker", e);
+        }
     }
 
     @Override

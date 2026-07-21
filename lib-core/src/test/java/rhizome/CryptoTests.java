@@ -13,11 +13,18 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static rhizome.core.common.Crypto.SHA256;
 import static rhizome.core.common.Crypto.addWork;
+import static rhizome.core.common.Crypto.concatHashes;
 import static rhizome.core.common.Crypto.generateKeyPair;
 import static rhizome.core.common.Crypto.signWithPrivateKey;
+import static rhizome.core.common.Crypto.verifyHash;
 import static rhizome.core.common.Utils.bytesToHex;
 import static rhizome.core.common.Utils.hexStringToByteArray;
 import static rhizome.core.common.Crypto.checkSignature;
+
+import rhizome.core.blockchain.Miner;
+import rhizome.core.common.PowAlgorithm;
+
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
@@ -104,6 +111,29 @@ class CryptoTests {
     //     // check first 6 bits are 0
     //     assertTrue((data[0] & 0b11111100) == 0);
     // }
+
+    /**
+     * Regression guard for the PoW wiring bug: {@code concatHashes} must actually run
+     * Pufferfish2 when asked, not silently fall back to plain SHA-256. We assert both
+     * that the two algorithms produce different digests for the same input (so the flag
+     * is honored) and that a nonce mined under Pufferfish2 verifies under Pufferfish2.
+     */
+    @Test
+    void proofOfWorkHonorsPufferfishFlag() {
+        var target = SHA256("rhizome-pow-vector".getBytes(StandardCharsets.UTF_8));
+        var nonce = SHA256Hash.empty();
+
+        SHA256Hash sha = concatHashes(target, nonce, false, false);
+        SHA256Hash puffer = concatHashes(target, nonce, true, false);
+        // If the flag were ignored (the old bug), these would be identical.
+        assertNotEquals(sha.toHexString(), puffer.toHexString());
+
+        // A nonce mined under Pufferfish2 (difficulty 4 = ~16 hashes, fast) must verify
+        // under Pufferfish2 and be rejected as a plain-SHA-256 solution would not carry.
+        int difficulty = 4;
+        SHA256Hash pufferNonce = Miner.mineNonce(target, difficulty, PowAlgorithm.PUFFERFISH2);
+        assertTrue(verifyHash(target, pufferNonce, difficulty, true, false));
+    }
 
     @Test
     void sha256ToString() {

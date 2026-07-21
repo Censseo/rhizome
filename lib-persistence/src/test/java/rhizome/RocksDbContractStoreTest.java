@@ -57,4 +57,20 @@ class RocksDbContractStoreTest {
             assertEquals(null, store.getCode(PublicAddress.random()));
         }
     }
+
+    @Test
+    void undoJournalSurvivesReopen(@TempDir Path dir) throws Exception {
+        byte[] journal = {1, 2, 3, 4, 5};
+        try (var store = new RocksDbContractStore(dir.toString())) {
+            assertNull(store.getJournal(7), "no journal yet");
+            store.putJournal(7, journal);
+            assertArrayEquals(journal, store.getJournal(7));
+        }
+        // A reorg that follows a restart must still find the persisted journal (audit M9).
+        try (var store = new RocksDbContractStore(dir.toString())) {
+            assertArrayEquals(journal, store.getJournal(7));
+            store.deleteJournal(7);
+            assertNull(store.getJournal(7));
+        }
+    }
 }

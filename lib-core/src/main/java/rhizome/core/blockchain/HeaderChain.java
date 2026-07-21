@@ -113,12 +113,20 @@ public final class HeaderChain {
 
             prevHash = header.hash();
             expectedId++;
-            // A completed retarget window seals the difficulty for the next block.
+            // A completed retarget window seals the difficulty for the next block. This MUST
+            // match ChainEngine.computeDifficultyFromChain exactly, including excluding the
+            // genesis interval from the first window (audit L2) — otherwise header-sync
+            // validation and the engine's own mining disagree and every synced chain is
+            // rejected as PEER_INVALID at the first retarget.
             if (h % lookback == 0) {
                 long windowStart = h - lookback + 1;
-                long observedMs = at.apply(h).timestamp() - at.apply(windowStart).timestamp();
-                expectedDifficulty = DifficultyAdjustment.nextDifficulty(
-                    params, expectedDifficulty, lookback - 1L, observedMs / 1000);
+                long measureStart = Math.max(windowStart, GenesisBlock.GENESIS_ID + 1);
+                long intervals = h - measureStart;
+                if (intervals > 0) {
+                    long observedMs = at.apply(h).timestamp() - at.apply(measureStart).timestamp();
+                    expectedDifficulty = DifficultyAdjustment.nextDifficulty(
+                        params, expectedDifficulty, intervals, observedMs / 1000);
+                }
             }
         }
         return Result.ok(work);
@@ -130,8 +138,14 @@ public final class HeaderChain {
         int difficulty = params.genesisDifficulty();
         for (long boundary = lookback; boundary <= tip; boundary += lookback) {
             long windowStart = boundary - lookback + 1;
-            long observedMs = at.apply(boundary).timestamp() - at.apply(windowStart).timestamp();
-            difficulty = DifficultyAdjustment.nextDifficulty(params, difficulty, lookback - 1L, observedMs / 1000);
+            // Mirror ChainEngine.computeDifficultyFromChain: exclude the genesis interval (audit L2).
+            long measureStart = Math.max(windowStart, GenesisBlock.GENESIS_ID + 1);
+            long intervals = boundary - measureStart;
+            if (intervals <= 0) {
+                continue;
+            }
+            long observedMs = at.apply(boundary).timestamp() - at.apply(measureStart).timestamp();
+            difficulty = DifficultyAdjustment.nextDifficulty(params, difficulty, intervals, observedMs / 1000);
         }
         return difficulty;
     }
@@ -163,7 +177,17 @@ public final class HeaderChain {
             if (!seen.add(ref.hash())) {
                 return null; // duplicate uncle within one block
             }
-            work = work.add(BigInteger.TWO.pow(ref.difficulty()));
+            // Defense-in-depth against the BigInteger.TWO.pow(difficulty) OOM/blow-up.
+            // Difficulty is a leading-zero-bit count, so it is bounded by maxDifficulty;
+            // reject an out-of-range value rather than fold pow(2^31) into the total. This
+            // mirrors the header decode bound (uncleWork also runs on locally-held headers)
+            // and is a pure safety bound — not a new consensus rule — so it can never reject
+            // an uncle the engine's validateUncles would accept.
+            int d = ref.difficulty();
+            if (d < 0 || d > params.maxDifficulty()) {
+                return null;
+            }
+            work = work.add(BigInteger.TWO.pow(d));
         }
         return work;
     }
