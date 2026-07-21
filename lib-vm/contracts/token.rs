@@ -9,7 +9,16 @@ extern "C" {
     fn set_output(ptr: *const u8, len: i32);
     fn emit_log(topic_ptr: *const u8, topic_len: i32, data_ptr: *const u8, data_len: i32);
     fn get_caller(out_ptr: *mut u8, out_cap: i32) -> i32;
+    fn get_deployer(out_ptr: *mut u8, out_cap: i32) -> i32;
     fn get_input(out_ptr: *mut u8, out_cap: i32) -> i32;
+}
+
+/// True if `who` is the contract's recorded deployer. init is gated on this so a mempool observer
+/// cannot front-run the deployer's init and seize the supply/ownership (audit T1).
+fn is_deployer(who: &[u8; ADDR_LEN]) -> bool {
+    let mut d = [0u8; ADDR_LEN];
+    let n = unsafe { get_deployer(d.as_mut_ptr(), ADDR_LEN as i32) };
+    n == ADDR_LEN as i32 && &d == who
 }
 
 #[panic_handler]
@@ -111,7 +120,9 @@ pub extern "C" fn call() {
 
     match input[0] {
         0 => {
-            // init: reject if the flag key already exists (read returns >= 0 when present).
+            // init: only the deployer may run it (audit T1), and only once (the flag key must be
+            // absent — storage_read returns >= 0 when present).
+            if !is_deployer(&caller) { return; }
             let flag = [0u8; 1];
             let mut probe = [0u8; 1];
             if unsafe { storage_read(flag.as_ptr(), 1, probe.as_mut_ptr(), 1) } >= 0 { return; }

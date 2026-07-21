@@ -110,6 +110,20 @@ public final class PersistentHostState implements HostState {
         return contract.toBytes();
     }
 
+    /**
+     * The deployer recorded at deploy time under the reserved empty storage key. Contracts cannot
+     * write that key (the storage_write host function rejects a zero-length key), so this value is
+     * unspoofable. Read straight from the store — it is set once at deploy, never in a call session.
+     */
+    @Override
+    public byte[] deployer() {
+        byte[] d = store.getStorage(contract, DEPLOYER_KEY);
+        return d == null ? new byte[0] : d;
+    }
+
+    /** Reserved (zero-length) storage key holding the deployer address; unwritable by contracts. */
+    static final byte[] DEPLOYER_KEY = new byte[0];
+
     @Override
     public rhizome.core.box.Box boxRead(byte[] id) {
         return boxReader == null ? null : boxReader.read(id);

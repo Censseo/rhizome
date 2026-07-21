@@ -508,6 +508,13 @@ public final class WasmVm {
                 int valLen = asLen(args[3]);
                 gas.charge(GasSchedule.STORAGE_WRITE_BASE
                     + (long) (keyLen + valLen) * GasSchedule.PER_BYTE);
+                if (keyLen == 0) {
+                    // The empty storage key is reserved for the host-written deployer record that
+                    // get_deployer reads (set once at deploy). Forbidding contracts from writing it
+                    // makes the deployer identity unspoofable — a contract cannot overwrite its own
+                    // recorded deployer to defeat an init access check (audit T1).
+                    throw new IllegalArgumentException("empty storage key is reserved");
+                }
                 byte[] key = mem.readBytes(asOffset(args[0]), keyLen);
                 byte[] value = mem.readBytes(asOffset(args[2]), valLen);
                 host.storageWrite(key, value);
@@ -555,6 +562,14 @@ public final class WasmVm {
             List.of(ValType.I32, ValType.I32), List.of(ValType.I32),
             (Instance inst, long... args) -> new long[] {copyOut(inst, host.selfAddress(), args[0], args[1], gas)});
 
+        // get_deployer(out_ptr, out_cap) -> i32: the address that deployed this contract (recorded
+        // at deploy, immutable). Copies up to out_cap bytes, returns the true length (0 if unknown).
+        // Lets a template gate its init/one-time setup to the deployer so a mempool observer cannot
+        // front-run init and seize the contract (audit T1).
+        HostFunction getDeployer = new HostFunction(ENV, "get_deployer",
+            List.of(ValType.I32, ValType.I32), List.of(ValType.I32),
+            (Instance inst, long... args) -> new long[] {copyOut(inst, host.deployer(), args[0], args[1], gas)});
+
         // box_read(id_ptr, out_ptr, out_cap) -> i32: reads the 32-byte box id at id_ptr,
         // copies the serialized box (up to out_cap bytes) to out_ptr and returns its true
         // length, or -1 if no box exists. A read-only data input — the box is not consumed.
@@ -599,7 +614,7 @@ public final class WasmVm {
 
         return new HostFunction[] {
             storageRead, storageWrite, setOutput, emitLog, getCaller, getInput, getValue, getSelf,
-            callContract, boxRead};
+            getDeployer, callContract, boxRead};
     }
 
     /**

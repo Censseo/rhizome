@@ -44,6 +44,15 @@ public interface HostState {
     }
 
     /**
+     * The address that deployed this contract, recorded once at deploy and immutable thereafter;
+     * empty when not applicable (e.g. an in-memory test host). Templates use it to bind one-time
+     * setup (init) to the deployer so it cannot be front-run (audit T1).
+     */
+    default byte[] deployer() {
+        return new byte[0];
+    }
+
+    /**
      * Reads the {@link rhizome.core.box.Box data box} at {@code id} without consuming
      * it (Ergo-style data input), or {@code null} if none exists. Sees boxes written
      * earlier in the same block. Default {@code null} (boxes not wired).

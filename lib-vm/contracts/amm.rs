@@ -11,6 +11,7 @@ extern "C" {
     fn set_output(ptr: *const u8, len: i32);
     fn emit_log(topic_ptr: *const u8, topic_len: i32, data_ptr: *const u8, data_len: i32);
     fn get_caller(out_ptr: *mut u8, out_cap: i32) -> i32;
+    fn get_deployer(out_ptr: *mut u8, out_cap: i32) -> i32;
     fn get_input(out_ptr: *mut u8, out_cap: i32) -> i32;
 }
 
@@ -29,6 +30,14 @@ fn read_u64(key: &[u8]) -> u64 {
 fn write_u64(key: &[u8], v: u64) {
     let val = v.to_le_bytes();
     unsafe { storage_write(key.as_ptr(), key.len() as i32, val.as_ptr(), 8); }
+}
+
+/// True if `who` deployed this contract; init is gated on it so the pool cannot be front-run
+/// (audit T1).
+fn is_deployer(who: &[u8; ADDR_LEN]) -> bool {
+    let mut d = [0u8; ADDR_LEN];
+    let n = unsafe { get_deployer(d.as_mut_ptr(), ADDR_LEN as i32) };
+    n == ADDR_LEN as i32 && &d == who
 }
 
 fn bal_key(prefix: u8, addr: &[u8; ADDR_LEN]) -> [u8; 1 + ADDR_LEN] {
@@ -74,6 +83,7 @@ pub extern "C" fn call() {
 
     match input[0] {
         0 => {
+            if !is_deployer(&caller) { return; }
             let init_flag = [9u8; 1];
             if unsafe { storage_read(init_flag.as_ptr(), 1, [0u8; 1].as_mut_ptr(), 1) } >= 0 { return; }
             write_u64(&ra_key, read_u64_at(&input, 1));
@@ -83,8 +93,12 @@ pub extern "C" fn call() {
             let one = [1u8; 1];
             unsafe { storage_write(init_flag.as_ptr(), 1, one.as_ptr(), 1); }
         }
-        1 => swap(&caller, read_u64_at(&input, 1), 2, 3, &ra_key, &rb_key),
-        2 => swap(&caller, read_u64_at(&input, 1), 3, 2, &rb_key, &ra_key),
+        // swap(amount_in(8) at [1], min_out(8) at [9]): min_out is the caller's slippage floor —
+        // 0 (or an absent field, since the input buffer is zero-padded) means "no floor", preserving
+        // the old ABI; any positive value reverts the swap unless it yields at least that much,
+        // defeating sandwich front-running (audit T3).
+        1 => swap(&caller, read_u64_at(&input, 1), read_u64_at(&input, 9), 2, 3, &ra_key, &rb_key),
+        2 => swap(&caller, read_u64_at(&input, 1), read_u64_at(&input, 9), 3, 2, &rb_key, &ra_key),
         3 => {
             let mut out = [0u8; 16];
             let a = read_u64(&ra_key).to_le_bytes();
@@ -99,7 +113,7 @@ pub extern "C" fn call() {
 
 // Spend `amount_in` of the `in_prefix` token from the caller for the `out_prefix` token,
 // moving the pool reserves (`res_in_key` in, `res_out_key` out) along the x*y=k curve.
-fn swap(caller: &[u8; ADDR_LEN], amount_in: u64, in_prefix: u8, out_prefix: u8,
+fn swap(caller: &[u8; ADDR_LEN], amount_in: u64, min_out: u64, in_prefix: u8, out_prefix: u8,
         res_in_key: &[u8], res_out_key: &[u8]) {
     let bal_in = read_u64(&bal_key(in_prefix, caller));
     if bal_in < amount_in || amount_in == 0 { return; }
@@ -107,6 +121,7 @@ fn swap(caller: &[u8; ADDR_LEN], amount_in: u64, in_prefix: u8, out_prefix: u8,
     let reserve_out = read_u64(res_out_key);
     let out = amount_out(amount_in, reserve_in, reserve_out);
     if out == 0 || out >= reserve_out { return; }
+    if out < min_out { return; } // slippage floor not met (audit T3)
 
     // Compute the credited balance and reserve with overflow checks BEFORE any write, so an
     // overflow is a clean no-op return rather than a silent u64 wrap that corrupts the pool in a

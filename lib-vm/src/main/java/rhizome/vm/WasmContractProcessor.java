@@ -99,6 +99,12 @@ public final class WasmContractProcessor implements ContractProcessor {
             return ContractResult.reverted(gasUsed, "invalid contract code: " + e.getMessage());
         }
         session.putCode(address, code);
+        // Record the deployer under the reserved empty storage key so get_deployer can return it and
+        // a template can gate its init to the deployer (audit T1). This rides the normal contract-
+        // storage commit path, so it is covered by the state root, snapshot export/import and the
+        // reorg undo journal with no extra plumbing; contracts cannot overwrite it (storage_write
+        // rejects a zero-length key).
+        session.putStorage(address, PersistentHostState.DEPLOYER_KEY, deployer.toBytes());
         return ContractResult.ok(gasUsed, new byte[0], address);
     }
 
