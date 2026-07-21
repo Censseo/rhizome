@@ -4,5 +4,7 @@ plugins {
 
 dependencies {
     // https://mvnrepository.com/artifact/org.bouncycastle/bcprov-jdk18on
-    implementation 'org.bouncycastle:bcprov-jdk18on:1.76'
+    // Kept in lock-step with lib-core: 1.76 is vulnerable to CVE-2024-30172
+    // (Ed25519 infinite-loop DoS), fixed in 1.78. Do not downgrade.
+    implementation 'org.bouncycastle:bcprov-jdk18on:1.78.1'
 }

@@ -156,7 +156,7 @@ public final class NodeApi {
             .with(GET, "/state/snapshot/info", req -> guarded(() -> snapshotInfo(node)))
             .with(GET, "/state/snapshot/chunk", req -> guarded(() -> snapshotChunk(node, req)))
             .with(GET, "/logs", req -> guarded(() -> logs(node, req)))
-            .with(GET, "/logs/stream", req -> guarded(() -> logStream(sse)))
+            .with(GET, "/logs/stream", req -> guarded(() -> logStream(sse, clientKey(req))))
             .with(GET, "/sync", req -> guarded(() -> sync(node, req)))
             .with(GET, "/headers", req -> guarded(() -> headers(node, req)))
             .with(POST, "/add_transaction_json", req -> req.loadBody(SMALL_BODY).map(body -> guardedResponse(() -> {
@@ -455,7 +455,40 @@ public final class NodeApi {
         if ("/call_readonly".equals(path)) {
             return CALL_READONLY_COST;
         }
+        // /sync and /headers were left at cost 1 by the M2 fix, yet they are the heaviest read
+        // endpoints: /sync reads and buffers up to BLOCKS_PER_FETCH full blocks (each up to
+        // MAX_BLOCK_SIZE) and /headers does up to BLOCK_HEADERS_PER_FETCH block reads. Weight both
+        // by their requested range so one IP cannot drive hundreds of full-block reads per token
+        // (audit: unweighted amplification on the block-serving paths).
+        if ("/sync".equals(path)) {
+            return rangeCost(request, 1, Constants.BLOCKS_PER_FETCH); // full-block reads: ~1 per block
+        }
+        if ("/headers".equals(path)) {
+            return rangeCost(request, SCAN_COST_PER_BLOCKS, Constants.BLOCK_HEADERS_PER_FETCH);
+        }
         return 1;
+    }
+
+    /**
+     * Rate-limit cost of a start/end range request: its block span divided by {@code blocksPerUnit}.
+     * A range that is missing, malformed, or larger than {@code maxRange} does no block-reading work
+     * (the handler rejects it with 400 before touching the store), so it stays at the flat cost of 1
+     * — only ranges the endpoint will actually serve are weighted by their span.
+     */
+    private static int rangeCost(HttpRequest request, int blocksPerUnit, int maxRange) {
+        long start;
+        long end;
+        try {
+            start = Long.parseLong(request.getQueryParameter("start").trim());
+            end = Long.parseLong(request.getQueryParameter("end").trim());
+        } catch (RuntimeException e) {
+            return 1; // malformed/missing: the handler rejects it, charge the default
+        }
+        long range = end - start + 1;
+        if (range < 1 || range > maxRange) {
+            return 1; // out of range: rejected cheaply, no store reads
+        }
+        return (int) Math.max(1, range / blocksPerUnit);
     }
 
     private static String clientKey(HttpRequest request) {
@@ -526,8 +559,8 @@ public final class NodeApi {
      * block and one {@code data:} event per log (see {@link SseLogHub} for the format
      * and the slow-subscriber contract). 503 when streaming is not wired or full.
      */
-    private static HttpResponse logStream(SseLogHub sse) {
-        var stream = sse == null ? null : sse.subscribe();
+    private static HttpResponse logStream(SseLogHub sse, String clientKey) {
+        var stream = sse == null ? null : sse.subscribe(clientKey);
         if (stream == null) {
             return HttpResponse.ofCode(503)
                 .withJson(new JSONObject().put("error", "streaming unavailable").toString())
@@ -935,11 +968,13 @@ public final class NodeApi {
     }
 
     private static HttpResponse text(String body) {
-        return HttpResponse.ok200().withPlainText(body).build();
+        // nosniff so a browser never re-interprets a reflected value as HTML (defence in depth,
+        // matching the dashboard asset responses).
+        return HttpResponse.ok200().withHeader(H_XCTO, "nosniff").withPlainText(body).build();
     }
 
     private static HttpResponse json(JSONObject body) {
-        return HttpResponse.ok200().withJson(body.toString()).build();
+        return HttpResponse.ok200().withHeader(H_XCTO, "nosniff").withJson(body.toString()).build();
     }
 
     private static HttpResponse badRequest(String message) {

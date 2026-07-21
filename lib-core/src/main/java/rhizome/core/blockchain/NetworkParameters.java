@@ -117,13 +117,16 @@ public final class NetworkParameters {
     private final long rewardDecayDen;
 
     /**
-     * GHOST uncle economics. An included uncle pays its miner
-     * {@code miningReward * uncleRewardNum / uncleRewardDen}; the including
-     * (nephew) block's miner earns {@code miningReward / nephewRewardDivisor} per
-     * uncle on top of the base reward. Both are fresh issuance, but every uncle is
-     * a real proof-of-work block, so no reward is ever minted without matching work.
-     * A flat fraction (not distance-scaled) keeps the reward derivable from the
-     * committed uncle refs alone, so reorg reversal is exact.
+     * GHOST uncle economics. These are the <b>base</b> amounts: an included uncle's miner
+     * is paid {@code miningReward * uncleRewardNum / uncleRewardDen} and the including
+     * (nephew) block's miner earns {@code miningReward / nephewRewardDivisor} per uncle on
+     * top of the base reward. {@link Executor#scaleRewardToWork} then scales each by the
+     * uncle's proven work relative to the nephew's difficulty (halving per missing bit), so
+     * a cheap sub-difficulty orphan cannot mint a disproportionate reward (audit C1). Both
+     * are fresh issuance, but every uncle is a real proof-of-work block and its reward is
+     * proportional to that work, so no reward is ever minted without matching work. The
+     * scaling reads only the committed uncle and nephew difficulties, so reorg reversal
+     * stays exact.
      */
     @lombok.Builder.Default
     private final long uncleRewardNum = 1;

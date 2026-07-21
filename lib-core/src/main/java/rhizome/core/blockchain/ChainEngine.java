@@ -325,6 +325,13 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             nonceStore.markSyncedThrough(b.id()); // nonces now reflect this new tip
             totalWork = totalWork.add(BigInteger.TWO.pow(b.difficulty())).add(uncleWork);
             uncleWorkByHeight.put((long) b.id(), uncleWork);
+            // A legal reorg pops at most maxReorgDepth blocks, so uncle-work for heights older
+            // than that is never subtracted again — evict it instead of retaining one BigInteger
+            // per height for the life of the process (audit: unbounded derived-state growth).
+            long uncleWorkFloor = b.id() - params.maxReorgDepth();
+            if (uncleWorkFloor > 0) {
+                uncleWorkByHeight.keySet().removeIf(h -> h < uncleWorkFloor);
+            }
             currentDifficulty = computeDifficultyFromChain();
             applyVotingAt(b.id()); // tally this epoch's votes if a boundary; effective next block
             if (onBlockApplied != null) {
@@ -488,6 +495,16 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         lock.lock();
         try {
             return ledger.hasWallet(sender) ? ledger.getWalletValue(sender).amount() : 0L;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    @Override
+    public boolean senderExists(rhizome.core.ledger.PublicAddress sender) {
+        lock.lock();
+        try {
+            return ledger.hasWallet(sender);
         } finally {
             lock.unlock();
         }

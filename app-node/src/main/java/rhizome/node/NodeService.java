@@ -45,18 +45,33 @@ public final class NodeService {
 
     private final ScanRegistry scans = new ScanRegistry();
 
+    /** Bound on peer admissions queued off-loop at once; excess {@code /add_peer} calls are shed. */
+    private static final int MAX_PENDING_ADMISSIONS = 256;
+
     /**
      * Off-loop worker for peer admission. Admitting a peer resolves DNS (ban check, routability,
      * subnet bucket); that blocking work must never run on the ActiveJ event-loop thread that
      * serves {@code /add_peer}, or a peer whose hostname resolves slowly (or times out) would
      * freeze the entire node. Daemon so it never holds the JVM open.
+     *
+     * <p>The queue is <b>bounded</b> (audit): the earlier single-thread executor used an unbounded
+     * queue, so a flood of {@code /add_peer} — each retaining a URL and each an ~5 s blocking DNS
+     * resolve — grew the queue ~1000/s and exhausted the heap while starving honest peers behind
+     * it. A full queue now sheds the request ({@code AbortPolicy}, caught below).
      */
     private final java.util.concurrent.ExecutorService peerAdmission =
-        java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
-            Thread t = new Thread(r, "rhizome-peer-admit");
-            t.setDaemon(true);
-            return t;
-        });
+        new java.util.concurrent.ThreadPoolExecutor(1, 1, 0L, java.util.concurrent.TimeUnit.MILLISECONDS,
+            new java.util.concurrent.ArrayBlockingQueue<>(MAX_PENDING_ADMISSIONS),
+            r -> {
+                Thread t = new Thread(r, "rhizome-peer-admit");
+                t.setDaemon(true);
+                return t;
+            },
+            new java.util.concurrent.ThreadPoolExecutor.AbortPolicy());
+
+    /** URLs currently queued/running for admission, so duplicate {@code /add_peer} coalesce. */
+    private final java.util.Set<String> pendingAdmissions =
+        java.util.concurrent.ConcurrentHashMap.newKeySet();
 
     public NodeService(ChainEngine engine, MemPool mempool) {
         this.engine = engine;
@@ -267,13 +282,26 @@ public final class NodeService {
         if (registry == null) {
             return;
         }
-        peerAdmission.execute(() -> {
-            try {
-                registry.add(url);
-            } catch (RuntimeException e) {
-                // Best-effort: a malformed or unresolvable peer is simply not added.
-            }
-        });
+        // Coalesce duplicate in-flight admissions: re-submitting the same slow hostname must not
+        // enqueue another full blocking DNS resolve. The set is kept in lock-step with the queue —
+        // every queued task removes its URL on completion, and a rejected enqueue removes it below —
+        // so it can never grow past the queue bound.
+        if (!pendingAdmissions.add(url)) {
+            return; // already queued or running
+        }
+        try {
+            peerAdmission.execute(() -> {
+                try {
+                    registry.add(url);
+                } catch (RuntimeException e) {
+                    // Best-effort: a malformed or unresolvable peer is simply not added.
+                } finally {
+                    pendingAdmissions.remove(url);
+                }
+            });
+        } catch (java.util.concurrent.RejectedExecutionException rejected) {
+            pendingAdmissions.remove(url); // queue full: shed load, keep the set bounded
+        }
     }
 
     public NetworkParameters params() {

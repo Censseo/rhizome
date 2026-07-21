@@ -325,9 +325,21 @@ public final class Executor {
             return;
         }
         long height = block.id();
-        long uncleReward = params.uncleReward(height);
-        long nephewReward = params.nephewReward(height);
+        long baseUncleReward = params.uncleReward(height);
+        long baseNephewReward = params.nephewReward(height);
+        int nephewDifficulty = block.difficulty();
         for (rhizome.core.block.UncleRef ref : uncles) {
+            // Scale each reward to the uncle's PROVEN work relative to the nephew's difficulty
+            // (audit C1 residual). A flat reward let a miner attach cheap minDifficulty orphans
+            // to a real high-difficulty block and mint ~half a block each — ~2x emission for
+            // ~2^minDifficulty hashes. Here a same-difficulty uncle still earns the full reward,
+            // but every bit of missing difficulty halves it (reward * 2^uncleDiff / 2^nephewDiff),
+            // so a sub-difficulty orphan earns ~nothing. validateUncles guarantees
+            // minDifficulty <= ref.difficulty() <= nephewDifficulty, so the deficit is >= 0.
+            // Integer shift only — deterministic across nodes, never floating point.
+            int deficit = nephewDifficulty - ref.difficulty();
+            long uncleReward = scaleRewardToWork(baseUncleReward, deficit);
+            long nephewReward = scaleRewardToWork(baseNephewReward, deficit);
             if (uncleReward > 0) {
                 deposit(ledger, applied, ref.miner(), new TransactionAmount(uncleReward));
             }
@@ -335,6 +347,21 @@ public final class Executor {
                 deposit(ledger, applied, miner, new TransactionAmount(nephewReward));
             }
         }
+    }
+
+    /**
+     * Halves {@code base} once per bit of difficulty the uncle fell short of the nephew, i.e.
+     * {@code base * 2^-difficultyDeficit}. A deficit of 0 pays in full; a deficit of 63 or more
+     * pays nothing. Integer arithmetic so every node computes the identical reward.
+     */
+    static long scaleRewardToWork(long base, int difficultyDeficit) {
+        if (difficultyDeficit <= 0) {
+            return base;
+        }
+        if (difficultyDeficit >= Long.SIZE) {
+            return 0;
+        }
+        return base >>> difficultyDeficit;
     }
 
     /** Rolls back applied ledger ops and discards the contract/box/token sessions, then returns the status. */

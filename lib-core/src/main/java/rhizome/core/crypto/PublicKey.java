@@ -41,7 +41,10 @@ public record PublicKey(Optional<Ed25519PublicKeyParameters> key) implements Sim
         if (hexString.length() != 64) {
             throw new IllegalArgumentException("Invalid public key string length. Expected 64 characters for a 32-byte key.");
         }
-        return new PublicKey(Optional.of(new Ed25519PublicKeyParameters(hexStringToByteArray(hexString), 0)));
+        // Route through of(byte[]) so the all-zero key maps to empty() identically for JSON and
+        // binary decoding. Otherwise the same wire bytes derive two different `from` addresses
+        // depending on the codec, splitting the signer-binding check (audit).
+        return of(hexStringToByteArray(hexString));
     }
 
     public String toHexString() {

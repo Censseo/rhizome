@@ -138,6 +138,13 @@ public final class WasmVm {
             if (isOutOfGas(e)) {
                 return ExecResult.outOfGas(gas.used());
             }
+            if (isStackExhausted(e)) {
+                // Defence in depth: the tree-wide depth cap should trap first, but if Chicory ever
+                // rewraps a real JVM StackOverflowError as ChicoryException("call stack exhausted")
+                // it must not surface with node-local gas.used() — that would fork consensus. Pin it
+                // to the same deterministic full-gas out-of-gas as the StackOverflowError catch.
+                return ExecResult.outOfGas(gas.limit());
+            }
             return ExecResult.reverted(gas.used(), e.getMessage());
         }
     }
@@ -183,6 +190,17 @@ public final class WasmVm {
     private static boolean isDepthExceeded(Throwable e) {
         for (Throwable t = e; t != null; t = t.getCause()) {
             if (t instanceof WasmCallDepthExceeded) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** True if {@code e} is Chicory's rewrapped JVM stack overflow ("call stack exhausted"). */
+    private static boolean isStackExhausted(Throwable e) {
+        for (Throwable t = e; t != null; t = t.getCause()) {
+            String msg = t.getMessage();
+            if (msg != null && msg.contains("call stack exhausted")) {
                 return true;
             }
         }
@@ -258,7 +276,10 @@ public final class WasmVm {
     private static void meter(Instruction instruction, MStack stack, GasMeter gas) {
         gas.charge(GasSchedule.PER_INSTRUCTION);
         switch (instruction.opcode()) {
-            case MEMORY_FILL, MEMORY_COPY, MEMORY_INIT, TABLE_FILL -> {
+            case MEMORY_FILL, MEMORY_COPY, MEMORY_INIT, TABLE_FILL, TABLE_COPY, TABLE_INIT -> {
+                // O(N) bulk element/byte moves: charge by the runtime count operand so copying a
+                // large table (or memory region) cannot cost a flat 1 gas (audit: table.copy/init
+                // were previously unmetered).
                 if (stack.size() > 0) {
                     gas.charge((stack.peek() & 0xFFFF_FFFFL) * GasSchedule.PER_BYTE);
                 }
