@@ -29,12 +29,18 @@ public final class PeerDiscovery {
 
     private final PeerRegistry registry;
     private final String selfUrl;
+    private final boolean blockPrivateHosts;
     private final HttpClient http;
     private final Map<String, Integer> failures = new ConcurrentHashMap<>();
 
     public PeerDiscovery(PeerRegistry registry, String selfUrl) {
+        this(registry, selfUrl, false);
+    }
+
+    public PeerDiscovery(PeerRegistry registry, String selfUrl, boolean blockPrivateHosts) {
         this.registry = registry;
         this.selfUrl = selfUrl;
+        this.blockPrivateHosts = blockPrivateHosts;
         this.http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build();
     }
 
@@ -57,8 +63,11 @@ public final class PeerDiscovery {
     }
 
     private List<String> fetchPeers(String peer) throws Exception {
+        // Pin the peer to its resolved IP (and refuse non-routable hosts on mainnet) so a DNS
+        // rebind cannot point this fetch at an internal service (SSRF).
+        String pinned = PeerHosts.pin(peer, blockPrivateHosts);
         HttpResponse<String> resp = http.send(
-            HttpRequest.newBuilder(URI.create(peer + "/peers")).timeout(Duration.ofSeconds(10)).GET().build(),
+            HttpRequest.newBuilder(URI.create(pinned + "/peers")).timeout(Duration.ofSeconds(10)).GET().build(),
             HttpResponse.BodyHandlers.ofString());
         if (resp.statusCode() != 200) {
             throw new IllegalStateException("/peers -> " + resp.statusCode());
@@ -74,8 +83,9 @@ public final class PeerDiscovery {
             return;
         }
         String body = new JSONObject().put("url", selfUrl).toString();
+        String pinned = PeerHosts.pin(peer, blockPrivateHosts);
         http.send(
-            HttpRequest.newBuilder(URI.create(peer + "/add_peer"))
+            HttpRequest.newBuilder(URI.create(pinned + "/add_peer"))
                 .timeout(Duration.ofSeconds(10))
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(body)).build(),

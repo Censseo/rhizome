@@ -21,6 +21,13 @@ public final class RateLimiter {
     private final int maxClients;
     private final LongSupplier nowMillis;
     private final Map<String, Window> clients = new ConcurrentHashMap<>();
+    /**
+     * Shared fallback bucket used when the per-client table is full and nothing can be
+     * reclaimed. Instead of failing open (letting an IP-spray disable rate limiting for
+     * everyone — audit M1), all otherwise-untracked clients are metered together against a
+     * single conservative bucket, so total overflow traffic stays bounded.
+     */
+    private final Window overflow = new Window(0);
 
     private static final class Window {
         volatile long start;
@@ -45,10 +52,17 @@ public final class RateLimiter {
         Window window = clients.get(client);
         if (window == null) {
             if (clients.size() >= maxClients && !sweepExpired(now)) {
-                return true; // tracking full and nothing reclaimable: don't grow, don't block
+                // Fail closed: meter every untracked client against one shared bucket rather
+                // than allowing them all unlimited (which an IP-spray could exploit to disable
+                // rate limiting globally). Conservative but bounded.
+                return count(overflow, now);
             }
             window = clients.computeIfAbsent(client, k -> new Window(now));
         }
+        return count(window, now);
+    }
+
+    private boolean count(Window window, long now) {
         synchronized (window) {
             if (now - window.start >= windowMs) {
                 window.start = now;

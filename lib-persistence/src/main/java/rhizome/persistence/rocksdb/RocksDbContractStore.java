@@ -22,17 +22,22 @@ public final class RocksDbContractStore implements ContractStore, AutoCloseable 
 
     private static final byte[] CF_CODE = "contract_code".getBytes();
     private static final byte[] CF_STORAGE = "contract_storage".getBytes();
+    // Persisted per-block undo journal (height BE(8) -> serialized journal), so a reorg after a
+    // restart can be reversed exactly instead of relying only on the processor's RAM journals.
+    private static final byte[] CF_JOURNAL = "contract_journal".getBytes();
 
     private final RocksDB db;
     private final ColumnFamilyHandle defaultCf;
     private final ColumnFamilyHandle codeCf;
     private final ColumnFamilyHandle storageCf;
+    private final ColumnFamilyHandle journalCf;
 
     public RocksDbContractStore(String path) throws IOException {
         List<ColumnFamilyDescriptor> descriptors = List.of(
             new ColumnFamilyDescriptor(RocksDB.DEFAULT_COLUMN_FAMILY),
             new ColumnFamilyDescriptor(CF_CODE),
-            new ColumnFamilyDescriptor(CF_STORAGE));
+            new ColumnFamilyDescriptor(CF_STORAGE),
+            new ColumnFamilyDescriptor(CF_JOURNAL));
         List<ColumnFamilyHandle> handles = new ArrayList<>();
         try {
             DBOptions options = new DBOptions()
@@ -45,6 +50,26 @@ public final class RocksDbContractStore implements ContractStore, AutoCloseable 
         this.defaultCf = handles.get(0);
         this.codeCf = handles.get(1);
         this.storageCf = handles.get(2);
+        this.journalCf = handles.get(3);
+    }
+
+    private static byte[] heightKey(long height) {
+        return java.nio.ByteBuffer.allocate(Long.BYTES).putLong(height).array();
+    }
+
+    @Override
+    public void putJournal(long height, byte[] serialized) {
+        put(journalCf, heightKey(height), serialized);
+    }
+
+    @Override
+    public byte[] getJournal(long height) {
+        return get(journalCf, heightKey(height));
+    }
+
+    @Override
+    public void deleteJournal(long height) {
+        delete(journalCf, heightKey(height));
     }
 
     private static byte[] slot(PublicAddress contract, byte[] key) {
@@ -135,6 +160,7 @@ public final class RocksDbContractStore implements ContractStore, AutoCloseable 
         defaultCf.close();
         codeCf.close();
         storageCf.close();
+        journalCf.close();
         db.close();
     }
 }

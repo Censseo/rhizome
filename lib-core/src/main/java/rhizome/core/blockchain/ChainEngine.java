@@ -301,6 +301,23 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
                     }
                     return INVALID_STATE_ROOT;
                 }
+            } else if (!java.util.Arrays.equals(b.stateRoot().toBytes(),
+                    rhizome.core.crypto.SHA256Hash.empty().toBytes())) {
+                // No accumulator to recompute the root, yet the block commits a non-empty one we
+                // cannot verify. Accepting it blindly would fork this node from every validating
+                // node (audit M6: state-root validation must not depend on local configuration),
+                // so refuse a block whose committed state we are unable to check.
+                Executor.rollbackBlock(block, ledger, contractProcessor, boxProcessor, b.id(), params);
+                if (contractProcessor != null) {
+                    contractProcessor.revertBlock(b.id());
+                }
+                if (boxProcessor != null) {
+                    boxProcessor.revertBlock(b.id());
+                }
+                if (tokenProcessor != null) {
+                    tokenProcessor.revertBlock(b.id());
+                }
+                return INVALID_STATE_ROOT;
             }
 
             store.append(block);

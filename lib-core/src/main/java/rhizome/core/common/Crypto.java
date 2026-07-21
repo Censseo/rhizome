@@ -33,8 +33,10 @@ public class Crypto {
             signer.update(message, 0, message.length);
             return signer.generateSignature();
         } catch (Exception e) {
-            e.printStackTrace();
-            return new byte[0];
+            // Never return an empty/garbage signature on failure: that used to let a
+            // signing fault surface only much later as a rejected transaction, masking
+            // key-corruption bugs and risking broadcast of an unsigned tx (audit M11).
+            throw new IllegalStateException("Ed25519 signing failed", e);
         }
     }
 

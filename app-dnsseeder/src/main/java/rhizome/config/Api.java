@@ -21,12 +21,22 @@ public class Api extends AbstractModule {
         return new Api();
     }
 
+    /** Minimal HTML escaping so a reflected query parameter cannot inject markup/script (audit L3). */
+    private static String escapeHtml(String s) {
+        if (s == null) {
+            return "";
+        }
+        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            .replace("\"", "&quot;").replace("'", "&#39;");
+    }
+
     @Provides
     AsyncServlet servlet(Eventloop eventloop) {
         log.info("HTTP Server is now available at http://localhost:" + PORT);
         return RoutingServlet.builder(eventloop)
             .with(GET, "/hello", request -> HttpResponse.ok200()
-                .withHtml("<h1><center>Hello from GET, " + request.getQueryParameter("name") + "!</center></h1>")
+                .withHtml("<h1><center>Hello from GET, " + escapeHtml(request.getQueryParameter("name"))
+                    + "!</center></h1>")
                 .toPromise())
             .build();
     }

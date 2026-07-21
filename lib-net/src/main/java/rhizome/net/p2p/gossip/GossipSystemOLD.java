@@ -55,7 +55,9 @@ public class GossipSystemOLD {
             throw new IllegalStateException("No peers available for gossiping");
         }
 
-        Random random = new Random();
+        // SecureRandom rather than java.util.Random: this is legacy/unused gossip code, but a
+        // predictable PRNG must not slip back into a peer-selection path if it is ever revived (audit L6).
+        Random random = new java.security.SecureRandom();
         int index = random.nextInt(peers.size());
         PeerOLD peer = peers.get(index);
 

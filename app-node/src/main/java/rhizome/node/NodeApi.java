@@ -419,7 +419,21 @@ public final class NodeApi {
         // of returning null; treat any such request as a single "local" bucket.
         try {
             java.net.InetAddress addr = request.getRemoteAddress();
-            return addr != null ? addr.getHostAddress() : "local";
+            if (addr == null) {
+                return "local";
+            }
+            byte[] b = addr.getAddress();
+            if (b.length == 16) {
+                // Key IPv6 clients by their /64 prefix: a single allocation hands out 2^64
+                // addresses, so keying by the full address would let one host spray the
+                // client table and (pre-fail-closed) evade the limiter (audit M1).
+                StringBuilder sb = new StringBuilder("v6:");
+                for (int i = 0; i < 8; i++) {
+                    sb.append(Character.forDigit((b[i] >> 4) & 0xF, 16)).append(Character.forDigit(b[i] & 0xF, 16));
+                }
+                return sb.toString();
+            }
+            return addr.getHostAddress();
         } catch (RuntimeException e) {
             return "local";
         }

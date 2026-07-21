@@ -36,8 +36,13 @@ public final class SignatureVerifier {
     private final int cacheCapacity;
     private final Map<CacheKey, Boolean> verified = new ConcurrentHashMap<>();
 
-    /** Cache identity: content hash + signature bytes (defends against Ed25519 malleability). */
-    private record CacheKey(SHA256Hash contentHash, String signatureHex) {}
+    /**
+     * Cache identity: content hash + signature bytes + the signing public key. Including the
+     * signature bytes defends against Ed25519 malleability; including the signing key means a
+     * cached "valid" verdict is bound to the exact key that produced it, not just to
+     * {@code (hash, sig)} (defense-in-depth, audit L5).
+     */
+    private record CacheKey(SHA256Hash contentHash, String signatureHex, String signingKeyHex) {}
 
     public SignatureVerifier() {
         this(Math.max(1, Runtime.getRuntime().availableProcessors()), 1 << 20);
@@ -50,7 +55,7 @@ public final class SignatureVerifier {
 
     private static CacheKey key(Transaction t) {
         var tx = (TransactionImpl) t;
-        return new CacheKey(t.hashContents(), tx.signature().toHexString());
+        return new CacheKey(t.hashContents(), tx.signature().toHexString(), tx.signingKey().toHexString());
     }
 
     /** True if this exact transaction (content + signature) was already verified. */

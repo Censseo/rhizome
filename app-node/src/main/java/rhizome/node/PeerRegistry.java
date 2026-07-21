@@ -1,8 +1,6 @@
 package rhizome.node;
 
-import java.net.InetAddress;
 import java.net.URI;
-import java.net.UnknownHostException;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -127,9 +125,10 @@ public final class PeerRegistry {
         }
     }
 
-    /** Records misbehaviour; if it tips the peer over the ban threshold, evicts it. */
+    /** Records misbehaviour; if it tips the peer over the ban threshold, evicts it. Seed peers
+     *  are trusted anchors and are never auto-banned or evicted (audit M4 collateral bans). */
     public boolean penalize(String url, int points) {
-        if (banList == null) {
+        if (banList == null || seeds.contains(normalize(url))) {
             return false;
         }
         boolean banned = banList.misbehave(url, points);
@@ -195,54 +194,13 @@ public final class PeerRegistry {
         }
     }
 
-    /**
-     * True only if every address {@code host} resolves to is a globally routable unicast
-     * address. Rejects loopback, any-local, link-local (incl. 169.254.169.254 metadata),
-     * IPv4 private (RFC1918) and carrier-grade NAT (100.64/10), IPv6 unique-local (fc00::/7),
-     * and multicast. Resolution failure is treated as not-routable (fail closed).
-     */
+    /** Delegates to {@link PeerHosts#isPubliclyRoutable} (kept here as the admission-time entry point). */
     static boolean isPubliclyRoutable(String host) {
-        if (host == null || host.isBlank()) {
-            return false;
-        }
-        try {
-            InetAddress[] addrs = InetAddress.getAllByName(host);
-            if (addrs.length == 0) {
-                return false;
-            }
-            for (InetAddress a : addrs) {
-                if (a.isLoopbackAddress() || a.isAnyLocalAddress() || a.isLinkLocalAddress()
-                    || a.isSiteLocalAddress() || a.isMulticastAddress()) {
-                    return false;
-                }
-                byte[] b = a.getAddress();
-                if (b.length == 16 && (b[0] & 0xFE) == 0xFC) {
-                    return false; // fc00::/7 unique-local IPv6
-                }
-                if (b.length == 4 && (b[0] & 0xFF) == 100 && (b[1] & 0xFF) >= 64 && (b[1] & 0xFF) <= 127) {
-                    return false; // 100.64.0.0/10 carrier-grade NAT
-                }
-            }
-            return true;
-        } catch (UnknownHostException e) {
-            return false;
-        }
+        return PeerHosts.isPubliclyRoutable(host);
     }
 
-    /** Subnet bucket key for eclipse-resistant diversity: /16 (v4) or /48 (v6); host string if unresolved. */
+    /** Delegates to {@link PeerHosts#subnetKey}. */
     static String subnetKey(String host) {
-        if (host == null) {
-            return "host:";
-        }
-        try {
-            byte[] b = InetAddress.getByName(host).getAddress();
-            if (b.length == 4) {
-                return "v4:" + (b[0] & 0xFF) + "." + (b[1] & 0xFF);
-            }
-            return String.format("v6:%02x%02x:%02x%02x:%02x%02x",
-                b[0], b[1], b[2], b[3], b[4], b[5]);
-        } catch (UnknownHostException e) {
-            return "host:" + host;
-        }
+        return PeerHosts.subnetKey(host);
     }
 }

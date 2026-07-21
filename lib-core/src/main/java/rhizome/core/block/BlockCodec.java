@@ -91,4 +91,52 @@ public final class BlockCodec {
         }
         return blocks;
     }
+
+    /**
+     * Streams a concatenation of blocks from {@code in}, decoding one block at a time so peak
+     * transient memory is bounded to a single block (≤ {@code maxBlockBytes}) rather than the
+     * whole response — the fix for the ~800 MiB single-shot {@code /sync} buffer (audit M5).
+     * Aborts if the stream yields more than {@code maxBlocks} blocks or a single block exceeds
+     * {@code maxBlockBytes}, so a hostile peer cannot force an unbounded allocation.
+     */
+    public static List<Block> decodeStreamed(java.io.InputStream in, int maxBlocks, int maxBlockBytes)
+            throws java.io.IOException {
+        List<Block> blocks = new ArrayList<>();
+        byte[] carry = new byte[0];
+        final int chunk = 64 * 1024;
+        while (true) {
+            // Try to decode as many complete blocks as the carry currently holds.
+            ByteBuffer buffer = ByteBuffer.wrap(carry);
+            boolean progressed = true;
+            while (buffer.hasRemaining() && progressed) {
+                int mark = buffer.position();
+                try {
+                    Block block = decode(buffer);
+                    if (blocks.size() >= maxBlocks) {
+                        throw new java.io.IOException("sync stream exceeds " + maxBlocks + " blocks");
+                    }
+                    blocks.add(block);
+                } catch (java.nio.BufferUnderflowException incomplete) {
+                    buffer.position(mark); // partial trailing block: keep it, read more
+                    progressed = false;
+                }
+            }
+            carry = java.util.Arrays.copyOfRange(carry, buffer.position(), carry.length);
+            if (carry.length > maxBlockBytes) {
+                throw new java.io.IOException("sync stream single block exceeds " + maxBlockBytes + " bytes");
+            }
+            byte[] more = in.readNBytes(chunk);
+            if (more.length == 0) {
+                break; // stream exhausted
+            }
+            byte[] merged = new byte[carry.length + more.length];
+            System.arraycopy(carry, 0, merged, 0, carry.length);
+            System.arraycopy(more, 0, merged, carry.length, more.length);
+            carry = merged;
+        }
+        if (carry.length != 0) {
+            throw new java.io.IOException("sync stream ended mid-block (" + carry.length + " trailing bytes)");
+        }
+        return blocks;
+    }
 }

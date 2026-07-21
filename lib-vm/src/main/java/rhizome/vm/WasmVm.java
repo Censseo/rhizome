@@ -154,19 +154,21 @@ public final class WasmVm {
             List.of(ValType.I32, ValType.I32, ValType.I32, ValType.I32), List.of(ValType.I32),
             (Instance inst, long... args) -> {
                 Memory mem = inst.memory();
-                byte[] key = mem.readBytes(asOffset(args[0]), asLen(args[1]));
+                int keyLen = asLen(args[1]);
+                // Charge before touching memory so the work is metered even on a failing path.
+                gas.charge(GasSchedule.STORAGE_READ_BASE + (long) keyLen * GasSchedule.PER_BYTE);
+                byte[] key = mem.readBytes(asOffset(args[0]), keyLen);
                 byte[] value = host.storageRead(key);
-                gas.charge(GasSchedule.STORAGE_READ_BASE + (long) key.length * GasSchedule.PER_BYTE);
                 if (value == null) {
                     return new long[] {-1L};
                 }
                 int outPtr = asOffset(args[2]);
                 int outCap = asLen(args[3]);
                 int copied = Math.min(value.length, outCap);
+                gas.charge((long) copied * GasSchedule.PER_BYTE);
                 if (copied > 0) {
                     mem.write(outPtr, value, 0, copied);
                 }
-                gas.charge((long) copied * GasSchedule.PER_BYTE);
                 return new long[] {value.length};
             });
 
@@ -174,10 +176,12 @@ public final class WasmVm {
             List.of(ValType.I32, ValType.I32, ValType.I32, ValType.I32), List.of(),
             (Instance inst, long... args) -> {
                 Memory mem = inst.memory();
-                byte[] key = mem.readBytes(asOffset(args[0]), asLen(args[1]));
-                byte[] value = mem.readBytes(asOffset(args[2]), asLen(args[3]));
+                int keyLen = asLen(args[1]);
+                int valLen = asLen(args[3]);
                 gas.charge(GasSchedule.STORAGE_WRITE_BASE
-                    + (long) (key.length + value.length) * GasSchedule.PER_BYTE);
+                    + (long) (keyLen + valLen) * GasSchedule.PER_BYTE);
+                byte[] key = mem.readBytes(asOffset(args[0]), keyLen);
+                byte[] value = mem.readBytes(asOffset(args[2]), valLen);
                 host.storageWrite(key, value);
                 return null;
             });
@@ -185,8 +189,9 @@ public final class WasmVm {
         HostFunction setOutput = new HostFunction(ENV, "set_output",
             List.of(ValType.I32, ValType.I32), List.of(),
             (Instance inst, long... args) -> {
-                byte[] out = inst.memory().readBytes(asOffset(args[0]), asLen(args[1]));
-                gas.charge(GasSchedule.OUTPUT_BASE + (long) out.length * GasSchedule.PER_BYTE);
+                int len = asLen(args[1]);
+                gas.charge(GasSchedule.OUTPUT_BASE + (long) len * GasSchedule.PER_BYTE);
+                byte[] out = inst.memory().readBytes(asOffset(args[0]), len);
                 host.setOutput(out);
                 return null;
             });
@@ -195,9 +200,11 @@ public final class WasmVm {
             List.of(ValType.I32, ValType.I32, ValType.I32, ValType.I32), List.of(),
             (Instance inst, long... args) -> {
                 Memory mem = inst.memory();
-                byte[] topic = mem.readBytes(asOffset(args[0]), asLen(args[1]));
-                byte[] data = mem.readBytes(asOffset(args[2]), asLen(args[3]));
-                gas.charge(GasSchedule.LOG_BASE + (long) (topic.length + data.length) * GasSchedule.PER_BYTE);
+                int topicLen = asLen(args[1]);
+                int dataLen = asLen(args[3]);
+                gas.charge(GasSchedule.LOG_BASE + (long) (topicLen + dataLen) * GasSchedule.PER_BYTE);
+                byte[] topic = mem.readBytes(asOffset(args[0]), topicLen);
+                byte[] data = mem.readBytes(asOffset(args[2]), dataLen);
                 host.emitLog(topic, data);
                 return null;
             });
@@ -246,9 +253,11 @@ public final class WasmVm {
             List.of(ValType.I32),
             (Instance inst, long... args) -> {
                 Memory mem = inst.memory();
-                byte[] callee = mem.readBytes(asOffset(args[0]), asLen(args[1]));
-                byte[] input = mem.readBytes(asOffset(args[2]), asLen(args[3]));
-                gas.charge(GasSchedule.CALL_BASE + (long) input.length * GasSchedule.PER_BYTE);
+                int calleeLen = asLen(args[1]);
+                int inputLen = asLen(args[3]);
+                gas.charge(GasSchedule.CALL_BASE + (long) inputLen * GasSchedule.PER_BYTE);
+                byte[] callee = mem.readBytes(asOffset(args[0]), calleeLen);
+                byte[] input = mem.readBytes(asOffset(args[2]), inputLen);
                 byte[] output = calls == null ? null : calls.call(callee, input);
                 if (output == null) {
                     return new long[] {-1L};
@@ -264,10 +273,10 @@ public final class WasmVm {
     /** Copies {@code src} into contract memory (at most {@code cap} bytes) and returns its true length. */
     private static long copyOut(Instance inst, byte[] src, long ptr, long cap, GasMeter gas) {
         int copied = Math.min(src.length, asLen(cap));
+        gas.charge((long) copied * GasSchedule.PER_BYTE); // meter before the write
         if (copied > 0) {
             inst.memory().write(asOffset(ptr), src, 0, copied);
         }
-        gas.charge((long) copied * GasSchedule.PER_BYTE);
         return src.length;
     }
 

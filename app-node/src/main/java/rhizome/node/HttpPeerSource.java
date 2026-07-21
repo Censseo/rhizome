@@ -36,12 +36,8 @@ public final class HttpPeerSource implements PeerSource {
     // peer can return for one fetch window.
     private static final int SCALAR_CAP = 4 * 1024;
     private static final int JSON_BLOCK_CAP = 1024 * 1024;
-    // Upper bound for one /sync window: the consensus maxima (BLOCKS_PER_FETCH full
-    // blocks, each a header plus MAX_TRANSACTIONS_PER_BLOCK transactions). Derived
-    // from the fixed DTO layouts so a valid response is never rejected, yet the
-    // buffered size is finite instead of whatever a hostile peer chooses to send.
-    private static final long BLOCK_STREAM_CAP =
-        (long) Constants.BLOCKS_PER_FETCH * Constants.MAX_BLOCK_SIZE_BYTES + 64 * 1024;
+    // The /sync body is now stream-decoded block-by-block (see blocks()), so there is no
+    // single-shot window buffer to cap here.
     // Headers are tiny and fixed-ish (≈156 B + a few uncle records); 1 KiB each is a
     // generous ceiling that still bounds a hostile /headers response hard.
     private static final long HEADER_STREAM_CAP =
@@ -51,7 +47,17 @@ public final class HttpPeerSource implements PeerSource {
     private final HttpClient client;
 
     public HttpPeerSource(String baseUrl) {
-        this.baseUrl = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
+        this(baseUrl, false);
+    }
+
+    /**
+     * @param blockPrivateHosts when true (production mainnet), the peer host is resolved and
+     *        refused if it maps to a non-routable address, and the connection is pinned to the
+     *        resolved IP so a DNS rebind cannot redirect the fetch to an internal service (SSRF).
+     */
+    public HttpPeerSource(String baseUrl, boolean blockPrivateHosts) {
+        String trimmed = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
+        this.baseUrl = PeerHosts.pin(trimmed, blockPrivateHosts);
         this.client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
     }
 
@@ -73,7 +79,26 @@ public final class HttpPeerSource implements PeerSource {
 
     @Override
     public List<Block> blocks(long start, long end) {
-        return BlockCodec.decodeAll(getBytes("/sync?start=" + start + "&end=" + end, BLOCK_STREAM_CAP));
+        // Stream-decode block-by-block so peak memory is ~one block, not the whole ~800 MiB
+        // window a hostile peer could otherwise force us to buffer (audit M5).
+        String path = "/sync?start=" + start + "&end=" + end;
+        HttpRequest request = HttpRequest.newBuilder(URI.create(baseUrl + path))
+            .timeout(Duration.ofSeconds(30)).GET().build();
+        try {
+            HttpResponse<InputStream> response = client.send(request, HttpResponse.BodyHandlers.ofInputStream());
+            if (response.statusCode() != 200) {
+                response.body().close();
+                throw new IOException("peer " + path + " returned " + response.statusCode());
+            }
+            try (InputStream in = response.body()) {
+                return BlockCodec.decodeStreamed(in, Constants.BLOCKS_PER_FETCH, Constants.MAX_BLOCK_SIZE_BYTES);
+            }
+        } catch (IOException e) {
+            throw new PeerUnavailableException("peer request failed: " + path, e);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new PeerUnavailableException("interrupted: " + path, e);
+        }
     }
 
     @Override

@@ -66,6 +66,8 @@ public final class RhizomeNode implements AutoCloseable {
     private PeerRegistry registry;
     private PeerDiscovery discovery;
     private PeerBanList banList;
+    /** Whether to refuse/ pin private peer hosts (SSRF): on for internet-exposed mainnet. */
+    private boolean blockPrivatePeers;
 
     // Ban-score costs per sync outcome. Serving an invalid chain (bad PoW, broken
     // continuity, claimed-heavy-proved-light) is an unambiguous protocol violation
@@ -114,6 +116,13 @@ public final class RhizomeNode implements AutoCloseable {
     }
 
     public synchronized void start() throws IOException {
+        // Block SSRF-prone (loopback / private / metadata) peer hosts on internet-exposed
+        // mainnet; testnet/devnets peer over localhost so they stay permissive. Computed here
+        // because the snap-sync bootstrap below already fetches from peers.
+        this.blockPrivatePeers =
+            config.params().networkName().toLowerCase(java.util.Locale.ROOT).contains("mainnet")
+            && !"true".equalsIgnoreCase(System.getenv("RHIZOME_ALLOW_PRIVATE_PEERS"));
+
         LedgerSnapshot snapshot = config.snapshotPath().isPresent()
             ? SnapshotLoader.fromFile(Path.of(config.snapshotPath().get()))
             : SnapshotLoader.empty(config.params().chainId());
@@ -125,6 +134,14 @@ public final class RhizomeNode implements AutoCloseable {
         stateStore = new RocksDbStateStore(config.dataDir() + "/state");
         verifier = new SignatureVerifier();
 
+        // A snap-sync bootstrap seeds several independent stores that commit separately; if a
+        // prior run was interrupted mid-seed, the on-disk state is inconsistent. Fail fast with
+        // a clear instruction rather than running on it (audit M8).
+        if (store.bootstrapInProgress()) {
+            throw new IOException("a previous snap-sync bootstrap did not complete; the data directory ("
+                + config.dataDir() + ") is inconsistent — delete it and restart to re-bootstrap");
+        }
+
         // RHIZOME_SYNC=snap on an empty data dir: adopt a peer's verified state snapshot at
         // a buried pivot instead of replaying history; falls back to full sync when no peer
         // offers a usable snapshot. The engine boot below then starts at the pivot.
@@ -132,7 +149,8 @@ public final class RhizomeNode implements AutoCloseable {
             for (String peerUrl : config.peers()) {
                 try {
                     if (SnapshotBootstrap.bootstrap(config.params(), snapshot, store, boxStore, tokenStore,
-                            contractStore, stateStore, new HttpPeerSource(peerUrl), System.currentTimeMillis())) {
+                            contractStore, stateStore, new HttpPeerSource(peerUrl, blockPrivatePeers),
+                            System.currentTimeMillis())) {
                         break;
                     }
                 } catch (RuntimeException e) {
@@ -176,9 +194,6 @@ public final class RhizomeNode implements AutoCloseable {
         // Block SSRF-prone (loopback / private / metadata) discovered peers on mainnet, where
         // the node is internet-exposed. Testnet/devnets peer over localhost, so they stay
         // permissive; an operator running mainnet over private infra can opt back in.
-        boolean blockPrivatePeers =
-            config.params().networkName().toLowerCase(java.util.Locale.ROOT).contains("mainnet")
-            && !"true".equalsIgnoreCase(System.getenv("RHIZOME_ALLOW_PRIVATE_PEERS"));
         registry = new PeerRegistry(config.selfUrl(), 128, banList, blockPrivatePeers);
         // Config peers are trusted seeds: protected from eclipse eviction and SSRF filtering.
         registry.addSeeds(config.peers());
@@ -243,7 +258,7 @@ public final class RhizomeNode implements AutoCloseable {
     }
 
     private void startNetworkLoops() {
-        discovery = new PeerDiscovery(registry, config.selfUrl());
+        discovery = new PeerDiscovery(registry, config.selfUrl(), blockPrivatePeers);
         syncScheduler = Executors.newScheduledThreadPool(2, r -> {
             Thread t = new Thread(r, "rhizome-net");
             t.setDaemon(true);
@@ -288,7 +303,7 @@ public final class RhizomeNode implements AutoCloseable {
                 continue;
             }
             try {
-                ChainSynchronizer.Result result = synchronizer.syncFrom(new HttpPeerSource(peerUrl));
+                ChainSynchronizer.Result result = synchronizer.syncFrom(new HttpPeerSource(peerUrl, blockPrivatePeers));
                 switch (result) {
                     case EXTENDED, REORGED ->
                         log.info("Synced from {}: {} -> height {}", peerUrl, result, engine.height());

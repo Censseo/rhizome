@@ -17,6 +17,9 @@ extern "C" {
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }
 
+/// Aborts the call by trapping; the VM reverts all of this call's state writes atomically.
+fn fail() -> ! { core::arch::wasm32::unreachable() }
+
 const ADDR_LEN: usize = 25;
 
 // Storage: [0]=reserve A, [1]=reserve B, [2||addr]=balance A, [3||addr]=balance B.
@@ -110,8 +113,11 @@ fn swap(caller: &[u8; ADDR_LEN], amount_in: u64, in_prefix: u8, out_prefix: u8,
 
     write_u64(&bal_key(in_prefix, caller), bal_in - amount_in);
     let bal_out = read_u64(&bal_key(out_prefix, caller));
-    write_u64(&bal_key(out_prefix, caller), bal_out + out);
-    write_u64(res_in_key, reserve_in + amount_in);
+    // Use checked_add so a crafted pool cannot wrap a u64 sum on overflow; a trap reverts the
+    // whole call atomically (audit M13). NOTE: the bundled .wasm must be recompiled from this
+    // source for the fix to take effect on-chain.
+    write_u64(&bal_key(out_prefix, caller), bal_out.checked_add(out).unwrap_or_else(|| fail()));
+    write_u64(res_in_key, reserve_in.checked_add(amount_in).unwrap_or_else(|| fail()));
     write_u64(res_out_key, reserve_out - out);
 
     // log: caller(25) || amount_in(8) || amount_out(8)
