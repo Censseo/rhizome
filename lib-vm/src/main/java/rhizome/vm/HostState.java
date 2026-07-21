@@ -53,6 +53,16 @@ public interface HostState {
     }
 
     /**
+     * Pays {@code amount} of native coin from this contract's own balance to the 25-byte address
+     * {@code to}. Returns 0 on success, -1 if rejected (unaffordable, bad recipient, or unsupported
+     * host). Lets a contract disburse funds it holds — e.g. a launchpad paying out sale proceeds
+     * (audit T4). Default -1 (in-memory test hosts have no ledger).
+     */
+    default int transferValue(byte[] to, long amount) {
+        return -1;
+    }
+
+    /**
      * Reads the {@link rhizome.core.box.Box data box} at {@code id} without consuming
      * it (Ergo-style data input), or {@code null} if none exists. Sees boxes written
      * earlier in the same block. Default {@code null} (boxes not wired).

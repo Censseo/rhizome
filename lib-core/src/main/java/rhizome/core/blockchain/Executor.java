@@ -539,6 +539,16 @@ public final class Executor {
             withdraw(ledger, applied, tx.from(), new TransactionAmount(gasFee));
             deposit(ledger, applied, miner, new TransactionAmount(gasFee));
         }
+        // Native payouts the contract made from its own balance via transfer_value (audit T4).
+        // The VM bounded each to the contract's committed balance, so these withdrawals succeed;
+        // the list is empty on a revert. Applied before the attached value moves (which the VM
+        // did not count as spendable), so a contract can never pay out coin it does not hold.
+        for (ContractProcessor.NativeTransfer nt : result.transfers()) {
+            if (nt.amount() > 0) {
+                withdraw(ledger, applied, nt.from(), new TransactionAmount(nt.amount()));
+                deposit(ledger, applied, nt.to(), new TransactionAmount(nt.amount()));
+            }
+        }
         if (result.success() && value > 0) {
             PublicAddress target = result.contractAddress() != null ? result.contractAddress() : tx.to();
             withdraw(ledger, applied, tx.from(), new TransactionAmount(value));
@@ -660,6 +670,16 @@ public final class Executor {
         if (gasFee > 0) {
             ledger.revertDeposit(miner, new TransactionAmount(gasFee));
             ledger.revertSend(tx.from(), new TransactionAmount(gasFee));
+        }
+        // Reverse the contract's native payouts (transfer_value), inverse order — the exact
+        // inverse of applyContract's forward application (audit T4).
+        java.util.List<ContractProcessor.NativeTransfer> transfers = receipt.transfers();
+        for (int i = transfers.size() - 1; i >= 0; i--) {
+            ContractProcessor.NativeTransfer nt = transfers.get(i);
+            if (nt.amount() > 0) {
+                ledger.revertDeposit(nt.to(), new TransactionAmount(nt.amount()));
+                ledger.revertSend(nt.from(), new TransactionAmount(nt.amount()));
+            }
         }
         long value = tx.amount().amount();
         if (receipt.success() && value > 0) {

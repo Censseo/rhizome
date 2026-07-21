@@ -19,6 +19,7 @@ public final class PersistentHostState implements HostState {
     private final byte[] input;
     private final long value;
     private final BoxReader boxReader;
+    private final NativeTransferHandler transferHandler;
 
     private final Map<String, byte[]> pending = new HashMap<>();
     private final java.util.List<LogEntry> logs = new java.util.ArrayList<>();
@@ -31,12 +32,19 @@ public final class PersistentHostState implements HostState {
 
     public PersistentHostState(ContractStore store, PublicAddress contract,
                                byte[] caller, byte[] input, long value, BoxReader boxReader) {
+        this(store, contract, caller, input, value, boxReader, null);
+    }
+
+    public PersistentHostState(ContractStore store, PublicAddress contract,
+                               byte[] caller, byte[] input, long value, BoxReader boxReader,
+                               NativeTransferHandler transferHandler) {
         this.store = store;
         this.contract = contract;
         this.caller = caller.clone();
         this.input = input.clone();
         this.value = value;
         this.boxReader = boxReader;
+        this.transferHandler = transferHandler;
     }
 
     private static String hex(byte[] b) {
@@ -123,6 +131,11 @@ public final class PersistentHostState implements HostState {
 
     /** Reserved (zero-length) storage key holding the deployer address; unwritable by contracts. */
     static final byte[] DEPLOYER_KEY = new byte[0];
+
+    @Override
+    public int transferValue(byte[] to, long amount) {
+        return transferHandler == null ? -1 : transferHandler.transfer(to, amount);
+    }
 
     @Override
     public rhizome.core.box.Box boxRead(byte[] id) {

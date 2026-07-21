@@ -27,6 +27,7 @@ public final class WasmContractProcessor implements ContractProcessor {
     private final ContractStore baseStore;
     private final int retainDepth;
     private volatile BoxReader boxReader;
+    private volatile ContractProcessor.NativeBalance nativeBalance;
     private SessionContractStore session;
     private List<ContractReceipt> currentReceipts = new java.util.ArrayList<>();
     private List<ContractLog> currentLogs = new java.util.ArrayList<>();
@@ -63,6 +64,11 @@ public final class WasmContractProcessor implements ContractProcessor {
     }
 
     @Override
+    public void useNativeBalance(ContractProcessor.NativeBalance source) {
+        this.nativeBalance = source;
+    }
+
+    @Override
     public void begin() {
         session = new SessionContractStore(baseStore);
         currentReceipts = new java.util.ArrayList<>();
@@ -80,7 +86,7 @@ public final class WasmContractProcessor implements ContractProcessor {
             case CALL -> call(from, to, data, value, gasLimit);
             default -> ContractResult.reverted(0, "not a contract transaction");
         };
-        currentReceipts.add(new ContractReceipt(result.gasUsed(), result.success()));
+        currentReceipts.add(new ContractReceipt(result.gasUsed(), result.success(), result.transfers()));
         currentLogs.addAll(result.logs());
         return result;
     }
@@ -114,12 +120,16 @@ public final class WasmContractProcessor implements ContractProcessor {
     private ContractResult call(PublicAddress caller, PublicAddress contract, byte[] input,
                                 long value, long gasLimit) {
         GasMeter meter = new GasMeter(gasLimit);
+        // Native transfers a contract makes (transfer_value) accumulate here across the call tree;
+        // a reverted frame truncates its own entries (see runCall), so only surviving transfers
+        // remain. The executor applies them from the contracts' balances on success.
+        List<ContractProcessor.NativeTransfer> transfers = new java.util.ArrayList<>();
         // The whole call tree runs on a fixed-stack thread so recursion depth is bounded by a
         // network constant, not the host JVM's -Xss (see WasmVm.onBoundedStack).
         CallOutcome outcome = WasmVm.onBoundedStack(() -> runCall(caller.toBytes(), contract, input,
-            value, meter, session, new java.util.ArrayDeque<>()));
+            value, meter, session, new java.util.ArrayDeque<>(), transfers));
         if (outcome.success()) {
-            return ContractResult.ok(meter.used(), outcome.output(), null, outcome.logs());
+            return ContractResult.ok(meter.used(), outcome.output(), null, outcome.logs(), transfers);
         }
         return ContractResult.reverted(meter.used(), outcome.error());
     }
@@ -132,8 +142,10 @@ public final class WasmContractProcessor implements ContractProcessor {
         // to the base store, so nothing persists and the block session is untouched.
         GasMeter meter = new GasMeter(gasLimit);
         SessionContractStore scratch = new SessionContractStore(baseStore);
+        // dryRun is read-only: transfers are collected for bounds-checking but never applied.
+        List<ContractProcessor.NativeTransfer> transfers = new java.util.ArrayList<>();
         CallOutcome outcome = WasmVm.onBoundedStack(() -> runCall(from.toBytes(), to, input, value,
-            meter, scratch, new java.util.ArrayDeque<>()));
+            meter, scratch, new java.util.ArrayDeque<>(), transfers));
         if (outcome.success()) {
             return ContractResult.ok(meter.used(), outcome.output(), null, outcome.logs());
         }
@@ -159,7 +171,8 @@ public final class WasmContractProcessor implements ContractProcessor {
      */
     private CallOutcome runCall(byte[] callerBytes, PublicAddress contract, byte[] input,
                                 long value, GasMeter meter, ContractStore parent,
-                                java.util.Deque<PublicAddress> stack) {
+                                java.util.Deque<PublicAddress> stack,
+                                List<ContractProcessor.NativeTransfer> transfers) {
         if (stack.size() >= MAX_CALL_DEPTH) {
             return CallOutcome.fail("call depth limit");
         }
@@ -172,9 +185,31 @@ public final class WasmContractProcessor implements ContractProcessor {
         }
 
         SessionContractStore frame = new SessionContractStore(parent);
+        // transfer_value handler: the contract may pay out native coin up to its committed balance
+        // minus what earlier (still-live) transfers in this tree already reserved for it. The intent
+        // is recorded here; the executor moves the value on success. Truncated below on a revert so
+        // a failed frame's payouts vanish along with its writes (audit T4).
+        NativeTransferHandler xfer = (toBytes, amount) -> {
+            ContractProcessor.NativeBalance nb = nativeBalance;
+            if (nb == null || amount <= 0 || toBytes.length != PublicAddress.SIZE) {
+                return -1;
+            }
+            long reserved = 0;
+            for (ContractProcessor.NativeTransfer t : transfers) {
+                if (t.from().equals(contract)) {
+                    reserved += t.amount();
+                }
+            }
+            if (amount > nb.balanceOf(contract) - reserved) {
+                return -1;
+            }
+            transfers.add(new ContractProcessor.NativeTransfer(contract, PublicAddress.of(toBytes), amount));
+            return 0;
+        };
         PersistentHostState host =
-            new PersistentHostState(frame, contract, callerBytes, input, value, boxReader);
+            new PersistentHostState(frame, contract, callerBytes, input, value, boxReader, xfer);
         List<ContractLog> collected = new java.util.ArrayList<>();
+        int transferMark = transfers.size();
 
         stack.push(contract);
         ExecResult result;
@@ -186,7 +221,7 @@ public final class WasmContractProcessor implements ContractProcessor {
                     return null;
                 }
                 CallOutcome sub = runCall(contract.toBytes(), PublicAddress.of(calleeAddr),
-                    calleeInput, 0, meter, frame, stack);
+                    calleeInput, 0, meter, frame, stack, transfers);
                 if (!sub.success()) {
                     return null;
                 }
@@ -198,6 +233,8 @@ public final class WasmContractProcessor implements ContractProcessor {
         }
 
         if (!result.succeeded()) {
+            // Frame discarded: drop this frame's (and its subtree's) native-transfer intents too.
+            transfers.subList(transferMark, transfers.size()).clear();
             return CallOutcome.fail(result.message()); // frame discarded: no writes, no logs
         }
         host.commit();                 // this call's own writes into its frame...

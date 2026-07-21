@@ -203,6 +203,43 @@ class LaunchpadContractTest {
     }
 
     @Test
+    void creatorWithdrawsSaleProceedsAndAReorgReversesIt() {
+        // A buy leaves 1_000 native proceeds on the launchpad (audit T4: previously unrecoverable).
+        long value = 1_000;
+        assertEquals(ExecutionStatus.SUCCESS,
+            mineBlock(List.of(tx(5, pad, new byte[] {1}, value, TransactionKind.CALL))));
+        assertEquals(value, nativeBalance(pad));
+
+        // The creator (deployer) sweeps the proceeds to a recipient via transfer_value.
+        PublicAddress recipient = PublicAddress.random();
+        byte[] withdraw = concat(new byte[] {2}, recipient.toBytes(), le64(value));
+        assertEquals(ExecutionStatus.SUCCESS,
+            mineBlock(List.of(tx(6, pad, withdraw, 0, TransactionKind.CALL))));
+        assertEquals(0, nativeBalance(pad), "proceeds swept out of the launchpad");
+        assertEquals(value, nativeBalance(recipient), "recipient received the proceeds");
+
+        // A reorg that pops the withdraw block must reverse the native payout exactly.
+        engine.popBlock();
+        assertEquals(value, nativeBalance(pad), "withdraw reversed: proceeds back on the launchpad");
+        assertEquals(0, nativeBalance(recipient), "withdraw reversed: recipient debited");
+    }
+
+    @Test
+    void withdrawBeyondTheLaunchpadBalanceReverts() {
+        long value = 1_000;
+        assertEquals(ExecutionStatus.SUCCESS,
+            mineBlock(List.of(tx(5, pad, new byte[] {1}, value, TransactionKind.CALL))));
+        // Ask for more than the launchpad holds: transfer_value returns -1, the contract traps, and
+        // the whole withdraw reverts — no coin moves (the VM bounds a payout by the committed balance).
+        PublicAddress recipient = PublicAddress.random();
+        byte[] withdraw = concat(new byte[] {2}, recipient.toBytes(), le64(value + 1));
+        assertEquals(ExecutionStatus.SUCCESS,
+            mineBlock(List.of(tx(6, pad, withdraw, 0, TransactionKind.CALL))));
+        assertEquals(value, nativeBalance(pad), "over-withdraw moved nothing");
+        assertEquals(0, nativeBalance(recipient), "recipient received nothing");
+    }
+
+    @Test
     void zeroValueBuyIsRefused() {
         long h = engine.height() + 1;
         assertEquals(ExecutionStatus.SUCCESS,

@@ -31,10 +31,33 @@ buffers its window server-side (mirror the `/sync` streaming fix); net F4 SSRF
 posture derives from the advertised `selfUrl` rather than the actual bind
 address; vm F3 module reparse+validate on a `MODULE_CACHE` miss is unmetered
 (price it by code length); crypto F4 SMT `load` does not re-hash the node blob
-(content-addressed, defence-in-depth only); template **T1** front-runnable
-`init` (needs a deploy-time constructor / deployer binding in the host ABI),
-**T3** no swap slippage/`min_out` (ABI change), **T4** `pair` mints no LP shares
-& `launchpad` has no proceeds-withdraw (LP/ABI redesign).
+(content-addressed, defence-in-depth only).
+
+### Contract-template redesigns (T1, T3, T4) — now fixed
+
+A follow-up pass hardened the bundled DeFi templates and added the minimal host
+ABI they needed:
+
+- **T1 — front-runnable `init` (High):** the host now records the deployer at
+  deploy under a reserved (zero-length, contract-unwritable) storage key and
+  exposes it via a new `get_deployer` host function; it rides the existing
+  contract-storage commit path, so the state root, snapshot and reorg journal
+  cover it with no new consensus state. `token`/`agent_wallet`/`pair`/`launchpad`/
+  `amm` gate `init` to the deployer, so a mempool observer can no longer seize a
+  token's supply or an agent wallet's ownership.
+- **T3 — no swap slippage (Medium):** `amm`/`pair` swaps take a `min_out` floor
+  (`[amount_in(8) || min_out(8)]`) and revert below it; `0`/absent preserves the
+  old ABI. Defeats sandwich front-running.
+- **T4 — locked funds (High):** `pair.add_liquidity` now mints LP shares
+  (geometric mean on the first deposit, else the min across both legs) and a new
+  `remove_liquidity` selector redeems them; a new `transfer_value` host function
+  (a contract paying native coin from its own balance, bounded by its committed
+  balance, applied by the executor and reversed on reorg) lets `launchpad` expose
+  an owner-gated `withdraw` for the sale proceeds. Both were previously
+  unrecoverable.
+
+Regressions: deployer-bound-init (front-run is a no-op), swap-below-`min_out`
+reverts, LP mint+redeem round-trips, and launchpad withdraw + its reorg reversal.
 
 ### P1 — Mempool-poisoning block-production halt (High, liveness)
 

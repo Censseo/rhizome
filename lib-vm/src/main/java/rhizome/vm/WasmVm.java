@@ -570,6 +570,19 @@ public final class WasmVm {
             List.of(ValType.I32, ValType.I32), List.of(ValType.I32),
             (Instance inst, long... args) -> new long[] {copyOut(inst, host.deployer(), args[0], args[1], gas)});
 
+        // transfer_value(to_ptr, to_len, amount) -> i32: pays `amount` native coin from THIS
+        // contract's own balance to the 25-byte address at to_ptr. Returns 0 on success, -1 if
+        // rejected (unaffordable, bad recipient, or no ledger wired). The move is recorded and
+        // applied by the executor on success; a revert discards it (audit T4).
+        HostFunction transferValue = new HostFunction(ENV, "transfer_value",
+            List.of(ValType.I32, ValType.I32, ValType.I64), List.of(ValType.I32),
+            (Instance inst, long... args) -> {
+                gas.charge(GasSchedule.CALL_BASE); // priced like a call: it mutates ledger state
+                int toLen = asLen(args[1]);
+                byte[] to = inst.memory().readBytes(asOffset(args[0]), toLen);
+                return new long[] {host.transferValue(to, args[2])};
+            });
+
         // box_read(id_ptr, out_ptr, out_cap) -> i32: reads the 32-byte box id at id_ptr,
         // copies the serialized box (up to out_cap bytes) to out_ptr and returns its true
         // length, or -1 if no box exists. A read-only data input — the box is not consumed.
@@ -614,7 +627,7 @@ public final class WasmVm {
 
         return new HostFunction[] {
             storageRead, storageWrite, setOutput, emitLog, getCaller, getInput, getValue, getSelf,
-            getDeployer, callContract, boxRead};
+            getDeployer, transferValue, callContract, boxRead};
     }
 
     /**

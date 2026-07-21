@@ -90,8 +90,33 @@ public interface ContractProcessor {
      */
     record ContractChange(boolean code, PublicAddress contract, byte[] key, byte[] value) {}
 
+    /**
+     * A native-coin (PDN) transfer a contract made out of its own balance via the {@code
+     * transfer_value} host function — e.g. a launchpad paying its creator the sale proceeds. The
+     * VM records the intent (affordability checked live against the contract's committed balance);
+     * the executor moves the value on success and reverses it on a reorg.
+     */
+    record NativeTransfer(PublicAddress from, PublicAddress to, long amount) {}
+
+    /** Reads a contract's committed native balance, so the VM can bound {@code transfer_value}. */
+    @FunctionalInterface
+    interface NativeBalance {
+        long balanceOf(PublicAddress address);
+    }
+
+    /**
+     * Wires the committed-balance source the VM uses to bound {@code transfer_value} (a contract
+     * cannot pay out more native coin than it holds). Called once at engine assembly. Processors
+     * with no native-transfer support ignore it.
+     */
+    default void useNativeBalance(NativeBalance source) { }
+
     /** Runtime outcome of one contract transaction, recorded for reorg reversal. */
-    record ContractReceipt(long gasUsed, boolean success) {}
+    record ContractReceipt(long gasUsed, boolean success, List<NativeTransfer> transfers) {
+        public ContractReceipt(long gasUsed, boolean success) {
+            this(gasUsed, success, List.of());
+        }
+    }
 
     /** One event a contract emitted: the emitting contract, an indexable topic, and data. */
     record ContractLog(PublicAddress contract, byte[] topic, byte[] data) {}
@@ -102,19 +127,26 @@ public interface ContractProcessor {
      * {@code logs} are the events it emitted (empty unless it succeeded).
      */
     record ContractResult(boolean success, long gasUsed, byte[] output,
-                          PublicAddress contractAddress, String error, List<ContractLog> logs) {
+                          PublicAddress contractAddress, String error, List<ContractLog> logs,
+                          List<NativeTransfer> transfers) {
 
         public static ContractResult ok(long gasUsed, byte[] output, PublicAddress contractAddress) {
-            return new ContractResult(true, gasUsed, output, contractAddress, null, List.of());
+            return new ContractResult(true, gasUsed, output, contractAddress, null, List.of(), List.of());
         }
 
         public static ContractResult ok(long gasUsed, byte[] output, PublicAddress contractAddress,
                                         List<ContractLog> logs) {
-            return new ContractResult(true, gasUsed, output, contractAddress, null, List.copyOf(logs));
+            return new ContractResult(true, gasUsed, output, contractAddress, null, List.copyOf(logs), List.of());
+        }
+
+        public static ContractResult ok(long gasUsed, byte[] output, PublicAddress contractAddress,
+                                        List<ContractLog> logs, List<NativeTransfer> transfers) {
+            return new ContractResult(true, gasUsed, output, contractAddress, null,
+                List.copyOf(logs), List.copyOf(transfers));
         }
 
         public static ContractResult reverted(long gasUsed, String error) {
-            return new ContractResult(false, gasUsed, new byte[0], null, error, List.of());
+            return new ContractResult(false, gasUsed, new byte[0], null, error, List.of(), List.of());
         }
     }
 }
