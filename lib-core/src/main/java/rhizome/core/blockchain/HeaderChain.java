@@ -105,11 +105,19 @@ public final class HeaderChain {
             if (header.timestamp() > nowMillis + params.maxFutureBlockTimeSec() * 1000L) {
                 return Result.reject(Rejection.TIMESTAMP_IN_FUTURE, h);
             }
-            BigInteger uncleWork = uncleWork(header, params);
-            if (uncleWork == null) {
+            // Validate the uncle references structurally (count, no dups, difficulty in range) but
+            // do NOT fold their claimed work into the total used by the reorg gate. The uncles are
+            // committed in the header preimage yet cannot be confirmed as real, pooled, eligible
+            // orphans until the bodies arrive, so counting them here lets an attacker pad each
+            // header with maxUnclesPerBlock same-difficulty fake uncles and inflate a cheap branch's
+            // claimed work ~3× — passing the gate with ~1/3 honest work and forcing a deep
+            // pop/restore on every node (audit M4, header-sync path). Base work only makes the gate
+            // count only PoW we verified per header; genuine uncle work is still counted
+            // authoritatively later in ChainEngine.addBlock/totalWork, with eligibility proven.
+            if (uncleWork(header, params) == null) {
                 return Result.reject(Rejection.INVALID_UNCLES, h);
             }
-            work = work.add(BigInteger.TWO.pow(header.difficulty())).add(uncleWork);
+            work = work.add(BigInteger.TWO.pow(header.difficulty()));
 
             prevHash = header.hash();
             expectedId++;

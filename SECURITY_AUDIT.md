@@ -1,3 +1,119 @@
+# Rhizome — Blockchain Security & Exploit Audit (fourth pass)
+
+**Date:** 2026-07-21 · **Scope:** whole tree · **Baseline:** post-`#7` (three
+prior passes merged). Six subsystems (consensus/PoW, tx/ledger/mempool, WASM VM,
+DeFi templates, P2P/net/API, crypto/codec/persistence) were re-audited in
+parallel; every prior finding was re-verified against the *current* source
+(several the doc marked "documented/open" turned out already fixed; a few marked
+"fixed" were only partially closed), and new exploitable defects were hunted.
+
+## Fourth-pass findings & fixes
+
+| # | Severity | Area | Title | Status |
+|---|----------|------|-------|--------|
+| P1 | **High** | tx/mempool | Box/token op with an unsatisfiable precondition aborts the whole block → free, permanent, network-wide **block-production halt** (mempool poisoning) | **Fixed** ✅ |
+| P2 | **High** | vm | Uncapped **aggregate** table allocation (per-table cap only) → tens-of-GB eager alloc → heap-dependent fork + crash DoS (residual H4) | **Fixed** ✅ |
+| P3 | Medium | consensus | M4 reorg work-gate fix landed on the fallback synchronizer only; `HeaderSynchronizer` (the live path) still counted **unverified** uncle work → ~⅓-work forced deep pop/restore | **Fixed** ✅ |
+| P4 | Medium | consensus | `restore()` swallowed `addBlock` failures → silent self-truncation after a forced failed reorg | **Fixed** ✅ (fail-loud) |
+| P5 | Low | net/crypto | Dashboard-served `token.wasm` was the **pre-T2** (vulnerable) build; only the test copy had been recompiled | **Fixed** ✅ |
+| P6 | Low | crypto | `SparseMerkleTree.verify` still threw on a wrong-length sibling/key/valueHash → light-client crash (residual L3) | **Fixed** ✅ |
+| P7 | Low | codec | Single-object `BlockCodec`/`HeaderCodec` `decode` accepted trailing bytes (latent malleability, L2) | **Fixed** ✅ |
+| P8 | Low | codec | Codec uncle bound (128) was 64× the consensus max (2) → decode-accepted header/block bloat (L7) | **Fixed** ✅ (→16) |
+| P9 | Low | contracts | `pair`/`amm` swap updated reserves with unchecked `+` → silent `u64` wrap corrupts the pool at extremes (residual T4) | **Fixed** ✅ (recompiled) |
+
+**Documented (verified real, deliberately not changed this pass — deployment
+trade-offs or template redesigns):** net F1 `/submit` runs one memory-hard hash
+per structurally-valid bad-PoW block on the consensus lock (already mitigated by
+cheap pre-checks + rate weight; a full fix offloads the hash to a worker thread);
+net F2 CSRF guard is `Origin==Host` only, so DNS-rebinding defeats it (needs a
+Host-header allowlist — an operator/deployment call); net F3 `/headers` still
+buffers its window server-side (mirror the `/sync` streaming fix); net F4 SSRF
+posture derives from the advertised `selfUrl` rather than the actual bind
+address; vm F3 module reparse+validate on a `MODULE_CACHE` miss is unmetered
+(price it by code length); crypto F4 SMT `load` does not re-hash the node blob
+(content-addressed, defence-in-depth only); template **T1** front-runnable
+`init` (needs a deploy-time constructor / deployer binding in the host ABI),
+**T3** no swap slippage/`min_out` (ABI change), **T4** `pair` mints no LP shares
+& `launchpad` has no proceeds-withdraw (LP/ABI redesign).
+
+### P1 — Mempool-poisoning block-production halt (High, liveness)
+
+**Files:** `blockchain/Executor.java` (`applyBox`/`applyToken`, `executeBlock`),
+`token/DefaultTokenProcessor.java`, `box/DefaultBoxProcessor.java`.
+
+A box/token transaction whose *precondition* fails (transfer a token you hold
+none of, update/spend a box you do not own, collect a not-yet-expired box, a
+malformed payload) returned a non-SUCCESS status that made `executeBlock`
+`abort` — **rejecting the entire block**. The mempool holds no box/token state,
+so it admits such a tx, gossips it, and selects it into *every* candidate block;
+every producer then fails to build a block and the tx — never applied — is never
+evicted. One signed, zero-fee, essentially free transaction **halts block
+production network-wide, permanently.** (The same class was already fixed for the
+fresh-keypair no-op via `senderExists`; box/token preconditions were the
+unguarded remainder.)
+
+**Fix:** box/token precondition failures now **soft-revert**, exactly like a
+contract revert (Ethereum-style): the block stays valid, the fee is still charged
+and the nonce consumed, only the state change is skipped — so the poisonous tx is
+*minable*, its nonce advances, and it clears the pool instead of jamming it. Three
+properties make this consensus-safe: (a) the token processor's transfer path was
+reordered to compute the recipient credit (with its overflow check) *before*
+staging the debit, so `run()` never partially stages on failure; (b) the box
+processor now emits a zero-delta receipt for *every* box tx so `rollbackBlock`'s
+per-box-tx receipt walk stays aligned across a reorg (the C2 aliasing class);
+(c) the residual affordability failures stay hard errors — the mempool's
+cumulative-balance selection makes them unreachable in an honestly-produced
+block, so they only signal a malicious block, which is correctly rejected.
+Regressions: `BoxOpTest.softRevertedBoxOpKeepsRollbackReceiptsAligned`, updated
+soft-revert assertions across `BoxOpTest`/`TokenOpTest`.
+
+### P2 — Uncapped aggregate WASM table allocation (High, fork + DoS; residual H4)
+
+**File:** `vm/WasmVm.java` (`rejectOversizedAllocations`).
+
+The H4 fix capped each table's `min` at 65 536 but bounded neither the *number*
+of tables nor their *aggregate* size. Chicory 1.7.5 validates no table count and
+allocates each table's backing arrays eagerly at instantiation, before the gas
+listener runs — so a ≤256 KiB module declaring ~50 000 tables of 65 536 entries
+forces tens of GB of unmetered allocation on every `CALL`: an OOM crash on
+small-heap nodes and a **consensus fork** against large-heap nodes (the exact
+heap-dependent class H2/H4 target).
+
+**Fix:** cap the table count (`MAX_TABLES=16`) and the summed initial entries
+across all tables (`MAX_TOTAL_TABLE_ENTRIES=65 536`), rejected at deploy — the
+eager table allocation is now a small fixed network constant, heap-independent,
+like `TREE_MAX_PAGES` for linear memory. Regression:
+`WasmVmTest.rejectsModuleWhoseTablesAggregateOverTheCap`.
+
+### P3 / P4 — Header-sync reorg gate & restore (Medium)
+
+**Files:** `blockchain/HeaderChain.java`, `blockchain/HeaderSynchronizer.java`,
+`blockchain/ChainSynchronizer.java`.
+
+The M4 anti-DoS fix (compare *PoW-verified base* work only at the pre-pop gate)
+had been applied to `ChainSynchronizer`, used only as a `/headers`-less fallback.
+The live path, `HeaderSynchronizer`, still summed **committed-but-unverified**
+uncle work on both sides of the gate: an attacker pads each header with
+`maxUnclesPerBlock` same-difficulty fake uncles, inflating a cheap branch's
+claimed work ~3× and passing the gate with ~⅓ honest work, forcing a deep
+pop/restore that only fails later at body-level uncle validation. **Fix:**
+`HeaderChain.validate` still checks uncles structurally but returns **base-only**
+work; `HeaderSynchronizer.localWorkAboveFork` drops its uncle sum — both gates now
+compare like PoW-verified work with like, while genuine uncle work still decides
+true fork choice via `totalWork` once bodies validate. Regression:
+`HeaderChainTest.committedUncleWorkDoesNotInflateTheReorgGateWork`.
+
+P4: both `restore()` routines re-applied the saved local branch with
+`addBlock(...)` while discarding the result. Re-adding a just-canonical block can
+fail if an attacker floods the bounded orphan pool to evict an uncle it
+references, silently truncating the node's own chain. **Fix:** `restore` now
+throws on a non-SUCCESS re-add (fail-loud → resync), instead of continuing in a
+silently-shorter state.
+
+---
+
+*The third-pass report follows.*
+
 # Rhizome — Blockchain Security & Exploit Audit (third pass)
 
 **Date:** 2026-07-21 · **Scope:** whole tree (`lib-core`, `lib-vm`, `lib-crypto`,

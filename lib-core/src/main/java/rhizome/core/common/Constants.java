@@ -27,9 +27,11 @@ public final class Constants {
      * loose anti-DoS guard (an attacker-controlled 4-byte count must not size a
      * multi-GB list). Consensus enforces the real, per-network {@code maxUnclesPerBlock}
      * (2) later; this only stops the decode-time OOM and is set comfortably above any
-     * plausible parameter.
+     * plausible parameter. Kept small (8×) over the consensus max so a peer cannot pad a
+     * header/block on the /headers and /sync streams with dozens of soon-to-be-rejected uncle
+     * records — a decode-accepted bloat amplifier — while still leaving headroom (audit L7).
      */
-    public static final int MAX_UNCLES_PER_BLOCK = 128;
+    public static final int MAX_UNCLES_PER_BLOCK = 16;
     /** Max serialized block size (4 MiB): fits a full transfer block and bounds contract payloads. */
     public static final int MAX_BLOCK_SIZE_BYTES = 4 * 1024 * 1024;
     public static final int PUFFERFISH_START_BLOCK = 124500;

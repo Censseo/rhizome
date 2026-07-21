@@ -99,15 +99,19 @@ public final class DefaultTokenProcessor implements TokenProcessor {
         if (from.equals(to)) {
             return new TokenResult(SUCCESS, id);
         }
-        // Debit first, into the session, then read-back-and-credit, so the two writes are always
-        // computed from up-to-date session state (defence in depth against the same aliasing bug).
-        setBalance(id, from, fromBal - payload.amount());
+        // Compute the recipient's new balance (with its overflow check) BEFORE staging any write,
+        // so a failing transfer leaves the session completely untouched. This atomicity is
+        // load-bearing: the executor soft-reverts a failed token op and keeps the block valid
+        // (Ethereum-style), which would silently commit a partial debit if run() staged before
+        // failing (audit: mempool-poisoning block-production halt). from != to here, so the debit
+        // and credit keys differ and reading the recipient pre-debit is safe.
         long toBal;
         try {
             toBal = Math.addExact(getBalance(id, to), payload.amount());
         } catch (ArithmeticException e) {
             return TokenResult.fail(INVALID_TRANSACTION_AMOUNT);
         }
+        setBalance(id, from, fromBal - payload.amount());
         setBalance(id, to, toBal);
         event(from, "token.transferred", id);
         return new TokenResult(SUCCESS, id);

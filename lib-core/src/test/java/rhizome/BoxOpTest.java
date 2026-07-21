@@ -135,10 +135,16 @@ class BoxOpTest {
     }
 
     @Test
-    void createRejectsValueBelowDustFloor() {
+    void createBelowDustFloorSoftRevertsAndKeepsBlockValid() {
         // A box with one 8-byte register serializes to 82 (header) + 11 = 93 bytes; min value = 93.
-        assertEquals(ExecutionStatus.BOX_VALUE_TOO_LOW,
+        // A box precondition failure is a soft revert (Ethereum-style): the block stays valid, no
+        // box is created and the would-be locked value is not debited. Aborting the block instead
+        // would let a bad box op poison the mempool and halt production network-wide (audit).
+        long before = ledger.getWalletValue(sender).amount();
+        assertEquals(ExecutionStatus.SUCCESS,
             execute(block(2, coinbase(2), create(10, 0, BoxRegister.i64(1)))));
+        assertNull(boxes.getCommitted(Box.deriveId(sender, 0))); // not created
+        assertEquals(before, ledger.getWalletValue(sender).amount()); // nothing locked
     }
 
     @Test
@@ -201,7 +207,11 @@ class BoxOpTest {
             .kind(TransactionKind.BOX_UPDATE).data(BoxPayload.encodeUpdate(id, List.of()))
             .build();
         tx.sign(otherPriv);
-        assertEquals(ExecutionStatus.BOX_NOT_OWNER, execute(block(3, coinbase(3), tx)));
+        // Soft revert: a non-owner update does not invalidate the block; the box is left untouched.
+        assertEquals(ExecutionStatus.SUCCESS, execute(block(3, coinbase(3), tx)));
+        Box box = boxes.getCommitted(id);
+        assertEquals(sender, box.owner());   // ownership unchanged
+        assertEquals(5000, box.value());     // value unchanged
     }
 
     // ---- spend ----
@@ -219,11 +229,15 @@ class BoxOpTest {
     // ---- rent collection ----
 
     @Test
-    void collectRejectedBeforeExpiry() {
+    void collectBeforeExpirySoftRevertsAndKeepsBlockValid() {
         assertEquals(ExecutionStatus.SUCCESS, execute(block(2, coinbase(2), create(5000, 0))));
         byte[] id = Box.deriveId(sender, 0);
         // storagePeriod = 10; at height 11 the box (rentPaid=2) is only 9 blocks old.
-        assertEquals(ExecutionStatus.BOX_NOT_EXPIRED, execute(block(11, coinbase(11), collect(id))));
+        // Soft revert: collecting a not-yet-expired box is a no-op, not a block-invalidating error.
+        assertEquals(ExecutionStatus.SUCCESS, execute(block(11, coinbase(11), collect(id))));
+        Box box = boxes.getCommitted(id);
+        assertEquals(5000, box.value());        // no rent taken
+        assertEquals(2, box.rentPaidHeight());  // rent clock untouched
     }
 
     @Test
@@ -294,6 +308,30 @@ class BoxOpTest {
 
         assertNull(boxes.getCommitted(id));                          // box gone
         assertEquals(ledgerBefore, ledger.getWalletValue(sender).amount()); // value returned
+    }
+
+    @Test
+    void softRevertedBoxOpKeepsRollbackReceiptsAligned() {
+        // Regression for the mempool-poisoning-halt fix: a soft-reverted box op must still emit a
+        // (0,0) receipt so rollbackBlock consumes exactly one box receipt per box tx in reverse.
+        // Here a failing op (create below the dust floor) precedes a successful one; if the failure
+        // emitted no receipt, the reverse walk would misalign and corrupt the reorg (C2 class).
+        long ledgerBefore = ledger.getWalletValue(sender).amount();
+        Transaction failing = create(10, 0, BoxRegister.i64(1)); // BOX_VALUE_TOO_LOW -> soft revert
+        Transaction ok = create(5000, 1, BoxRegister.string("data")); // succeeds
+        Block b = block(2, coinbase(2), failing, ok);
+        assertEquals(ExecutionStatus.SUCCESS, execute(b));
+
+        assertNull(boxes.getCommitted(Box.deriveId(sender, 0))); // failing op created nothing
+        byte[] okId = Box.deriveId(sender, 1);
+        assertNotNull(boxes.getCommitted(okId));
+        assertEquals(ledgerBefore - 5000, ledger.getWalletValue(sender).amount()); // only the good lock
+
+        Executor.rollbackBlock(b, ledger, null, boxes, 2, params);
+        boxes.revertBlock(2);
+
+        assertNull(boxes.getCommitted(okId));                              // fully reverted
+        assertEquals(ledgerBefore, ledger.getWalletValue(sender).amount()); // exact inverse
     }
 
     /** Sum of all ledger balances plus all box values — the invariant collateral. */

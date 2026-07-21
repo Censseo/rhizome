@@ -108,10 +108,16 @@ fn swap(caller: &[u8; ADDR_LEN], amount_in: u64, in_prefix: u8, out_prefix: u8,
     let out = amount_out(amount_in, reserve_in, reserve_out);
     if out == 0 || out >= reserve_out { return; }
 
-    write_u64(&bal_key(in_prefix, caller), bal_in - amount_in);
+    // Compute the credited balance and reserve with overflow checks BEFORE any write, so an
+    // overflow is a clean no-op return rather than a silent u64 wrap that corrupts the pool in a
+    // #![no_std] release build (audit T4). bal_in >= amount_in and out < reserve_out are checked
+    // above, so the two subtractions cannot underflow.
     let bal_out = read_u64(&bal_key(out_prefix, caller));
-    write_u64(&bal_key(out_prefix, caller), bal_out + out);
-    write_u64(res_in_key, reserve_in + amount_in);
+    let new_bal_out = match bal_out.checked_add(out) { Some(v) => v, None => return };
+    let new_res_in = match reserve_in.checked_add(amount_in) { Some(v) => v, None => return };
+    write_u64(&bal_key(in_prefix, caller), bal_in - amount_in);
+    write_u64(&bal_key(out_prefix, caller), new_bal_out);
+    write_u64(res_in_key, new_res_in);
     write_u64(res_out_key, reserve_out - out);
 
     // log: caller(25) || amount_in(8) || amount_out(8)

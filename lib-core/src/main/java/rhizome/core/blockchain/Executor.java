@@ -399,15 +399,24 @@ public final class Executor {
     /**
      * Runs one native-token transaction. The token processor validates and stages the
      * token-state change (no ledger effect); this method moves only the fee to the miner.
-     * A non-SUCCESS token status invalidates the block.
+     *
+     * <p>A token-op <em>precondition</em> failure (unknown token, insufficient token balance, …)
+     * is a soft revert, Ethereum-style: it does <em>not</em> invalidate the block. The processor
+     * staged nothing ({@code run()} is failure-atomic), so the fee is still charged and the nonce
+     * consumed, and only the token-state change is skipped. This is essential for liveness: the
+     * mempool cannot check token preconditions (it holds no token state), so a tx transferring a
+     * token the sender holds none of is admitted and selected into every candidate block. If it
+     * aborted the block it would never be mined, never clear, and halt production network-wide —
+     * a free, permanent poisoning DoS. The remaining affordability failures stay hard errors: the
+     * mempool's cumulative-balance selection makes them unreachable in an honestly-produced block,
+     * so they only arise in a malicious block, which must be rejected.
      */
     private static ExecutionStatus applyToken(TransactionImpl tx, Ledger ledger, List<AppliedOp> applied,
                                               PublicAddress miner, TokenProcessor tokenProcessor, long height) {
-        TokenProcessor.TokenResult result =
-            tokenProcessor.run(tx.kind(), tx.from(), tx.to(), tx.nonce(), tx.data(), height);
-        if (!result.success()) {
-            return result.status();
-        }
+        // Success stages the token change; a precondition failure stages nothing. Either way the
+        // only ledger effect is the fee below, so the block stays valid and revertToken (which
+        // reverts exactly the fee) is an exact inverse in both cases.
+        tokenProcessor.run(tx.kind(), tx.from(), tx.to(), tx.nonce(), tx.data(), height);
         long fee = tx.fee().amount();
         if (fee > 0) {
             if (!ledger.hasWallet(tx.from())) {
@@ -426,8 +435,17 @@ public final class Executor {
      * Runs one box transaction. The box processor validates and stages the box-state
      * change (no ledger access); this method then moves value: the fee to the miner,
      * the locked value out of the sender (CREATE/UPDATE) or the released value back to
-     * the sender (SPEND/COLLECT). Unlike a contract revert, a non-SUCCESS box status
-     * invalidates the block.
+     * the sender (SPEND/COLLECT).
+     *
+     * <p>Like a contract revert (and {@link #applyToken}), a box-op <em>precondition</em> failure
+     * — wrong owner, missing/expired box, dust floor, malformed payload — is a soft revert that
+     * does <em>not</em> invalidate the block: the box state and the value lock/release are skipped
+     * and only the fee moves. The processor emitted a zero-delta receipt so the per-box-tx receipt
+     * walk in {@code rollbackBlock} stays aligned. Aborting the block here would let anyone poison
+     * the mempool with a box op on a box they do not own and halt production network-wide (audit:
+     * mempool-poisoning halt). The affordability failures stay hard errors — unreachable in an
+     * honestly-produced block (the mempool selects within the sender's confirmed balance), so they
+     * signal a malicious block that must be rejected.
      */
     private static ExecutionStatus applyBox(TransactionImpl tx, Ledger ledger, List<AppliedOp> applied,
                                             PublicAddress miner, BoxProcessor boxProcessor, long height) {
@@ -436,7 +454,17 @@ public final class Executor {
         BoxProcessor.BoxResult result =
             boxProcessor.run(tx.kind(), tx.from(), tx.to(), amount, tx.nonce(), tx.data(), height);
         if (!result.success()) {
-            return result.status();
+            if (fee > 0) {
+                if (!ledger.hasWallet(tx.from())) {
+                    return SENDER_DOES_NOT_EXIST;
+                }
+                if (ledger.getWalletValue(tx.from()).amount() < fee) {
+                    return BALANCE_TOO_LOW;
+                }
+                withdraw(ledger, applied, tx.from(), new TransactionAmount(fee));
+                deposit(ledger, applied, miner, new TransactionAmount(fee));
+            }
+            return SUCCESS;
         }
         long debit;
         try {

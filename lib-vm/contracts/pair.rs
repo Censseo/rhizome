@@ -172,7 +172,10 @@ fn swap(caller: &[u8; ADDR_LEN], own: &[u8; ADDR_LEN], amount_in: u64,
     let token_out = read_token(out_token_key);
     pull(&token_in, caller, own, amount_in);
     pay(&token_out, caller, out);
-    write_u64(in_res_key, reserve_in + amount_in);
+    // checked_add on the incoming reserve, matching add_liquidity: a #![no_std] release build wraps
+    // silently on overflow, which would corrupt the reserve and break the pool invariant at extreme
+    // values. out < reserve_out is guaranteed above, so the subtraction cannot underflow (audit T4).
+    write_u64(in_res_key, reserve_in.checked_add(amount_in).unwrap_or_else(|| fail()));
     write_u64(out_res_key, reserve_out - out);
 
     // log: caller(25) || amount_in(8) || amount_out(8)

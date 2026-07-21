@@ -242,7 +242,16 @@ public final class ChainSynchronizer {
             engine.popBlock();
         }
         for (Block block : localBranch) {
-            engine.addBlock(block);
+            ExecutionStatus status = engine.addBlock(block);
+            if (status != ExecutionStatus.SUCCESS) {
+                // Re-adding a just-canonical block must succeed; a failure (e.g. an orphan-pool
+                // eviction knocking out a referenced uncle after a forced failed reorg) would
+                // silently leave the node permanently shorter. Fail loud so a full resync recovers
+                // the suffix instead of continuing truncated (audit: restore self-truncation).
+                throw new IllegalStateException("failed to restore local branch at "
+                    + ((BlockImpl) block).id() + " after a rejected reorg: " + status
+                    + " — a full resync is required");
+            }
         }
     }
 }

@@ -171,6 +171,25 @@ class HeaderChainTest {
     }
 
     @Test
+    void committedUncleWorkDoesNotInflateTheReorgGateWork() {
+        // M4 (header-sync path): a header's committed uncles cannot be confirmed as real, pooled,
+        // eligible orphans without the bodies, so their claimed work must NOT count toward the work
+        // total the reorg gate compares. Otherwise an attacker pads a cheap branch with same-
+        // difficulty fake uncles, inflating its claimed work and forcing a deep pop/restore with a
+        // fraction of honest work. A structurally-valid uncle is still accepted (branch validates),
+        // but the reported work stays base-only.
+        for (int i = 0; i < 7; i++) mineOnEngine();
+        int diff = engine.headerAt(7).difficulty();
+        // One structurally-valid uncle at the maximum allowed difficulty (= the header's own): the
+        // most an attacker could claim. Old code counted it and doubled the header's work.
+        UncleRef u = new UncleRef(SHA256Hash.random(), diff, PublicAddress.random());
+        BlockHeader padded = mineHeader(7, engine.headerAt(6).hash(), diff, clock.get() + 1000, List.of(u));
+        HeaderChain.Result r = HeaderChain.validate(params, engine::headerAt, 6, List.of(padded), clock.get() + 10_000);
+        assertTrue(r.valid(), "a structurally-valid uncle must not reject the branch, got " + r.rejection());
+        assertEquals(BigInteger.TWO.pow(diff), r.work()); // base only — NOT 2^diff + 2^diff
+    }
+
+    @Test
     void rejectsMalformedUncleReferences() {
         for (int i = 0; i < 7; i++) mineOnEngine();
         int diff = engine.headerAt(7).difficulty();

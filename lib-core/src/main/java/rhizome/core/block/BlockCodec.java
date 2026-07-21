@@ -49,7 +49,15 @@ public final class BlockCodec {
     }
 
     public static Block decode(byte[] bytes) {
-        return decode(ByteBuffer.wrap(bytes));
+        ByteBuffer buffer = ByteBuffer.wrap(bytes);
+        Block block = decode(buffer);
+        // A single-object decode must consume the whole buffer: trailing bytes mean two distinct
+        // wire encodings map to the same block, a malleability source for any code that keys on raw
+        // stored bytes (audit L2). decodeAll uses the streaming decode(ByteBuffer) and is exempt.
+        if (buffer.hasRemaining()) {
+            throw new IllegalArgumentException("trailing bytes after block: " + buffer.remaining());
+        }
+        return block;
     }
 
     private static Block decode(ByteBuffer buffer) {

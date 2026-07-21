@@ -186,10 +186,12 @@ class NodeApiTest {
         HttpResponse sync = call(HttpRequest.get("http://x/sync?start=2&end=3").build());
         assertEquals(200, sync.getCode());
         byte[] bytes = sync.getBody().getArray();
-        var buffer = java.nio.ByteBuffer.wrap(bytes);
-        Block b2 = BlockCodec.decode(java.util.Arrays.copyOfRange(bytes, 0, bytes.length));
-        assertEquals(2, ((BlockImpl) b2).id());
-        assertTrue(bytes.length > 0);
+        // /sync streams a window of concatenated blocks: decode it with decodeAll. (The single-object
+        // BlockCodec.decode now rejects trailing bytes, so it must not be used on a multi-block body.)
+        var blocks = BlockCodec.decodeAll(bytes);
+        assertEquals(2, blocks.size());
+        assertEquals(2, ((BlockImpl) blocks.get(0)).id());
+        assertEquals(3, ((BlockImpl) blocks.get(1)).id());
     }
 
     @Test

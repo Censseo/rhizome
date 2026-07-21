@@ -51,6 +51,16 @@ class CodecBoundsTest {
     }
 
     @Test
+    void rejectsTrailingBytesAfterHeader() {
+        // Single-object decode must consume the whole buffer: a valid header with one extra byte is
+        // a non-canonical wire form and must be rejected, not silently accepted (audit L2).
+        byte[] wellFormed = header(0, 0, null);
+        byte[] withTrailer = java.util.Arrays.copyOf(wellFormed, wellFormed.length + 1);
+        assertDoesNotThrow(() -> HeaderCodec.decode(wellFormed));
+        assertThrows(IllegalArgumentException.class, () -> HeaderCodec.decode(withTrailer));
+    }
+
+    @Test
     void rejectsHugeUncleCount() {
         assertThrows(IllegalArgumentException.class, () -> HeaderCodec.decode(header(0, Integer.MAX_VALUE, null)));
         assertThrows(IllegalArgumentException.class, () -> HeaderCodec.decode(header(0, -1, null)));

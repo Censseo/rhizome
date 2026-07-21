@@ -85,6 +85,20 @@ public final class WasmVm {
     static final long MAX_TABLE_ENTRIES = 65_536;
 
     /**
+     * Hard cap on the number of table sections in a module, and on the SUM of every table's initial
+     * entry count. The per-table {@link #MAX_TABLE_ENTRIES} cap alone is insufficient: a WASM module
+     * may declare arbitrarily many tables (Chicory validates no count), each eagerly allocated at
+     * instantiation, so ~50 000 tables of 65 536 entries each (a few RLE bytes apiece, well under
+     * {@link #MAX_CODE_SIZE}) force tens of GB of unmetered, heap-dependent allocation on every CALL
+     * — a repeatable OOM crash and a consensus fork between large- and small-heap nodes (audit H4,
+     * residual). Bounding the count and the aggregate makes the eager table allocation a small fixed
+     * network constant, exactly like {@link #TREE_MAX_PAGES} does for linear memory. The bundled
+     * templates declare a single tiny table.
+     */
+    static final int MAX_TABLES = 16;
+    static final long MAX_TOTAL_TABLE_ENTRIES = 65_536;
+
+    /**
      * Hard cap on a function's local-variable count (defence in depth). Chicory already rejects
      * &gt; 50 000 locals at parse, but the interpreter allocates a locals array per activation, so a
      * deep recursion of a high-locals function still spikes heap; this tighter bound keeps that
@@ -413,13 +427,28 @@ public final class WasmVm {
     private static void rejectOversizedAllocations(WasmModule module) {
         var tables = module.tableSection();
         if (tables != null) {
-            for (int i = 0; i < tables.tableCount(); i++) {
+            int tableCount = tables.tableCount();
+            // Cap the number of tables: each is eagerly allocated at instantiation, so an unbounded
+            // count is an unmetered, heap-dependent allocation vector on its own (audit H4 residual).
+            if (tableCount > MAX_TABLES) {
+                throw new IllegalArgumentException("contract declares too many tables: "
+                    + tableCount + " (max " + MAX_TABLES + ")");
+            }
+            long totalEntries = 0;
+            for (int i = 0; i < tableCount; i++) {
                 // Only the initial (min) count is allocated eagerly at instantiation; table.grow is
                 // metered by its operand (see meter), so a large max ceiling is already priced.
                 long initial = tables.getTable(i).limits().min();
                 if (initial > MAX_TABLE_ENTRIES) {
                     throw new IllegalArgumentException("contract declares too large a table: "
                         + initial + " entries (max " + MAX_TABLE_ENTRIES + ")");
+                }
+                totalEntries += initial;
+                // Bound the AGGREGATE across all tables, not just each one: many mid-size tables sum
+                // to the same multi-GB eager allocation a single oversized table would (audit H4).
+                if (totalEntries > MAX_TOTAL_TABLE_ENTRIES) {
+                    throw new IllegalArgumentException("contract declares too many total table entries: "
+                        + totalEntries + " (max " + MAX_TOTAL_TABLE_ENTRIES + ")");
                 }
             }
         }

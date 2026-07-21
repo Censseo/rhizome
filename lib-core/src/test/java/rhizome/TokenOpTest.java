@@ -130,17 +130,26 @@ class TokenOpTest {
     }
 
     @Test
-    void transferRejectsInsufficientBalance() {
+    void transferOnShortBalanceSoftRevertsAndKeepsBlockValid() {
+        // A token op whose precondition fails is a soft revert (Ethereum-style): the block stays
+        // valid and the token state is untouched. The mempool cannot see token balances, so a tx
+        // spending more than it holds would otherwise abort every candidate block forever — a free
+        // production halt (audit: mempool-poisoning halt). The overspend must simply not apply.
         execute(block(2, coinbase(2), mint(100, 0)));
         byte[] id = TokenMeta.deriveId(sender, 0);
-        assertEquals(ExecutionStatus.TOKEN_INSUFFICIENT_BALANCE,
+        assertEquals(ExecutionStatus.SUCCESS,
             execute(block(3, coinbase(3), transfer(id, bob, 101, 1))));
+        assertEquals(100, tokens.balance(id, sender.toBytes()));
+        assertEquals(0, tokens.balance(id, bob.toBytes()));
     }
 
     @Test
-    void transferRejectsUnknownToken() {
-        assertEquals(ExecutionStatus.TOKEN_NOT_FOUND,
+    void transferOfUnknownTokenSoftRevertsAndKeepsBlockValid() {
+        // Same anti-poisoning rule: transferring a token that does not exist does not invalidate
+        // the block; it is a no-op that still consumes the sender's nonce so it clears the pool.
+        assertEquals(ExecutionStatus.SUCCESS,
             execute(block(2, coinbase(2), transfer(new byte[32], bob, 1, 0))));
+        assertEquals(0, tokens.balance(new byte[32], bob.toBytes()));
     }
 
     @Test
