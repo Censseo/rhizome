@@ -183,6 +183,13 @@ public class Crypto {
         if (challengeSize <= 0) {
             return false;
         }
+        // The hash is 32 bytes (256 bits); a challenge past that can never be satisfied and,
+        // read literally, indexes past the array. Adversarial blocks can carry any difficulty
+        // int, and registerOrphan/uncleEligible call verifyNonce before bounding the high side,
+        // so fail closed instead of throwing an AIOOBE the caller must catch (audit).
+        if (challengeSize > 256) {
+            return false;
+        }
         byte[] a = hash.hash().getArray();
         int bytes = challengeSize / 8;
         for (int i = 0; i < bytes; i++) {

@@ -73,6 +73,12 @@ public final class HeaderCodec {
         int id = buffer.getInt();
         long timestamp = buffer.getLong();
         int difficulty = buffer.getInt();
+        // Bound the header's own difficulty at decode (matches uncleDifficulty below): it feeds
+        // checkLeadingZeroBits and BigInteger.TWO.pow in the header-work sums, so an unbounded or
+        // negative wire int would reach those as an index overrun or a huge allocation (audit).
+        if (difficulty < 0 || difficulty > rhizome.core.common.Constants.MAX_DIFFICULTY) {
+            throw new IllegalArgumentException("difficulty out of range: " + difficulty);
+        }
         int numTransactions = buffer.getInt();
         SHA256Hash lastBlockHash = SHA256Hash.of(BinaryIO.getFixed(buffer, SHA256Hash.SIZE));
         SHA256Hash merkleRoot = SHA256Hash.of(BinaryIO.getFixed(buffer, SHA256Hash.SIZE));

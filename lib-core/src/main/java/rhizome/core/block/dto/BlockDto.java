@@ -83,6 +83,13 @@ public class BlockDto implements BinarySerializable {
         int id = buffer.getInt();
         long timestamp = buffer.getLong();
         int difficulty = buffer.getInt();
+        // Bound the block's own difficulty at decode, like uncleDifficulty already is: it feeds
+        // checkLeadingZeroBits (challenge past 256 bits) and BigInteger.TWO.pow(difficulty) in the
+        // work sums, so an unbounded/negative wire int would otherwise reach those as an
+        // out-of-range index or an astronomically large allocation (audit).
+        if (difficulty < 0 || difficulty > rhizome.core.common.Constants.MAX_DIFFICULTY) {
+            throw new IllegalArgumentException("difficulty out of range: " + difficulty);
+        }
         int numTransactions = buffer.getInt();
         // Bound the attacker-controlled count BEFORE any caller pre-sizes a collection
         // from it (BlockCodec did `new ArrayList<>(numTransactions)`): a raw wire int of

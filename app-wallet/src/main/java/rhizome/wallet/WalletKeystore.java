@@ -31,6 +31,9 @@ final class WalletKeystore {
     // files sealed at the old count (audit L4). A memory-hard KDF (scrypt/argon2id) would be
     // stronger still and is the recommended follow-up.
     private static final int ITERATIONS = 600_000;
+    /** Accepted range for a file-supplied iteration count, so a tampered "iter" cannot wedge decrypt. */
+    private static final int MIN_ITERATIONS = 100_000;
+    private static final int MAX_ITERATIONS = 10_000_000;
     private static final int SALT_LEN = 16;
     private static final int IV_LEN = 12;
     private static final int KEY_BITS = 256;
@@ -72,6 +75,12 @@ final class WalletKeystore {
         try {
             JSONObject o = new JSONObject(envelope);
             int iterations = o.optInt("iter", ITERATIONS);
+            // The count comes from the file. Reject an out-of-range value instead of feeding it to
+            // PBKDF2, where a hostile "iter" (e.g. 2 billion) would hang load() for minutes — a
+            // local lock-out on the very shared-host/backup threat the keystore defends (audit).
+            if (iterations < MIN_ITERATIONS || iterations > MAX_ITERATIONS) {
+                throw new IllegalStateException("wallet keystore iteration count out of range: " + iterations);
+            }
             Base64.Decoder b64 = Base64.getDecoder();
             byte[] salt = b64.decode(o.getString("salt"));
             byte[] iv = b64.decode(o.getString("iv"));

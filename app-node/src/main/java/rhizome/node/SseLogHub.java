@@ -32,9 +32,14 @@ final class SseLogHub {
     /** Queued chunks per subscriber before it is considered too slow and dropped. */
     private static final int SUBSCRIBER_BUFFER = 256;
 
+    /** Concurrent streams one client key (IP / IPv6 /64) may hold, so one host cannot deny the rest. */
+    private static final int MAX_SUBSCRIBERS_PER_CLIENT = 4;
+
     private final Eventloop eventloop;
     private final int maxSubscribers;
-    private final List<ChannelBuffer<ByteBuf>> subscribers = new ArrayList<>();
+    private final List<Subscriber> subscribers = new ArrayList<>();
+
+    private record Subscriber(String clientKey, ChannelBuffer<ByteBuf> buffer) {}
 
     SseLogHub(Eventloop eventloop, int maxSubscribers) {
         this.eventloop = eventloop;
@@ -42,15 +47,27 @@ final class SseLogHub {
     }
 
     /**
-     * Registers a new SSE subscriber. Must be called on the event loop (servlet
-     * handlers are). Returns {@code null} when the subscriber cap is reached.
+     * Registers a new SSE subscriber for {@code clientKey}. Must be called on the event loop
+     * (servlet handlers are). Returns {@code null} when the global cap is reached, or when this
+     * client already holds {@link #MAX_SUBSCRIBERS_PER_CLIENT} streams — without the per-client
+     * cap, one IP could open every slot (each a cost-1 request) and deny the live feed to everyone
+     * else (audit).
      */
-    ChannelSupplier<ByteBuf> subscribe() {
+    ChannelSupplier<ByteBuf> subscribe(String clientKey) {
         if (subscribers.size() >= maxSubscribers) {
             return null;
         }
+        int mine = 0;
+        for (Subscriber s : subscribers) {
+            if (s.clientKey().equals(clientKey)) {
+                mine++;
+            }
+        }
+        if (mine >= MAX_SUBSCRIBERS_PER_CLIENT) {
+            return null;
+        }
         ChannelBuffer<ByteBuf> buffer = new ChannelBuffer<>(SUBSCRIBER_BUFFER);
-        subscribers.add(buffer);
+        subscribers.add(new Subscriber(clientKey, buffer));
         // An immediate comment so the client sees headers and first bytes at once.
         buffer.put(chunk(": connected\nretry: 2000\n\n"));
         return buffer.getSupplier();
@@ -75,9 +92,9 @@ final class SseLogHub {
             return;
         }
         String payload = format(height, logs);
-        Iterator<ChannelBuffer<ByteBuf>> it = subscribers.iterator();
+        Iterator<Subscriber> it = subscribers.iterator();
         while (it.hasNext()) {
-            ChannelBuffer<ByteBuf> buffer = it.next();
+            ChannelBuffer<ByteBuf> buffer = it.next().buffer();
             if (buffer.getException() != null) {
                 it.remove(); // connection already closed by the client
                 continue;

@@ -42,6 +42,7 @@ class MemPoolTest {
         final Map<PublicAddress, Long> balances = new HashMap<>();
         public long confirmedNextNonce(PublicAddress s) { return nonces.getOrDefault(s, 0L); }
         public long confirmedBalance(PublicAddress s) { return balances.getOrDefault(s, 0L); }
+        public boolean senderExists(PublicAddress s) { return balances.containsKey(s); }
     }
 
     @BeforeEach
@@ -143,6 +144,23 @@ class MemPoolTest {
         // Each fits alone (100 <= 150), but together 100+100 > 150.
         assertEquals(ExecutionStatus.SUCCESS, mempool.addTransaction(send(100, 0, 0)));
         assertEquals(ExecutionStatus.BALANCE_TOO_LOW, mempool.addTransaction(send(100, 0, 1)));
+    }
+
+    @Test
+    void rejectsAndNeverSelectsTransactionFromNonexistentSender() {
+        // Regression: a free signed no-op (amount 0, fee 0) from a fresh unfunded keypair used to
+        // be admitted and selected into every candidate block, get the block rejected at execution
+        // (SENDER_DOES_NOT_EXIST), never be purged, and halt production network-wide.
+        var freshPair = generateKeyPair();
+        var freshKey = PublicKey.of(freshPair.getPublic());
+        var freshPriv = new PrivateKey((Ed25519PrivateKeyParameters) freshPair.getPrivate());
+        var freshAddr = PublicAddress.of(freshKey);
+        Transaction poison = Transaction.of(freshAddr, PublicAddress.random(), new TransactionAmount(0),
+            freshKey, new TransactionAmount(0), 1000L, params.chainId(), 0);
+        poison.sign(freshPriv);
+        assertEquals(ExecutionStatus.SENDER_DOES_NOT_EXIST, mempool.addTransaction(poison));
+        assertEquals(0, mempool.size());
+        assertEquals(0, mempool.getTransactionsForBlock(10).size());
     }
 
     @Test

@@ -92,13 +92,22 @@ public final class DefaultTokenProcessor implements TokenProcessor {
         if (fromBal < payload.amount()) {
             return TokenResult.fail(TOKEN_INSUFFICIENT_BALANCE);
         }
+        // A self-transfer is a no-op. Handling it explicitly is not just an optimisation: the
+        // debit-then-credit sequence below shares one balance key when from == to, and computing
+        // the credit from a pre-debit read would blind-overwrite the debit and MINT the amount
+        // (final balance = B + amount). See audit: token self-transfer counterfeiting.
+        if (from.equals(to)) {
+            return new TokenResult(SUCCESS, id);
+        }
+        // Debit first, into the session, then read-back-and-credit, so the two writes are always
+        // computed from up-to-date session state (defence in depth against the same aliasing bug).
+        setBalance(id, from, fromBal - payload.amount());
         long toBal;
         try {
             toBal = Math.addExact(getBalance(id, to), payload.amount());
         } catch (ArithmeticException e) {
             return TokenResult.fail(INVALID_TRANSACTION_AMOUNT);
         }
-        setBalance(id, from, fromBal - payload.amount());
         setBalance(id, to, toBal);
         event(from, "token.transferred", id);
         return new TokenResult(SUCCESS, id);

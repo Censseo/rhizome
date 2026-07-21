@@ -396,3 +396,84 @@ Ces classes d'attaque ont été explicitement recherchées et trouvées **correc
 
 *Le fil rouge des deux findings sérieux de consensus (C1, H2) est unique : **la difficulté d'oncle n'est
 jamais validée contre le consensus**. Le corriger à une seule règle partagée ferme les deux.*
+
+---
+---
+
+# Deuxième passe d'audit — vérification des correctifs + nouveaux findings + durcissement
+
+**Date :** 2026-07-21 (seconde passe)
+**Méthode :** re-revue adverse de l'intégralité du dépôt par six sous-audits parallèles (consensus/PoW,
+VM WASM, P2P/réseau, crypto/sérialisation/Merkle, API/dashboard/wallet, persistance/mempool/tokens), avec
+double objectif : (1) **vérifier dans le code réel** que les correctifs C1–C2, H1–H5, M1–M5, L1–L15 tiennent,
+et (2) **trouver ce que la première passe a manqué**. Chaque finding ci-dessous a été confirmé exploitable et
+atteignable depuis une entrée réseau, puis corrigé. **Tous les correctifs de cette passe sont accompagnés de
+tests de régression ; suite complète verte.**
+
+> **Résultat de la vérification.** La grande majorité des correctifs antérieurs **tiennent** (C2, H1–H5,
+> M1, M3–M5, L1–L14, et les résultats négatifs). **Trois se sont révélés incomplets** — C1 (résidu critique),
+> H3 (offload non borné) et M2 (endpoints les plus lourds non pondérés) — et **cinq vulnérabilités nouvelles**
+> ont été découvertes, dont **deux critiques directement atteignables par transaction** (contrefaçon de token,
+> arrêt de production). Toutes corrigées sur `claude/security-audit-hardening-vo5b9g`.
+
+## Résumé — nouveaux findings de la 2e passe
+
+| # | Sévérité | Titre | Zone | Statut |
+|---|----------|-------|------|--------|
+| **N1** | 🔴 Critique | **Résidu C1** — récompense d'oncle forfaitaire ⇒ ~2× d'inflation (oncle à `minDifficulty` sur chaîne à haute difficulté) | Consensus | ✅ Corrigé |
+| **N2** | 🔴 Critique | **Contrefaçon de token** — l'auto-transfert (`to==from`) écrase le débit et double le solde | Tokens | ✅ Corrigé |
+| **N3** | 🟠 Élevée | **Arrêt de production** — une tx no-op signée d'un compte inexistant (frais 0) fige le minage réseau | Mempool | ✅ Corrigé |
+| **N4** | 🟠 Élevée | **Résidu C2** — cap de profondeur WASM par-instance, réinitialisé à chaque `call_contract` (fork de pile réintroduit) | VM | ✅ Corrigé |
+| **N5** | 🟠 Élevée | **Résidu M2** — `/sync` & `/headers` (les plus lourds, jusqu'à ~800 MiB bufferisés) non pondérés dans le rate-limiter | API/P2P | ✅ Corrigé |
+| **N6** | 🟡 Moyenne | **Résidu H3** — l'offload DNS d'`/add_peer` sur file mono-thread **non bornée, sans dédup** ⇒ OOM + famine d'admission | P2P | ✅ Corrigé |
+| **N7** | ⚪ Faible | Difficulté propre du bloc/en-tête **non bornée au décodage** ⇒ AIOOBE dans `checkLeadingZeroBits`, `pow(2^31)` | Codec/PoW | ✅ Corrigé |
+| **N8** | ⚪ Faible | `uncleWorkByHeight` croît sans borne (fuite d'état dérivé) | Consensus | ✅ Corrigé |
+| **N9** | ⚪ Faible | Pool SSE global sans cap par IP ⇒ une IP prive tout le monde du flux live | API | ✅ Corrigé |
+| **N10** | ⚪ Faible | `WalletKeystore` fait confiance à un champ `iter` non borné ⇒ DoS local (PBKDF2 bloque des minutes) | Wallet | ✅ Corrigé |
+| **N11** | ⚪ Faible | `PublicKey.of(String)` n'aligne pas la clé tout-zéro sur `empty()` (divergence JSON/binaire du binding) | Crypto | ✅ Corrigé |
+| **N12** | ⚪ Faible | `table.copy`/`table.init` WASM non tarifés (O(N) au prix de 1 gas) | VM | ✅ Corrigé |
+| **I6** | ℹ️ Info | `lib-crypto` (module mort) épinglait toujours BouncyCastle **1.76** (CVE-2024-30172) — signalé par tout scanner | Deps | ✅ Corrigé (1.78.1) |
+| **I7** | ℹ️ Info | CI livrée en `.example` (inerte) ; le workflow n'est jamais exécuté par GitHub | Infra | ⚠️ Reste à activer par un mainteneur (permission `workflows`) |
+| **I8** | ℹ️ Info | Régression du correctif M2 : le dashboard demandait `depth=2000` alors que le cap est passé à 1000 (boutons en 400) | Dashboard | ✅ Corrigé |
+
+**Non implémentés (recommandations de suivi, plus structurels)** : cap déterministe de taille de table WASM à
+l'instanciation et **budget mémoire linéaire agrégé sur tout l'arbre d'appel** (N-VM : le cap mémoire de 64 MiB
+est par-instance, donc une chaîne de 8 `call_contract` peut allouer ~512 MiB ⇒ fork OOM asymétrique) ; **service
+des blocs/headers et dry-run VM hors event-loop en streaming** (le buffering intégral et l'exécution WASM
+`/call_readonly` jusqu'à 50 M gas restent sur la loop — la pondération N5 borne le *débit* mais pas le
+*par-requête*) ; **chiffrement wallet par défaut** + passphrase lue depuis fichier/prompt plutôt que variable
+d'env (résidu L4) ; tarification gas du parse par taille de code (résidu H4 sur cache-miss).
+
+## Détail des critiques
+
+### 🔴 N1 — Résidu C1 : récompense d'oncle forfaitaire ⇒ ~2× d'inflation
+
+Le correctif C1 a bien fermé le chemin travail-nul (difficulté 0 rejetée, `registerOrphan` plancher
+`minDifficulty`, `checkLeadingZeroBits(≤0)=false`), **mais la récompense est restée forfaitaire** (`miningReward/2`
+par oncle) avec une éligibilité `[minDifficulty, nephewDifficulty]`. Sur un réseau vivant, la difficulté réelle
+dépasse vite `minDifficulty` (16) ; un mineur attache alors à un vrai bloc à haute difficulté des oncles à
+difficulté 16 (~2^16 hachages) et empoche une demi-récompense chacun — **~2× d'émission** pour un travail
+négligeable, reproduisant l'impact économique de C1.
+**Correctif** (`Executor.payUncleRewards` + `scaleRewardToWork`) : récompense **proportionnelle au travail
+prouvé** via un décalage entier `reward >> (nephewDifficulty − uncleDifficulty)` — un oncle de même difficulté
+garde la pleine récompense (donc aucun changement pour les oncles légitimes), chaque bit de difficulté manquant
+la divise par deux, un oncle très sous-difficulté rapporte 0. Entier pur ⇒ déterministe entre nœuds.
+
+### 🔴 N2 — Contrefaçon de token par auto-transfert
+
+`DefaultTokenProcessor.transfer` calculait le crédit destinataire à partir du solde **avant** débit, puis
+écrasait le débit. Quand `to == from` (même clé de solde), le solde final devenait `B + montant` : un
+`TOKEN_TRANSFER` vers soi-même de tout son solde **doublait** le solde à chaque appel, quasi gratuitement,
+brisant l'invariant `Σ soldes == totalSupply` — contrefaçon illimitée de l'actif.
+**Correctif** : `from.equals(to)` traité en no-op explicite, et pour le cas général débit d'abord puis relecture
+avant crédit. Test de régression `TokenOpTest.selfTransferIsNoOpAndDoesNotMint`.
+
+### 🟠 N3 — Arrêt de production par transaction empoisonnée
+
+Le mempool admettait une transaction no-op signée (`amount=0, fee=0`) d'un **compte inexistant** (le check de
+solde cumulé `0 > 0` est faux, la clé n'existe pas). Sélectionnée dans chaque bloc candidat, elle faisait rejeter
+tout le bloc à l'exécution (`SENDER_DOES_NOT_EXIST`), n'était jamais purgée (pas de TTL), et **figeait la
+production de blocs sur tout le réseau** — plus saturation du pool par clés jetables gratuites.
+**Correctif** : `AccountView.senderExists` (miroir du check de l'Executor), appliqué à l'**admission** et à la
+**sélection** dans `MemPool`. Aucune transaction de valeur légitime n'est perdue (toute tx déplaçant de la valeur
+d'un émetteur non financé échouait déjà au check de solde). Test `MemPoolTest.rejectsAndNeverSelects…`.

@@ -118,6 +118,18 @@ class TokenOpTest {
     }
 
     @Test
+    void selfTransferIsNoOpAndDoesNotMint() {
+        // Regression: a self-transfer aliases the debit and credit keys; computing the credit from
+        // the pre-debit balance used to blind-overwrite the debit and DOUBLE the balance (token
+        // counterfeiting). Sending the full balance to yourself must leave supply and balance intact.
+        execute(block(2, coinbase(2), mint(1_000, 0)));
+        byte[] id = TokenMeta.deriveId(sender, 0);
+        assertEquals(ExecutionStatus.SUCCESS, execute(block(3, coinbase(3), transfer(id, sender, 1_000, 1))));
+        assertEquals(1_000, tokens.balance(id, sender.toBytes()));
+        assertEquals(1_000, tokens.meta(id).totalSupply());
+    }
+
+    @Test
     void transferRejectsInsufficientBalance() {
         execute(block(2, coinbase(2), mint(100, 0)));
         byte[] id = TokenMeta.deriveId(sender, 0);

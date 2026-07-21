@@ -514,8 +514,8 @@ async function renderTxDetail(txid) {
     } catch (e) {
       zone.replaceChildren(el('div', { class: 'card' },
         el('p', { class: 'bad' }, String(e)),
-        depth < 2000 ? el('button', { class: 'secondary', onclick: () => load(2000) },
-          'Chercher plus profond (2000 blocs)') : null));
+        depth < 1000 ? el('button', { class: 'secondary', onclick: () => load(1000) },
+          'Chercher plus profond (1000 blocs)') : null));
     }
   }
   load(250);
@@ -549,7 +549,7 @@ async function renderAddressDetail(address) {
     const histZone = el('div', { class: 'card' }, el('h3', null, 'Historique (scan borné)'),
       el('p', { class: 'muted' }, 'Chargement…'));
     $view.append(histZone);
-    const hist = await api('/address_txs?address=' + address + '&depth=2000');
+    const hist = await api('/address_txs?address=' + address + '&depth=1000');
     histZone.replaceChildren(el('h3', null, 'Historique'),
       el('p', { class: 'muted' }, 'Scan des blocs ' + hist.scannedFrom + ' à ' + hist.scannedTo +
         ' — ' + hist.transactions.length + ' transaction(s) trouvée(s).'),

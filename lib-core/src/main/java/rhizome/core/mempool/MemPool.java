@@ -141,6 +141,13 @@ public final class MemPool {
             }
 
             PublicAddress from = tx.from();
+            // Sender must have a confirmed wallet, exactly as the block executor requires
+            // (SENDER_DOES_NOT_EXIST). Without this, a free signed no-op (amount 0, fee 0)
+            // from a fresh keypair is admitted, selected into every candidate block, gets the
+            // block rejected at execution, is never purged, and halts production network-wide.
+            if (!accounts.senderExists(from)) {
+                return SENDER_DOES_NOT_EXIST;
+            }
             long confirmedNonce = accounts.confirmedNextNonce(from);
             if (tx.nonce() < confirmedNonce) {
                 return INVALID_TRANSACTION_NONCE; // already spent
@@ -195,6 +202,9 @@ public final class MemPool {
             for (PublicAddress sender : senders) {
                 if (selected.size() >= maxTransactions) {
                     break;
+                }
+                if (!accounts.senderExists(sender)) {
+                    continue; // never select an unexecutable sender (see addTransaction)
                 }
                 NavigableMap<Long, Transaction> pending = bySender.get(sender);
                 long nonce = accounts.confirmedNextNonce(sender);
