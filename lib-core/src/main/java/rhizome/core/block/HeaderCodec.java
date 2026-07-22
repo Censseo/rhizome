@@ -95,6 +95,13 @@ public final class HeaderCodec {
             throw new IllegalArgumentException("numTransactions out of range: " + numTransactions);
         }
         int vote = buffer.getInt();
+        // Canonical votes are 0 (abstain) or ±paramId for the two votable params (VoteableParams:
+        // STORAGE_FEE_FACTOR=1, MIN_VALUE_PER_BYTE=2). Reject anything else at decode so an unbounded
+        // wire int never reaches the vote tally or the header preimage (audit V6e). Long abs so
+        // Integer.MIN_VALUE (whose int abs stays negative) is handled.
+        if (Math.abs((long) vote) > 2) {
+            throw new IllegalArgumentException("vote out of range: " + vote);
+        }
         int numUncles = buffer.getInt();
         // Bound the uncle count before pre-sizing the list — `new ArrayList<>(0x7FFFFFFF)`
         // is a one-header remote OOM on the /headers sync path otherwise.

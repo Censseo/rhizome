@@ -61,7 +61,17 @@ public final class HeaderSynchronizer {
     }
 
     private ChainSynchronizer.Result headersFirstSync(PeerSource peer) {
-        long forkHeight = findCommonAncestor(peer); // first call touches peer.headers → may fall back
+        long forkHeight;
+        try {
+            forkHeight = findCommonAncestor(peer); // first call touches peer.headers → may fall back
+        } catch (UnsupportedOperationException headersUnsupported) {
+            throw headersUnsupported; // peer lacks /headers: let syncFrom fall back to full blocks
+        } catch (RuntimeException e) {
+            // A peer that throws or returns an empty/garbage response while we probe for the common
+            // ancestor is invalid, exactly like the fetch phases below — it must not propagate out of
+            // the sync pass (audit V6c). (UnsupportedOperationException is re-thrown above.)
+            return ChainSynchronizer.Result.PEER_INVALID;
+        }
         if (forkHeight < GenesisBlock.GENESIS_ID) {
             return ChainSynchronizer.Result.INCOMPATIBLE; // genesis mismatch: different network
         }
@@ -236,18 +246,20 @@ public final class HeaderSynchronizer {
             engine.popBlock();
         }
         for (Block block : localBranch) {
-            ExecutionStatus status = engine.addBlock(block);
+            // restoreBlock trusts our own already-validated uncle refs instead of re-checking them
+            // against the orphan pool: an attacker who flooded the pool with fresh siblings to evict a
+            // referenced uncle, then forced this failed reorg, can no longer turn it into a forced full
+            // resync (audit V5). Uncle work/rewards derive from the committed refs, so restoration is
+            // exact. Any other failure remains a genuine invariant breach and still fails loud below.
+            ExecutionStatus status = engine.restoreBlock(block);
             if (status != ExecutionStatus.SUCCESS) {
-                // Re-adding a block that was canonical moments ago must succeed. A failure means an
-                // uncle it references was evicted from the (bounded) orphan pool — e.g. an attacker
-                // flooded the pool with fresh siblings to knock it out, then forced this failed
-                // reorg — so validateUncles now rejects our own block. Swallowing the failure would
-                // leave the node permanently shorter than it started, silently (audit: restore
-                // self-truncation). Fail loud instead so it is caught and a full resync recovers the
-                // suffix, rather than continuing in a silently-truncated state.
+                // Re-adding a block that was canonical moments ago must otherwise succeed. Swallowing a
+                // failure would leave the node permanently shorter than it started, silently (audit:
+                // restore self-truncation). Fail loud instead so it is caught and a full resync
+                // recovers the suffix, rather than continuing in a silently-truncated state.
                 throw new IllegalStateException("failed to restore local branch at "
                     + ((BlockImpl) block).id() + " after a rejected reorg: " + status
-                    + " — orphan pool likely evicted a referenced uncle; a full resync is required");
+                    + " — a full resync is required");
             }
         }
     }

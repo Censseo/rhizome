@@ -117,7 +117,11 @@ public final class BlockCodec {
             throws java.io.IOException {
         List<Block> blocks = new ArrayList<>();
         byte[] carry = new byte[0];
-        final int chunk = 64 * 1024;
+        // Read in large chunks: a trailing partial block is re-decoded from its start on every append,
+        // so a peer dribbling a near-maxBlockBytes block forces O(blockSize²/chunk) parse work. A 512
+        // KiB chunk (vs 64 KiB) cuts that constant ~8×, keeping the quadratic tail negligible against
+        // the maxBlockBytes/maxBlocks ceilings while peak memory stays one block plus one chunk (V6b).
+        final int chunk = 512 * 1024;
         while (true) {
             // Try to decode as many complete blocks as the carry currently holds.
             ByteBuffer buffer = ByteBuffer.wrap(carry);

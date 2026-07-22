@@ -92,6 +92,36 @@ class BlockUnclesTest {
     }
 
     @Test
+    void restoreBlockRecoversANephewWhoseUncleIsMissingFromThePool() {
+        // audit V5: the restore half of a rejected reorg must re-add our own canonical block even when
+        // the bounded orphan pool no longer holds a referenced uncle — a hostile peer can spray cheap
+        // siblings to evict it, then force the failed reorg, turning a lost race into a forced full
+        // resync. A second engine that shares the chain prefix but never saw the orphan stands in for
+        // that churned pool: addBlock rejects the nephew (uncle unknown) but restoreBlock trusts the
+        // committed refs (work and rewards derive from them) and recovers it.
+        engine.addBlock(mineNext(List.of()));                 // height 2
+        BlockImpl orphan = registerOrphanSiblingOfTip();      // orphan sibling at height 2
+        PublicAddress uncleMiner = ((TransactionImpl) orphan.transactions().get(0)).to();
+        BlockImpl nephew = mineNext(List.of(ref(orphan)));    // height 3 referencing the orphan
+        assertEquals(ExecutionStatus.SUCCESS, engine.addBlock(nephew));
+
+        InMemoryLedger bLedger = new InMemoryLedger();
+        ChainEngine b = ChainEngine.init(params, bLedger, new InMemoryChainStore(),
+            new LedgerSnapshot("t", 0, params.chainId()), null, clock::get);
+        assertEquals(ExecutionStatus.SUCCESS, b.addBlock(engine.blockAt(2))); // replay the shared prefix
+
+        // The orphan was never registered on b, so full validation cannot find it...
+        assertEquals(ExecutionStatus.INVALID_UNCLES, b.addBlock(nephew));
+        // ...but restoreBlock trusts the already-validated refs and recovers the suffix.
+        assertEquals(ExecutionStatus.SUCCESS, b.restoreBlock(nephew));
+        assertEquals(3, b.height());
+        // The uncle miner was still paid from the committed reference (reward is ref-derived, not
+        // pool-derived), so the restore is exact, not a work/reward-losing shortcut.
+        assertTrue(balanceOf(bLedger, uncleMiner) > 0L,
+            "uncle reward must be applied from the committed reference on restore");
+    }
+
+    @Test
     void unclesCommitToTheHashAndRoundTripThroughTheCodec() {
         UncleRef u = new UncleRef(SHA256Hash.random(), 5, PublicAddress.random());
         BlockImpl withUncle = mineNext(List.of(u));

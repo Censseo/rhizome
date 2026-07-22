@@ -101,6 +101,21 @@ class HeaderChainTest {
     }
 
     @Test
+    void rejectsBranchThatViolatesACheckpointInTheHeaderGate() {
+        // audit V6d: a base-heavier branch diverging at a checkpointed height must be refused by the
+        // header gate itself, before any local pop — not only later in ChainEngine.addBlock. The
+        // engine mines with no checkpoints; validation then runs under params that pin height 8 to a
+        // hash the branch does not carry, so the gate rejects at height 8.
+        for (int i = 0; i < 11; i++) mineOnEngine(); // heights 2..12
+        List<BlockHeader> candidates = headers(7, 12);
+        NetworkParameters pinned = params.toBuilder()
+            .checkpoints(java.util.Map.of(8L, SHA256Hash.random())).build();
+        HeaderChain.Result r = HeaderChain.validate(pinned, engine::headerAt, 6, candidates, clock.get());
+        assertEquals(HeaderChain.Rejection.CHECKPOINT_MISMATCH, r.rejection());
+        assertEquals(8, r.rejectedHeight());
+    }
+
+    @Test
     void rejectsDiscontinuousId() {
         for (int i = 0; i < 7; i++) mineOnEngine(); // heights 2..8
         List<BlockHeader> candidates = headers(8, 8); // starts at 8, but fork+1 = 7

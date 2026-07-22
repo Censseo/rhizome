@@ -39,7 +39,8 @@ public final class HeaderChain {
         TIMESTAMP_TOO_OLD,
         TIMESTAMP_TOO_CLOSE,
         TIMESTAMP_IN_FUTURE,
-        INVALID_UNCLES
+        INVALID_UNCLES,
+        CHECKPOINT_MISMATCH
     }
 
     public record Result(boolean valid, Rejection rejection, long rejectedHeight, BigInteger work) {
@@ -89,6 +90,15 @@ public final class HeaderChain {
             }
             if (!header.lastBlockHash().equals(prevHash)) {
                 return Result.reject(Rejection.BROKEN_CHAIN, h);
+            }
+            // Enforce static checkpoints in the header gate too, not only in ChainEngine.addBlock: a
+            // base-heavier branch diverging at/below a checkpointed height would otherwise pass the
+            // gate, drive a pop of local blocks, and only be rejected block-by-block on the way back —
+            // an attacker-extractable pop/restore cycle. Rejecting here short-circuits it before any
+            // local mutation (audit V6d). (Mainnet ships an empty checkpoint map, so this is latent.)
+            SHA256Hash checkpoint = params.checkpoints().get(h);
+            if (checkpoint != null && !header.hash().equals(checkpoint)) {
+                return Result.reject(Rejection.CHECKPOINT_MISMATCH, h);
             }
             if (header.difficulty() != expectedDifficulty) {
                 return Result.reject(Rejection.WRONG_DIFFICULTY, h);

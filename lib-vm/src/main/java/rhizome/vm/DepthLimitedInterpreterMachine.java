@@ -53,6 +53,18 @@ final class DepthLimitedInterpreterMachine extends InterpreterMachine {
      */
     private static final ThreadLocal<int[]> TREE_DEPTH = ThreadLocal.withInitial(() -> new int[1]);
 
+    /**
+     * Locals currently live across every activation on this thread's call tree. Each interpreter
+     * frame allocates {@code (params+locals)}-sized arrays, and depth alone ({@link
+     * #MAX_WASM_CALL_DEPTH}) times {@link WasmVm#MAX_FUNCTION_LOCALS} would hold ~160 MiB for ~1 K
+     * gas — an unmetered, heap-dependent spike that forks consensus (small-heap node OOMs → full-gas
+     * out-of-gas; large-heap node reverts → partial gas). Reserving locals against a fixed tree-wide
+     * cap makes the ceiling a deterministic network constant, mirroring {@link WasmVm}'s page budget
+     * (audit V3). The whole tree runs on one {@code rhizome-wasm} thread, so a thread-local is a
+     * correct tree-wide counter; every increment is paired with a {@code finally} decrement.
+     */
+    private static final ThreadLocal<long[]> TREE_LOCALS = ThreadLocal.withInitial(() -> new long[1]);
+
     DepthLimitedInterpreterMachine(Instance instance) {
         super(instance);
     }
@@ -65,11 +77,36 @@ final class DepthLimitedInterpreterMachine extends InterpreterMachine {
         if (depth[0] >= MAX_WASM_CALL_DEPTH) {
             throw new WasmCallDepthExceeded();
         }
+        // Reserve this activation's locals against the tree-wide budget before the frame allocates
+        // them, so a locals-heavy recursion is bounded to a deterministic ceiling on every node
+        // rather than OOM-ing memory-constrained validators at a host-specific depth (audit V3).
+        long frameLocals = localCount(instance, funcId);
+        long[] locals = TREE_LOCALS.get();
+        if (locals[0] + frameLocals > WasmVm.MAX_TREE_LIVE_LOCALS) {
+            throw new WasmLocalsBudgetExceeded();
+        }
         depth[0]++;
+        locals[0] += frameLocals;
         try {
             return super.call(stack, instance, callStack, funcId, args, type, popArgs);
         } finally {
             depth[0]--;
+            locals[0] -= frameLocals;
+        }
+    }
+
+    /**
+     * Declared local count of the function {@code funcId} in {@code instance}, or 0 when it is an
+     * imported (host) function — those run as plain Java and allocate no WASM locals array, and
+     * {@code instance.function} has no body for them. Any lookup failure yields 0 (the depth cap
+     * still bounds the tree), so this can only ever add safety, never reject a legitimate call.
+     */
+    private static long localCount(Instance instance, int funcId) {
+        try {
+            var body = instance.function(funcId);
+            return body == null ? 0L : body.localTypes().size();
+        } catch (RuntimeException e) {
+            return 0L;
         }
     }
 }

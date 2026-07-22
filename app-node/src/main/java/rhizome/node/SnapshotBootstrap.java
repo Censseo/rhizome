@@ -142,7 +142,12 @@ final class SnapshotBootstrap {
             return false;
         }
 
-        // Rebuild the state tree and require root equality BEFORE seeding any store.
+        // Rebuild the state tree and require root equality BEFORE seeding any store. Chunks are held
+        // whole here deliberately: the sink writes ledger/nonce bindings through immediately, so the
+        // full set must be verified against the PoW-validated pivot root before any of it is seeded,
+        // and the seeded bytes must be the exact ones verified (no re-fetch). Bounding the peak memory
+        // would need a fully transactional, rollback-capable sink (audit V6a, accepted: the bootstrap
+        // peer is an operator-configured trusted seed, and info.chunkCount() is already bounded).
         var contracts = new ContractStateAdapter(contractStore);
         var adapter = new DomainStateAdapter(store.ledger(), store.nonceStore(), boxStore, tokenStore,
             contracts, contracts);

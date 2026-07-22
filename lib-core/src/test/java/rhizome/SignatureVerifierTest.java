@@ -80,9 +80,23 @@ class SignatureVerifierTest {
     void markVerifiedPrewarmsCache() {
         var verifier = new SignatureVerifier();
         Transaction t = signed(0);
-        verifier.markVerified(t);
+        assertTrue(verifier.markVerified(t));
         assertTrue(verifier.isCached(t));
         assertEquals(1, verifier.cacheSize());
+        verifier.shutdown();
+    }
+
+    @Test
+    void markVerifiedReVerifiesAndRefusesToPoisonTheCacheWithABadSignature() {
+        // audit V6h: markVerified must not blindly trust its caller — caching an unverified tx would
+        // make a forged signature a cache hit at block validation. A tampered tx must be rejected and
+        // never cached.
+        var verifier = new SignatureVerifier();
+        Transaction t = signed(0);
+        ((TransactionImpl) t).nonce(99); // invalidate after signing
+        assertFalse(verifier.markVerified(t));
+        assertFalse(verifier.isCached(t));
+        assertEquals(0, verifier.cacheSize());
         verifier.shutdown();
     }
 

@@ -99,12 +99,40 @@ public final class WasmVm {
     static final long MAX_TOTAL_TABLE_ENTRIES = 65_536;
 
     /**
-     * Hard cap on a function's local-variable count (defence in depth). Chicory already rejects
-     * &gt; 50 000 locals at parse, but the interpreter allocates a locals array per activation, so a
-     * deep recursion of a high-locals function still spikes heap; this tighter bound keeps that
-     * product small. Far above what a compiled Rust contract uses.
+     * Hard cap on a function's local-variable count (defence in depth). The interpreter allocates a
+     * locals array per activation, so a deep recursion of a high-locals function spikes heap; this
+     * bound keeps that product small. Far above what a compiled Rust contract uses.
+     *
+     * <p>Enforced by {@link #preScanLocals} <em>before</em> {@code Parser.parse}, and re-checked in
+     * {@link #rejectOversizedAllocations} as defence in depth — see the pre-scan for why the
+     * post-parse check alone is insufficient (audit V1).
      */
     static final int MAX_FUNCTION_LOCALS = 8_192;
+
+    /**
+     * Hard cap on the SUM of declared locals across every function body in one module. Chicory's
+     * {@code Parser} caps each local-declaration <em>group</em> at 50 000 but does NOT bound the
+     * number of groups, and it eagerly expands every group into a per-local list <em>during the
+     * parse itself</em>. So a &lt;{@link #MAX_CODE_SIZE} module can declare billions of locals
+     * (many groups, or many functions) and OOM the node inside {@code Parser.parse} — before the
+     * post-parse {@link #rejectOversizedAllocations} guard can ever run. {@link #preScanLocals}
+     * therefore bounds the aggregate directly from the raw bytes, ahead of the parse (audit V1).
+     * Generous: real templates declare a few dozen locals total.
+     */
+    static final long MAX_MODULE_TOTAL_LOCALS = 65_536;
+
+    /**
+     * Live per-activation locals summed across the whole call tree. The interpreter allocates
+     * {@code (params+locals)}-sized arrays per frame, so a function with {@link #MAX_FUNCTION_LOCALS}
+     * locals recursing to {@link DepthLimitedInterpreterMachine#MAX_WASM_CALL_DEPTH} would hold
+     * ~8 M live locals (~160 MiB) for ~1 K gas — unmetered and heap-dependent, so a small-heap node
+     * OOMs (full-gas out-of-gas) while a large-heap node reverts (partial gas): different gasUsed →
+     * consensus fork, exactly the class {@link #TREE_MAX_PAGES} closes for linear memory. This
+     * tree-wide reservation (in {@link DepthLimitedInterpreterMachine}) makes the ceiling a
+     * deterministic network constant enforced before any host OOM (audit V3). ~5 MiB worst case;
+     * far above any legitimate contract, which iterates rather than recursing thousands deep.
+     */
+    static final long MAX_TREE_LIVE_LOCALS = 262_144;
 
     /**
      * Fixed stack size (bytes) for the dedicated contract-execution thread. Large enough to hold
@@ -202,6 +230,12 @@ public final class WasmVm {
                 // stream, so gas.used() here is identical network-wide.
                 return ExecResult.reverted(gas.used(), "call depth limit exceeded");
             }
+            if (isLocalsBudgetExceeded(e)) {
+                // Deterministic locals-budget cap (audit V3): reserved before the frame allocates,
+                // as a fixed network constant, so gas.used() is identical on every node — unlike the
+                // host-heap-dependent OOM it replaces.
+                return ExecResult.reverted(gas.used(), "locals budget exceeded");
+            }
             if (isOutOfGas(e)) {
                 return ExecResult.outOfGas(gas.used());
             }
@@ -283,6 +317,15 @@ public final class WasmVm {
         return false;
     }
 
+    private static boolean isLocalsBudgetExceeded(Throwable e) {
+        for (Throwable t = e; t != null; t = t.getCause()) {
+            if (t instanceof WasmLocalsBudgetExceeded) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /** True if {@code e} is Chicory's rewrapped JVM stack overflow ("call stack exhausted"). */
     private static boolean isStackExhausted(Throwable e) {
         for (Throwable t = e; t != null; t = t.getCause()) {
@@ -334,6 +377,10 @@ public final class WasmVm {
                 return cached;
             }
         }
+        // Bound declared locals from the raw bytes BEFORE Parser.parse: the parser eagerly expands
+        // every local group into a per-local list as it reads, so an unbounded aggregate would OOM
+        // inside parse, before rejectOversizedAllocations could reject it (audit V1).
+        preScanLocals(wasmCode);
         WasmModule module = Parser.parse(wasmCode);
         rejectNonDeterministic(module);
         rejectOversizedAllocations(module);
@@ -440,7 +487,12 @@ public final class WasmVm {
         for (int i = 0; i < code.functionBodyCount(); i++) {
             for (var instruction : code.getFunctionBody(i).instructions()) {
                 String op = instruction.opcode().name().toUpperCase(java.util.Locale.ROOT);
-                if (op.startsWith("F32") || op.startsWith("F64") || op.startsWith("V128")
+                // Match the float families anywhere in the name, not just as a prefix: the
+                // integer<->float conversions (I32_TRUNC_F32_S, I64_REINTERPRET_F64, …) carry the
+                // float type in the MIDDLE of the mnemonic and slipped a startsWith("F..") filter,
+                // leaving a float value reachable on the stack (audit V6j). All WASM opcodes whose
+                // name contains F32/F64 are float ops; contracts are integer-only by construction.
+                if (op.contains("F32") || op.contains("F64") || op.startsWith("V128")
                         || op.contains("X16_") || op.contains("X8_")
                         || op.contains("X4_") || op.contains("X2_")) {
                     throw new IllegalArgumentException(
@@ -497,6 +549,105 @@ public final class WasmVm {
                 }
             }
         }
+    }
+
+    /**
+     * Bounds the locals a module declares by reading the raw WASM byte stream, BEFORE handing it to
+     * {@code Parser.parse}. This is the load-bearing half of the locals guard: Chicory's parser caps
+     * each local-declaration group at 50 000 but not the number of groups, and it materialises every
+     * group into a per-local list <em>as it parses</em> — so a &lt;{@link #MAX_CODE_SIZE} module can
+     * declare billions of locals and OOM the node inside the parse, before {@link
+     * #rejectOversizedAllocations} (which reads {@code localTypes().size()} on the already-built list)
+     * can reject it (audit V1). We mirror the WASM code-section framing exactly and reject as soon as
+     * a function's locals exceed {@link #MAX_FUNCTION_LOCALS} or the module total exceeds {@link
+     * #MAX_MODULE_TOTAL_LOCALS}. Any framing we cannot interpret is left to {@code Parser.parse},
+     * which fails closed with its own {@code MalformedException} before expanding a bad body — so this
+     * method only ever <em>adds</em> a rejection, never masks one.
+     */
+    private static void preScanLocals(byte[] code) {
+        // magic(4) + version(4); if absent, let the parser produce the canonical error.
+        if (code.length < 8) {
+            return;
+        }
+        int[] p = {8};
+        long moduleLocals = 0;
+        while (p[0] < code.length) {
+            int sectionId = code[p[0]] & 0xFF;
+            p[0]++;
+            long sectionSize = readVarU32(code, p);
+            if (sectionSize < 0) {
+                return; // truncated LEB — defer to Parser
+            }
+            int sectionStart = p[0];
+            long sectionEnd = (long) sectionStart + sectionSize;
+            if (sectionEnd > code.length) {
+                return; // declared size overruns the buffer — Parser will reject
+            }
+            if (sectionId == 10) { // Code section
+                long funcCount = readVarU32(code, p);
+                if (funcCount < 0) {
+                    return;
+                }
+                for (long f = 0; f < funcCount; f++) {
+                    long bodySize = readVarU32(code, p);
+                    if (bodySize < 0) {
+                        return;
+                    }
+                    long bodyEnd = (long) p[0] + bodySize;
+                    if (bodyEnd > sectionEnd) {
+                        return;
+                    }
+                    long groupCount = readVarU32(code, p);
+                    if (groupCount < 0) {
+                        return;
+                    }
+                    long funcLocals = 0;
+                    for (long g = 0; g < groupCount; g++) {
+                        long n = readVarU32(code, p);
+                        if (n < 0 || p[0] >= code.length) {
+                            return; // truncated locals vec — Parser rejects before expanding it
+                        }
+                        p[0]++; // valtype byte
+                        funcLocals += n;
+                        moduleLocals += n;
+                        if (funcLocals > MAX_FUNCTION_LOCALS) {
+                            throw new IllegalArgumentException("contract function declares too many locals: "
+                                + funcLocals + " (max " + MAX_FUNCTION_LOCALS + ")");
+                        }
+                        if (moduleLocals > MAX_MODULE_TOTAL_LOCALS) {
+                            throw new IllegalArgumentException("contract declares too many total locals: "
+                                + moduleLocals + " (max " + MAX_MODULE_TOTAL_LOCALS + ")");
+                        }
+                    }
+                    p[0] = (int) bodyEnd; // skip the function's expression to the next body
+                }
+                return; // one code section per module; done
+            }
+            p[0] = (int) sectionEnd; // skip non-code section
+        }
+    }
+
+    /**
+     * Reads an unsigned LEB128 uint32 at {@code p[0]}, advancing it. Returns {@code -1} (rather than
+     * throwing) on a truncated or over-long encoding so {@link #preScanLocals} can defer that module
+     * to {@code Parser.parse} for the canonical malformed-module error.
+     */
+    private static long readVarU32(byte[] data, int[] p) {
+        long result = 0;
+        int shift = 0;
+        while (shift < 35) {
+            if (p[0] >= data.length) {
+                return -1;
+            }
+            int b = data[p[0]] & 0xFF;
+            p[0]++;
+            result |= (long) (b & 0x7F) << shift;
+            if ((b & 0x80) == 0) {
+                return result & 0xFFFF_FFFFL;
+            }
+            shift += 7;
+        }
+        return -1; // more than 5 bytes — malformed
     }
 
     private static boolean isOutOfGas(Throwable e) {
