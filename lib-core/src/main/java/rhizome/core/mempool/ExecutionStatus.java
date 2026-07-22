@@ -50,5 +50,8 @@ public enum ExecutionStatus {
     TOKEN_INSUFFICIENT_BALANCE,
     // --- authenticated state ---
     INVALID_STATE_ROOT,
+    /** A /submit block was dropped without verification because the global submit-PoW budget is
+     *  exhausted — an anti-DoS shed, not a validity verdict (audit F1). */
+    SUBMIT_THROTTLED,
     SUCCESS
 }

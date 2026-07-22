@@ -156,6 +156,18 @@ class NodeApiTest {
     }
 
     @Test
+    void submitPowGateShedsBlocksOnceTheGlobalBudgetIsSpent() {
+        // A global budget of one verification per (long) window: the first /submit is verified and
+        // accepted; the second is shed as SUBMIT_THROTTLED without touching the chain — the
+        // aggregate anti-DoS cap the per-IP limiter lacks (audit F1).
+        NodeService gated = new NodeService(engine, mempool, new RateLimiter(1, 3_600_000, 1));
+        assertEquals(rhizome.core.mempool.ExecutionStatus.SUCCESS, gated.submitBlock(mineNext(List.of())));
+        long height = engine.height();
+        assertEquals(rhizome.core.mempool.ExecutionStatus.SUBMIT_THROTTLED, gated.submitBlock(mineNext(List.of())));
+        assertEquals(height, engine.height(), "a throttled submit must not extend the chain");
+    }
+
+    @Test
     void browserPostIsRefusedUnlessSameOriginWithTheCsrfHeader() throws Exception {
         var origin = io.activej.http.HttpHeaders.of("Origin");
         var marker = io.activej.http.HttpHeaders.of("X-Rhizome-Request");

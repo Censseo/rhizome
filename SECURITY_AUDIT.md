@@ -32,28 +32,45 @@ F3 a CALL that misses the module cache is now charged for the O(code) reparse +
 scan (`MODULE_PARSE_BASE/_PER_BYTE`), so cycling distinct max-size contracts can't
 force that work unpriced.
 
-**Documented (verified real, deliberately not changed — deployment trade-offs or
-diminishing returns):** net F4 SSRF posture derives from the advertised `selfUrl`
-rather than the actual bind address (an operator/deployment call); crypto F4 SMT
-`load` does not re-hash the node blob (content-addressed store, defence-in-depth
-only, hot-path cost).
+**net F1 — `/submit` memory-hard-hash DoS: verified GENUINELY exploitable, FIXED.**
+A deeper analysis confirmed the H3 mitigation only removed the *double* hash, not
+the DoS primitive: a single source IP resending one **PoW-free** crafted block
+(valid public parent hash, in-window id, garbage nonce) forces one memory-hard
+Pufferfish2 hash per submit at both `ChainEngine.addBlock` (verifyNonce last check)
+and `registerOrphan`, **synchronously on the single ActiveJ event-loop thread under
+the global consensus lock**. Measured ~25 ms/hash (~40 hashes/s/thread); the per-IP
+rate budget is ~125 submits/s and there was **no global cap**, so one IP pins the
+node's only I/O thread (and starves block production + sync on the shared lock).
+*Fix:* a process-wide single-bucket limiter (`NodeService.submitPowGate`,
+`SUBMIT_POW_MAX_PER_SEC`) bounds the **aggregate** submit-triggered PoW
+verifications/s across every IP, below loop capacity; over budget the block is shed
+(`SUBMIT_THROTTLED` → HTTP 429) *without* hashing. Safe because both call sites
+already drop non-verifying blocks (orphan admission is best-effort) and honest
+blocks still arrive via sync, which calls the engine directly and is not gated. No
+locking/threading change. Regression:
+`NodeApiTest.submitPowGateShedsBlocksOnceTheGlobalBudgetIsSpent`.
 
-**net F1 — `/submit` memory-hard-hash DoS: verified GENUINELY exploitable, fix
-recommended.** A deeper analysis confirmed the H3 mitigation only removed the
-*double* hash, not the DoS primitive: a single source IP resending one **PoW-free**
-crafted block (valid public parent hash, in-window id, garbage nonce) forces one
-memory-hard Pufferfish2 hash per submit at both `ChainEngine.addBlock` (verifyNonce
-last check) and `registerOrphan`, **synchronously on the single ActiveJ event-loop
-thread under the global consensus lock**. Measured ~25 ms/hash (~40 hashes/s/thread);
-the per-IP rate budget is ~125 submits/s and there is **no global cap**, so one IP
-pins the node's only I/O thread (and starves block production + sync on the shared
-lock). *Recommended minimal fix (low risk):* a process-wide token bucket bounding
-**aggregate** submit-triggered PoW verifications/second (below loop capacity),
-dropping the block when exhausted — semantically safe because both call sites
-already drop non-verifying blocks (orphan admission is best-effort; a rejected
-addBlock is already a non-accept), with no locking/threading change. Offloading the
-hash to a worker is a larger follow-up (needs tip-revalidation after the off-lock
-hash) and is not required to close the DoS.
+**net F4 — SSRF posture keyed off `selfUrl`: verified real, FIX RECOMMENDED (low
+risk).** `blockPrivatePeers` is derived from whether the *advertised* `selfUrl` is
+loopback (`RhizomeNode.java:125-129`), but the node always binds `0.0.0.0` and
+`/add_peer` is unauthenticated. So an exposed **testnet/custom-net** node left at the
+default (loopback) advertise URL runs with the SSRF host filter + DNS-pin rejection
+**off** — any network-reachable party (not just a browser) can add a
+`169.254.169.254`/RFC1918 peer, which `syncRound` then GETs. (Mainnet is safe by
+default; the SSRF is *blind* with fixed paths, so moderate, not credential-grade.)
+*Minimal fix:* derive `blockPrivatePeers` from an explicit opt-out
+(`!RHIZOME_ALLOW_PRIVATE_PEERS`) rather than `selfUrl` — secure-by-default; seed
+peers (`RHIZOME_PEERS`) bypass the filter so configured devnets are unaffected.
+
+**crypto F4 — SMT `load` does not re-hash the node blob: verified, LEAVE DOCUMENTED.**
+Not remotely triggerable — the node store is content-addressed and written only by
+the node from validated state; snap-sync rebuilds locally and gates on the
+PoW-committed root, so no untrusted `(hash, blob)` reaches `load`. On genuine local
+corruption the impact is availability-only (wrong root → the node diverges/halts, or
+a proof that fails the light client's stateless `verify` — never a forged-yet-accepted
+proof). The one-line `sha256(node)==hash` guard is safe but sits on the per-key/
+per-block hot path; add it only in a dedicated corruption-hardening pass (or gate it
+to the `prove`-serving path) rather than paying it unconditionally on block apply.
 
 ### Contract-template redesigns (T1, T3, T4) — now fixed
 

@@ -999,7 +999,11 @@ public final class NodeApi {
     }
 
     private static HttpResponse statusResponse(ExecutionStatus status) {
-        int code = status == ExecutionStatus.SUCCESS ? 200 : 400;
+        int code = switch (status) {
+            case SUCCESS -> 200;
+            case SUBMIT_THROTTLED -> 429; // anti-DoS shed, not a validity error — tell the peer to retry
+            default -> 400;
+        };
         return HttpResponse.ofCode(code)
             .withJson(new JSONObject().put("status", status.name()).toString())
             .build();
