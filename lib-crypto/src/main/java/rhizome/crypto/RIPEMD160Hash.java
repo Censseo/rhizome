@@ -1,9 +1,8 @@
-package rhizome.core.crypto;
+package rhizome.crypto;
 
-import io.activej.bytebuf.ByteBuf;
-import rhizome.core.common.SimpleHashType;
+import java.util.Arrays;
 
-public record RIPEMD160Hash(ByteBuf hash) implements SimpleHashType {
+public record RIPEMD160Hash(byte[] hash) implements SimpleHashType {
     public static RIPEMD160Hash empty() {
         return new RIPEMD160Hash(SimpleHashType.empty(SIZE));
     }
@@ -17,7 +16,12 @@ public record RIPEMD160Hash(ByteBuf hash) implements SimpleHashType {
         if (!(other instanceof RIPEMD160Hash)) {
             return false;
         }
-        return hash.isContentEqual(((RIPEMD160Hash) other).hash());
+        return Arrays.equals(hash, ((RIPEMD160Hash) other).hash());
+    }
+
+    @Override
+    public int hashCode() {
+        return Arrays.hashCode(hash);
     }
 
     public static final int SIZE = 20;
@@ -28,6 +32,6 @@ public record RIPEMD160Hash(ByteBuf hash) implements SimpleHashType {
 
     @Override
     public byte[] toBytes() {
-        return hash.getArray();
+        return hash;
     }
 }

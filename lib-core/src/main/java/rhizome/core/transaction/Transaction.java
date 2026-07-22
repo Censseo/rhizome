@@ -2,9 +2,9 @@ package rhizome.core.transaction;
 
 import org.json.JSONObject;
 
-import rhizome.core.crypto.PrivateKey;
-import rhizome.core.crypto.PublicKey;
-import rhizome.core.crypto.SHA256Hash;
+import rhizome.crypto.PrivateKey;
+import rhizome.crypto.PublicKey;
+import rhizome.crypto.SHA256Hash;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.serialization.Serializable;
 import rhizome.core.transaction.dto.TransactionDto;

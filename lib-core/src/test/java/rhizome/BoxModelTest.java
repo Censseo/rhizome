@@ -136,7 +136,7 @@ class BoxModelTest {
         var transfer = rhizome.core.transaction.TransactionImpl.builder()
             .from(owner).to(PublicAddress.random())
             .amount(new rhizome.core.transaction.TransactionAmount(1))
-            .signingKey(rhizome.core.crypto.PublicKey.empty())
+            .signingKey(rhizome.crypto.PublicKey.empty())
             .build();
         int size = transfer.serialize().getSize();
         assertEquals(rhizome.core.transaction.dto.TransactionDto.FIXED_SIZE + 1, size);

@@ -3,7 +3,7 @@ package rhizome.persistence;
 import org.iq80.leveldb.*;
 import rhizome.core.transaction.Transaction;
 import rhizome.persistence.leveldb.LevelDBDataStore;
-import rhizome.core.crypto.SHA256Hash;
+import rhizome.crypto.SHA256Hash;
 import rhizome.core.ledger.LedgerException;
 
 import java.nio.ByteBuffer;

@@ -1,0 +1,14 @@
+plugins {
+    id 'java-library'
+}
+
+dependencies {
+    // Peer transport exchanges lib-core domain types (Block, BlockHeader,
+    // SHA256Hash) and implements its PeerSource abstraction.
+    api project(':lib-core')
+
+    implementation "org.json:json:${jsonVersion}"
+
+    implementation "org.slf4j:slf4j-api:${slf4jVersion}"
+    testRuntimeOnly "ch.qos.logback:logback-classic:${logbackVersion}"
+}

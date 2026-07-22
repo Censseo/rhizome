@@ -1,5 +1,8 @@
 package rhizome.node;
 
+import rhizome.net.PeerRegistry;
+import rhizome.net.RateLimiter;
+
 import java.util.ArrayList;
 import java.util.List;
 

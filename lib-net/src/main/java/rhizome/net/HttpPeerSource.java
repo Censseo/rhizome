@@ -1,4 +1,4 @@
-package rhizome.node;
+package rhizome.net;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -20,7 +20,7 @@ import rhizome.core.block.BlockCodec;
 import rhizome.core.block.BlockHeader;
 import rhizome.core.block.HeaderCodec;
 import rhizome.core.blockchain.PeerSource;
-import rhizome.core.crypto.SHA256Hash;
+import rhizome.crypto.SHA256Hash;
 
 /**
  * {@link PeerSource} over a peer's HTTP node API, using the blocking JDK client

@@ -8,14 +8,14 @@ import org.json.JSONObject;
 import lombok.Builder;
 import lombok.Data;
 import lombok.experimental.Accessors;
-import rhizome.core.crypto.PrivateKey;
-import rhizome.core.crypto.PublicKey;
-import rhizome.core.crypto.SHA256Hash;
+import rhizome.crypto.PrivateKey;
+import rhizome.crypto.PublicKey;
+import rhizome.crypto.SHA256Hash;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.transaction.dto.TransactionDto;
 
-import static rhizome.core.common.Crypto.signWithPrivateKey;
-import static rhizome.core.common.Crypto.checkSignature;
+import static rhizome.crypto.Crypto.signWithPrivateKey;
+import static rhizome.crypto.Crypto.checkSignature;
 import static rhizome.core.common.Utils.intToBytes;
 import static rhizome.core.common.Utils.longToBytes;
 
@@ -122,9 +122,9 @@ public final class TransactionImpl implements Transaction, Comparable<Transactio
         var digest = new SHA256Digest();
         var sha256Hash = new byte[SHA256Hash.SIZE];
 
-        digest.update(to.address().getArray(), 0, to.address().readRemaining());
+        digest.update(to.toBytes(), 0, to.toBytes().length);
         if (!isTransactionFee) {
-            digest.update(from.address().getArray(), 0, from.address().readRemaining());
+            digest.update(from.toBytes(), 0, from.toBytes().length);
         }
         digest.update(longToBytes(fee.amount()), 0, 8);
         digest.update(longToBytes(amount.amount()), 0, 8);

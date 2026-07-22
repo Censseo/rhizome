@@ -1,11 +1,10 @@
-package rhizome.core.crypto;
+package rhizome.crypto;
 
 import org.bouncycastle.crypto.params.AsymmetricKeyParameter;
 import org.bouncycastle.crypto.params.Ed25519PublicKeyParameters;
-import rhizome.core.common.SimpleHashType;
 
-import static rhizome.core.common.Utils.bytesToHex;
-import static rhizome.core.common.Utils.hexStringToByteArray;
+import static rhizome.crypto.Hex.bytesToHex;
+import static rhizome.crypto.Hex.hexStringToByteArray;
 
 import java.util.Optional;
 

@@ -3,14 +3,14 @@ package rhizome;
 import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters;
 import org.junit.jupiter.api.Test;
 
-import rhizome.core.crypto.PrivateKey;
+import rhizome.crypto.PrivateKey;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.transaction.TransactionSignature;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
-import static rhizome.core.common.Crypto.signWithPrivateKey;
+import static rhizome.crypto.Crypto.signWithPrivateKey;
 import static rhizome.core.common.Utils.bytesToHex;
 import static rhizome.core.common.Utils.hexStringToByteArray;
 

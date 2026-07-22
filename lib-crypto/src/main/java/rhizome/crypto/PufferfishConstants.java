@@ -1,4 +1,4 @@
-package rhizome.core.common;
+package rhizome.crypto;
 
 /**
  * Sizing constants for the Pufferfish2 encoded-hash buffer, matching the

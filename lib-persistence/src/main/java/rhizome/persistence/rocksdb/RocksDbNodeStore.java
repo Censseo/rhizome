@@ -20,7 +20,7 @@ import rhizome.core.block.BlockHeader;
 import rhizome.core.block.BlockImpl;
 import rhizome.core.block.HeaderCodec;
 import rhizome.core.blockchain.ChainStore;
-import rhizome.core.crypto.SHA256Hash;
+import rhizome.crypto.SHA256Hash;
 import rhizome.core.ledger.Ledger;
 import rhizome.core.ledger.LedgerException;
 import rhizome.persistence.PersistenceException;

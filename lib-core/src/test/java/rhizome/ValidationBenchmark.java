@@ -6,13 +6,13 @@ import java.util.List;
 import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters;
 import org.junit.jupiter.api.Test;
 
-import rhizome.core.crypto.PrivateKey;
-import rhizome.core.crypto.PublicKey;
+import rhizome.crypto.PrivateKey;
+import rhizome.crypto.PublicKey;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.transaction.Transaction;
 import rhizome.core.transaction.TransactionAmount;
 
-import static rhizome.core.common.Crypto.generateKeyPair;
+import static rhizome.crypto.Crypto.generateKeyPair;
 
 /**
  * Not a correctness test — a rough throughput probe for the validation hot path.

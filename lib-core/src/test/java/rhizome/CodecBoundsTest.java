@@ -13,7 +13,7 @@ import rhizome.core.block.HeaderCodec;
 import rhizome.core.block.UncleRef;
 import rhizome.core.block.dto.BlockDto;
 import rhizome.core.common.Constants;
-import rhizome.core.crypto.SHA256Hash;
+import rhizome.crypto.SHA256Hash;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.merkletree.MerkleTree;
 import rhizome.core.transaction.Transaction;

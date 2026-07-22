@@ -1,13 +1,11 @@
-package rhizome.core.crypto;
+package rhizome.crypto;
 
 import java.util.Arrays;
-import io.activej.bytebuf.ByteBuf;
-import rhizome.core.common.SimpleHashType;
 
-import static rhizome.core.common.Utils.bytesToHex;
-import static rhizome.core.common.Utils.hexStringToByteArray;
+import static rhizome.crypto.Hex.bytesToHex;
+import static rhizome.crypto.Hex.hexStringToByteArray;
 
-public record SHA256Hash (ByteBuf hash) implements SimpleHashType, Comparable<SHA256Hash> {
+public record SHA256Hash(byte[] hash) implements SimpleHashType, Comparable<SHA256Hash> {
 
     public static SHA256Hash empty() {
         return new SHA256Hash(SimpleHashType.empty(SIZE));
@@ -18,7 +16,7 @@ public record SHA256Hash (ByteBuf hash) implements SimpleHashType, Comparable<SH
     }
 
     public static SHA256Hash of(byte[] bytes) {
-        return new SHA256Hash(ByteBuf.wrapForReading(bytes));
+        return new SHA256Hash(bytes);
     }
 
     public static SHA256Hash of(String hexString) {
@@ -26,11 +24,11 @@ public record SHA256Hash (ByteBuf hash) implements SimpleHashType, Comparable<SH
     }
 
     public String toHexString() {
-        return bytesToHex(hash.getArray());
+        return bytesToHex(hash);
     }
 
     public byte[] toBytes() {
-        return hash.getArray();
+        return hash;
     }
 
     @Override
@@ -38,18 +36,18 @@ public record SHA256Hash (ByteBuf hash) implements SimpleHashType, Comparable<SH
         if (!(other instanceof SHA256Hash)) {
             return false;
         }
-        return hash.isContentEqual(((SHA256Hash) other).hash());
+        return Arrays.equals(hash, ((SHA256Hash) other).hash());
     }
 
     @Override
     public int hashCode() {
-        return Arrays.hashCode(hash.getArray());
+        return Arrays.hashCode(hash);
     }
 
     @Override
     public int compareTo(SHA256Hash o) {
-        for (int i = 0; i < this.hash.getArray().length; i++) {
-            int compare = Byte.compare(this.hash.getArray()[i], o.hash.getArray()[i]);
+        for (int i = 0; i < this.hash.length; i++) {
+            int compare = Byte.compare(this.hash[i], o.hash[i]);
             if (compare != 0) {
                 return compare;
             }

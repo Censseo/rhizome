@@ -3,7 +3,7 @@ package rhizome;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static rhizome.core.common.Crypto.generateKeyPair;
+import static rhizome.crypto.Crypto.generateKeyPair;
 
 import java.math.BigInteger;
 import java.util.List;
@@ -19,9 +19,9 @@ import rhizome.core.blockchain.ChainEngine;
 import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
-import rhizome.core.common.PowAlgorithm;
-import rhizome.core.crypto.PrivateKey;
-import rhizome.core.crypto.PublicKey;
+import rhizome.crypto.PowAlgorithm;
+import rhizome.crypto.PrivateKey;
+import rhizome.crypto.PublicKey;
 import rhizome.core.ledger.LedgerSnapshot;
 import rhizome.core.ledger.InMemoryLedger;
 import rhizome.core.ledger.PublicAddress;
@@ -122,7 +122,7 @@ class ChainEngineTest {
         assertEquals(ExecutionStatus.INVALID_BLOCK_ID, engine.addBlock(wrongId));
 
         var wrongPrev = (BlockImpl) rhizome.core.block.Block.of(ok);
-        wrongPrev.lastBlockHash(rhizome.core.crypto.SHA256Hash.random());
+        wrongPrev.lastBlockHash(rhizome.crypto.SHA256Hash.random());
         assertEquals(ExecutionStatus.INVALID_LASTBLOCK_HASH, engine.addBlock(wrongPrev));
 
         var wrongDifficulty = (BlockImpl) rhizome.core.block.Block.of(ok);
@@ -144,7 +144,7 @@ class ChainEngineTest {
     @Test
     void rejectsBadMerkleAndBadPow() {
         Block badMerkle = nextBlock(List.of(send(100, 0, 0)));
-        ((BlockImpl) badMerkle).merkleRoot(rhizome.core.crypto.SHA256Hash.random());
+        ((BlockImpl) badMerkle).merkleRoot(rhizome.crypto.SHA256Hash.random());
         assertEquals(ExecutionStatus.INVALID_MERKLE_ROOT, engine.addBlock(badMerkle));
 
         BlockImpl badPow = (BlockImpl) nextBlock(List.of());

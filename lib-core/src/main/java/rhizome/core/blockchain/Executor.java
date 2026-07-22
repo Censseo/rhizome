@@ -10,7 +10,7 @@ import rhizome.core.block.Block;
 import rhizome.core.block.BlockImpl;
 import rhizome.core.box.BoxProcessor;
 import rhizome.core.token.TokenProcessor;
-import rhizome.core.crypto.SHA256Hash;
+import rhizome.crypto.SHA256Hash;
 import rhizome.core.ledger.Ledger;
 import rhizome.core.ledger.LedgerException;
 import rhizome.core.ledger.PublicAddress;

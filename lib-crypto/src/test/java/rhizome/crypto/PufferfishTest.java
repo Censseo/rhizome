@@ -1,4 +1,4 @@
-package rhizome;
+package rhizome.crypto;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -6,8 +6,6 @@ import java.security.MessageDigest;
 
 import org.junit.jupiter.api.Test;
 
-import rhizome.core.common.Crypto;
-import rhizome.core.crypto.SHA256Hash;
 
 /**
  * Validates the pure-Java Pufferfish2 port bit-for-bit against golden vectors

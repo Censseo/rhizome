@@ -1,4 +1,4 @@
-package rhizome.core.common;
+package rhizome.crypto;
 
 /**
  * Pandanite proof-of-work uses Pufferfish2 with cost parameters {@code cost_t=0}

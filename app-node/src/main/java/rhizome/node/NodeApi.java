@@ -1,5 +1,7 @@
 package rhizome.node;
 
+import rhizome.net.RateLimiter;
+
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.Callable;
 

@@ -4,6 +4,7 @@ plugins {
 
 dependencies {
     implementation project(':lib-core')
+    implementation project(':lib-net')
     implementation project(':lib-persistence')
     implementation project(':lib-vm')
 

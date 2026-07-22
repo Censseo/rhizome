@@ -163,7 +163,7 @@ public final class HeaderSynchronizer {
         return engine.headerAt(h).hash().equals(peerHeaderHash(peer, h));
     }
 
-    private static rhizome.core.crypto.SHA256Hash peerHeaderHash(PeerSource peer, long h) {
+    private static rhizome.crypto.SHA256Hash peerHeaderHash(PeerSource peer, long h) {
         List<BlockHeader> one = peer.headers(h, h);
         if (one.isEmpty()) {
             throw new IllegalStateException("peer returned no header at " + h);

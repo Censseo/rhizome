@@ -11,8 +11,8 @@ import org.json.JSONObject;
 import lombok.Builder;
 import lombok.Data;
 import rhizome.core.block.dto.BlockDto;
-import rhizome.core.common.PowAlgorithm;
-import rhizome.core.crypto.SHA256Hash;
+import rhizome.crypto.PowAlgorithm;
+import rhizome.crypto.SHA256Hash;
 import rhizome.core.transaction.Transaction;
 
 @Data @Builder

@@ -1,4 +1,4 @@
-package rhizome.core.common;
+package rhizome.crypto;
 
 import java.nio.charset.StandardCharsets;
 

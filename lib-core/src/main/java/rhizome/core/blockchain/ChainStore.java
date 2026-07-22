@@ -2,7 +2,7 @@ package rhizome.core.blockchain;
 
 import rhizome.core.block.Block;
 import rhizome.core.block.BlockHeader;
-import rhizome.core.crypto.SHA256Hash;
+import rhizome.crypto.SHA256Hash;
 
 /**
  * Append-only view of the chain the engine drives: blocks by height plus an

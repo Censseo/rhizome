@@ -6,7 +6,7 @@ import java.util.List;
 import java.util.Map;
 
 import rhizome.core.block.Block;
-import rhizome.core.crypto.SHA256Hash;
+import rhizome.crypto.SHA256Hash;
 
 /**
  * A bounded, LRU cache of valid blocks the node has seen off the main chain —

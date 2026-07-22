@@ -9,7 +9,7 @@ import java.math.BigInteger;
 
 import lombok.Getter;
 import lombok.Setter;
-import rhizome.core.crypto.SHA256Hash;
+import rhizome.crypto.SHA256Hash;
 import rhizome.core.ledger.Ledger;
 // import rhizome.persistence.BlockPersistence;
 // import rhizome.persistence.TransactionStore;

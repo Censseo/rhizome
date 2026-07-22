@@ -1,4 +1,4 @@
-package rhizome.core.common;
+package rhizome.crypto;
 
 /**
  * Proof-of-work hash function used by a chain.

@@ -1,5 +1,7 @@
 package rhizome.node;
 
+import rhizome.net.HttpPeerSource;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -10,7 +12,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import rhizome.core.blockchain.NetworkParameters;
-import rhizome.core.common.PowAlgorithm;
+import rhizome.crypto.PowAlgorithm;
 import rhizome.core.ledger.PublicAddress;
 
 /** Assembles real nodes: one mines and serves its API; a second syncs from it. */
@@ -101,9 +103,9 @@ class RhizomeNodeTest {
 
     @Test
     void miningNodeIncludesSubmittedContractTransactions() throws Exception {
-        var pair = rhizome.core.common.Crypto.generateKeyPair();
-        var key = rhizome.core.crypto.PublicKey.of(pair.getPublic());
-        var priv = new rhizome.core.crypto.PrivateKey(
+        var pair = rhizome.crypto.Crypto.generateKeyPair();
+        var key = rhizome.crypto.PublicKey.of(pair.getPublic());
+        var priv = new rhizome.crypto.PrivateKey(
             (org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters) pair.getPrivate());
         var sender = PublicAddress.of(key);
 

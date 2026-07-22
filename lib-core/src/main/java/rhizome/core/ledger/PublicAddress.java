@@ -1,17 +1,16 @@
 package rhizome.core.ledger;
 
-import static rhizome.core.common.Utils.bytesToHex;
-import static rhizome.core.common.Utils.hexStringToByteArray;
+import static rhizome.crypto.Hex.bytesToHex;
+import static rhizome.crypto.Hex.hexStringToByteArray;
 
 import java.util.Arrays;
 
 import org.bouncycastle.crypto.digests.RIPEMD160Digest;
 import org.bouncycastle.crypto.digests.SHA256Digest;
-import io.activej.bytebuf.ByteBuf;
-import rhizome.core.common.SimpleHashType;
-import rhizome.core.crypto.PublicKey;
+import rhizome.crypto.PublicKey;
+import rhizome.crypto.SimpleHashType;
 
-public record PublicAddress(ByteBuf address) implements SimpleHashType {
+public record PublicAddress(byte[] address) implements SimpleHashType {
     public PublicAddress {
         checkSize(address);
     }
@@ -50,17 +49,16 @@ public record PublicAddress(ByteBuf address) implements SimpleHashType {
         sha256.update(hash3, 0, hash3.length);
         sha256.doFinal(hash4, 0);
 
-        ByteBuf buf = ByteBuf.wrapForWriting(new byte[25]);
+        byte[] out = new byte[SIZE];
+        out[0] = 0;
+        System.arraycopy(hash2, 0, out, 1, 20);
+        System.arraycopy(hash4, 0, out, 21, 4);
 
-        buf.writeByte((byte) 0);
-        buf.put(hash2);
-        buf.put(Arrays.copyOfRange(hash4, 0, 4));
-
-        return new PublicAddress(buf); 
+        return new PublicAddress(out);
     }
 
     public static PublicAddress of(byte[] address) {
-        return new PublicAddress(ByteBuf.wrapForReading(address));
+        return new PublicAddress(address);
     }
 
     public static PublicAddress of(String hexString) {
@@ -80,7 +78,7 @@ public record PublicAddress(ByteBuf address) implements SimpleHashType {
      * where funds sent to a typo'd-but-well-formed address would otherwise be unspendable.
      */
     public boolean isValidChecksum() {
-        byte[] a = address.getArray();
+        byte[] a = address;
         if (a.length != SIZE) {
             return false;
         }
@@ -101,11 +99,11 @@ public record PublicAddress(ByteBuf address) implements SimpleHashType {
     }
 
     public String toHexString() {
-        return bytesToHex(address.getArray());
+        return bytesToHex(address);
     }
 
     public byte[] toBytes() {
-        return address.getArray();
+        return address;
     }
 
     @Override
@@ -113,12 +111,12 @@ public record PublicAddress(ByteBuf address) implements SimpleHashType {
         if (!(other instanceof PublicAddress)) {
             return false;
         }
-        return address.isContentEqual(((PublicAddress) other).address());
+        return Arrays.equals(address, ((PublicAddress) other).address());
     }
 
     @Override
     public int hashCode() {
-        return Arrays.hashCode(address.getArray());
+        return Arrays.hashCode(address);
     }
 
     public static final int SIZE = 25;

@@ -1,4 +1,4 @@
-package rhizome.core.common;
+package rhizome.crypto;
 
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -16,9 +16,6 @@ import org.bouncycastle.crypto.generators.Ed25519KeyPairGenerator;
 import org.bouncycastle.crypto.params.Ed25519KeyGenerationParameters;
 import org.bouncycastle.crypto.signers.Ed25519Signer;
 
-import rhizome.core.crypto.PrivateKey;
-import rhizome.core.crypto.PublicKey;
-import rhizome.core.crypto.SHA256Hash;
 
 public class Crypto {
 
@@ -133,7 +130,7 @@ public class Crypto {
         Random rand = new SecureRandom();
 
         // Copy the target hash into the first part of concat.
-        System.arraycopy(target.hash().getArray(), 0, concat, 0, 32);
+        System.arraycopy(target.hash(), 0, concat, 0, 32);
         // Fill with random data for privacy
         byte[] randomBytes = new byte[32];
         rand.nextBytes(randomBytes);
@@ -186,8 +183,8 @@ public class Crypto {
         // (and mined) with the memory-hard Pufferfish2 function, not plain SHA-256 — that
         // is the whole ASIC-resistance property. See PowAlgorithm / NetworkParameters.
         byte[] data = new byte[64];
-        System.arraycopy(a.hash().getArray(), 0, data, 0, 32);
-        System.arraycopy(b.hash().getArray(), 0, data, 32, 32);
+        System.arraycopy(a.hash(), 0, data, 0, 32);
+        System.arraycopy(b.hash(), 0, data, 32, 32);
         return usePufferFish ? PUFFERFISH(data, useCache) : SHA256(data);
     }
 
@@ -206,7 +203,7 @@ public class Crypto {
         if (challengeSize > 256) {
             return false;
         }
-        byte[] a = hash.hash().getArray();
+        byte[] a = hash.hash();
         int bytes = challengeSize / 8;
         for (int i = 0; i < bytes; i++) {
             if (a[i] != 0) return false;

@@ -2,7 +2,7 @@ package rhizome;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
-import static rhizome.core.common.Crypto.generateKeyPair;
+import static rhizome.crypto.Crypto.generateKeyPair;
 
 import java.util.Set;
 
@@ -14,9 +14,9 @@ import rhizome.core.block.Block;
 import rhizome.core.block.BlockImpl;
 import rhizome.core.blockchain.Executor;
 import rhizome.core.blockchain.NetworkParameters;
-import rhizome.core.crypto.PrivateKey;
-import rhizome.core.crypto.PublicKey;
-import rhizome.core.crypto.SHA256Hash;
+import rhizome.crypto.PrivateKey;
+import rhizome.crypto.PublicKey;
+import rhizome.crypto.SHA256Hash;
 import rhizome.core.ledger.InMemoryLedger;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.mempool.ExecutionStatus;

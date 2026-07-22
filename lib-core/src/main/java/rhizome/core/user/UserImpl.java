@@ -7,8 +7,8 @@ import org.json.JSONObject;
 
 import lombok.Builder;
 import lombok.Data;
-import rhizome.core.crypto.PrivateKey;
-import rhizome.core.crypto.PublicKey;
+import rhizome.crypto.PrivateKey;
+import rhizome.crypto.PublicKey;
 
 @Data
 @Builder

@@ -4,7 +4,7 @@ import lombok.Builder;
 import lombok.Getter;
 import lombok.experimental.Accessors;
 import rhizome.core.common.Constants;
-import rhizome.core.common.PowAlgorithm;
+import rhizome.crypto.PowAlgorithm;
 
 /**
  * Consensus configuration for a Rhizome chain.
@@ -104,7 +104,7 @@ public final class NetworkParameters {
      * with releases to pin history against long-range rewrites.
      */
     @lombok.Builder.Default
-    private final java.util.Map<Long, rhizome.core.crypto.SHA256Hash> checkpoints = java.util.Map.of();
+    private final java.util.Map<Long, rhizome.crypto.SHA256Hash> checkpoints = java.util.Map.of();
 
     // --- Economics (all amounts are integers scaled by decimalScaleFactor) ---
     private final long decimalScaleFactor;

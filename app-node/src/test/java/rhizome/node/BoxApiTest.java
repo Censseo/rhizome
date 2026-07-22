@@ -30,10 +30,10 @@ import rhizome.core.box.BoxPayload;
 import rhizome.core.box.BoxRegister;
 import rhizome.core.box.DefaultBoxProcessor;
 import rhizome.core.box.InMemoryBoxStore;
-import rhizome.core.common.PowAlgorithm;
+import rhizome.crypto.PowAlgorithm;
 import rhizome.core.common.Utils;
-import rhizome.core.crypto.PrivateKey;
-import rhizome.core.crypto.PublicKey;
+import rhizome.crypto.PrivateKey;
+import rhizome.crypto.PublicKey;
 import rhizome.core.ledger.InMemoryLedger;
 import rhizome.core.ledger.LedgerSnapshot;
 import rhizome.core.ledger.PublicAddress;
@@ -118,7 +118,7 @@ class BoxApiTest {
     }
 
     private static org.bouncycastle.crypto.AsymmetricCipherKeyPair generateKeyPair() {
-        return rhizome.core.common.Crypto.generateKeyPair();
+        return rhizome.crypto.Crypto.generateKeyPair();
     }
 
     private HttpResponse call(HttpRequest request) throws Exception {

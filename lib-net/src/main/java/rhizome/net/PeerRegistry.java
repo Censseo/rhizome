@@ -1,4 +1,4 @@
-package rhizome.node;
+package rhizome.net;
 
 import java.net.URI;
 import java.util.List;

@@ -7,7 +7,7 @@ import java.util.function.LongFunction;
 
 import rhizome.core.block.BlockHeader;
 import rhizome.core.block.UncleRef;
-import rhizome.core.crypto.SHA256Hash;
+import rhizome.crypto.SHA256Hash;
 
 /**
  * Stateless validator for a contiguous run of block headers extending a trusted
