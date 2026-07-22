@@ -5,6 +5,10 @@ plugins {
 dependencies {
     implementation project(':lib-core')
 
+    implementation "org.json:json:${jsonVersion}"
+
+    runtimeOnly "ch.qos.logback:logback-classic:${logbackVersion}"
+
     // The end-to-end wallet test drives a real node.
     testImplementation project(':app-node')
     testImplementation project(':lib-persistence')

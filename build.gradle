@@ -15,6 +15,16 @@ gradleLint {
     excludedRules= ['undeclared-dependency']
  }
 
+// Shared dependency versions. Each module declares only what it actually
+// uses in its own build.gradle; nothing is injected globally anymore.
+ext {
+    activejVersion = '6.0-rc2'
+    bouncycastleVersion = '1.78.1'  // 1.76 is vulnerable to CVE-2024-30172 — do not downgrade.
+    jsonVersion = '20240303'
+    slf4jVersion = '2.0.12'
+    logbackVersion = '1.5.3'
+}
+
 subprojects {
     apply plugin: 'java'
     apply plugin: 'io.freefair.lombok'
@@ -44,48 +54,8 @@ subprojects {
     }
 
     dependencies {
-
-        // ActiveJ
-        implementation 'io.activej:activej:6.0-rc2'
-        implementation 'io.activej:activej-inject:6.0-rc2'
-        implementation 'io.activej:activej-config:6.0-rc2'
-        implementation 'io.activej:activej-launcher:6.0-rc2'
-        implementation 'io.activej:activej-launchers-common:6.0-rc2'
-        implementation 'io.activej:activej-rpc:6.0-rc2'
-        implementation 'io.activej:activej-datastream:6.0-rc2'
-        implementation 'io.activej:activej-servicegraph:6.0-rc2'
-        implementation 'io.activej:activej-workers:6.0-rc2'
-        implementation 'io.activej:activej-serializer:6.0-rc2'
-        implementation 'io.activej:activej-boot:6.0-rc2'
-        implementation 'io.activej:activej-promise:6.0-rc2'
-        implementation 'io.activej:activej-eventloop:6.0-rc2'
-        implementation 'io.activej:activej-http:6.0-rc2'
-        implementation 'io.activej:activej-common:6.0-rc2'
-        implementation 'io.activej:activej-jmxapi:6.0-rc2'
-        implementation 'io.activej:activej-net:6.0-rc2'
-        
-        // Logback
-        implementation 'ch.qos.logback:logback-classic:1.5.3'
-
-        // Logging
-        implementation 'org.slf4j:slf4j-api:2.0.12'
-
-        // TODO: TBD
-        implementation 'org.json:json:20240303'
-        // implementation 'com.dslplatform:dsl-json:2.0.2'
-
-        // JNI support for crypto libs PUFFERFISH2
-        // implementation 'org.bytedeco:javacpp:1.5.9'
-
-        // This dependency is used by the application.
-        implementation 'com.google.guava:guava:31.1-jre'
-
         // Use JUnit Jupiter for testing.
         testImplementation 'org.junit.jupiter:junit-jupiter:5.9.1'
-
-        // Use Mockito for testing.
-        testImplementation 'org.mockito:mockito-junit-jupiter:5.3.1'
-        testImplementation 'org.mockito:mockito-inline:5.2.0'
     }
 
     java {
