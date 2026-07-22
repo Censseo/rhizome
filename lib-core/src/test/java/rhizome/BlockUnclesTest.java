@@ -201,6 +201,23 @@ class BlockUnclesTest {
     }
 
     @Test
+    void blocksOwnPowIsVerifiedBeforeUncleWork() {
+        // Audit 5th-pass (uncle-PoW-before-block-PoW DoS): validateUncles runs a memory-hard PoW hash
+        // per referenced uncle, and it used to run BEFORE the block's own PoW — so a PoW-free /submit
+        // forced up to maxUnclesPerBlock uncle hashes it was never budgeted for (the submitPowGate sizes
+        // for one hash/submit). The block's own PoW must be checked first: a block whose own nonce is
+        // invalid is rejected as INVALID_NONCE regardless of its uncle list, so no uncle hashing runs.
+        engine.addBlock(mineNext(List.of())); // height 2
+
+        // A block that carries an (unknown, would-be-INVALID_UNCLES) uncle AND an invalid own PoW.
+        BlockImpl bad = mineNext(List.of(new UncleRef(SHA256Hash.random(), 3, PublicAddress.random())));
+        do { bad.nonce(SHA256Hash.random()); } while (bad.verifyNonce(params.powAlgorithm())); // fails PoW
+        // Own-PoW gate fires first -> INVALID_NONCE (before the reorder this returned INVALID_UNCLES).
+        assertEquals(ExecutionStatus.INVALID_NONCE, engine.addBlock(bad));
+        assertEquals(2, engine.height());
+    }
+
+    @Test
     void rejectsUncleThatIsAMainChainBlock() {
         engine.addBlock(mineNext(List.of())); // height 2
         BlockImpl canonical = (BlockImpl) engine.blockAt(2); // the canonical block 2

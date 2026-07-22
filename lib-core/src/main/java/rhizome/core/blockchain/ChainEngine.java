@@ -234,13 +234,6 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             if (serializedSize(block) > params.maxBlockSizeBytes()) {
                 return BLOCK_TOO_LARGE;
             }
-            // Structural uncle checks (GHOST): bounded count, distinct, and none is the
-            // parent itself. Ancestry/PoW validation and fork-choice weighting land with
-            // the orphan pool; for now uncles are carried and committed but earn no work.
-            BigInteger uncleWork = validateUncles(b);
-            if (uncleWork == null) {
-                return INVALID_UNCLES;
-            }
             // Static checkpoint: at a pinned height, only the published hash passes.
             SHA256Hash checkpoint = params.checkpoints().get(height + 1);
             if (checkpoint != null && !block.hash().equals(checkpoint)) {
@@ -276,6 +269,19 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             }
             if (!block.verifyNonce(params.powAlgorithm())) {
                 return INVALID_NONCE;
+            }
+
+            // Structural uncle checks (GHOST): bounded count, distinct, none is the parent, and each
+            // referenced orphan is PoW-verified (memory-hard) for its work weight. Deliberately AFTER
+            // the block's OWN PoW: a submitted block triggers up to maxUnclesPerBlock memory-hard uncle
+            // hashes, and running them before line-277 let a PoW-free /submit force ~3x the hashing the
+            // submitPowGate budgets (one own hash) — an event-loop DoS under the consensus lock. Gating
+            // uncle verification behind the block's proven work means an attacker must do real PoW
+            // before any uncle hashing runs, so it is no longer a cheap amplifier (audit 5th-pass,
+            // consensus/crypto Finding: uncle-PoW-before-block-PoW).
+            BigInteger uncleWork = validateUncles(b);
+            if (uncleWork == null) {
+                return INVALID_UNCLES;
             }
 
             java.util.Set<PublicAddress> touched = stateAccumulator == null ? null : new java.util.HashSet<>();

@@ -192,6 +192,58 @@ class MemPoolTest {
         assertEquals(ExecutionStatus.SUCCESS, pool.addTransaction(fromOther));
     }
 
+    /** A funded, independent sender for the parking-eviction tests. */
+    private Transaction fromFreshSender(PublicAddress[] out, long fee, long nonce) {
+        var pair = generateKeyPair();
+        var k = PublicKey.of(pair.getPublic());
+        var p = new PrivateKey((Ed25519PrivateKeyParameters) pair.getPrivate());
+        var addr = PublicAddress.of(k);
+        accounts.balances.put(addr, 1_000_000L);
+        out[0] = addr;
+        Transaction t = Transaction.of(addr, PublicAddress.random(), new TransactionAmount(1),
+            k, new TransactionAmount(fee), 1000L + nonce, params.chainId(), nonce);
+        t.sign(p);
+        return t;
+    }
+
+    @Test
+    void readyTransactionDisplacesParkedDeadWeightWhenPoolIsFull() {
+        // Audit 5th-pass (nonce-gap parking censorship): the pool must not be permanently fillable with
+        // individually-valid but never-minable gap transactions. Here `sender` parks 3 txs above an
+        // unfilled gap at nonce 0 (confirmedNextNonce==0), so none is selectable and the pool is full.
+        MemPool pool = new MemPool(params, verifier, accounts, 3);
+        for (int nonce = 1; nonce <= 3; nonce++) {
+            assertEquals(ExecutionStatus.SUCCESS, pool.addTransaction(send(1, 1, nonce)));
+        }
+        assertEquals(3, pool.size());
+        assertEquals(0, pool.getTransactionsForBlock(10).size(), "parked txs are unminable");
+
+        // An honest sender's ready tx (nonce == its confirmed next) must be admitted by reclaiming a
+        // parked slot, not shed with QUEUE_FULL.
+        PublicAddress[] h = new PublicAddress[1];
+        Transaction ready = fromFreshSender(h, 1, 0);
+        assertEquals(ExecutionStatus.SUCCESS, pool.addTransaction(ready));
+        assertTrue(pool.contains(ready.hashContents()));
+
+        List<Transaction> selected = pool.getTransactionsForBlock(10);
+        assertEquals(1, selected.size(), "the pool is no longer censored");
+        assertEquals(h[0], ((TransactionImpl) selected.get(0)).from());
+    }
+
+    @Test
+    void parkedNewcomerCannotChurnAFullParkedPool() {
+        // A gapped, no-higher-fee newcomer must NOT evict parked dead weight — otherwise attackers
+        // could churn each other's slots. Only a ready or strictly-higher-fee tx reclaims a slot.
+        MemPool pool = new MemPool(params, verifier, accounts, 3);
+        for (int nonce = 1; nonce <= 3; nonce++) {
+            assertEquals(ExecutionStatus.SUCCESS, pool.addTransaction(send(1, 1, nonce)));
+        }
+        PublicAddress[] h = new PublicAddress[1];
+        Transaction gappedSameFee = fromFreshSender(h, 1, 5); // gap at its front, fee == victim's
+        assertEquals(ExecutionStatus.QUEUE_FULL, pool.addTransaction(gappedSameFee));
+        assertEquals(3, pool.size());
+    }
+
     @Test
     void selectsContiguousNonceRunInOrder() {
         mempool.addTransaction(send(100, 0, 0));

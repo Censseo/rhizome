@@ -1,3 +1,143 @@
+# Rhizome — Blockchain Security & Exploit Audit (fifth pass)
+
+**Date:** 2026-07-22 · **Scope:** whole tree · **Baseline:** post-`#8` (four
+prior passes merged). Six subsystems (consensus/PoW, tx/ledger/mempool, WASM VM,
+DeFi templates, P2P/net/API, crypto/codec/persistence) were re-audited in
+parallel against the *current* source; every prior finding was re-verified and
+new exploitable defects were hunted. **Two of the findings were introduced by the
+fourth pass's own hardening** — a reminder that even minimal security fixes need
+a determinism/DoS re-review.
+
+## Fifth-pass findings & fixes
+
+| # | Severity | Area | Title | Status |
+|---|----------|------|-------|--------|
+| Q1 | **High** | vm/consensus | `MODULE_PARSE` gas charged **only on a cache miss** → `gasUsed` (hence the fee and the state root) depends on node-local module-cache warmth → **consensus fork on any node restart / snapshot pivot / LRU churn** (regression from 4th-pass `vm F3`) | **Fixed** ✅ |
+| Q2 | **High** | consensus/ledger | **Phantom 0-balance wallet**: `hasWallet` returns a key left behind by any apply-then-rollback, while the state root treats balance 0 as absent — so a `charged==0` (amount 0, fee 0) transfer is `SUCCESS` on a node that reverted the sender into existence and `SENDER_DOES_NOT_EXIST` on one that synced the winner directly → **permanent partition** | **Fixed** ✅ |
+| Q3 | **High** | tx/mempool | **Nonce-gap parking**: no upper nonce-lookahead bound, no TTL, and a full pool blindly returns `QUEUE_FULL` → a one-time, near-free flood of individually-valid but never-minable gap transactions fills every pool permanently → **network-wide transaction censorship** | **Fixed** ✅ |
+| Q4 | **High** | net/api | `/call_readonly` runs up to 50M interpreted VM instructions synchronously on the event-loop thread with **only a per-IP** rate limit → a few IPs pin the loop and starve ingestion/sync (the aggregate-vs-per-IP gap the 4th-pass `F1` closed for `/submit`) | **Fixed** ✅ |
+| Q5 | Medium | consensus/net | **Uncle PoW verified before the block's own PoW**: `validateUncles` runs up to `maxUnclesPerBlock` memory-hard hashes at `addBlock` *before* the block's own `verifyNonce`, so a PoW-free `/submit` forces ~3× the hashing the `submitPowGate` budgets (corroborated independently by two auditors) | **Fixed** ✅ |
+| Q6 | Medium | net/api | Explorer reads (`/stats`, `/blocks`) fully decode blocks **under the consensus lock** on the event loop yet were weighted cost 1 → one IP drives tens of thousands of lock-guarded decodes/s, contending block production/sync | **Fixed** ✅ (weighted) |
+| Q7 | Info | code-org | Dead code removed: `ChainSync.java` (fully commented-out C++ stub), `PeerOLD`, `GossipSystemOLD`, `PeerManagerImplOLD` (unreferenced) | **Done** ✅ |
+
+### Q1 — Cache-dependent module-parse gas forks consensus (High)
+
+**File:** `lib-vm/vm/WasmVm.java` (`moduleFor`).
+
+The 4th-pass `vm F3` fix priced the O(code) module reparse to stop CPU
+amplification, but levied the charge **inside the cache-miss branch** — after the
+`return cached`. `MODULE_CACHE` is a process-wide, non-persistent, LRU-bounded
+(256) map whose occupancy differs across nodes (cleared on restart, empty after a
+snapshot-sync pivot, evicted per local access order). Since `gasUsed` feeds
+`gasFee = gasUsed × gasPrice`, hence the sender/miner balances and the
+authenticated state root (`Executor.applyContract`), a validator with a cold
+cache charges an extra `MODULE_PARSE_BASE + len·PER_BYTE`, computes a different
+root, and **rejects the honest block a warm producer built** (`INVALID_STATE_ROOT`)
+— a routine node restart forks the network. **Fix:** charge the parse cost on
+*every* runtime call (hit and miss alike), before the cache lookup; the cache
+stays a pure CPU optimization and the cost is a deterministic function of code
+length. Regression: `WasmVmTest.moduleParseGasIsChargedIdenticallyOnWarmAndColdCache`.
+
+### Q2 — Phantom 0-balance wallet forks consensus on a zero-cost tx (High)
+
+**Files:** `lib-core/blockchain/Executor.java` (normal-transfer path, `applyContract`),
+`InMemoryLedger.java` / `ChainEngine.collectStateChanges`.
+
+Wallet *existence* (`hasWallet` = key present) is **not** a function of canonical
+state: every apply-then-rollback (a failed pass-2, `popBlock` reorg,
+`stampStateRoot` undo, `INVALID_STATE_ROOT` undo) leaves the credited-then-reverted
+wallet in the map at balance 0, whereas `collectStateChanges` emits a `delete` for a
+0 balance — so the ledger and the state root disagree, invisibly, until a
+`charged==0` (amount 0, fee 0) transfer whose validity turns purely on `hasWallet`
+is mined: `SUCCESS` on the phantom node, `SENDER_DOES_NOT_EXIST` on a node that
+synced the winner directly → the same canonical block valid on one honest node and
+invalid on another → **permanent partition**, double-spend across it. **Fix:** make
+block validity a pure function of **balance** — an absent wallet reads as balance 0
+(`Executor` normal-transfer and `applyContract`); `charged>0` still requires a real,
+funded wallet, so no withdraw ever touches a non-existent one. Regression:
+`ExecutorTest.zeroValueTransferIsValidRegardlessOfWhetherTheSenderWalletExists`
+(the `unknownSenderRejected` status moved `SENDER_DOES_NOT_EXIST`→`BALANCE_TOO_LOW`,
+same accept/reject decision).
+
+### Q3 — Mempool nonce-gap parking → permanent censorship (High)
+
+**File:** `lib-core/mempool/MemPool.java`.
+
+Admission bounded a tx's nonce only from *below*; block selection emits only the
+*contiguous* run from the confirmed nonce; `pruneStale` evicts only *below*-confirmed
+nonces; and a full pool returns `QUEUE_FULL` with no eviction and no TTL. So a pool
+can be filled once, cheaply and permanently, with individually-valid but never-minable
+gap transactions (skip the confirmed nonce, queue the rest) — after which every honest
+submission is rejected, network-wide, with no self-heal. The cumulative-balance defense
+is bypassed (parked txs carry `amount 0, fee 0` and are never mined, so never spend).
+**Fix:** when the pool is full, reclaim a slot held by a **fully-parked** sender (its
+confirmed nonce absent, so none of its txs is minable) for a **ready or higher-fee**
+newcomer — honest traffic always displaces parked dead weight, while a live sender is
+never evicted (legitimate saturation still sheds). Regressions:
+`MemPoolTest.readyTransactionDisplacesParkedDeadWeightWhenPoolIsFull`,
+`parkedNewcomerCannotChurnAFullParkedPool`.
+
+### Q4 — `/call_readonly` aggregate compute DoS (High)
+
+**Files:** `app-node/node/NodeApi.java` (`callReadonly`), `NodeService.java`.
+
+A dry-run runs the VM interpreter for up to `MAX_READONLY_GAS` (50M) instructions
+synchronously on the sole event-loop thread; the only limiter was per-IP, so a few
+IPs each within budget could pin the loop with back-to-back gas-sink runs and starve
+`/submit` ingestion and sync — structurally identical to the `/submit` DoS the 4th
+pass fixed with the process-wide `submitPowGate`, which had no `/call_readonly`
+counterpart. **Fix:** a process-wide `readonlyGasGate` bounds aggregate dry-run
+gas/second across all IPs; an over-budget call is shed (HTTP 429) charging the clamped
+gasLimit up-front, **before** the VM runs. Sized to admit many cheap dashboard queries
+while throttling repeated max-gas sinks. Regression:
+`NodeApiTest.readonlyGasGateShedsCallsOnceTheGlobalBudgetIsSpent`.
+
+### Q5 — Uncle PoW verified before the block's own PoW (Medium)
+
+**File:** `lib-core/blockchain/ChainEngine.java` (`addBlock`).
+
+`validateUncles` (which runs a memory-hard `verifyNonce` per referenced orphan, up to
+`maxUnclesPerBlock`) ran *before* the block's own `verifyNonce`, so a PoW-free `/submit`
+citing two pooled orphans forced ~3 memory-hard hashes where the `submitPowGate` budgets
+one — pinning the event-loop thread under the consensus lock. **Fix:** move
+`validateUncles` to run **after** the block's own PoW check, so uncle hashing happens
+only for a block that already proved its own work (no longer a cheap amplifier).
+Regression: `BlockUnclesTest.blocksOwnPowIsVerifiedBeforeUncleWork`.
+
+### Q6 — Explorer reads under-weighted under the consensus lock (Medium)
+
+**File:** `app-node/node/NodeApi.java` (`requestCost`).
+
+`/stats` (reads `STATS_WINDOW`=32 blocks) and `/blocks` (up to 50 full blocks) fully
+decode blocks from RocksDB **while holding the consensus lock** (`ChainEngine.blockAt`),
+yet were weighted cost 1 — so one IP could drive tens of thousands of lock-guarded
+decodes/s, contending block production and sync. **Fix:** weight `/blocks` by its block
+span (like `/sync`) and `/stats` by `STATS_WINDOW`. *Documented, not changed:* serving
+these reads from a lock-free snapshot view (so explorer traffic never takes the consensus
+lock) is the deeper fix, left as a dedicated change to avoid consensus-path risk.
+
+### Documented (verified, not changed this pass)
+
+- **Reorg-gate work metric mismatch (Low).** `HeaderSynchronizer.syncFrom` early-outs on
+  uncle-*inclusive* `totalWork` while the adoption gate compares base-only work; with
+  genuine (costly) uncle work this could in principle stabilize a split. A refinement of
+  the accepted M4 base-only tradeoff; make both gates use one metric if hardened.
+- **Snapshot bootstrap buffering (Low).** `SnapshotBootstrap` accumulates every header to
+  the untrusted peer height and all chunks before validation; bounded only by the
+  operator-chosen seed trust boundary (the live `HeaderSynchronizer` caps at
+  `MAX_HEADER_WINDOW`). Cap the bootstrap span and stream chunks.
+- **Dead experimental P2P package (Info).** `lib-net/.../p2p/*` (`PeerSystem`,
+  `GossipSystem`, `DiscoveryService`, `FloodDiscovery`, …) is unused by the live node
+  (which uses `rhizome.node`); recommend removing it (and `FloodDiscoveryTest`) so future
+  audits don't treat it as reachable surface. Left in place this pass (has a test) to keep
+  the change minimal.
+- **Codec parity (Info).** `BlockCodec.decode` doesn't bound uncle difficulty (unreachable
+  today — forced equal to a registered orphan's bounded difficulty before use);
+  `TransactionDto` single-object decode accepts trailing bytes (nil impact — identity is
+  content-hash, not raw bytes). Add for defense-in-depth/wire uniqueness.
+
+---
+
 # Rhizome — Blockchain Security & Exploit Audit (fourth pass)
 
 **Date:** 2026-07-21 · **Scope:** whole tree · **Baseline:** post-`#7` (three

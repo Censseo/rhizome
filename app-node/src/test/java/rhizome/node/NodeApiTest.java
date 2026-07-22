@@ -1,6 +1,7 @@
 package rhizome.node;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static rhizome.core.common.Crypto.generateKeyPair;
 
@@ -165,6 +166,19 @@ class NodeApiTest {
         long height = engine.height();
         assertEquals(rhizome.core.mempool.ExecutionStatus.SUBMIT_THROTTLED, gated.submitBlock(mineNext(List.of())));
         assertEquals(height, engine.height(), "a throttled submit must not extend the chain");
+    }
+
+    @Test
+    void readonlyGasGateShedsCallsOnceTheGlobalBudgetIsSpent() {
+        // Aggregate (all-IP) dry-run gas budget: with a global budget of 100 gas/window, the first
+        // call reserving 60 is admitted and the second is shed (the /call_readonly handler then
+        // returns HTTP 429) WITHOUT running the VM on the event loop — the aggregate cap the per-IP
+        // limiter lacks for /call_readonly (audit 5th-pass, net Finding 1).
+        NodeService gated = new NodeService(engine, mempool,
+            new RateLimiter(NodeService.SUBMIT_POW_MAX_PER_SEC, 1000, 1),
+            new RateLimiter(100, 3_600_000, 1));
+        assertTrue(gated.tryReadonlyGasBudget(60), "first call fits the budget");
+        assertFalse(gated.tryReadonlyGasBudget(60), "second call is over the aggregate budget");
     }
 
     @Test

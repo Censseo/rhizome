@@ -492,6 +492,17 @@ public final class NodeApi {
         if ("/headers".equals(path)) {
             return rangeCost(request, SCAN_COST_PER_BLOCKS, Constants.BLOCK_HEADERS_PER_FETCH);
         }
+        // The explorer read endpoints also fully decode blocks from RocksDB under the consensus lock
+        // (ChainEngine.blockAt), yet were left at cost 1 by the M2 weighting pass. /blocks serves up to
+        // BLOCKS_RANGE_MAX full blocks and /stats reads STATS_WINDOW of them per call, so at cost 1 one
+        // IP could drive tens of thousands of lock-guarded block decodes/s, contending block production
+        // and sync. Weight them by the blocks they actually read (audit 5th-pass, net Finding 2).
+        if ("/blocks".equals(path)) {
+            return rangeCost(request, 1, BLOCKS_RANGE_MAX); // full-block reads: ~1 unit per block
+        }
+        if ("/stats".equals(path)) {
+            return Math.max(1, STATS_WINDOW / SCAN_COST_PER_BLOCKS);
+        }
         return 1;
     }
 
@@ -619,6 +630,14 @@ public final class NodeApi {
         // Clamp the caller-supplied gas: a dry-run is free and unauthenticated, so an
         // unbounded gasLimit would let anyone burn arbitrary node CPU. Bound it server-side.
         long gasLimit = Math.min(Math.max(1L, body.optLong("gasLimit", 10_000_000L)), MAX_READONLY_GAS);
+
+        // Aggregate (all-IP) dry-run gas budget: the per-IP RateLimiter cannot stop a handful of IPs
+        // from pinning the event loop with back-to-back max-gas sink runs, so shed the call before it
+        // reaches the VM once the global budget is spent (audit 5th-pass, net Finding 1).
+        if (!node.tryReadonlyGasBudget(gasLimit)) {
+            return HttpResponse.ofCode(429)
+                .withJson(new JSONObject().put("error", "readonly compute budget exceeded").toString()).build();
+        }
 
         var result = node.dryRun(from, to, input, value, gasLimit);
         org.json.JSONArray logs = new org.json.JSONArray();

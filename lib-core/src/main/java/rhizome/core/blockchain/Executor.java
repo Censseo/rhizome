@@ -286,14 +286,24 @@ public final class Executor {
                     return abort(processor, boxProcessor, tokenProcessor, ledger, applied, BALANCE_TOO_LOW);
                 }
 
-                if (!ledger.hasWallet(tx.from())) {
-                    return abort(processor, boxProcessor, tokenProcessor, ledger, applied, SENDER_DOES_NOT_EXIST);
-                }
-                if (ledger.getWalletValue(tx.from()).amount() < charged) {
+                // Block validity must be a pure function of BALANCE, never of ledger key-presence.
+                // hasWallet returns true for a "phantom" 0-balance key left behind by any apply-then-
+                // rollback (a failed pass-2, popBlock reorg, stampStateRoot undo), whereas the state root
+                // treats a 0 balance as absent (collectStateChanges emits delete). So gating on hasWallet
+                // let a charged==0 (amount 0, fee 0) transfer be SUCCESS on a node that had reverted the
+                // sender into existence but SENDER_DOES_NOT_EXIST on a node that synced the winning chain
+                // directly — the same block valid on one honest node and invalid on another → permanent
+                // fork. Treating an absent wallet as balance 0 makes both nodes agree (audit 5th-pass,
+                // consensus Finding 1). charged>0 still requires balance>=charged>0, i.e. a real wallet,
+                // so the withdraw below never touches a non-existent one.
+                long available = ledger.hasWallet(tx.from()) ? ledger.getWalletValue(tx.from()).amount() : 0L;
+                if (available < charged) {
                     return abort(processor, boxProcessor, tokenProcessor, ledger, applied, BALANCE_TOO_LOW);
                 }
 
-                withdraw(ledger, applied, tx.from(), new TransactionAmount(charged));
+                if (charged > 0) {
+                    withdraw(ledger, applied, tx.from(), new TransactionAmount(charged));
+                }
                 deposit(ledger, applied, tx.to(), tx.amount());
                 if (fee > 0) {
                     deposit(ledger, applied, miner, new TransactionAmount(fee));
@@ -524,10 +534,12 @@ public final class Executor {
         } catch (ArithmeticException e) {
             return INVALID_TRANSACTION_AMOUNT;
         }
-        if (!ledger.hasWallet(tx.from())) {
-            return SENDER_DOES_NOT_EXIST;
-        }
-        if (ledger.getWalletValue(tx.from()).amount() < required) {
+        // Balance-not-key-presence, exactly as the normal-transfer path (audit 5th-pass, consensus
+        // Finding 1): a phantom 0-balance sender must not make a required==0 call (value 0, gasLimit or
+        // gasPrice 0) valid on one node and SENDER_DOES_NOT_EXIST on another. required>0 still implies a
+        // real, sufficiently funded wallet, so every withdraw below hits an existing wallet.
+        long available = ledger.hasWallet(tx.from()) ? ledger.getWalletValue(tx.from()).amount() : 0L;
+        if (available < required) {
             return BALANCE_TOO_LOW;
         }
 

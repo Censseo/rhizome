@@ -136,9 +136,6 @@ public final class MemPool {
             if (contentHashes.contains(id)) {
                 return ALREADY_IN_QUEUE;
             }
-            if (size >= maxSize) {
-                return QUEUE_FULL;
-            }
 
             PublicAddress from = tx.from();
             // Sender must have a confirmed wallet, exactly as the block executor requires
@@ -171,6 +168,16 @@ public final class MemPool {
             }
             if (spend < 0 || spend > accounts.confirmedBalance(from)) {
                 return BALANCE_TOO_LOW;
+            }
+
+            // Capacity, checked only after the cheap validity gates so eviction runs for a genuine
+            // candidate. A full pool no longer blindly rejects: if some sender is fully parked (its
+            // confirmed nonce is absent, so NONE of its txs are minable now) that dead weight yields
+            // to a more useful newcomer, so honest ready/fee-paying traffic can never be crowded out
+            // permanently by parked gap-txs (audit 5th-pass, mempool censorship). If the pool is full
+            // of live txs instead, this is legitimate saturation and we still shed the newcomer.
+            if (size >= maxSize && !makeRoomForParkedSlot(from, tx)) {
+                return QUEUE_FULL;
             }
 
             if (!verifier.verify(transaction)) {
@@ -243,6 +250,52 @@ public final class MemPool {
         } finally {
             lock.unlock();
         }
+    }
+
+    /**
+     * Called only when the pool is at capacity. Reclaims one slot held by a <em>fully parked</em>
+     * sender — one whose confirmed next nonce is absent from its pending set, so none of its queued
+     * transactions can be selected into a block now or by any contiguous run — in favour of a more
+     * useful {@code incoming} transaction. Returns {@code true} iff a slot was freed (leaving room for
+     * the caller to insert).
+     *
+     * <p>This is the eviction half of the nonce-gap-parking defence (audit 5th-pass): a pool with no
+     * eviction and no TTL could be filled once, cheaply and permanently, with individually-valid but
+     * never-minable gap transactions, censoring all honest traffic network-wide. A ready or
+     * higher-fee newcomer now always displaces that dead weight. A live (progressing) sender is never
+     * evicted, so legitimate saturation still yields {@code QUEUE_FULL}.
+     */
+    private boolean makeRoomForParkedSlot(PublicAddress from, TransactionImpl incoming) {
+        PublicAddress victimSender = null;
+        Transaction victim = null;
+        long victimFee = Long.MAX_VALUE;
+        for (Map.Entry<PublicAddress, NavigableMap<Long, Transaction>> e : bySender.entrySet()) {
+            NavigableMap<Long, Transaction> pending = e.getValue();
+            long confirmed = accounts.confirmedNextNonce(e.getKey());
+            if (pending.containsKey(confirmed)) {
+                continue; // sender is making progress (front present) — never evict a live queue
+            }
+            // Fully parked: its deepest (highest-nonce) tx is the furthest from ever being minable.
+            Transaction deepest = pending.lastEntry().getValue();
+            long fee = ((TransactionImpl) deepest).fee().amount();
+            if (victim == null || fee < victimFee) {
+                victimSender = e.getKey();
+                victim = deepest;
+                victimFee = fee;
+            }
+        }
+        if (victim == null) {
+            return false; // no parked slots — the pool is legitimately full of live transactions
+        }
+        // Only displace parked dead weight for a newcomer worth more than it: one that is itself ready
+        // (immediately minable for its sender) or pays a strictly higher fee than the victim. A gapped,
+        // no-higher-fee newcomer cannot churn the pool.
+        boolean incomingReady = incoming.nonce() == accounts.confirmedNextNonce(from);
+        if (!incomingReady && incoming.fee().amount() <= victimFee) {
+            return false;
+        }
+        remove(victimSender, victim.hashContents());
+        return true;
     }
 
     private void pruneStale() {
