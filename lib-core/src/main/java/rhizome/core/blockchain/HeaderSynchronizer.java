@@ -224,17 +224,30 @@ public final class HeaderSynchronizer {
             engine.popBlock();
         }
         for (Block block : localBranch) {
-            engine.addBlock(block);
+            ExecutionStatus status = engine.addBlock(block);
+            if (status != ExecutionStatus.SUCCESS) {
+                // Re-adding a block that was canonical moments ago must succeed. A failure means an
+                // uncle it references was evicted from the (bounded) orphan pool — e.g. an attacker
+                // flooded the pool with fresh siblings to knock it out, then forced this failed
+                // reorg — so validateUncles now rejects our own block. Swallowing the failure would
+                // leave the node permanently shorter than it started, silently (audit: restore
+                // self-truncation). Fail loud instead so it is caught and a full resync recovers the
+                // suffix, rather than continuing in a silently-truncated state.
+                throw new IllegalStateException("failed to restore local branch at "
+                    + ((BlockImpl) block).id() + " after a rejected reorg: " + status
+                    + " — orphan pool likely evicted a referenced uncle; a full resync is required");
+            }
         }
     }
 
     private BigInteger localWorkAboveFork(long forkHeight) {
+        // Base work only, matching HeaderChain's base-only branch total: the reorg gate compares
+        // like with like and never lets unverifiable committed uncle work (on either side) drive a
+        // pop/restore decision (audit M4). Uncle work still decides true fork choice via
+        // engine.totalWork() once the bodies validate.
         BigInteger work = BigInteger.ZERO;
         for (long h = forkHeight + 1; h <= engine.height(); h++) {
             work = work.add(BigInteger.TWO.pow(engine.headerAt(h).difficulty()));
-            for (var uncle : engine.headerAt(h).uncles()) {
-                work = work.add(BigInteger.TWO.pow(uncle.difficulty()));
-            }
         }
         return work;
     }

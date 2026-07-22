@@ -156,6 +156,44 @@ class NodeApiTest {
     }
 
     @Test
+    void submitPowGateShedsBlocksOnceTheGlobalBudgetIsSpent() {
+        // A global budget of one verification per (long) window: the first /submit is verified and
+        // accepted; the second is shed as SUBMIT_THROTTLED without touching the chain — the
+        // aggregate anti-DoS cap the per-IP limiter lacks (audit F1).
+        NodeService gated = new NodeService(engine, mempool, new RateLimiter(1, 3_600_000, 1));
+        assertEquals(rhizome.core.mempool.ExecutionStatus.SUCCESS, gated.submitBlock(mineNext(List.of())));
+        long height = engine.height();
+        assertEquals(rhizome.core.mempool.ExecutionStatus.SUBMIT_THROTTLED, gated.submitBlock(mineNext(List.of())));
+        assertEquals(height, engine.height(), "a throttled submit must not extend the chain");
+    }
+
+    @Test
+    void browserPostIsRefusedUnlessSameOriginWithTheCsrfHeader() throws Exception {
+        var origin = io.activej.http.HttpHeaders.of("Origin");
+        var marker = io.activej.http.HttpHeaders.of("X-Rhizome-Request");
+        Transaction t = signedSend(100_000, 0);
+
+        // A browser POST (carries Origin) that is same-origin but lacks the custom header is refused
+        // — this is the DNS-rebinding case the plain Origin==Host check used to let through.
+        assertEquals(403, call(HttpRequest.post("http://x/add_transaction")
+            .withHeader(origin, "http://x").withBody(t.serialize().toBuffer()).build()).getCode());
+
+        // Cross-origin is refused regardless of the header.
+        assertEquals(403, call(HttpRequest.post("http://x/add_transaction")
+            .withHeader(origin, "http://evil").withHeader(marker, "1")
+            .withBody(t.serialize().toBuffer()).build()).getCode());
+
+        // Same-origin WITH the custom header passes the guard (the dashboard's own requests).
+        assertEquals(200, call(HttpRequest.post("http://x/add_transaction")
+            .withHeader(origin, "http://x").withHeader(marker, "1")
+            .withBody(t.serialize().toBuffer()).build()).getCode());
+
+        // A non-browser client (no Origin — a peer/CLI) is never blocked.
+        assertEquals(200, call(HttpRequest.post("http://x/add_transaction")
+            .withBody(signedSend(100_000, 1).serialize().toBuffer()).build()).getCode());
+    }
+
+    @Test
     void submitTransactionThenBlockUpdatesState() throws Exception {
         Transaction t = signedSend(100_000, 0);
         HttpResponse add = call(HttpRequest.post("http://x/add_transaction")
@@ -186,10 +224,12 @@ class NodeApiTest {
         HttpResponse sync = call(HttpRequest.get("http://x/sync?start=2&end=3").build());
         assertEquals(200, sync.getCode());
         byte[] bytes = sync.getBody().getArray();
-        var buffer = java.nio.ByteBuffer.wrap(bytes);
-        Block b2 = BlockCodec.decode(java.util.Arrays.copyOfRange(bytes, 0, bytes.length));
-        assertEquals(2, ((BlockImpl) b2).id());
-        assertTrue(bytes.length > 0);
+        // /sync streams a window of concatenated blocks: decode it with decodeAll. (The single-object
+        // BlockCodec.decode now rejects trailing bytes, so it must not be used on a multi-block body.)
+        var blocks = BlockCodec.decodeAll(bytes);
+        assertEquals(2, blocks.size());
+        assertEquals(2, ((BlockImpl) blocks.get(0)).id());
+        assertEquals(3, ((BlockImpl) blocks.get(1)).id());
     }
 
     @Test

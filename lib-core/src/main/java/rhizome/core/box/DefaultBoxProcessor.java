@@ -83,9 +83,14 @@ public final class DefaultBoxProcessor implements BoxProcessor {
             case BOX_COLLECT -> collect(payload, height);
             default -> BoxResult.fail(BOX_PAYLOAD_INVALID);
         };
-        if (result.success()) {
-            currentReceipts.add(new BoxReceipt(kind, result.debitFrom(), result.creditFrom()));
-        }
+        // Emit one receipt per box transaction, even for a soft-reverted failure (debit 0,
+        // credit 0). The executor keeps a failed box op in the block (Ethereum-style soft revert,
+        // to defeat the mempool-poisoning halt) and rollbackBlock consumes exactly one box receipt
+        // per box transaction in reverse; a receipt only on success would misalign that walk and
+        // corrupt a reorg (audit: mempool-poisoning halt / C2-class rollback aliasing).
+        currentReceipts.add(result.success()
+            ? new BoxReceipt(kind, result.debitFrom(), result.creditFrom())
+            : new BoxReceipt(kind, 0, 0));
         return result;
     }
 

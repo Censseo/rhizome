@@ -73,7 +73,26 @@ public final class NodeService {
     private final java.util.Set<String> pendingAdmissions =
         java.util.concurrent.ConcurrentHashMap.newKeySet();
 
+    /**
+     * Global (all-clients) cap on the memory-hard PoW verifications that {@code /submit} can trigger
+     * per second. The per-IP HTTP limiter allows ~125 submits/s/IP with no aggregate bound, so a
+     * single IP resending one PoW-free block (public parent hash, in-window id, garbage nonce) can
+     * pin the single event-loop thread on ~40 memory-hard hashes/s and, via the shared consensus
+     * lock, stall block production and sync (audit F1). This single-bucket limiter bounds the total
+     * across every source IP, well below loop capacity; an over-budget submit is dropped WITHOUT
+     * hashing. Declining to speculatively verify is safe: both verification sites already drop
+     * non-verifying blocks (orphan admission is best-effort), and honest blocks still arrive via
+     * sync, which calls the engine directly and is not gated here.
+     */
+    static final int SUBMIT_POW_MAX_PER_SEC = 25;
+    private final RateLimiter submitPowGate;
+
     public NodeService(ChainEngine engine, MemPool mempool) {
+        this(engine, mempool, new RateLimiter(SUBMIT_POW_MAX_PER_SEC, 1000, 1));
+    }
+
+    NodeService(ChainEngine engine, MemPool mempool, RateLimiter submitPowGate) {
+        this.submitPowGate = submitPowGate;
         this.engine = engine;
         this.mempool = mempool;
     }
@@ -407,6 +426,13 @@ public final class NodeService {
 
     /** Accepts a mined block; on success the mempool is purged of its transactions. */
     public ExecutionStatus submitBlock(Block block) {
+        // Global anti-DoS shed: bound the aggregate rate of memory-hard PoW verifications /submit
+        // can trigger, across ALL source IPs (the per-IP HTTP limiter has no aggregate cap). Both
+        // addBlock and registerOrphan below run one memory-hard Pufferfish2 hash on the event-loop
+        // thread for a ~0-cost attacker input; over budget we drop the block un-hashed (audit F1).
+        if (!submitPowGate.allow("submit")) {
+            return ExecutionStatus.SUBMIT_THROTTLED;
+        }
         ExecutionStatus status = engine.addBlock(block);
         if (status == ExecutionStatus.SUCCESS) {
             mempool.onBlockApplied(block);

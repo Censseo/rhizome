@@ -1,5 +1,6 @@
 package rhizome.node;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.net.ServerSocket;
@@ -36,10 +37,39 @@ class PeerDiscoveryTest {
         }
     }
 
+    /** A node with the SSRF filter at its secure default (no allowPrivatePeers opt-in). */
+    private RhizomeNode nodeStrict(String name, int port, List<String> seeds) {
+        return new RhizomeNode(NodeConfig.defaults(FAST, tempDir.resolve(name).toString(), port)
+            .withPeers(seeds).withAdvertisedUrl("http://localhost:" + port));
+    }
+
+    @Test
+    void loopbackPeersAreNotDiscoveredByDefault() throws Exception {
+        // Secure-by-default (audit F4): without the allowPrivatePeers opt-in the SSRF host filter is
+        // on, so the loopback PEX mesh that nodesDiscoverEachOtherFromOneSeed forms WITH the opt-in
+        // does not form here. Before the fix (filter derived from a loopback selfUrl → off), A would
+        // have learned B; now it must not.
+        int portA = freePort();
+        int portB = freePort();
+        String urlA = "http://localhost:" + portA;
+        String urlB = "http://localhost:" + portB;
+        try (RhizomeNode a = nodeStrict("as", portA, List.of());
+             RhizomeNode b = nodeStrict("bs", portB, List.of(urlA))) {
+            a.start();
+            b.start();
+            for (int i = 0; i < 3; i++) {
+                b.discoverRound();
+                a.discoverRound();
+            }
+            assertFalse(a.knownPeers().contains(urlB), "A must not learn B's loopback URL by default");
+        }
+    }
+
     private RhizomeNode node(String name, int port, List<String> seeds, boolean miner) {
         NodeConfig config = NodeConfig.defaults(FAST, tempDir.resolve(name).toString(), port)
             .withPeers(seeds)
-            .withAdvertisedUrl("http://localhost:" + port);
+            .withAdvertisedUrl("http://localhost:" + port)
+            .withAllowPrivatePeers(true); // local dev: PEX-discover peers over loopback (audit F4)
         if (miner) {
             config = config.withMiner(PublicAddress.random()).withBlockIntervalMs(50);
         }

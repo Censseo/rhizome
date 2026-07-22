@@ -108,6 +108,23 @@ class SparseMerkleTreeTest {
     }
 
     @Test
+    void verifyReturnsFalseOnMalformedProofInsteadOfThrowing() {
+        // A proof server is untrusted: a wrong-length sibling (or key/valueHash) must yield a clean
+        // false, never an ArrayIndexOutOfBounds inside encode()'s fixed 32-byte copy that would
+        // crash a verifying light client (audit L3, residual).
+        SparseMerkleTree t = tree();
+        byte[] root = t.update(SparseMerkleTree.EMPTY_ROOT, h("k"), h("v"));
+        StateProof good = t.prove(root, h("k"));
+        // A single 5-byte sibling instead of 32 bytes.
+        StateProof badSibling = new StateProof(h("v"), List.of(new byte[5]));
+        assertFalse(SparseMerkleTree.verify(root, h("k"), h("v"), badSibling));
+        // A short key against an otherwise-valid proof.
+        assertFalse(SparseMerkleTree.verify(root, new byte[5], h("v"), good));
+        // A short valueHash.
+        assertFalse(SparseMerkleTree.verify(root, h("k"), new byte[5], good));
+    }
+
+    @Test
     void absentKeyHasNoProof() {
         SparseMerkleTree t = tree();
         byte[] root = t.update(SparseMerkleTree.EMPTY_ROOT, h("present"), h("v"));

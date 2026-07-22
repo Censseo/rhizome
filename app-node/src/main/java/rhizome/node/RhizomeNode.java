@@ -116,17 +116,17 @@ public final class RhizomeNode implements AutoCloseable {
     }
 
     public synchronized void start() throws IOException {
-        // Block SSRF-prone (loopback / private / metadata) peer hosts on any internet-exposed
-        // node — mainnet, or any network whose advertised self URL is not loopback — so a
-        // publicly-reachable testnet is protected too (audit L2), not just mainnet. A node that
-        // advertises itself over localhost (the default; local dev/test) stays permissive so it
-        // can peer over 127.0.0.1, and RHIZOME_ALLOW_PRIVATE_PEERS=true forces it off explicitly.
-        // Computed here because the snap-sync bootstrap below already fetches from peers.
-        boolean mainnet =
-            config.params().networkName().toLowerCase(java.util.Locale.ROOT).contains("mainnet");
-        this.blockPrivatePeers =
-            !"true".equalsIgnoreCase(System.getenv("RHIZOME_ALLOW_PRIVATE_PEERS"))
-            && (mainnet || !advertisesLoopback(config.selfUrl()));
+        // Block SSRF-prone (loopback / private / metadata) peer hosts by DEFAULT on every node.
+        // The previous heuristic keyed this off whether the *advertised* self URL was loopback, but
+        // the node always binds 0.0.0.0 and /add_peer is unauthenticated, so an exposed testnet or
+        // custom-net node left at the default (loopback) advertise URL ran with the SSRF filter and
+        // DNS-pin rejection OFF — any network-reachable party could add a 169.254.169.254 / RFC1918
+        // peer that syncRound then fetches (audit F4). Secure-by-default instead: only an explicit
+        // RHIZOME_ALLOW_PRIVATE_PEERS=true opts out (for local dev/devnets peering over 127.0.0.1 or
+        // private IPs via pure PEX — configured RHIZOME_PEERS seeds already bypass the filter).
+        boolean allowPrivate = config.allowPrivatePeers()
+            || "true".equalsIgnoreCase(System.getenv("RHIZOME_ALLOW_PRIVATE_PEERS"));
+        this.blockPrivatePeers = !allowPrivate;
 
         LedgerSnapshot snapshot = config.snapshotPath().isPresent()
             ? SnapshotLoader.fromFile(Path.of(config.snapshotPath().get()))
@@ -260,21 +260,6 @@ public final class RhizomeNode implements AutoCloseable {
             }
             producer.start();
         });
-    }
-
-    /** Whether {@code selfUrl}'s host is a loopback name/literal (local dev/test), by host string
-     *  alone (no DNS). Non-loopback (a real advertised host) means the node is internet-facing. */
-    private static boolean advertisesLoopback(String selfUrl) {
-        try {
-            String host = java.net.URI.create(selfUrl).getHost();
-            if (host == null) {
-                return false;
-            }
-            host = host.toLowerCase(java.util.Locale.ROOT);
-            return host.equals("localhost") || host.equals("::1") || host.startsWith("127.");
-        } catch (RuntimeException e) {
-            return false; // unparseable self URL: treat as internet-facing (filter on)
-        }
     }
 
     private void startNetworkLoops() {

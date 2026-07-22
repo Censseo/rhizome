@@ -131,6 +131,50 @@ class TokenContractTest {
     }
 
     @Test
+    void initCannotBeFrontRunByANonDeployer() {
+        // T1: the token is deployed by `sender`. A mempool observer (attacker) races an init to mint
+        // the whole supply to themselves. Under the deployer-bound init it is a no-op: nothing is
+        // minted, the init flag stays unset, and the real deployer can still init afterwards.
+        PublicAddress token = Contracts.deriveAddress(sender, 0);
+        var apair = generateKeyPair();
+        PublicKey aKey = PublicKey.of(apair.getPublic());
+        PrivateKey aPriv = new PrivateKey((Ed25519PrivateKeyParameters) apair.getPrivate());
+        PublicAddress attacker = PublicAddress.of(aKey);
+
+        // Deploy the token and fund the attacker so it can pay gas for its init attempt.
+        assertEquals(ExecutionStatus.SUCCESS, mineBlock(List.of(
+            tx(0, PublicAddress.empty(), TOKEN, TransactionKind.DEPLOY),
+            transferTx(sender, key, priv, 1, attacker, 10_000_000))));
+
+        // Attacker (not the deployer) tries to init: no-op, no supply seized.
+        Transaction attackerInit = TransactionImpl.builder()
+            .from(attacker).to(token).amount(new TransactionAmount(0)).fee(new TransactionAmount(0))
+            .chainId(params.chainId()).nonce(0).signingKey(aKey)
+            .kind(TransactionKind.CALL).data(concat(new byte[] {0}, le64(1000)))
+            .gasLimit(GAS_LIMIT).gasPrice(1).build();
+        attackerInit.sign(aPriv);
+        assertEquals(ExecutionStatus.SUCCESS, mineBlock(List.of(attackerInit)));
+        assertEquals(null, contracts.getStorage(token, balanceKey(attacker)), "attacker minted nothing");
+
+        // The real deployer can still init: the front-run did not consume the one-time init.
+        assertEquals(ExecutionStatus.SUCCESS, mineBlock(List.of(
+            tx(2, token, concat(new byte[] {0}, le64(1000)), TransactionKind.CALL))));
+        assertArrayEquals(le64(1000), contracts.getStorage(token, balanceKey(sender)), "deployer minted the supply");
+        assertEquals(null, contracts.getStorage(token, balanceKey(attacker)), "attacker still holds nothing");
+    }
+
+    /** A plain PDN transfer from a given signer (funds a second identity in a test). */
+    private Transaction transferTx(PublicAddress from, PublicKey fromKey, PrivateKey fromPriv,
+                                   long nonce, PublicAddress to, long amount) {
+        Transaction t = TransactionImpl.builder()
+            .from(from).to(to).amount(new TransactionAmount(amount)).fee(new TransactionAmount(0))
+            .chainId(params.chainId()).nonce(nonce).signingKey(fromKey)
+            .kind(TransactionKind.TRANSFER).gasLimit(0).gasPrice(0).build();
+        t.sign(fromPriv);
+        return t;
+    }
+
+    @Test
     void deployInitTransferMovesBalancesAndEmitsTransferLog() {
         PublicAddress token = Contracts.deriveAddress(sender, 0);
         PublicAddress bob = PublicAddress.random();

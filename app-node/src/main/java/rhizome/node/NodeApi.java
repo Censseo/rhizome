@@ -1,6 +1,5 @@
 package rhizome.node;
 
-import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.Callable;
 
@@ -62,6 +61,9 @@ public final class NodeApi {
     private static final HttpHeader H_REFERRER = HttpHeaders.of("Referrer-Policy");
     private static final HttpHeader H_ORIGIN = HttpHeaders.of("Origin");
     private static final HttpHeader H_HOST = HttpHeaders.of("Host");
+    /** Non-simple header the dashboard sends on every state-changing POST; forces a CORS preflight
+     *  a cross-site/rebinding page cannot satisfy, so its POST is blocked by the browser. */
+    private static final HttpHeader H_RZ_REQUEST = HttpHeaders.of("X-Rhizome-Request");
     private static final String DASHBOARD_CSP =
         "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
         + "script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
@@ -183,12 +185,15 @@ public final class NodeApi {
                     .withJson(new JSONObject().put("error", "rate limited").toString())
                     .toPromise();
             }
-            // CSRF / DNS-rebinding guard on state-changing requests: a browser attaches an
-            // Origin header on cross-site POSTs, so reject any POST whose Origin is not this
-            // node's own host. Peer and CLI clients send no Origin and are unaffected, so P2P
-            // submit/gossip keeps working; the check fails open if headers can't be read, so
-            // it can never block the dashboard's own same-origin requests.
-            if (request.getMethod() == POST && isCrossOriginPost(request)) {
+            // CSRF / DNS-rebinding guard on state-changing requests. A browser attaches an Origin
+            // header on every POST, so any POST carrying an Origin is browser-originated. Such a
+            // request is refused unless it is (a) same-origin AND (b) carries the non-simple
+            // X-Rhizome-Request header. (a) blocks classic cross-site POSTs; (b) blocks DNS
+            // rebinding, which defeats (a) by making Origin==Host — a rebinding page cannot set a
+            // custom header without a CORS preflight this node never grants (no Access-Control-*
+            // response), so the browser blocks the request. Peer and CLI clients send no Origin and
+            // are unaffected, so P2P submit/gossip keeps working.
+            if (request.getMethod() == POST && isForbiddenBrowserPost(request)) {
                 return HttpResponse.ofCode(403)
                     .withJson(new JSONObject().put("error", "cross-origin request refused").toString())
                     .toPromise();
@@ -408,23 +413,32 @@ public final class NodeApi {
     }
 
     /**
-     * True when a POST carries a browser {@code Origin} header whose authority differs from
-     * the request's {@code Host} — i.e. a cross-site request. Fails open (returns false) if
-     * either header is absent or unparseable, so non-browser peers and the dashboard's own
-     * same-origin requests are never blocked.
+     * True when a browser-originated POST must be refused. A request carrying an {@code Origin} is
+     * browser-originated (browsers attach Origin to every POST); it is allowed only when it is
+     * same-origin ({@code Origin} authority == {@code Host}) AND carries the {@code X-Rhizome-Request}
+     * header. The same-origin check stops classic cross-site POSTs; the custom-header requirement
+     * stops DNS rebinding (which makes Origin==Host) because a rebinding page cannot set a non-simple
+     * header without a CORS preflight this node never grants. Requests with no {@code Origin}
+     * (peers, CLI — not browsers, so not a CSRF vector) are always allowed. Fails open only when a
+     * present {@code Origin}/{@code Host} is unparseable.
      */
-    private static boolean isCrossOriginPost(HttpRequest request) {
+    private static boolean isForbiddenBrowserPost(HttpRequest request) {
         try {
             String origin = request.getHeader(H_ORIGIN);
             if (origin == null || origin.isEmpty()) {
-                return false;
+                return false; // not a browser request
             }
             String host = request.getHeader(H_HOST);
             if (host == null || host.isEmpty()) {
                 return false;
             }
             String authority = java.net.URI.create(origin).getAuthority();
-            return authority == null || !authority.equalsIgnoreCase(host);
+            if (authority == null || !authority.equalsIgnoreCase(host)) {
+                return true; // cross-site
+            }
+            // Same-origin (or rebound to look same-origin): require the custom header.
+            String marker = request.getHeader(H_RZ_REQUEST);
+            return marker == null || marker.isEmpty();
         } catch (RuntimeException e) {
             return false;
         }
@@ -915,14 +929,23 @@ public final class NodeApi {
             return badRequest("range too large (max " + Constants.BLOCK_HEADERS_PER_FETCH + ")");
         }
         long cappedEnd = Math.min(end, node.blockCount());
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        for (long h = start; h <= cappedEnd; h++) {
-            byte[] encoded = rhizome.core.block.HeaderCodec.encode(node.header(h));
-            out.write(encoded, 0, encoded.length);
-        }
+        // Stream header-by-header instead of buffering the whole window and copying it again via
+        // toByteArray() (the same ~2×-window-on-the-event-loop pattern the M5 fix removed from
+        // /sync). Headers are small, so the impact was modest, but the streaming form is bounded to
+        // one header in memory at a time and matches /sync (audit net F3). The wire bytes are the
+        // identical self-framing concatenation the client (HeaderCodec.decodeAll) already parses.
+        java.util.Iterator<ByteBuf> headers = new java.util.Iterator<>() {
+            private long h = start;
+            @Override public boolean hasNext() {
+                return h <= cappedEnd;
+            }
+            @Override public ByteBuf next() {
+                return ByteBuf.wrapForReading(rhizome.core.block.HeaderCodec.encode(node.header(h++)));
+            }
+        };
         return HttpResponse.ok200()
             .withHeader(HttpHeaders.CONTENT_TYPE, "application/octet-stream")
-            .withBody(out.toByteArray())
+            .withBodyStream(ChannelSuppliers.ofIterator(headers))
             .build();
     }
 
@@ -976,7 +999,11 @@ public final class NodeApi {
     }
 
     private static HttpResponse statusResponse(ExecutionStatus status) {
-        int code = status == ExecutionStatus.SUCCESS ? 200 : 400;
+        int code = switch (status) {
+            case SUCCESS -> 200;
+            case SUBMIT_THROTTLED -> 429; // anti-DoS shed, not a validity error — tell the peer to retry
+            default -> 400;
+        };
         return HttpResponse.ofCode(code)
             .withJson(new JSONObject().put("status", status.name()).toString())
             .build();

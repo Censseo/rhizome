@@ -96,6 +96,21 @@ class WasmVmTest {
     }
 
     @Test
+    void rejectsModuleWhoseTablesAggregateOverTheCap() {
+        // Two tables of 40,000 entries each pass the per-table cap (65,536) but sum to 80,000 — the
+        // residual H4 vector: many mid-size tables force the same multi-GB eager allocation a single
+        // oversized table would. The aggregate cap must refuse it. 40,000 = LEB128 C0 B8 02.
+        byte[] mod = new byte[] {
+            0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00,          // wasm header
+            0x04, 0x0B, 0x02,                                        // table section: size 11, 2 tables
+            0x70, 0x00, (byte) 0xC0, (byte) 0xB8, 0x02,              // table 0: funcref, min 40,000
+            0x70, 0x00, (byte) 0xC0, (byte) 0xB8, 0x02               // table 1: funcref, min 40,000
+        };
+        var ex = assertThrows(IllegalArgumentException.class, () -> WasmVm.validateCode(mod));
+        assertTrue(ex.getMessage().contains("table"), ex.getMessage());
+    }
+
+    @Test
     void outOfGasIsReportedNotHung() {
         // A budget far too small to finish: the per-instruction meter must abort
         // deterministically instead of running (or hanging) to completion.

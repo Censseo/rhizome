@@ -13,6 +13,7 @@ extern "C" {
     fn set_output(ptr: *const u8, len: i32);
     fn emit_log(topic_ptr: *const u8, topic_len: i32, data_ptr: *const u8, data_len: i32);
     fn get_caller(out_ptr: *mut u8, out_cap: i32) -> i32;
+    fn get_deployer(out_ptr: *mut u8, out_cap: i32) -> i32;
     fn get_input(out_ptr: *mut u8, out_cap: i32) -> i32;
     fn call_contract(addr_ptr: *const u8, addr_len: i32,
                      in_ptr: *const u8, in_len: i32,
@@ -49,6 +50,14 @@ fn read_u64_at(input: &[u8], off: usize) -> u64 {
     let mut i = 0;
     while i < 8 { b[i] = input[off + i]; i += 1; }
     u64::from_le_bytes(b)
+}
+
+/// True if `who` deployed this contract; init is gated on this so the owner cannot be front-run
+/// (audit T1).
+fn is_deployer(who: &[u8; ADDR_LEN]) -> bool {
+    let mut d = [0u8; ADDR_LEN];
+    let n = unsafe { get_deployer(d.as_mut_ptr(), ADDR_LEN as i32) };
+    n == ADDR_LEN as i32 && &d == who
 }
 
 fn require_owner(caller: &[u8; ADDR_LEN]) {
@@ -99,6 +108,8 @@ pub extern "C" fn call() {
 
     match input[0] {
         0 => {
+            // Only the deployer may claim ownership, and only once (audit T1).
+            if !is_deployer(&caller) { return; }
             let mut probe = [0u8; 1];
             if unsafe { storage_read(KEY_OWNER.as_ptr(), 1, probe.as_mut_ptr(), 1) } >= 0 { return; }
             unsafe { storage_write(KEY_OWNER.as_ptr(), 1, caller.as_ptr(), ADDR_LEN as i32); }

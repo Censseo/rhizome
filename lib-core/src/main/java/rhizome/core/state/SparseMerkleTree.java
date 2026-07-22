@@ -147,7 +147,6 @@ public final class SparseMerkleTree {
      * recomputes the root from {@code key}, {@code valueHash} and the proof's siblings.
      */
     public static boolean verify(byte[] root, byte[] key, byte[] valueHash, StateProof proof) {
-        byte[] h = leafHash(key, valueHash);
         List<byte[]> siblings = proof.siblings();
         // A key is 256 bits, so a real proof has at most 256 siblings. An over-long attacker-supplied
         // proof would drive bit(key, depth) past the key's bit width and throw — a light client
@@ -155,11 +154,29 @@ public final class SparseMerkleTree {
         if (siblings.size() > KEY_BITS) {
             return false;
         }
+        // Every hash fed into innerHash/leafHash must be exactly 32 bytes: encode() does a fixed
+        // System.arraycopy(...,32) that throws ArrayIndexOutOfBounds on a short/long input. A proof
+        // server is untrusted, so a wrong-length key, valueHash or sibling must return false, not
+        // crash the verifying light client (audit L3, residual). root is compared with Arrays.equals,
+        // which is length-safe, so it needs no check.
+        if (!is32(key) || !is32(valueHash)) {
+            return false;
+        }
+        for (byte[] sib : siblings) {
+            if (!is32(sib)) {
+                return false;
+            }
+        }
+        byte[] h = leafHash(key, valueHash);
         for (int depth = siblings.size() - 1; depth >= 0; depth--) {
             byte[] sib = siblings.get(depth);
             h = bit(key, depth) == 0 ? innerHash(h, sib) : innerHash(sib, h);
         }
         return Arrays.equals(h, root);
+    }
+
+    private static boolean is32(byte[] b) {
+        return b != null && b.length == 32;
     }
 
     // ---- node encoding ----

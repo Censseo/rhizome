@@ -19,6 +19,7 @@ public final class PersistentHostState implements HostState {
     private final byte[] input;
     private final long value;
     private final BoxReader boxReader;
+    private final NativeTransferHandler transferHandler;
 
     private final Map<String, byte[]> pending = new HashMap<>();
     private final java.util.List<LogEntry> logs = new java.util.ArrayList<>();
@@ -31,12 +32,19 @@ public final class PersistentHostState implements HostState {
 
     public PersistentHostState(ContractStore store, PublicAddress contract,
                                byte[] caller, byte[] input, long value, BoxReader boxReader) {
+        this(store, contract, caller, input, value, boxReader, null);
+    }
+
+    public PersistentHostState(ContractStore store, PublicAddress contract,
+                               byte[] caller, byte[] input, long value, BoxReader boxReader,
+                               NativeTransferHandler transferHandler) {
         this.store = store;
         this.contract = contract;
         this.caller = caller.clone();
         this.input = input.clone();
         this.value = value;
         this.boxReader = boxReader;
+        this.transferHandler = transferHandler;
     }
 
     private static String hex(byte[] b) {
@@ -108,6 +116,25 @@ public final class PersistentHostState implements HostState {
     @Override
     public byte[] selfAddress() {
         return contract.toBytes();
+    }
+
+    /**
+     * The deployer recorded at deploy time under the reserved empty storage key. Contracts cannot
+     * write that key (the storage_write host function rejects a zero-length key), so this value is
+     * unspoofable. Read straight from the store — it is set once at deploy, never in a call session.
+     */
+    @Override
+    public byte[] deployer() {
+        byte[] d = store.getStorage(contract, DEPLOYER_KEY);
+        return d == null ? new byte[0] : d;
+    }
+
+    /** Reserved (zero-length) storage key holding the deployer address; unwritable by contracts. */
+    static final byte[] DEPLOYER_KEY = new byte[0];
+
+    @Override
+    public int transferValue(byte[] to, long amount) {
+        return transferHandler == null ? -1 : transferHandler.transfer(to, amount);
     }
 
     @Override

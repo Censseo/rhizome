@@ -1,3 +1,184 @@
+# Rhizome — Blockchain Security & Exploit Audit (fourth pass)
+
+**Date:** 2026-07-21 · **Scope:** whole tree · **Baseline:** post-`#7` (three
+prior passes merged). Six subsystems (consensus/PoW, tx/ledger/mempool, WASM VM,
+DeFi templates, P2P/net/API, crypto/codec/persistence) were re-audited in
+parallel; every prior finding was re-verified against the *current* source
+(several the doc marked "documented/open" turned out already fixed; a few marked
+"fixed" were only partially closed), and new exploitable defects were hunted.
+
+## Fourth-pass findings & fixes
+
+| # | Severity | Area | Title | Status |
+|---|----------|------|-------|--------|
+| P1 | **High** | tx/mempool | Box/token op with an unsatisfiable precondition aborts the whole block → free, permanent, network-wide **block-production halt** (mempool poisoning) | **Fixed** ✅ |
+| P2 | **High** | vm | Uncapped **aggregate** table allocation (per-table cap only) → tens-of-GB eager alloc → heap-dependent fork + crash DoS (residual H4) | **Fixed** ✅ |
+| P3 | Medium | consensus | M4 reorg work-gate fix landed on the fallback synchronizer only; `HeaderSynchronizer` (the live path) still counted **unverified** uncle work → ~⅓-work forced deep pop/restore | **Fixed** ✅ |
+| P4 | Medium | consensus | `restore()` swallowed `addBlock` failures → silent self-truncation after a forced failed reorg | **Fixed** ✅ (fail-loud) |
+| P5 | Low | net/crypto | Dashboard-served `token.wasm` was the **pre-T2** (vulnerable) build; only the test copy had been recompiled | **Fixed** ✅ |
+| P6 | Low | crypto | `SparseMerkleTree.verify` still threw on a wrong-length sibling/key/valueHash → light-client crash (residual L3) | **Fixed** ✅ |
+| P7 | Low | codec | Single-object `BlockCodec`/`HeaderCodec` `decode` accepted trailing bytes (latent malleability, L2) | **Fixed** ✅ |
+| P8 | Low | codec | Codec uncle bound (128) was 64× the consensus max (2) → decode-accepted header/block bloat (L7) | **Fixed** ✅ (→16) |
+| P9 | Low | contracts | `pair`/`amm` swap updated reserves with unchecked `+` → silent `u64` wrap corrupts the pool at extremes (residual T4) | **Fixed** ✅ (recompiled) |
+
+**Also fixed (net/vm hardening batch):** net F2 CSRF/DNS-rebinding — the
+`Origin==Host` guard was defeated by rebinding (which makes Origin==Host); a
+state-changing browser POST now must also carry a non-simple `X-Rhizome-Request`
+header, which a cross-site/rebinding page cannot set without a CORS preflight the
+node never grants, so the browser blocks it (peers/CLI send no Origin and are
+unaffected; the dashboard sends the header). net F3 `/headers` now streams its
+window header-by-header instead of buffering it (mirrors the `/sync` M5 fix). vm
+F3 a CALL that misses the module cache is now charged for the O(code) reparse +
+scan (`MODULE_PARSE_BASE/_PER_BYTE`), so cycling distinct max-size contracts can't
+force that work unpriced.
+
+**net F1 — `/submit` memory-hard-hash DoS: verified GENUINELY exploitable, FIXED.**
+A deeper analysis confirmed the H3 mitigation only removed the *double* hash, not
+the DoS primitive: a single source IP resending one **PoW-free** crafted block
+(valid public parent hash, in-window id, garbage nonce) forces one memory-hard
+Pufferfish2 hash per submit at both `ChainEngine.addBlock` (verifyNonce last check)
+and `registerOrphan`, **synchronously on the single ActiveJ event-loop thread under
+the global consensus lock**. Measured ~25 ms/hash (~40 hashes/s/thread); the per-IP
+rate budget is ~125 submits/s and there was **no global cap**, so one IP pins the
+node's only I/O thread (and starves block production + sync on the shared lock).
+*Fix:* a process-wide single-bucket limiter (`NodeService.submitPowGate`,
+`SUBMIT_POW_MAX_PER_SEC`) bounds the **aggregate** submit-triggered PoW
+verifications/s across every IP, below loop capacity; over budget the block is shed
+(`SUBMIT_THROTTLED` → HTTP 429) *without* hashing. Safe because both call sites
+already drop non-verifying blocks (orphan admission is best-effort) and honest
+blocks still arrive via sync, which calls the engine directly and is not gated. No
+locking/threading change. Regression:
+`NodeApiTest.submitPowGateShedsBlocksOnceTheGlobalBudgetIsSpent`.
+
+**net F4 — SSRF posture keyed off `selfUrl`: verified real, FIXED.**
+`blockPrivatePeers` was derived from whether the *advertised* `selfUrl` was loopback
+(`RhizomeNode.java`), but the node always binds `0.0.0.0` and `/add_peer` is
+unauthenticated. So an exposed **testnet/custom-net** node left at the default
+(loopback) advertise URL ran with the SSRF host filter + DNS-pin rejection **off** —
+any network-reachable party (not just a browser) could add a `169.254.169.254`/RFC1918
+peer that `syncRound` then GETs. (Mainnet was safe by default; the SSRF is *blind*
+with fixed paths, so moderate, not credential-grade.) *Fix:* the filter is now
+**secure-by-default** — `blockPrivatePeers = !(config.allowPrivatePeers() ||
+RHIZOME_ALLOW_PRIVATE_PEERS)`, no longer keyed off `selfUrl`. Local dev/devnets opt in
+via `NodeConfig.withAllowPrivatePeers(true)` or the env var; configured seed peers
+bypass the filter regardless, so seeded deployments are unaffected. Regression:
+`PeerDiscoveryTest.loopbackPeersAreNotDiscoveredByDefault` (default-off blocks loopback
+PEX) alongside the existing opt-in mesh test.
+
+**crypto F4 — SMT `load` does not re-hash the node blob: verified, LEAVE DOCUMENTED.**
+Not remotely triggerable — the node store is content-addressed and written only by
+the node from validated state; snap-sync rebuilds locally and gates on the
+PoW-committed root, so no untrusted `(hash, blob)` reaches `load`. On genuine local
+corruption the impact is availability-only (wrong root → the node diverges/halts, or
+a proof that fails the light client's stateless `verify` — never a forged-yet-accepted
+proof). The one-line `sha256(node)==hash` guard is safe but sits on the per-key/
+per-block hot path; add it only in a dedicated corruption-hardening pass (or gate it
+to the `prove`-serving path) rather than paying it unconditionally on block apply.
+
+### Contract-template redesigns (T1, T3, T4) — now fixed
+
+A follow-up pass hardened the bundled DeFi templates and added the minimal host
+ABI they needed:
+
+- **T1 — front-runnable `init` (High):** the host now records the deployer at
+  deploy under a reserved (zero-length, contract-unwritable) storage key and
+  exposes it via a new `get_deployer` host function; it rides the existing
+  contract-storage commit path, so the state root, snapshot and reorg journal
+  cover it with no new consensus state. `token`/`agent_wallet`/`pair`/`launchpad`/
+  `amm` gate `init` to the deployer, so a mempool observer can no longer seize a
+  token's supply or an agent wallet's ownership.
+- **T3 — no swap slippage (Medium):** `amm`/`pair` swaps take a `min_out` floor
+  (`[amount_in(8) || min_out(8)]`) and revert below it; `0`/absent preserves the
+  old ABI. Defeats sandwich front-running.
+- **T4 — locked funds (High):** `pair.add_liquidity` now mints LP shares
+  (geometric mean on the first deposit, else the min across both legs) and a new
+  `remove_liquidity` selector redeems them; a new `transfer_value` host function
+  (a contract paying native coin from its own balance, bounded by its committed
+  balance, applied by the executor and reversed on reorg) lets `launchpad` expose
+  an owner-gated `withdraw` for the sale proceeds. Both were previously
+  unrecoverable.
+
+Regressions: deployer-bound-init (front-run is a no-op), swap-below-`min_out`
+reverts, LP mint+redeem round-trips, and launchpad withdraw + its reorg reversal.
+
+### P1 — Mempool-poisoning block-production halt (High, liveness)
+
+**Files:** `blockchain/Executor.java` (`applyBox`/`applyToken`, `executeBlock`),
+`token/DefaultTokenProcessor.java`, `box/DefaultBoxProcessor.java`.
+
+A box/token transaction whose *precondition* fails (transfer a token you hold
+none of, update/spend a box you do not own, collect a not-yet-expired box, a
+malformed payload) returned a non-SUCCESS status that made `executeBlock`
+`abort` — **rejecting the entire block**. The mempool holds no box/token state,
+so it admits such a tx, gossips it, and selects it into *every* candidate block;
+every producer then fails to build a block and the tx — never applied — is never
+evicted. One signed, zero-fee, essentially free transaction **halts block
+production network-wide, permanently.** (The same class was already fixed for the
+fresh-keypair no-op via `senderExists`; box/token preconditions were the
+unguarded remainder.)
+
+**Fix:** box/token precondition failures now **soft-revert**, exactly like a
+contract revert (Ethereum-style): the block stays valid, the fee is still charged
+and the nonce consumed, only the state change is skipped — so the poisonous tx is
+*minable*, its nonce advances, and it clears the pool instead of jamming it. Three
+properties make this consensus-safe: (a) the token processor's transfer path was
+reordered to compute the recipient credit (with its overflow check) *before*
+staging the debit, so `run()` never partially stages on failure; (b) the box
+processor now emits a zero-delta receipt for *every* box tx so `rollbackBlock`'s
+per-box-tx receipt walk stays aligned across a reorg (the C2 aliasing class);
+(c) the residual affordability failures stay hard errors — the mempool's
+cumulative-balance selection makes them unreachable in an honestly-produced
+block, so they only signal a malicious block, which is correctly rejected.
+Regressions: `BoxOpTest.softRevertedBoxOpKeepsRollbackReceiptsAligned`, updated
+soft-revert assertions across `BoxOpTest`/`TokenOpTest`.
+
+### P2 — Uncapped aggregate WASM table allocation (High, fork + DoS; residual H4)
+
+**File:** `vm/WasmVm.java` (`rejectOversizedAllocations`).
+
+The H4 fix capped each table's `min` at 65 536 but bounded neither the *number*
+of tables nor their *aggregate* size. Chicory 1.7.5 validates no table count and
+allocates each table's backing arrays eagerly at instantiation, before the gas
+listener runs — so a ≤256 KiB module declaring ~50 000 tables of 65 536 entries
+forces tens of GB of unmetered allocation on every `CALL`: an OOM crash on
+small-heap nodes and a **consensus fork** against large-heap nodes (the exact
+heap-dependent class H2/H4 target).
+
+**Fix:** cap the table count (`MAX_TABLES=16`) and the summed initial entries
+across all tables (`MAX_TOTAL_TABLE_ENTRIES=65 536`), rejected at deploy — the
+eager table allocation is now a small fixed network constant, heap-independent,
+like `TREE_MAX_PAGES` for linear memory. Regression:
+`WasmVmTest.rejectsModuleWhoseTablesAggregateOverTheCap`.
+
+### P3 / P4 — Header-sync reorg gate & restore (Medium)
+
+**Files:** `blockchain/HeaderChain.java`, `blockchain/HeaderSynchronizer.java`,
+`blockchain/ChainSynchronizer.java`.
+
+The M4 anti-DoS fix (compare *PoW-verified base* work only at the pre-pop gate)
+had been applied to `ChainSynchronizer`, used only as a `/headers`-less fallback.
+The live path, `HeaderSynchronizer`, still summed **committed-but-unverified**
+uncle work on both sides of the gate: an attacker pads each header with
+`maxUnclesPerBlock` same-difficulty fake uncles, inflating a cheap branch's
+claimed work ~3× and passing the gate with ~⅓ honest work, forcing a deep
+pop/restore that only fails later at body-level uncle validation. **Fix:**
+`HeaderChain.validate` still checks uncles structurally but returns **base-only**
+work; `HeaderSynchronizer.localWorkAboveFork` drops its uncle sum — both gates now
+compare like PoW-verified work with like, while genuine uncle work still decides
+true fork choice via `totalWork` once bodies validate. Regression:
+`HeaderChainTest.committedUncleWorkDoesNotInflateTheReorgGateWork`.
+
+P4: both `restore()` routines re-applied the saved local branch with
+`addBlock(...)` while discarding the result. Re-adding a just-canonical block can
+fail if an attacker floods the bounded orphan pool to evict an uncle it
+references, silently truncating the node's own chain. **Fix:** `restore` now
+throws on a non-SUCCESS re-add (fail-loud → resync), instead of continuing in a
+silently-shorter state.
+
+---
+
+*The third-pass report follows.*
+
 # Rhizome — Blockchain Security & Exploit Audit (third pass)
 
 **Date:** 2026-07-21 · **Scope:** whole tree (`lib-core`, `lib-vm`, `lib-crypto`,

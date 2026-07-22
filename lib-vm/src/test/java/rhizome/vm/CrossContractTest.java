@@ -113,15 +113,19 @@ class CrossContractTest {
         processor = new WasmContractProcessor(new WasmVm(), contracts);
         engine = ChainEngine.init(params, ledger, store, snapshot, null, clock::get, null, processor);
 
-        // Deploy token (nonce 0) and router (nonce 1), then have the router init the
-        // token: the supply is minted to the token's caller — the ROUTER, not the EOA.
+        // Deploy token (nonce 0) and router (nonce 1). init is now deployer-gated (audit T1), so the
+        // deployer (sender) must init the token — a non-deployer like the router can no longer seize
+        // the supply. The deployer then moves the whole supply to the router so it can act as the
+        // intermediary the caller-context tests below exercise.
         token = Contracts.deriveAddress(sender, 0);
         router = Contracts.deriveAddress(sender, 1);
         assertEquals(ExecutionStatus.SUCCESS, mineBlock(List.of(
             tx(0, PublicAddress.empty(), TOKEN, TransactionKind.DEPLOY),
             tx(1, PublicAddress.empty(), ROUTER, TransactionKind.DEPLOY))));
         assertEquals(ExecutionStatus.SUCCESS, mineBlock(List.of(
-            tx(2, router, forward(token, concat(new byte[] {0}, le64(1000))), TransactionKind.CALL))));
+            tx(2, token, concat(new byte[] {0}, le64(1000)), TransactionKind.CALL))));            // sender inits: supply -> sender
+        assertEquals(ExecutionStatus.SUCCESS, mineBlock(List.of(
+            tx(3, token, concat(new byte[] {1}, router.toBytes(), le64(1000)), TransactionKind.CALL)))); // sender -> router
     }
 
     private Transaction tx(long nonce, PublicAddress to, byte[] data, TransactionKind kind) {
@@ -160,15 +164,15 @@ class CrossContractTest {
 
     @Test
     void routerMovesTokenBalancesAndCalleeSeesRouterAsCaller() {
-        // setUp already proved init-through-router: the supply landed on the ROUTER.
-        assertArrayEquals(le64(1000), contracts.getStorage(token, balKey(router)),
-            "callee credited its caller — the router, not the EOA");
+        // setUp funded the router with the whole supply. Now the router forwards a transfer: the
+        // token must see the ROUTER (the immediate caller), not the EOA, as `from`.
+        assertArrayEquals(le64(1000), contracts.getStorage(token, balKey(router)), "router holds the supply");
 
         PublicAddress bob = PublicAddress.random();
         byte[] transfer = concat(new byte[] {1}, bob.toBytes(), le64(300));
         long h = engine.height() + 1;
         assertEquals(ExecutionStatus.SUCCESS,
-            mineBlock(List.of(tx(3, router, forward(token, transfer), TransactionKind.CALL))));
+            mineBlock(List.of(tx(4, router, forward(token, transfer), TransactionKind.CALL))));
 
         assertArrayEquals(le64(700), contracts.getStorage(token, balKey(router)), "router debited");
         assertArrayEquals(le64(300), contracts.getStorage(token, balKey(bob)), "bob credited");
@@ -190,7 +194,7 @@ class CrossContractTest {
             concat(new byte[] {1}, bob.toBytes(), le64(100)));
         long h = engine.height() + 1;
         assertEquals(ExecutionStatus.SUCCESS,
-            mineBlock(List.of(tx(3, router, callThenTrap, TransactionKind.CALL))));
+            mineBlock(List.of(tx(4, router, callThenTrap, TransactionKind.CALL))));
 
         // The block is valid (a revert never invalidates it), but the sub-call's writes
         // died with the caller's frame: balances untouched, no logs.
@@ -206,7 +210,7 @@ class CrossContractTest {
         // the outer call still succeeds.
         long h = engine.height() + 1;
         assertEquals(ExecutionStatus.SUCCESS,
-            mineBlock(List.of(tx(3, router, forward(router, new byte[] {0}), TransactionKind.CALL))));
+            mineBlock(List.of(tx(4, router, forward(router, new byte[] {0}), TransactionKind.CALL))));
 
         List<ContractLog> logs = processor.logs(h);
         assertEquals(1, logs.size());

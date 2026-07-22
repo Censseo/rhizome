@@ -60,7 +60,7 @@ class RhizomeNodeTest {
     void secondNodeSyncsFromFirst() throws Exception {
         int portA = freePort();
         NodeConfig configA = NodeConfig.defaults(FAST, tempDir.resolve("a").toString(), portA)
-            .withMiner(PublicAddress.random()).withBlockIntervalMs(50);
+            .withMiner(PublicAddress.random()).withBlockIntervalMs(50).withAllowPrivatePeers(true);
 
         try (RhizomeNode nodeA = new RhizomeNode(configA)) {
             nodeA.start();
@@ -68,7 +68,7 @@ class RhizomeNodeTest {
 
             int portB = freePort();
             NodeConfig configB = NodeConfig.defaults(FAST, tempDir.resolve("b").toString(), portB)
-                .withPeers(java.util.List.of("http://localhost:" + portA));
+                .withPeers(java.util.List.of("http://localhost:" + portA)).withAllowPrivatePeers(true);
 
             try (RhizomeNode nodeB = new RhizomeNode(configB)) {
                 nodeB.start();

@@ -85,6 +85,20 @@ public final class WasmVm {
     static final long MAX_TABLE_ENTRIES = 65_536;
 
     /**
+     * Hard cap on the number of table sections in a module, and on the SUM of every table's initial
+     * entry count. The per-table {@link #MAX_TABLE_ENTRIES} cap alone is insufficient: a WASM module
+     * may declare arbitrarily many tables (Chicory validates no count), each eagerly allocated at
+     * instantiation, so ~50 000 tables of 65 536 entries each (a few RLE bytes apiece, well under
+     * {@link #MAX_CODE_SIZE}) force tens of GB of unmetered, heap-dependent allocation on every CALL
+     * — a repeatable OOM crash and a consensus fork between large- and small-heap nodes (audit H4,
+     * residual). Bounding the count and the aggregate makes the eager table allocation a small fixed
+     * network constant, exactly like {@link #TREE_MAX_PAGES} does for linear memory. The bundled
+     * templates declare a single tiny table.
+     */
+    static final int MAX_TABLES = 16;
+    static final long MAX_TOTAL_TABLE_ENTRIES = 65_536;
+
+    /**
      * Hard cap on a function's local-variable count (defence in depth). Chicory already rejects
      * &gt; 50 000 locals at parse, but the interpreter allocates a locals array per activation, so a
      * deep recursion of a high-locals function still spikes heap; this tighter bound keeps that
@@ -138,7 +152,7 @@ public final class WasmVm {
             // every CALL re-parsed the whole module and re-scanned every instruction (O(code)
             // work) unpriced, so a large module could be spammed to amplify node CPU. Deploy
             // also caps code size, so a cache miss is bounded work.
-            module = moduleFor(wasmCode);
+            module = moduleFor(wasmCode, gas);
         } catch (Throwable e) {
             // Malformed bytecode (or a module using non-deterministic float/SIMD opcodes) never
             // reaches instantiation — deterministic revert.
@@ -283,17 +297,26 @@ public final class WasmVm {
             throw new IllegalArgumentException(
                 "contract code too large: " + wasmCode.length + " > " + MAX_CODE_SIZE);
         }
-        moduleFor(wasmCode);
+        moduleFor(wasmCode, null);
     }
 
-    /** Returns the parsed, validated module for {@code wasmCode}, parsing on a cache miss. */
-    private static WasmModule moduleFor(byte[] wasmCode) {
+    /**
+     * Returns the parsed, validated module for {@code wasmCode}, parsing on a cache miss. When a
+     * {@code gas} meter is supplied (a runtime CALL, not deploy-time validation), a cache miss is
+     * charged for the O(code) parse + non-determinism/allocation scan, so cycling more distinct
+     * max-size contracts than the LRU holds cannot force that work unpriced (audit vm F3).
+     */
+    private static WasmModule moduleFor(byte[] wasmCode, GasMeter gas) {
         String key = sha256Hex(wasmCode);
         synchronized (MODULE_CACHE) {
             WasmModule cached = MODULE_CACHE.get(key);
             if (cached != null) {
                 return cached;
             }
+        }
+        if (gas != null) {
+            gas.charge(GasSchedule.MODULE_PARSE_BASE
+                + (long) wasmCode.length * GasSchedule.MODULE_PARSE_PER_BYTE);
         }
         WasmModule module = Parser.parse(wasmCode);
         rejectNonDeterministic(module);
@@ -413,13 +436,28 @@ public final class WasmVm {
     private static void rejectOversizedAllocations(WasmModule module) {
         var tables = module.tableSection();
         if (tables != null) {
-            for (int i = 0; i < tables.tableCount(); i++) {
+            int tableCount = tables.tableCount();
+            // Cap the number of tables: each is eagerly allocated at instantiation, so an unbounded
+            // count is an unmetered, heap-dependent allocation vector on its own (audit H4 residual).
+            if (tableCount > MAX_TABLES) {
+                throw new IllegalArgumentException("contract declares too many tables: "
+                    + tableCount + " (max " + MAX_TABLES + ")");
+            }
+            long totalEntries = 0;
+            for (int i = 0; i < tableCount; i++) {
                 // Only the initial (min) count is allocated eagerly at instantiation; table.grow is
                 // metered by its operand (see meter), so a large max ceiling is already priced.
                 long initial = tables.getTable(i).limits().min();
                 if (initial > MAX_TABLE_ENTRIES) {
                     throw new IllegalArgumentException("contract declares too large a table: "
                         + initial + " entries (max " + MAX_TABLE_ENTRIES + ")");
+                }
+                totalEntries += initial;
+                // Bound the AGGREGATE across all tables, not just each one: many mid-size tables sum
+                // to the same multi-GB eager allocation a single oversized table would (audit H4).
+                if (totalEntries > MAX_TOTAL_TABLE_ENTRIES) {
+                    throw new IllegalArgumentException("contract declares too many total table entries: "
+                        + totalEntries + " (max " + MAX_TOTAL_TABLE_ENTRIES + ")");
                 }
             }
         }
@@ -479,6 +517,13 @@ public final class WasmVm {
                 int valLen = asLen(args[3]);
                 gas.charge(GasSchedule.STORAGE_WRITE_BASE
                     + (long) (keyLen + valLen) * GasSchedule.PER_BYTE);
+                if (keyLen == 0) {
+                    // The empty storage key is reserved for the host-written deployer record that
+                    // get_deployer reads (set once at deploy). Forbidding contracts from writing it
+                    // makes the deployer identity unspoofable — a contract cannot overwrite its own
+                    // recorded deployer to defeat an init access check (audit T1).
+                    throw new IllegalArgumentException("empty storage key is reserved");
+                }
                 byte[] key = mem.readBytes(asOffset(args[0]), keyLen);
                 byte[] value = mem.readBytes(asOffset(args[2]), valLen);
                 host.storageWrite(key, value);
@@ -526,6 +571,27 @@ public final class WasmVm {
             List.of(ValType.I32, ValType.I32), List.of(ValType.I32),
             (Instance inst, long... args) -> new long[] {copyOut(inst, host.selfAddress(), args[0], args[1], gas)});
 
+        // get_deployer(out_ptr, out_cap) -> i32: the address that deployed this contract (recorded
+        // at deploy, immutable). Copies up to out_cap bytes, returns the true length (0 if unknown).
+        // Lets a template gate its init/one-time setup to the deployer so a mempool observer cannot
+        // front-run init and seize the contract (audit T1).
+        HostFunction getDeployer = new HostFunction(ENV, "get_deployer",
+            List.of(ValType.I32, ValType.I32), List.of(ValType.I32),
+            (Instance inst, long... args) -> new long[] {copyOut(inst, host.deployer(), args[0], args[1], gas)});
+
+        // transfer_value(to_ptr, to_len, amount) -> i32: pays `amount` native coin from THIS
+        // contract's own balance to the 25-byte address at to_ptr. Returns 0 on success, -1 if
+        // rejected (unaffordable, bad recipient, or no ledger wired). The move is recorded and
+        // applied by the executor on success; a revert discards it (audit T4).
+        HostFunction transferValue = new HostFunction(ENV, "transfer_value",
+            List.of(ValType.I32, ValType.I32, ValType.I64), List.of(ValType.I32),
+            (Instance inst, long... args) -> {
+                gas.charge(GasSchedule.CALL_BASE); // priced like a call: it mutates ledger state
+                int toLen = asLen(args[1]);
+                byte[] to = inst.memory().readBytes(asOffset(args[0]), toLen);
+                return new long[] {host.transferValue(to, args[2])};
+            });
+
         // box_read(id_ptr, out_ptr, out_cap) -> i32: reads the 32-byte box id at id_ptr,
         // copies the serialized box (up to out_cap bytes) to out_ptr and returns its true
         // length, or -1 if no box exists. A read-only data input — the box is not consumed.
@@ -570,7 +636,7 @@ public final class WasmVm {
 
         return new HostFunction[] {
             storageRead, storageWrite, setOutput, emitLog, getCaller, getInput, getValue, getSelf,
-            callContract, boxRead};
+            getDeployer, transferValue, callContract, boxRead};
     }
 
     /**

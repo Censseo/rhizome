@@ -66,7 +66,14 @@ public final class HeaderCodec {
     }
 
     public static BlockHeader decode(byte[] bytes) {
-        return readFrom(ByteBuffer.wrap(bytes));
+        ByteBuffer buffer = ByteBuffer.wrap(bytes);
+        BlockHeader header = readFrom(buffer);
+        // Single-object decode must consume the whole buffer; trailing bytes are a non-canonical
+        // wire form / latent malleability (audit L2). Streamed multi-header decode uses readFrom.
+        if (buffer.hasRemaining()) {
+            throw new IllegalArgumentException("trailing bytes after header: " + buffer.remaining());
+        }
+        return header;
     }
 
     public static BlockHeader readFrom(ByteBuffer buffer) {

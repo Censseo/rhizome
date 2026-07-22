@@ -43,15 +43,20 @@ async function api(path) {
   return body;
 }
 
+// A non-simple custom header on every state-changing POST. A cross-site or DNS-rebinding page
+// cannot set it without a CORS preflight the node never grants, so the browser blocks the request;
+// the node refuses any browser POST that lacks it (audit net F2).
+const RZ_CSRF = { 'X-Rhizome-Request': '1' };
+
 async function apiPost(path, json) {
-  const res = await fetch(path, { method: 'POST', body: JSON.stringify(json) });
+  const res = await fetch(path, { method: 'POST', headers: RZ_CSRF, body: JSON.stringify(json) });
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(body.error || body.status || ('HTTP ' + res.status));
   return body;
 }
 
 async function submitWire(wire) {
-  const res = await fetch('/add_transaction', { method: 'POST', body: wire });
+  const res = await fetch('/add_transaction', { method: 'POST', headers: RZ_CSRF, body: wire });
   const body = await res.json().catch(() => ({}));
   if (!res.ok || body.status !== 'SUCCESS') {
     throw new Error(body.status || body.error || ('HTTP ' + res.status));

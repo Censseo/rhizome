@@ -35,6 +35,14 @@ public final class GasSchedule {
     public static final long DEPLOY_BASE = 500L;
     public static final long DEPLOY_PER_CODE_BYTE = 10L;
 
+    /**
+     * Charged on a CALL that misses the module cache and must re-parse + re-scan the whole module
+     * (O(code) work). Without it, cycling more distinct max-size contracts than the LRU holds forces
+     * that unpriced work on every call — a CPU amplifier (audit vm F3). Bounded by MAX_CODE_SIZE.
+     */
+    public static final long MODULE_PARSE_BASE = 500L;
+    public static final long MODULE_PARSE_PER_BYTE = 2L;
+
     /** Reading a data box (Ergo-style data input): cheap, base plus per copied byte. */
     public static final long BOX_READ_BASE = 100L;
 }

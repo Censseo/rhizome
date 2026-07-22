@@ -97,6 +97,11 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         this.boxProcessor = boxProcessor;
         this.tokenProcessor = tokenProcessor;
         this.stateAccumulator = stateAccumulator;
+        if (contractProcessor != null) {
+            // Let the VM bound transfer_value by the contract's committed balance (audit T4).
+            contractProcessor.useNativeBalance(a ->
+                ledger.hasWallet(a) ? ledger.getWalletValue(a).amount() : 0L);
+        }
     }
 
     /**

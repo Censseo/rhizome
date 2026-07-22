@@ -11,6 +11,8 @@ extern "C" {
     fn storage_write(key_ptr: *const u8, key_len: i32, val_ptr: *const u8, val_len: i32);
     fn emit_log(topic_ptr: *const u8, topic_len: i32, data_ptr: *const u8, data_len: i32);
     fn get_caller(out_ptr: *mut u8, out_cap: i32) -> i32;
+    fn get_deployer(out_ptr: *mut u8, out_cap: i32) -> i32;
+    fn transfer_value(to_ptr: *const u8, to_len: i32, amount: i64) -> i32;
     fn get_input(out_ptr: *mut u8, out_cap: i32) -> i32;
     fn get_value() -> i64;
     fn get_self(out_ptr: *mut u8, out_cap: i32) -> i32;
@@ -38,6 +40,13 @@ fn read_exact(key: &[u8], out: &mut [u8]) -> bool {
     n == out.len() as i32
 }
 
+/// True if `who` deployed this launchpad; init and withdraw are gated on this (audit T1 / T4).
+fn is_deployer(who: &[u8; ADDR_LEN]) -> bool {
+    let mut d = [0u8; ADDR_LEN];
+    let n = unsafe { get_deployer(d.as_mut_ptr(), ADDR_LEN as i32) };
+    n == ADDR_LEN as i32 && &d == who
+}
+
 /// input[0] selector:
 ///   0 = init(token(25), rate(8 LE)) — once; the creator then funds the launchpad
 ///       by a plain token.transfer to its address.
@@ -50,6 +59,9 @@ pub extern "C" fn call() {
 
     match input[0] {
         0 => {
+            let mut caller = [0u8; ADDR_LEN];
+            unsafe { get_caller(caller.as_mut_ptr(), ADDR_LEN as i32); }
+            if !is_deployer(&caller) { return; }
             let mut probe = [0u8; 1];
             if unsafe { storage_read(KEY_INIT.as_ptr(), 1, probe.as_mut_ptr(), 1) } >= 0 { return; }
             if n < (1 + ADDR_LEN + 8) as i32 { return; }
@@ -61,6 +73,22 @@ pub extern "C" fn call() {
             }
         }
         1 => buy(),
+        // 2 = withdraw(to(25), amount(8)): the creator (deployer) sweeps native sale proceeds out
+        // of the launchpad to `to`. Without this the proceeds were permanently stranded (audit T4).
+        2 => {
+            let mut caller = [0u8; ADDR_LEN];
+            unsafe { get_caller(caller.as_mut_ptr(), ADDR_LEN as i32); }
+            if !is_deployer(&caller) { return; }
+            if n < (1 + ADDR_LEN + 8) as i32 { return; }
+            let mut to = [0u8; ADDR_LEN];
+            let mut i = 0;
+            while i < ADDR_LEN { to[i] = input[1 + i]; i += 1; }
+            let mut amt_b = [0u8; 8];
+            i = 0;
+            while i < 8 { amt_b[i] = input[1 + ADDR_LEN + i]; i += 1; }
+            let amount = u64::from_le_bytes(amt_b);
+            if unsafe { transfer_value(to.as_ptr(), ADDR_LEN as i32, amount as i64) } < 0 { fail(); }
+        }
         _ => {}
     }
 }

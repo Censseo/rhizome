@@ -176,6 +176,43 @@ class TokenPairTest {
         return concat(new byte[] {2}, owner.toBytes(), spender.toBytes());
     }
 
+    private byte[] lpKey(PublicAddress addr) {
+        return concat(new byte[] {6}, addr.toBytes());
+    }
+
+    @Test
+    void addLiquidityMintsLpSharesAndRemoveLiquidityRedeemsThem() {
+        // T4: the first deposit minted sqrt(500k*500k) = 500k LP shares to the provider (previously
+        // the deposit was lost — no shares, no withdraw path).
+        assertArrayEquals(le64(500_000), contracts.getStorage(pair, lpKey(sender)), "LP shares minted");
+        assertArrayEquals(le64(500_000), contracts.getStorage(pair, new byte[] {5}), "LP total tracked");
+
+        // Redeem every share: the proportional reserves (500k of each token) return to the provider,
+        // the shares burn and the pool empties.
+        assertEquals(ExecutionStatus.SUCCESS,
+            mineBlock(List.of(tx(9, pair, concat(new byte[] {5}, le64(500_000)), TransactionKind.CALL))));
+        assertArrayEquals(le64(0), contracts.getStorage(pair, lpKey(sender)), "shares burned");
+        assertArrayEquals(le64(0), contracts.getStorage(pair, new byte[] {5}), "LP total zero");
+        assertArrayEquals(le64(0), contracts.getStorage(pair, new byte[] {2}), "reserve A drained");
+        assertArrayEquals(le64(0), contracts.getStorage(pair, new byte[] {3}), "reserve B drained");
+        assertArrayEquals(le64(SUPPLY), contracts.getStorage(tokenA, balKey(sender)), "token A fully returned");
+        assertArrayEquals(le64(SUPPLY), contracts.getStorage(tokenB, balKey(sender)), "token B fully returned");
+        assertArrayEquals(le64(0), contracts.getStorage(tokenA, balKey(pair)), "pair holds no token A");
+    }
+
+    @Test
+    void swapBelowMinOutRevertsLeavingReservesIntact() {
+        // T3: demand a floor higher than the pool can pay — the swap traps and unwinds, so no token
+        // moves and the reserves are untouched. swap input: [2] || amount_in(8) || min_out(8).
+        long amountIn = 100_000;
+        long out = amountOut(amountIn, LIQUIDITY, LIQUIDITY);
+        byte[] swap = concat(new byte[] {2}, le64(amountIn), le64(out + 1));
+        assertEquals(ExecutionStatus.SUCCESS, mineBlock(List.of(tx(9, pair, swap, TransactionKind.CALL))));
+        assertArrayEquals(le64(LIQUIDITY), contracts.getStorage(pair, new byte[] {2}), "reserve A untouched");
+        assertArrayEquals(le64(LIQUIDITY), contracts.getStorage(pair, new byte[] {3}), "reserve B untouched");
+        assertArrayEquals(le64(SUPPLY - LIQUIDITY), contracts.getStorage(tokenA, balKey(sender)), "seller not debited");
+    }
+
     @Test
     void addLiquidityPulledBothRealTokensIntoThePair() {
         assertArrayEquals(le64(LIQUIDITY), contracts.getStorage(tokenA, balKey(pair)));
