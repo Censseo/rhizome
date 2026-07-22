@@ -4,6 +4,8 @@ plugins {
 
 dependencies {
     implementation project(':lib-core')
+    // Node HTTP transport (NodeHttpClient) shared with the p2p layer.
+    implementation project(':lib-net')
 
     implementation "org.json:json:${jsonVersion}"
 
