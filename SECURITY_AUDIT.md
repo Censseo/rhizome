@@ -22,6 +22,29 @@ plus critiques.
 
 Aucune rupture de consensus Critical ni vol de fonds directement exploitable n'a été trouvé.
 
+## Statut de remédiation (mise à jour)
+
+Tous les findings ont été traités. Chaque correctif est accompagné d'un test verrouillant
+la régression (sauf mention contraire).
+
+| Réf | Sévérité | Statut | Correctif |
+|---|---|---|---|
+| V1 | High | **Corrigé** | Pré-scan des locals sur les octets bruts **avant** `Parser.parse` (`WasmVm.preScanLocals`), bornes par-fonction et par-module. Tests : `WasmLocalsGuardTest`. |
+| V2 | High | **Corrigé** | `PeerDiscovery.fetchPeers` lit désormais via `ofInputStream()` + `readBounded` (64 KiB). Test : `PeerDiscoveryBodyBoundTest`. |
+| V3 | Medium | **Corrigé** | Réservation tree-wide des locals dans `DepthLimitedInterpreterMachine` (`MAX_TREE_LIVE_LOCALS`), revert déterministe. Tests : `WasmLocalsGuardTest`. |
+| V4 | Low/Med | **Corrigé** | `MemPool.addTransaction` vérifie la signature **avant** `makeRoomForParkedSlot`. Test : `MemPoolTest.invalidSignatureNewcomerCannotEvictParkedVictims…`. |
+| V5 | Low/Med | **Corrigé** | `restoreBlock` fait confiance aux refs d'oncle déjà validées (pas de dépendance au pool churné) dans les deux synchroniseurs. Test : `BlockUnclesTest.restoreBlockRecoversANephewWhoseUncleIsMissing…`. |
+| V6c | Low | **Corrigé** | Confinement d'exception autour de `findCommonAncestor` (→ `PEER_INVALID`) dans les deux synchroniseurs. |
+| V6d | Low | **Corrigé** | Checkpoint appliqué dans `HeaderChain.validate`. Test : `HeaderChainTest.rejectsBranchThatViolatesACheckpoint…`. |
+| V6e | Low | **Corrigé** | Champ `vote` borné au décodage (`HeaderCodec`, `BlockDto`). Test : `CodecBoundsTest.rejectsOutOfRangeVote`. |
+| V6g | Low | **Corrigé** | `Helpers.PDN` rejette négatif / NaN / overflow. Test : `HelpersTest`. |
+| V6h | Low | **Corrigé** | `SignatureVerifier.markVerified` re-vérifie (ne peut plus empoisonner le cache). Test : `SignatureVerifierTest.markVerifiedReVerifies…`. |
+| V6j | Low | **Corrigé** | `rejectNonDeterministic` capture aussi les conversions `I32_TRUNC_F32`/`_REINTERPRET_F64`. |
+| V6b | Low | **Mitigé** | `decodeStreamed` lit en chunks de 512 KiB (facteur quadratique ÷8) ; un vrai fix asymptotique demanderait un préfixe de longueur (changement wire). Tests : `BlockCodecStreamTest`. |
+| V6a | Low | **Accepté** | Buffering des chunks de snapshot : reachability limitée aux seeds de confiance ; le sink écrit ledger/nonce en write-through, donc un streaming sûr exigerait un adaptateur transactionnel (rollback). Documenté dans le code. |
+| V6f | Low | **Accepté** | Recalcul de difficulté O(hauteur) : optimisation de scalabilité (cache de préfixe), à risque de divergence de déterminisme — hors périmètre d'un correctif sécurité. |
+| V6i | Low/Info | **Accepté** | Registre STRING reflété dans le JSON `/box` : pas d'XSS côté nœud (CSP `script-src 'self'` + `nosniff`) ; risque uniquement pour des consommateurs tiers non-échappants. |
+
 ---
 
 ## 1. Vulnérabilités

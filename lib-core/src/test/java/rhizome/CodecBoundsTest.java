@@ -68,6 +68,23 @@ class CodecBoundsTest {
         assertThrows(IllegalArgumentException.class, () -> HeaderCodec.decode(withTrailer));
     }
 
+    private static byte[] headerWithVote(int vote) {
+        byte[] h = header(0, 0, null);
+        ByteBuffer.wrap(h).putInt(148, vote); // vote field: after id+ts+diff+numTx + four 32-byte hashes
+        return h;
+    }
+
+    @Test
+    void rejectsOutOfRangeVote() {
+        // Canonical votes are 0 (abstain) or ±1/±2 (VoteableParams). An out-of-range wire int must be
+        // rejected at decode so it never reaches the vote tally or the header preimage (audit V6e).
+        assertDoesNotThrow(() -> HeaderCodec.decode(headerWithVote(0)));
+        assertDoesNotThrow(() -> HeaderCodec.decode(headerWithVote(2)));
+        assertDoesNotThrow(() -> HeaderCodec.decode(headerWithVote(-2)));
+        assertThrows(IllegalArgumentException.class, () -> HeaderCodec.decode(headerWithVote(3)));
+        assertThrows(IllegalArgumentException.class, () -> HeaderCodec.decode(headerWithVote(Integer.MIN_VALUE)));
+    }
+
     @Test
     void rejectsHugeUncleCount() {
         assertThrows(IllegalArgumentException.class, () -> HeaderCodec.decode(header(0, Integer.MAX_VALUE, null)));

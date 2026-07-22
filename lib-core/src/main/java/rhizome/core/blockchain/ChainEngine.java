@@ -224,6 +224,25 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
     }
 
     public ExecutionStatus addBlock(Block block) {
+        return addBlock(block, false);
+    }
+
+    /**
+     * Re-applies a block that was already canonical on this node — the restore half of a rejected
+     * reorg. It is validated exactly like {@link #addBlock} EXCEPT that its uncle references are
+     * trusted rather than re-checked against the orphan pool: those uncles passed full validation
+     * when the block was first accepted, but the pool is a bounded LRU that a hostile peer can churn
+     * (spraying cheap orphans) so a referenced uncle may have been evicted meanwhile. Re-deriving the
+     * uncle work from the block's own committed references — instead of failing the restore and
+     * throwing "a full resync is required" — lets an honest node recover its own suffix without the
+     * orphan pool being a remote liveness lever (audit V5). Uncle rewards come from the same committed
+     * references (via the Executor), so they are applied identically with or without the pool.
+     */
+    public ExecutionStatus restoreBlock(Block block) {
+        return addBlock(block, true);
+    }
+
+    private ExecutionStatus addBlock(Block block, boolean trustedRestore) {
         lock.lock();
         try {
             var b = (BlockImpl) block;
@@ -286,9 +305,16 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             // uncle verification behind the block's proven work means an attacker must do real PoW
             // before any uncle hashing runs, so it is no longer a cheap amplifier (audit 5th-pass,
             // consensus/crypto Finding: uncle-PoW-before-block-PoW).
-            BigInteger uncleWork = validateUncles(b);
-            if (uncleWork == null) {
-                return INVALID_UNCLES;
+            BigInteger uncleWork;
+            if (trustedRestore) {
+                // Trust our own previously-validated block's uncle refs; the pool may have been
+                // churned since (audit V5). Work is a pure function of the committed ref difficulties.
+                uncleWork = uncleWorkFromRefs(b);
+            } else {
+                uncleWork = validateUncles(b);
+                if (uncleWork == null) {
+                    return INVALID_UNCLES;
+                }
             }
 
             java.util.Set<PublicAddress> touched = stateAccumulator == null ? null : new java.util.HashSet<>();
@@ -1102,6 +1128,20 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
      * referenced uncles) to fold into the chain weight, or {@code null} if any
      * check fails.
      */
+    /**
+     * The uncle work committed by {@code block}'s references, summed as {@code Σ 2^difficulty} — the
+     * same total {@link #validateUncles} returns, but read straight from the (already-validated)
+     * references without consulting the orphan pool. Used only by {@link #restoreBlock}. Each
+     * committed difficulty is bounded to {@code [0, 255]} at header decode, so the power is bounded.
+     */
+    private static BigInteger uncleWorkFromRefs(BlockImpl block) {
+        BigInteger work = BigInteger.ZERO;
+        for (UncleRef ref : block.uncles()) {
+            work = work.add(BigInteger.TWO.pow(ref.difficulty()));
+        }
+        return work;
+    }
+
     private BigInteger validateUncles(BlockImpl block) {
         List<UncleRef> uncles = block.uncles();
         if (uncles.isEmpty()) {

@@ -170,18 +170,25 @@ public final class MemPool {
                 return BALANCE_TOO_LOW;
             }
 
-            // Capacity, checked only after the cheap validity gates so eviction runs for a genuine
-            // candidate. A full pool no longer blindly rejects: if some sender is fully parked (its
-            // confirmed nonce is absent, so NONE of its txs are minable now) that dead weight yields
-            // to a more useful newcomer, so honest ready/fee-paying traffic can never be crowded out
-            // permanently by parked gap-txs (audit 5th-pass, mempool censorship). If the pool is full
-            // of live txs instead, this is legitimate saturation and we still shed the newcomer.
-            if (size >= maxSize && !makeRoomForParkedSlot(from, tx)) {
-                return QUEUE_FULL;
-            }
-
+            // Signature is verified BEFORE the capacity/eviction step, which is the only step here
+            // that mutates the pool: makeRoomForParkedSlot evicts a parked victim, and if that ran
+            // ahead of verification an attacker could evict honest parked transactions for free with
+            // a garbage signature — an unauthenticated, zero-cost censorship of a full pool (audit
+            // V4). The cheap read-only gates above still run first, so verify only ever pays for a
+            // structurally-valid candidate; only the state-changing eviction now sits behind it.
             if (!verifier.verify(transaction)) {
                 return INVALID_SIGNATURE;
+            }
+
+            // Capacity, checked after the validity gates AND the signature so eviction runs only for a
+            // genuine, authenticated candidate. A full pool no longer blindly rejects: if some sender
+            // is fully parked (its confirmed nonce is absent, so NONE of its txs are minable now) that
+            // dead weight yields to a more useful newcomer, so honest ready/fee-paying traffic can
+            // never be crowded out permanently by parked gap-txs (audit 5th-pass, mempool censorship).
+            // If the pool is full of live txs instead, this is legitimate saturation and we still shed
+            // the newcomer.
+            if (size >= maxSize && !makeRoomForParkedSlot(from, tx)) {
+                return QUEUE_FULL;
             }
 
             bySender.computeIfAbsent(from, a -> new TreeMap<>()).put(tx.nonce(), transaction);

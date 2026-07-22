@@ -102,6 +102,12 @@ public class BlockDto implements BinarySerializable {
         SHA256Hash nonce = SHA256Hash.of(BinaryIO.getFixed(buffer, SHA256Hash.SIZE));
         SHA256Hash stateRoot = SHA256Hash.of(BinaryIO.getFixed(buffer, SHA256Hash.SIZE));
         int vote = buffer.getInt();
+        // Canonical votes are 0 (abstain) or ±paramId (VoteableParams: STORAGE_FEE_FACTOR=1,
+        // MIN_VALUE_PER_BYTE=2). Reject anything else at decode so an unbounded wire int never reaches
+        // the vote tally or the header preimage (audit V6e). Long abs guards Integer.MIN_VALUE.
+        if (Math.abs((long) vote) > 2) {
+            throw new IllegalArgumentException("vote out of range: " + vote);
+        }
         return new BlockDto(id, timestamp, difficulty, numTransactions, lastBlockHash, merkleRoot, nonce,
             stateRoot, vote);
     }

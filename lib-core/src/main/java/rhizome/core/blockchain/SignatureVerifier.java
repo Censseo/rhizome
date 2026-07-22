@@ -126,11 +126,15 @@ public final class SignatureVerifier {
         verified.put(key, Boolean.TRUE);
     }
 
-    /** Pre-warms the cache from a transaction known to be validly signed (mempool admission). */
-    public void markVerified(Transaction t) {
-        if (!((TransactionImpl) t).isTransactionFee()) {
-            remember(key(t));
-        }
+    /**
+     * Pre-warms the verify-once cache for {@code t}. This now RE-VERIFIES the signature rather than
+     * trusting the caller: caching an unverified transaction would poison the cache so that a forged
+     * signature is treated as valid at block validation ({@code verifyAll} is a cache hit) — a
+     * signature-check bypass sitting one careless caller away from the consensus path (audit V6h).
+     * Returns whether the transaction is validly signed.
+     */
+    public boolean markVerified(Transaction t) {
+        return verify(t);
     }
 
     public int cacheSize() {

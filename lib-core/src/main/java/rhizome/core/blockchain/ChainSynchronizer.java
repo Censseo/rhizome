@@ -57,7 +57,15 @@ public final class ChainSynchronizer {
             return Result.NO_CHANGE;
         }
 
-        long forkHeight = findCommonAncestor(peer);
+        long forkHeight;
+        try {
+            forkHeight = findCommonAncestor(peer);
+        } catch (RuntimeException e) {
+            // A peer that throws or returns an empty/garbage response while we probe for the common
+            // ancestor must be treated as invalid, exactly like the bulk fetch phases below — never
+            // allowed to propagate out of syncFrom and disrupt the whole sync pass (audit V6c).
+            return Result.PEER_INVALID;
+        }
         if (forkHeight < GenesisBlock.GENESIS_ID) {
             return Result.INCOMPATIBLE; // genesis mismatch: different network
         }
@@ -249,12 +257,15 @@ public final class ChainSynchronizer {
             engine.popBlock();
         }
         for (Block block : localBranch) {
-            ExecutionStatus status = engine.addBlock(block);
+            // restoreBlock (not addBlock): these blocks were canonical here, so their uncle refs were
+            // already fully validated; re-checking them against the orphan pool would let a hostile
+            // peer that churned the pool (evicting a referenced uncle) turn a rejected reorg into a
+            // forced full resync (audit V5). Any OTHER failure is still a genuine invariant breach.
+            ExecutionStatus status = engine.restoreBlock(block);
             if (status != ExecutionStatus.SUCCESS) {
-                // Re-adding a just-canonical block must succeed; a failure (e.g. an orphan-pool
-                // eviction knocking out a referenced uncle after a forced failed reorg) would
-                // silently leave the node permanently shorter. Fail loud so a full resync recovers
-                // the suffix instead of continuing truncated (audit: restore self-truncation).
+                // Re-adding a just-canonical block must otherwise succeed; a failure would silently
+                // leave the node permanently shorter. Fail loud so a full resync recovers the suffix
+                // instead of continuing truncated (audit: restore self-truncation).
                 throw new IllegalStateException("failed to restore local branch at "
                     + ((BlockImpl) block).id() + " after a rejected reorg: " + status
                     + " — a full resync is required");

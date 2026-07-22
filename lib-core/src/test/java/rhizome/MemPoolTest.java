@@ -244,6 +244,49 @@ class MemPoolTest {
         assertEquals(3, pool.size());
     }
 
+    /**
+     * A ready-nonce, high-fee newcomer whose {@code from}/{@code signingKey} match (so it passes the
+     * cheap gates) but whose signature was made by a DIFFERENT key, so it fails verification.
+     */
+    private Transaction readyButInvalidSig(PublicAddress[] out, long fee) {
+        var pair = generateKeyPair();
+        var k = PublicKey.of(pair.getPublic());
+        var addr = PublicAddress.of(k);
+        accounts.balances.put(addr, 1_000_000L);
+        out[0] = addr;
+        Transaction t = Transaction.of(addr, PublicAddress.random(), new TransactionAmount(1),
+            k, new TransactionAmount(fee), 1000L, params.chainId(), 0); // nonce 0 == confirmed next -> ready
+        var wrong = generateKeyPair();
+        t.sign(new PrivateKey((Ed25519PrivateKeyParameters) wrong.getPrivate())); // wrong key -> bad sig
+        return t;
+    }
+
+    @Test
+    void invalidSignatureNewcomerCannotEvictParkedVictimsFromAFullPool() {
+        // audit V4: eviction (the only pool-mutating step in addTransaction) must run only for an
+        // authenticated candidate. Fill the pool with honest parked dead weight, then submit a
+        // ready-nonce, HIGH-fee newcomer with a garbage signature — exactly the shape that would win
+        // makeRoomForParkedSlot. It must be rejected for the bad signature WITHOUT evicting a victim.
+        MemPool pool = new MemPool(params, verifier, accounts, 3);
+        List<Transaction> parked = new java.util.ArrayList<>();
+        for (int nonce = 1; nonce <= 3; nonce++) {
+            Transaction t = send(1, 1, nonce);
+            assertEquals(ExecutionStatus.SUCCESS, pool.addTransaction(t));
+            parked.add(t);
+        }
+        assertEquals(3, pool.size());
+
+        PublicAddress[] a = new PublicAddress[1];
+        Transaction badReady = readyButInvalidSig(a, 100); // ready + fee 100 > victim fee 1
+        assertEquals(ExecutionStatus.INVALID_SIGNATURE, pool.addTransaction(badReady));
+
+        assertEquals(3, pool.size(), "no victim may be evicted for an unverified transaction");
+        for (Transaction t : parked) {
+            assertTrue(pool.contains(t.hashContents()),
+                "parked victim must survive an invalid-signature newcomer");
+        }
+    }
+
     @Test
     void selectsContiguousNonceRunInOrder() {
         mempool.addTransaction(send(100, 0, 0));
