@@ -13,11 +13,13 @@ test where one is expressible:
 | `token.rs do_transfer` unchecked add (Info) | Credit is now `to_bal.checked_add(amount).unwrap_or_else(\|\| fail())`, matching the `pair`/`amm` checked-arithmetic discipline; `token.wasm` recompiled (test + dashboard copies). Unreachable via the shipped ABI (supply conservation), so no trigger test is expressible — the existing token suite confirms no regression. |
 | Dead p2p cluster (Info) | Removed the whole unreachable cluster: the `lib-net` module (`rhizome.net.**` + `FloodDiscoveryTest`) and the non-functional `app-dnsseeder` module, plus their `settings.gradle` entries, the source-unused `lib-net` deps in `app-node`/`app-wallet`, and the dead commented `Peer` references in `NodeInterface`. No live code path referenced any of it (no inbound listener existed). |
 | `/stats` rate-limit weight (bug in the 5th-pass fix) | Corrected the integer-division `STATS_WINDOW / SCAN_COST_PER_BLOCKS` (=1) to `STATS_WINDOW`. |
+| Aggregate (all-IP) explorer-read gate (net Finding 2, deeper half) | Added a process-wide `readGate` (`NodeService.READ_DECODE_MAX_PER_SEC`, `tryReadBudget`) charged — on top of the per-IP limiter — for the reads that decode blocks under the consensus lock (`/stats`, `/blocks`, `/block`, `/transaction`, `/address_txs`); a distributed flood is shed with HTTP 429 before touching the store, so it can no longer sum past the per-IP weighting and pin the event loop / contend the lock. The peer-sync paths (`/sync`, `/headers`) are deliberately excluded. Regression: `NodeApiTest.aggregateReadGateShedsExplorerReadsPastTheGlobalBudget`. |
 
 Not implemented (unchanged, by design): `SparseMerkleTree.load` re-hash stays off
-the per-key apply hot path (local-corruption-only, no remote trigger); and an
-*aggregate* (all-IP) read-compute gate for the explorer endpoints — the deeper
-lock-free-reads change — remains a recommended dedicated hardening, noted below.
+the per-key apply hot path (local-corruption-only, no remote trigger); and the
+lock-free / decode-outside-lock explorer read path (serving these reads without
+taking the consensus lock at all) remains a larger dedicated refactor — the
+aggregate `readGate` above bounds the exposure in the meantime.
 
 ---
 

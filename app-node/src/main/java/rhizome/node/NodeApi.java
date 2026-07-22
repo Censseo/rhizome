@@ -180,9 +180,19 @@ public final class NodeApi {
             .build();
 
         return request -> {
-            if (!limiter.allow(clientKey(request), requestCost(request))) {
+            int cost = requestCost(request);
+            if (!limiter.allow(clientKey(request), cost)) {
                 return HttpResponse.ofCode(429)
                     .withJson(new JSONObject().put("error", "rate limited").toString())
+                    .toPromise();
+            }
+            // Aggregate (all-IP) budget for the explorer reads that decode blocks under the consensus
+            // lock: the per-IP limiter above cannot stop a distributed flood from summing past it, so a
+            // process-wide bucket bounds the total lock-guarded decode work on the event-loop thread
+            // (audit 5th-pass, net Finding 2). Shed over-budget reads before they touch the store.
+            if (isConsensusLockRead(request) && !node.tryReadBudget(cost)) {
+                return HttpResponse.ofCode(429)
+                    .withJson(new JSONObject().put("error", "read budget exceeded").toString())
                     .toPromise();
             }
             // CSRF / DNS-rebinding guard on state-changing requests. A browser attaches an Origin
@@ -507,6 +517,24 @@ public final class NodeApi {
             return STATS_WINDOW;
         }
         return 1;
+    }
+
+    /**
+     * The browser-facing explorer reads that fully decode blocks from RocksDB under the consensus lock
+     * (ChainEngine.blockAt). These are additionally charged to the process-wide aggregate read budget
+     * (NodeService.tryReadBudget) so a distributed flood can't sum past the per-IP limiter and pin the
+     * event loop / contend the lock (audit 5th-pass, net Finding 2). The peer-sync paths /sync and
+     * /headers are deliberately excluded — throttling them would slow honest chain sync.
+     */
+    private static boolean isConsensusLockRead(HttpRequest request) {
+        String path;
+        try {
+            path = request.getPath();
+        } catch (RuntimeException e) {
+            return false;
+        }
+        return "/stats".equals(path) || "/blocks".equals(path) || "/block".equals(path)
+            || "/transaction".equals(path) || "/address_txs".equals(path);
     }
 
     /**

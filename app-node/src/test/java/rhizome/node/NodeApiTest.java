@@ -2,6 +2,7 @@ package rhizome.node;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static rhizome.core.common.Crypto.generateKeyPair;
 
@@ -166,6 +167,26 @@ class NodeApiTest {
         long height = engine.height();
         assertEquals(rhizome.core.mempool.ExecutionStatus.SUBMIT_THROTTLED, gated.submitBlock(mineNext(List.of())));
         assertEquals(height, engine.height(), "a throttled submit must not extend the chain");
+    }
+
+    @Test
+    void aggregateReadGateShedsExplorerReadsPastTheGlobalBudget() throws Exception {
+        // A distributed flood can stay within every per-IP budget yet sum to unbounded lock-guarded
+        // block decodes on the event loop; the process-wide read gate caps the total (audit 5th-pass,
+        // net Finding 2). Here the per-IP limiter is generous but the aggregate read budget is tiny.
+        var lenientPerIp = new RateLimiter(1_000_000, 60_000, 100);
+        NodeService node = new NodeService(engine, mempool,
+            new RateLimiter(NodeService.SUBMIT_POW_MAX_PER_SEC, 1000, 1),
+            new RateLimiter(NodeService.READONLY_GAS_MAX_PER_SEC, 1000, 1),
+            new RateLimiter(40, 3_600_000, 1)); // aggregate read budget: 40 units/window
+        var srv = NodeApi.servlet(eventloop, node, lenientPerIp);
+
+        // /stats costs STATS_WINDOW (32): the first is admitted (gate charges before the handler),
+        // the second (64 > 40) is shed with 429 regardless of the per-IP budget.
+        assertNotEquals(429, callWith(srv, HttpRequest.get("http://x/stats").build()).getCode());
+        assertEquals(429, callWith(srv, HttpRequest.get("http://x/stats").build()).getCode());
+        // A read that does not decode blocks under the consensus lock is never charged to this budget.
+        assertEquals(200, callWith(srv, HttpRequest.get("http://x/block_count").build()).getCode());
     }
 
     @Test
