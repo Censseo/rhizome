@@ -2,27 +2,27 @@ package rhizome;
 
 import org.junit.jupiter.api.Test;
 
-import rhizome.core.crypto.PrivateKey;
-import rhizome.core.crypto.PublicKey;
-import rhizome.core.crypto.SHA256Hash;
+import rhizome.crypto.PrivateKey;
+import rhizome.crypto.PublicKey;
+import rhizome.crypto.SHA256Hash;
 
 import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static rhizome.core.common.Crypto.SHA256;
-import static rhizome.core.common.Crypto.addWork;
-import static rhizome.core.common.Crypto.concatHashes;
-import static rhizome.core.common.Crypto.generateKeyPair;
-import static rhizome.core.common.Crypto.signWithPrivateKey;
-import static rhizome.core.common.Crypto.verifyHash;
+import static rhizome.crypto.Crypto.SHA256;
+import static rhizome.crypto.Crypto.addWork;
+import static rhizome.crypto.Crypto.concatHashes;
+import static rhizome.crypto.Crypto.generateKeyPair;
+import static rhizome.crypto.Crypto.signWithPrivateKey;
+import static rhizome.crypto.Crypto.verifyHash;
 import static rhizome.core.common.Utils.bytesToHex;
 import static rhizome.core.common.Utils.hexStringToByteArray;
-import static rhizome.core.common.Crypto.checkSignature;
+import static rhizome.crypto.Crypto.checkSignature;
 
 import rhizome.core.blockchain.Miner;
-import rhizome.core.common.PowAlgorithm;
+import rhizome.crypto.PowAlgorithm;
 
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
@@ -142,6 +142,6 @@ class CryptoTests {
         var hashString = hash.toHexString();
         var convertedHash = SHA256Hash.of(hashString);
 
-        assertTrue(hash.hash().isContentEqual(convertedHash.hash()));
+        assertEquals(hash, convertedHash);
     }
 }

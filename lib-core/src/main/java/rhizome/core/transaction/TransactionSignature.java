@@ -1,12 +1,13 @@
 package rhizome.core.transaction;
 
-import io.activej.bytebuf.ByteBuf;
-import rhizome.core.common.SimpleHashType;
+import java.util.Arrays;
 
-import static rhizome.core.common.Utils.bytesToHex;
-import static rhizome.core.common.Utils.hexStringToByteArray;
+import rhizome.crypto.SimpleHashType;
 
-public record TransactionSignature(ByteBuf signature) implements SimpleHashType {
+import static rhizome.crypto.Hex.bytesToHex;
+import static rhizome.crypto.Hex.hexStringToByteArray;
+
+public record TransactionSignature(byte[] signature) implements SimpleHashType {
 
     public static TransactionSignature empty() {
         return new TransactionSignature(SimpleHashType.empty(SIZE));
@@ -17,7 +18,7 @@ public record TransactionSignature(ByteBuf signature) implements SimpleHashType 
     }
 
     public static TransactionSignature of(byte[] bytes) {
-        return new TransactionSignature(ByteBuf.wrapForReading(bytes));
+        return new TransactionSignature(bytes);
     }
 
     public static TransactionSignature of(String hexString) {
@@ -25,11 +26,11 @@ public record TransactionSignature(ByteBuf signature) implements SimpleHashType 
     }
 
     public String toHexString() {
-        return bytesToHex(signature.getArray());
+        return bytesToHex(signature);
     }
 
     public byte[] toBytes() {
-        return signature.getArray();
+        return signature;
     }
 
     @Override
@@ -37,7 +38,12 @@ public record TransactionSignature(ByteBuf signature) implements SimpleHashType 
         if (!(other instanceof TransactionSignature)) {
             return false;
         }
-        return signature.isContentEqual(((TransactionSignature) other).signature());
+        return Arrays.equals(signature, ((TransactionSignature) other).signature());
+    }
+
+    @Override
+    public int hashCode() {
+        return Arrays.hashCode(signature);
     }
 
     public static final int SIZE = 64;

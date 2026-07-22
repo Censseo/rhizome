@@ -12,7 +12,7 @@ import rhizome.core.block.Block;
 import rhizome.core.block.BlockHeader;
 import rhizome.core.block.BlockImpl;
 import rhizome.core.block.UncleRef;
-import rhizome.core.crypto.SHA256Hash;
+import rhizome.crypto.SHA256Hash;
 import rhizome.core.ledger.Ledger;
 import rhizome.core.ledger.LedgerSnapshot;
 import rhizome.core.ledger.PublicAddress;
@@ -320,7 +320,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
                     return INVALID_STATE_ROOT;
                 }
             } else if (!java.util.Arrays.equals(b.stateRoot().toBytes(),
-                    rhizome.core.crypto.SHA256Hash.empty().toBytes())) {
+                    rhizome.crypto.SHA256Hash.empty().toBytes())) {
                 // No accumulator to recompute the root, yet the block commits a non-empty one we
                 // cannot verify. Accepting it blindly would fork this node from every validating
                 // node (audit M6: state-root validation must not depend on local configuration),

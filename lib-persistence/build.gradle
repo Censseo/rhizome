@@ -7,8 +7,8 @@ dependencies {
     // Contract-store interface implemented by the RocksDB-backed store below.
     implementation project(':lib-vm')
 
-    // CQEngine
-    implementation 'com.googlecode.cqengine:cqengine:3.6.0'
+    implementation "io.activej:activej-bytebuf:${activejVersion}"
+    implementation "io.activej:activej-common:${activejVersion}"
 
     // https://mvnrepository.com/artifact/org.iq80.leveldb/leveldb
     // Pure-Java store: the native-image / test / light-node path.
@@ -20,4 +20,7 @@ dependencies {
 
     // https://mvnrepository.com/artifact/commons-io/commons-io
     implementation 'commons-io:commons-io:2.15.0'
+
+    implementation "org.slf4j:slf4j-api:${slf4jVersion}"
+    testRuntimeOnly "ch.qos.logback:logback-classic:${logbackVersion}"
 }

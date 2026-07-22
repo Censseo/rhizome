@@ -4,6 +4,12 @@ plugins {
 
 dependencies {
     implementation project(':lib-core')
+    // Node HTTP transport (NodeHttpClient) shared with the p2p layer.
+    implementation project(':lib-net')
+
+    implementation "org.json:json:${jsonVersion}"
+
+    runtimeOnly "ch.qos.logback:logback-classic:${logbackVersion}"
 
     // The end-to-end wallet test drives a real node.
     testImplementation project(':app-node')

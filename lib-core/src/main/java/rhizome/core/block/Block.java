@@ -5,7 +5,7 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 import rhizome.core.block.dto.BlockDto;
-import rhizome.core.crypto.SHA256Hash;
+import rhizome.crypto.SHA256Hash;
 import rhizome.core.serialization.Serializable;
 import rhizome.core.transaction.Transaction;
 
@@ -70,7 +70,7 @@ public sealed interface Block permits BlockImpl {
     public void addTransaction(Transaction t);
     public List<Transaction> transactions();
     public List<UncleRef> uncles();
-    public boolean verifyNonce(rhizome.core.common.PowAlgorithm powAlgorithm);
+    public boolean verifyNonce(rhizome.crypto.PowAlgorithm powAlgorithm);
     public SHA256Hash hash();
     public SHA256Hash lastBlockHash();
     public int difficulty();

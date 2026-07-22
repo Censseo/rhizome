@@ -2,7 +2,7 @@ package rhizome;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static rhizome.core.common.Crypto.generateKeyPair;
+import static rhizome.crypto.Crypto.generateKeyPair;
 import static rhizome.core.common.Helpers.PDN;
 
 import java.io.IOException;
@@ -11,7 +11,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import rhizome.core.crypto.PublicKey;
+import rhizome.crypto.PublicKey;
 import rhizome.core.ledger.LedgerException;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.persistence.leveldb.LevelDBLedger;

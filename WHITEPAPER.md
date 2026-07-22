@@ -29,7 +29,7 @@ Four goals drive the design:
    GHOST-style fork choice (§9) that credits and rewards orphaned (uncle) work, making
    the fast cadence safe against the orphaning a naïve longest chain suffers.
 
-The node is functional and covered by **404 tests**: consensus, the WASM contract VM
+The node is functional and covered by **401 tests**: consensus, the WASM contract VM
 and its persistence, execution, storage, mempool, HTTP API, block production, P2P
 synchronisation with reorganisation, GHOST uncles, data boxes (agent-facing on-chain
 storage with typed registers, an anti-dust deposit and storage rent), native tokens
@@ -67,29 +67,37 @@ native compilation.
 ```
                 +------------------ app-node ------------------+
    HTTP  <----> |  NodeApi (rate limit + bounded body sizes)   |
-                |  BlockProducer   PeerBroadcaster/Discovery    |
+                |  BlockProducer                                |
                 |  ChainSynchronizer (periodic sync + reorg)    |
-                +----------------------|------------------------+
-                                       v
+                +----------|---------------------|--------------+
+                           v                     |
+        +------ lib-net (p2p transport) ------+  |
+        |  HttpPeerSource  PeerBroadcaster    |  |
+        |  PeerDiscovery   PeerRegistry/Ban   |  |
+        +------------------|------------------+  |
+                           v                     v
          +-------------------------- lib-core -------------------------+
          |  ChainEngine  (addBlock/popBlock, nonces, work, difficulty) |
          |  Executor  (transactional apply; dispatches contract txs)   |
-         |  MemPool   ·  Pufferfish2 (PoW)  ·  Difficulty  ·  Merkle    |
+         |  MemPool   ·  Difficulty  ·  Merkle  ·  PeerSource (iface)   |
          |  ContractProcessor (interface) <--- implemented by lib-vm   |
-         +------------------|-------------------------|----------------+
-                            v                         v
-        +-------- lib-vm (WASM contracts) ----+  +--- lib-persistence ---+
-        |  WasmVm (Chicory, gas-metered)      |  |  RocksDbNodeStore:     |
-        |  WasmContractProcessor (sessions,   |  |  ChainStore + Ledger   |
-        |  undo journals, receipts)           |  |  + txdb (one DB, CFs,  |
-        |  ContractStore <-- RocksDbContract  |  |  atomic WriteBatch)    |
-        +-------------------------------------+  +-----------------------+
+         +--------|-----------------|-------------------|--------------+
+                  v                 v                   v
+  +- lib-crypto (primitives) -+  +- lib-vm (WASM) ---+  +- lib-persistence -+
+  |  Ed25519 (keys, signing)  |  |  WasmVm (Chicory, |  |  RocksDbNodeStore: |
+  |  Pufferfish2 (PoW)        |  |  gas-metered)     |  |  ChainStore+Ledger |
+  |  SHA256/RIPEMD160, hex    |  |  sessions, undo   |  |  +txdb (one DB,    |
+  +---------------------------+  |  journals         |  |  atomic WriteBatch)|
+                                 +-------------------+  +--------------------+
 ```
 
 `lib-vm` depends on `lib-core` and implements its `ContractProcessor` interface, so the
-consensus core dispatches contracts without ever depending on the WASM runtime. Gradle
-multi-module project (Java 21): `lib-core`, `lib-vm`, `lib-persistence`,
-`lib-crypto` (reserved), `app-node`, `app-wallet`.
+consensus core dispatches contracts without ever depending on the WASM runtime.
+`lib-net` implements lib-core's `PeerSource` abstraction over HTTP, so sync logic never
+depends on a transport. `lib-crypto` holds the primitives (Ed25519, Pufferfish2, hashes,
+hex) with BouncyCastle as its only dependency. Gradle multi-module project (Java 21):
+`lib-crypto`, `lib-core`, `lib-net`, `lib-vm`, `lib-persistence`, `app-node`,
+`app-wallet`.
 
 ---
 
@@ -914,7 +922,7 @@ nonces plus an `ACCOUNT_NONCE` state domain (§6.5) so the engine's derived stat
 configurable body pruning (`RHIZOME_PRUNE`) with a `/sync` 410 and a `prunedBelow` advert, and
 trust-minimised snap-sync (`RHIZOME_SYNC=snap`) — periodic per-domain snapshot materialisation,
 `/state/snapshot/*`, and a bootstrap that adopts a peer's state at a buried pivot only when it
-reproduces a PoW-validated header's root. **404 tests, 0 failures.**
+reproduces a PoW-validated header's root. **401 tests, 0 failures.**
 
 **GHOST fork choice.** A fast single longest chain orphans blocks because propagation
 takes a meaningful fraction of the interval (§6.3). A GHOST-style fork choice — the

@@ -5,15 +5,15 @@ import org.bouncycastle.crypto.params.Ed25519PublicKeyParameters;
 import org.json.JSONException;
 import org.json.JSONObject;
 
-import rhizome.core.crypto.PrivateKey;
-import rhizome.core.crypto.PublicKey;
+import rhizome.crypto.PrivateKey;
+import rhizome.crypto.PublicKey;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.serialization.Serializable;
 import rhizome.core.transaction.Transaction;
 import rhizome.core.transaction.TransactionAmount;
 
 import static rhizome.core.common.Helpers.PDN;
-import static rhizome.core.common.Crypto.generateKeyPair;
+import static rhizome.crypto.Crypto.generateKeyPair;
 
 public interface User {
 

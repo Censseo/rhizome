@@ -10,7 +10,7 @@ import io.activej.bytebuf.ByteBufPool;
 import io.activej.common.MemSize;
 import rhizome.core.block.Block;
 import rhizome.core.block.dto.BlockDto;
-import rhizome.core.crypto.SHA256Hash;
+import rhizome.crypto.SHA256Hash;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.serialization.BinarySerializable;
 import rhizome.core.transaction.Transaction;
@@ -173,7 +173,7 @@ public class LevelDBBlockPersistence extends LevelDBDataStore implements BlockPe
         }
 
         static byte[] key(PublicAddress address, SHA256Hash sha256) {
-            return composeKey(address.address().array(), sha256.toBytes());
+            return composeKey(address.toBytes(), sha256.toBytes());
         }
     }
 }

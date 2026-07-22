@@ -5,10 +5,10 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.List;
 
-import rhizome.core.common.PowAlgorithm;
-import rhizome.core.crypto.SHA256Hash;
+import rhizome.crypto.PowAlgorithm;
+import rhizome.crypto.SHA256Hash;
 
-import static rhizome.core.common.Crypto.verifyHash;
+import static rhizome.crypto.Crypto.verifyHash;
 
 /**
  * The logical block header: exactly the fields committed by the proof-of-work,
@@ -75,8 +75,8 @@ public record BlockHeader(
         try {
             MessageDigest sha256 = MessageDigest.getInstance("SHA-256");
 
-            sha256.update(merkleRoot.hash().getArray());
-            sha256.update(lastBlockHash.hash().getArray());
+            sha256.update(merkleRoot.toBytes());
+            sha256.update(lastBlockHash.toBytes());
 
             ByteBuffer buffer = ByteBuffer.allocate(3 * Integer.BYTES + Long.BYTES);
             buffer.putInt(id);
@@ -86,7 +86,7 @@ public record BlockHeader(
             sha256.update(buffer.array());
 
             if (stateRoot != null && !stateRoot.equals(SHA256Hash.empty())) {
-                sha256.update(stateRoot.hash().getArray());
+                sha256.update(stateRoot.toBytes());
             }
 
             if (vote != 0) {
@@ -96,7 +96,7 @@ public record BlockHeader(
             if (uncles != null && !uncles.isEmpty()) {
                 ByteBuffer uncleBuf = ByteBuffer.allocate(uncles.size() * Integer.BYTES);
                 for (UncleRef uncle : uncles) {
-                    sha256.update(uncle.hash().hash().getArray());
+                    sha256.update(uncle.hash().toBytes());
                     uncleBuf.putInt(uncle.difficulty());
                     sha256.update(uncle.miner().toBytes());
                 }

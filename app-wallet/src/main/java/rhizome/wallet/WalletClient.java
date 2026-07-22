@@ -1,26 +1,18 @@
 package rhizome.wallet;
 
-import java.io.IOException;
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
-import java.time.Duration;
-
 import org.json.JSONObject;
 
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.transaction.Transaction;
+import rhizome.net.NodeHttpClient;
 
 /** Talks to a node's HTTP API on the wallet's behalf (query state, submit transfers). */
 public final class WalletClient {
 
-    private final String baseUrl;
-    private final HttpClient http;
+    private final NodeHttpClient http;
 
     public WalletClient(String baseUrl) {
-        this.baseUrl = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
-        this.http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
+        this.http = new NodeHttpClient(baseUrl);
     }
 
     public record WalletInfo(long balance, long nextNonce) {}
@@ -37,12 +29,7 @@ public final class WalletClient {
     /** Submits a signed transaction; returns the node's status string (SUCCESS or a rejection). */
     public String submit(Transaction transaction) {
         byte[] body = transaction.serialize().toBuffer();
-        HttpRequest request = HttpRequest.newBuilder(URI.create(baseUrl + "/add_transaction"))
-            .timeout(Duration.ofSeconds(30))
-            .header("Content-Type", "application/octet-stream")
-            .POST(HttpRequest.BodyPublishers.ofByteArray(body))
-            .build();
-        return new JSONObject(sendForString(request)).getString("status");
+        return new JSONObject(wrap(() -> http.postBinary("/add_transaction", body))).getString("status");
     }
 
     /** Raw JSON of a read-only contract call (dry run) against committed state. */
@@ -51,12 +38,7 @@ public final class WalletClient {
         if (input.length > 0) {
             body.put("input", rhizome.core.common.Utils.bytesToHex(input));
         }
-        HttpRequest request = HttpRequest.newBuilder(URI.create(baseUrl + "/call_readonly"))
-            .timeout(Duration.ofSeconds(30))
-            .header("Content-Type", "application/json")
-            .POST(HttpRequest.BodyPublishers.ofString(body.toString()))
-            .build();
-        return sendForString(request);
+        return wrap(() -> http.postJson("/call_readonly", body.toString()));
     }
 
     /** Raw JSON of a token's metadata by id. */
@@ -85,23 +67,15 @@ public final class WalletClient {
     }
 
     private String get(String path) {
-        return sendForString(HttpRequest.newBuilder(URI.create(baseUrl + path))
-            .timeout(Duration.ofSeconds(15)).GET().build());
+        return wrap(() -> http.get(path));
     }
 
-    private String sendForString(HttpRequest request) {
+    /** Maps transport failures onto the wallet's own exception type. */
+    private static String wrap(java.util.function.Supplier<String> request) {
         try {
-            HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
-            if (response.statusCode() != 200) {
-                // The node returns JSON with a status/error on 4xx; surface it as-is.
-                return response.body();
-            }
-            return response.body();
-        } catch (IOException e) {
-            throw new WalletException("node request failed: " + request.uri(), e);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new WalletException("interrupted: " + request.uri(), e);
+            return request.get();
+        } catch (NodeHttpClient.NodeUnavailableException e) {
+            throw new WalletException(e.getMessage(), e.getCause());
         }
     }
 

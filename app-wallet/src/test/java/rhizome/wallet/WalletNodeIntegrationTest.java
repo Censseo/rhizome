@@ -13,7 +13,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import rhizome.core.blockchain.NetworkParameters;
 import rhizome.core.common.Helpers;
-import rhizome.core.common.PowAlgorithm;
+import rhizome.crypto.PowAlgorithm;
 import rhizome.core.ledger.LedgerSnapshot;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.transaction.TransactionAmount;

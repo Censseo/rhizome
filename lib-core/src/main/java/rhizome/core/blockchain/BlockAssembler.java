@@ -5,7 +5,7 @@ import java.util.List;
 import rhizome.core.block.Block;
 import rhizome.core.block.BlockImpl;
 import rhizome.core.box.BoxPayload;
-import rhizome.core.crypto.SHA256Hash;
+import rhizome.crypto.SHA256Hash;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.mempool.MemPool;
 import rhizome.core.merkletree.MerkleTree;

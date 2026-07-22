@@ -7,7 +7,7 @@ import java.util.Map;
 
 import rhizome.core.block.Block;
 import rhizome.core.block.BlockImpl;
-import rhizome.core.crypto.SHA256Hash;
+import rhizome.crypto.SHA256Hash;
 import rhizome.core.transaction.Transaction;
 import rhizome.core.transaction.TransactionImpl;
 

@@ -76,7 +76,7 @@ public final class LedgerSnapshot {
      * affect it. The genesis block header commits to this hash, binding the
      * chain to its seeded state.
      */
-    public rhizome.core.crypto.SHA256Hash commitmentHash() {
+    public rhizome.crypto.SHA256Hash commitmentHash() {
         var digest = new org.bouncycastle.crypto.digests.SHA256Digest();
         balances.entrySet().stream()
             .sorted(Map.Entry.comparingByKey(
@@ -87,9 +87,9 @@ public final class LedgerSnapshot {
                 byte[] amount = rhizome.core.common.Utils.longToBytes(entry.getValue().amount());
                 digest.update(amount, 0, amount.length);
             });
-        byte[] out = new byte[rhizome.core.crypto.SHA256Hash.SIZE];
+        byte[] out = new byte[rhizome.crypto.SHA256Hash.SIZE];
         digest.doFinal(out, 0);
-        return rhizome.core.crypto.SHA256Hash.of(out);
+        return rhizome.crypto.SHA256Hash.of(out);
     }
 
     public JSONObject toJson() {

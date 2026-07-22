@@ -4,7 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static rhizome.core.common.Crypto.generateKeyPair;
+import static rhizome.crypto.Crypto.generateKeyPair;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -23,9 +23,9 @@ import rhizome.core.blockchain.ChainEngine;
 import rhizome.core.blockchain.ChainStore;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
-import rhizome.core.common.PowAlgorithm;
-import rhizome.core.crypto.PrivateKey;
-import rhizome.core.crypto.PublicKey;
+import rhizome.crypto.PowAlgorithm;
+import rhizome.crypto.PrivateKey;
+import rhizome.crypto.PublicKey;
 import rhizome.core.ledger.Ledger;
 import rhizome.core.ledger.LedgerException;
 import rhizome.core.ledger.LedgerSnapshot;
@@ -114,7 +114,7 @@ class RocksDbNodeStoreTest {
         snapshot.put(sender, new TransactionAmount(1_000_000L));
 
         java.math.BigInteger workAfter;
-        rhizome.core.crypto.SHA256Hash tipAfter;
+        rhizome.crypto.SHA256Hash tipAfter;
 
         try (RocksDbNodeStore store = new RocksDbNodeStore(path)) {
             ChainEngine engine = ChainEngine.init(params, store.ledger(), store.chainStore(), snapshot, null, clock::get);
@@ -174,7 +174,7 @@ class RocksDbNodeStoreTest {
         String path = tempDir.resolve("legacy-db").toString();
 
         // Build a few blocks and remember their hashes.
-        Block b1 = looseBlock(1, rhizome.core.crypto.SHA256Hash.random());
+        Block b1 = looseBlock(1, rhizome.crypto.SHA256Hash.random());
         Block b2 = looseBlock(2, b1.hash());
         Block b3 = looseBlock(3, b2.hash());
         List<Block> blocks = List.of(b1, b2, b3);
@@ -353,11 +353,11 @@ class RocksDbNodeStoreTest {
         @Override public BlockHeader headerAt(long height) { return inner.headerAt(height); }
         @Override public void append(Block block) { inner.append(block); }
         @Override public void pop() { inner.pop(); }
-        @Override public boolean hasTransaction(rhizome.core.crypto.SHA256Hash h) { return inner.hasTransaction(h); }
+        @Override public boolean hasTransaction(rhizome.crypto.SHA256Hash h) { return inner.hasTransaction(h); }
     }
 
     /** A standalone, un-mined block (valid encoding; not chain-validated) for storage tests. */
-    private Block looseBlock(int id, rhizome.core.crypto.SHA256Hash parent) {
+    private Block looseBlock(int id, rhizome.crypto.SHA256Hash parent) {
         var b = (BlockImpl) BlockImpl.builder()
             .id(id).timestamp(1_000_000L + id).difficulty(4)
             .lastBlockHash(parent).build();
@@ -365,7 +365,7 @@ class RocksDbNodeStoreTest {
         var tree = new MerkleTree();
         tree.setItems(b.transactions());
         b.merkleRoot(tree.getRootHash());
-        b.nonce(rhizome.core.crypto.SHA256Hash.random());
+        b.nonce(rhizome.crypto.SHA256Hash.random());
         return b;
     }
 

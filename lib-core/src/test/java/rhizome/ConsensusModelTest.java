@@ -3,17 +3,17 @@ package rhizome;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static rhizome.core.common.Crypto.generateKeyPair;
+import static rhizome.crypto.Crypto.generateKeyPair;
 
 import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters;
 import org.junit.jupiter.api.Test;
 
 import rhizome.core.block.Block;
 import rhizome.core.block.BlockImpl;
-import rhizome.core.common.PowAlgorithm;
-import rhizome.core.crypto.PrivateKey;
-import rhizome.core.crypto.PublicKey;
-import rhizome.core.crypto.SHA256Hash;
+import rhizome.crypto.PowAlgorithm;
+import rhizome.crypto.PrivateKey;
+import rhizome.crypto.PublicKey;
+import rhizome.crypto.SHA256Hash;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.transaction.Transaction;
 import rhizome.core.transaction.TransactionAmount;

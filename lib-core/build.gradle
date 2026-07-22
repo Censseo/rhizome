@@ -3,8 +3,15 @@ plugins {
 }
 
 dependencies {
-    // https://mvnrepository.com/artifact/org.bouncycastle/bcprov-jdk18on
-    // Exposed as `api` because crypto types (PublicKey, PrivateKey) surface
-    // BouncyCastle types in lib-core's public API.
-    api 'org.bouncycastle:bcprov-jdk18on:1.78.1'
+    // Exposed as `api`: crypto types (PublicKey, SHA256Hash, ...) appear
+    // throughout lib-core's public signatures.
+    api project(':lib-crypto')
+
+    // Address derivation (PublicAddress) uses BouncyCastle digests directly.
+    implementation "org.bouncycastle:bcprov-jdk18on:${bouncycastleVersion}"
+
+    // JSONObject appears in the Serializable contract and domain toJson() methods.
+    api "org.json:json:${jsonVersion}"
+
+    compileOnly 'org.jetbrains:annotations:24.1.0'
 }

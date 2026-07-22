@@ -89,14 +89,14 @@ public class LevelDBLedger extends LevelDBDataStore implements Ledger {
 
     private void setWalletValue(PublicAddress wallet, TransactionAmount amount) {
         try {
-            db().put(wallet.address().asArray(), longToBytes(amount.amount()));
+            db().put(wallet.toBytes(), longToBytes(amount.amount()));
         } catch (DBException e) {
             throw new LedgerException("Failed to set wallet value", e);
         }
     }
 
     private TransactionAmount getWalletValueInternal(PublicAddress wallet) {
-        byte[] value = db().get(wallet.address().asArray());
+        byte[] value = db().get(wallet.toBytes());
         if (value == null) {
             return null;
         }

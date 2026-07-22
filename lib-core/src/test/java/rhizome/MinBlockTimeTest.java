@@ -13,7 +13,7 @@ import rhizome.core.blockchain.ChainEngine;
 import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
-import rhizome.core.common.PowAlgorithm;
+import rhizome.crypto.PowAlgorithm;
 import rhizome.core.ledger.InMemoryLedger;
 import rhizome.core.ledger.LedgerSnapshot;
 import rhizome.core.ledger.PublicAddress;

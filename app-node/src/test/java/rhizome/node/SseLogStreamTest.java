@@ -1,5 +1,7 @@
 package rhizome.node;
 
+import rhizome.net.RateLimiter;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -21,7 +23,7 @@ import rhizome.core.blockchain.ChainEngine;
 import rhizome.core.blockchain.ContractProcessor.ContractLog;
 import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.NetworkParameters;
-import rhizome.core.common.PowAlgorithm;
+import rhizome.crypto.PowAlgorithm;
 import rhizome.core.ledger.InMemoryLedger;
 import rhizome.core.ledger.LedgerSnapshot;
 import rhizome.core.ledger.PublicAddress;

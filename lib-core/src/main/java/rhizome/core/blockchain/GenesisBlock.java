@@ -2,7 +2,7 @@ package rhizome.core.blockchain;
 
 import rhizome.core.block.Block;
 import rhizome.core.block.BlockImpl;
-import rhizome.core.crypto.SHA256Hash;
+import rhizome.crypto.SHA256Hash;
 import rhizome.core.ledger.GenesisLedger;
 import rhizome.core.ledger.Ledger;
 import rhizome.core.ledger.LedgerSnapshot;

@@ -6,7 +6,7 @@ import org.jetbrains.annotations.NotNull;
 
 import lombok.Getter;
 import lombok.experimental.Accessors;
-import rhizome.core.crypto.PublicKey;
+import rhizome.crypto.PublicKey;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.serialization.BinaryIO;
 import rhizome.core.serialization.BinarySerializable;

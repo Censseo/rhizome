@@ -5,7 +5,7 @@ import java.util.List;
 
 import rhizome.core.block.Block;
 import rhizome.core.block.BlockHeader;
-import rhizome.core.crypto.SHA256Hash;
+import rhizome.crypto.SHA256Hash;
 
 /**
  * A peer's chain as seen by the synchronizer. An HTTP adapter maps these onto

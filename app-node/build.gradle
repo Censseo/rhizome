@@ -4,8 +4,21 @@ plugins {
 
 dependencies {
     implementation project(':lib-core')
+    implementation project(':lib-net')
     implementation project(':lib-persistence')
     implementation project(':lib-vm')
+
+    implementation "io.activej:activej-http:${activejVersion}"
+    // activej-eventloop also provides the io.activej.reactor package.
+    implementation "io.activej:activej-eventloop:${activejVersion}"
+    implementation "io.activej:activej-promise:${activejVersion}"
+    implementation "io.activej:activej-csp:${activejVersion}"
+    implementation "io.activej:activej-bytebuf:${activejVersion}"
+
+    implementation "org.json:json:${jsonVersion}"
+
+    implementation "org.slf4j:slf4j-api:${slf4jVersion}"
+    runtimeOnly "ch.qos.logback:logback-classic:${logbackVersion}"
 }
 
 application {

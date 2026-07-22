@@ -1,6 +1,6 @@
 package rhizome.core.block;
 
-import rhizome.core.crypto.SHA256Hash;
+import rhizome.crypto.SHA256Hash;
 import rhizome.core.ledger.PublicAddress;
 
 /**

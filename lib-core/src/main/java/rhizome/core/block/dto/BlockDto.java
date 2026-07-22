@@ -5,7 +5,7 @@ import java.nio.ByteBuffer;
 import org.jetbrains.annotations.NotNull;
 
 import lombok.Getter;
-import rhizome.core.crypto.SHA256Hash;
+import rhizome.crypto.SHA256Hash;
 import rhizome.core.serialization.BinaryIO;
 import rhizome.core.serialization.BinarySerializable;
 

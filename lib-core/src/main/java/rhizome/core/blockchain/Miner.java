@@ -1,8 +1,8 @@
 package rhizome.core.blockchain;
 
-import rhizome.core.common.Crypto;
-import rhizome.core.common.PowAlgorithm;
-import rhizome.core.crypto.SHA256Hash;
+import rhizome.crypto.Crypto;
+import rhizome.crypto.PowAlgorithm;
+import rhizome.crypto.SHA256Hash;
 
 /**
  * Minimal proof-of-work solver: finds a nonce for a block-header hash under the

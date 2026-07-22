@@ -7,7 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import org.junit.jupiter.api.Test;
 
 import rhizome.core.blockchain.NetworkParameters;
-import rhizome.core.common.PowAlgorithm;
+import rhizome.crypto.PowAlgorithm;
 
 class NetworkParametersTest {
 

@@ -31,7 +31,7 @@ public final class BlockCodec {
             size += dtos[i].getSize();
         }
         // Each uncle: hash (32) + difficulty (4) + miner address (25).
-        int uncleSize = rhizome.core.crypto.SHA256Hash.SIZE + Integer.BYTES + rhizome.core.ledger.PublicAddress.SIZE;
+        int uncleSize = rhizome.crypto.SHA256Hash.SIZE + Integer.BYTES + rhizome.core.ledger.PublicAddress.SIZE;
         size += Integer.BYTES + uncles.size() * uncleSize;
 
         ByteBuffer buffer = ByteBuffer.allocate(size);
@@ -41,7 +41,7 @@ public final class BlockCodec {
         }
         buffer.putInt(uncles.size());
         for (UncleRef uncle : uncles) {
-            buffer.put(uncle.hash().hash().getArray());
+            buffer.put(uncle.hash().toBytes());
             buffer.putInt(uncle.difficulty());
             buffer.put(uncle.miner().toBytes());
         }
@@ -76,7 +76,7 @@ public final class BlockCodec {
             throw new IllegalArgumentException("numUncles out of range: " + numUncles);
         }
         for (int i = 0; i < numUncles; i++) {
-            byte[] h = new byte[rhizome.core.crypto.SHA256Hash.SIZE];
+            byte[] h = new byte[rhizome.crypto.SHA256Hash.SIZE];
             buffer.get(h);
             int difficulty = buffer.getInt();
             // Bound uncle difficulty at decode, exactly as HeaderCodec.readFrom does (codec parity):
@@ -87,7 +87,7 @@ public final class BlockCodec {
             }
             byte[] m = new byte[rhizome.core.ledger.PublicAddress.SIZE];
             buffer.get(m);
-            uncles.add(new UncleRef(rhizome.core.crypto.SHA256Hash.of(h), difficulty,
+            uncles.add(new UncleRef(rhizome.crypto.SHA256Hash.of(h), difficulty,
                 rhizome.core.ledger.PublicAddress.of(m)));
         }
         return Block.of(header, transactions, uncles);

@@ -13,7 +13,7 @@ import rhizome.core.blockchain.HeaderChain;
 import rhizome.core.blockchain.NetworkParameters;
 import rhizome.core.blockchain.PeerSource;
 import rhizome.core.common.Constants;
-import rhizome.core.crypto.SHA256Hash;
+import rhizome.crypto.SHA256Hash;
 import rhizome.core.ledger.LedgerSnapshot;
 import rhizome.core.state.snapshot.DomainStateAdapter;
 import rhizome.core.state.snapshot.SnapshotChunk;
