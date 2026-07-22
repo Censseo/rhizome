@@ -1,6 +1,8 @@
 package rhizome.node;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static rhizome.core.common.Crypto.generateKeyPair;
 
@@ -168,24 +170,62 @@ class NodeApiTest {
     }
 
     @Test
+    void aggregateReadGateShedsExplorerReadsPastTheGlobalBudget() throws Exception {
+        // A distributed flood can stay within every per-IP budget yet sum to unbounded lock-guarded
+        // block decodes on the event loop; the process-wide read gate caps the total (audit 5th-pass,
+        // net Finding 2). Here the per-IP limiter is generous but the aggregate read budget is tiny.
+        var lenientPerIp = new RateLimiter(1_000_000, 60_000, 100);
+        NodeService node = new NodeService(engine, mempool,
+            new RateLimiter(NodeService.SUBMIT_POW_MAX_PER_SEC, 1000, 1),
+            new RateLimiter(NodeService.READONLY_GAS_MAX_PER_SEC, 1000, 1),
+            new RateLimiter(40, 3_600_000, 1)); // aggregate read budget: 40 units/window
+        var srv = NodeApi.servlet(eventloop, node, lenientPerIp);
+
+        // /stats costs STATS_WINDOW (32): the first is admitted (gate charges before the handler),
+        // the second (64 > 40) is shed with 429 regardless of the per-IP budget.
+        assertNotEquals(429, callWith(srv, HttpRequest.get("http://x/stats").build()).getCode());
+        assertEquals(429, callWith(srv, HttpRequest.get("http://x/stats").build()).getCode());
+        // A read that does not decode blocks under the consensus lock is never charged to this budget.
+        assertEquals(200, callWith(srv, HttpRequest.get("http://x/block_count").build()).getCode());
+    }
+
+    @Test
+    void readonlyGasGateShedsCallsOnceTheGlobalBudgetIsSpent() {
+        // Aggregate (all-IP) dry-run gas budget: with a global budget of 100 gas/window, the first
+        // call reserving 60 is admitted and the second is shed (the /call_readonly handler then
+        // returns HTTP 429) WITHOUT running the VM on the event loop — the aggregate cap the per-IP
+        // limiter lacks for /call_readonly (audit 5th-pass, net Finding 1).
+        NodeService gated = new NodeService(engine, mempool,
+            new RateLimiter(NodeService.SUBMIT_POW_MAX_PER_SEC, 1000, 1),
+            new RateLimiter(100, 3_600_000, 1));
+        assertTrue(gated.tryReadonlyGasBudget(60), "first call fits the budget");
+        assertFalse(gated.tryReadonlyGasBudget(60), "second call is over the aggregate budget");
+    }
+
+    @Test
     void browserPostIsRefusedUnlessSameOriginWithTheCsrfHeader() throws Exception {
-        var origin = io.activej.http.HttpHeaders.of("Origin");
+        // Use the well-known Origin/Host tokens (the interned ones the guard and the real HTTP parser
+        // use), and set Host explicitly the way every browser does — so this exercises the guard the
+        // same way a parsed network request would, independent of ActiveJ's URL-derived-Host behavior.
+        var origin = io.activej.http.HttpHeaders.ORIGIN;
+        var host = io.activej.http.HttpHeaders.HOST;
         var marker = io.activej.http.HttpHeaders.of("X-Rhizome-Request");
         Transaction t = signedSend(100_000, 0);
 
         // A browser POST (carries Origin) that is same-origin but lacks the custom header is refused
         // — this is the DNS-rebinding case the plain Origin==Host check used to let through.
         assertEquals(403, call(HttpRequest.post("http://x/add_transaction")
-            .withHeader(origin, "http://x").withBody(t.serialize().toBuffer()).build()).getCode());
+            .withHeader(origin, "http://x").withHeader(host, "x")
+            .withBody(t.serialize().toBuffer()).build()).getCode());
 
         // Cross-origin is refused regardless of the header.
         assertEquals(403, call(HttpRequest.post("http://x/add_transaction")
-            .withHeader(origin, "http://evil").withHeader(marker, "1")
+            .withHeader(origin, "http://evil").withHeader(host, "x").withHeader(marker, "1")
             .withBody(t.serialize().toBuffer()).build()).getCode());
 
         // Same-origin WITH the custom header passes the guard (the dashboard's own requests).
         assertEquals(200, call(HttpRequest.post("http://x/add_transaction")
-            .withHeader(origin, "http://x").withHeader(marker, "1")
+            .withHeader(origin, "http://x").withHeader(host, "x").withHeader(marker, "1")
             .withBody(t.serialize().toBuffer()).build()).getCode());
 
         // A non-browser client (no Origin — a peer/CLI) is never blocked.

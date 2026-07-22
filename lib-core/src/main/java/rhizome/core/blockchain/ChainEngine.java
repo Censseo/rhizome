@@ -66,6 +66,13 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
     private final NonceStore nonceStore;
 
     private BigInteger totalWork = BigInteger.ZERO;
+    // Base-only cumulative work (Σ 2^difficulty, no uncle/GHOST term) — the same metric the reorg
+    // ADOPTION gate uses (HeaderChain / *Synchronizer.localWorkAboveFork). totalWork adds validated
+    // uncle work on top; keeping the base total lets the sync PREFILTER compare like-with-like so an
+    // uncle-inflated local total can't make a node refuse to even look at a base-heavier peer, while a
+    // peer's self-reported totalWork (an upper bound on its base work) still can't trick it into a
+    // pop/restore — that stays gated on validated base work (audit 5th-pass, reorg-gate metric).
+    private BigInteger baseWork = BigInteger.ZERO;
     private int currentDifficulty;
 
     /** Uncle work credited per block height, so a pop subtracts exactly what an add added. */
@@ -234,13 +241,6 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             if (serializedSize(block) > params.maxBlockSizeBytes()) {
                 return BLOCK_TOO_LARGE;
             }
-            // Structural uncle checks (GHOST): bounded count, distinct, and none is the
-            // parent itself. Ancestry/PoW validation and fork-choice weighting land with
-            // the orphan pool; for now uncles are carried and committed but earn no work.
-            BigInteger uncleWork = validateUncles(b);
-            if (uncleWork == null) {
-                return INVALID_UNCLES;
-            }
             // Static checkpoint: at a pinned height, only the published hash passes.
             SHA256Hash checkpoint = params.checkpoints().get(height + 1);
             if (checkpoint != null && !block.hash().equals(checkpoint)) {
@@ -276,6 +276,19 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             }
             if (!block.verifyNonce(params.powAlgorithm())) {
                 return INVALID_NONCE;
+            }
+
+            // Structural uncle checks (GHOST): bounded count, distinct, none is the parent, and each
+            // referenced orphan is PoW-verified (memory-hard) for its work weight. Deliberately AFTER
+            // the block's OWN PoW: a submitted block triggers up to maxUnclesPerBlock memory-hard uncle
+            // hashes, and running them before line-277 let a PoW-free /submit force ~3x the hashing the
+            // submitPowGate budgets (one own hash) — an event-loop DoS under the consensus lock. Gating
+            // uncle verification behind the block's proven work means an attacker must do real PoW
+            // before any uncle hashing runs, so it is no longer a cheap amplifier (audit 5th-pass,
+            // consensus/crypto Finding: uncle-PoW-before-block-PoW).
+            BigInteger uncleWork = validateUncles(b);
+            if (uncleWork == null) {
+                return INVALID_UNCLES;
             }
 
             java.util.Set<PublicAddress> touched = stateAccumulator == null ? null : new java.util.HashSet<>();
@@ -329,6 +342,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             commitAccountNonces(block);
             nonceStore.markSyncedThrough(b.id()); // nonces now reflect this new tip
             totalWork = totalWork.add(BigInteger.TWO.pow(b.difficulty())).add(uncleWork);
+            baseWork = baseWork.add(BigInteger.TWO.pow(b.difficulty()));
             uncleWorkByHeight.put((long) b.id(), uncleWork);
             // A legal reorg pops at most maxReorgDepth blocks, so uncle-work for heights older
             // than that is never subtracted again — evict it instead of retaining one BigInteger
@@ -390,6 +404,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             }
             BigInteger uncleWork = uncleWorkByHeight.remove(height);
             totalWork = totalWork.subtract(BigInteger.TWO.pow(((BlockImpl) tip).difficulty()));
+            baseWork = baseWork.subtract(BigInteger.TWO.pow(((BlockImpl) tip).difficulty()));
             if (uncleWork != null) {
                 totalWork = totalWork.subtract(uncleWork);
             }
@@ -475,6 +490,16 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         lock.lock();
         try {
             return totalWork;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** Base-only cumulative work (Σ 2^difficulty, no uncle term) — the reorg adoption-gate metric. */
+    public BigInteger baseWork() {
+        lock.lock();
+        try {
+            return baseWork;
         } finally {
             lock.unlock();
         }
@@ -877,6 +902,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
 
     private void rebuildDerivedState() {
         totalWork = BigInteger.ZERO;
+        baseWork = BigInteger.ZERO;
         uncleWorkByHeight.clear();
         voteParamsByBoundary.clear();
         long height = store.height();
@@ -907,6 +933,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             BigInteger uncleWork = uncleWorkOf(header);
             uncleWorkByHeight.put(h, uncleWork);
             totalWork = totalWork.add(BigInteger.TWO.pow(header.difficulty())).add(uncleWork);
+            baseWork = baseWork.add(BigInteger.TWO.pow(header.difficulty()));
             applyVotingAt(h); // replay epoch tallies so the votable params are restored
         }
         if (height > nonceSynced) {

@@ -118,4 +118,24 @@ class WasmVmTest {
         assertEquals(ExecResult.Status.OUT_OF_GAS, r.status());
         assertEquals(50, r.gasUsed());
     }
+
+    @Test
+    void moduleParseGasIsChargedIdenticallyOnWarmAndColdCache() {
+        // Audit 5th-pass, VM Finding 1: the vm F3 module-parse charge was levied only on a cache
+        // MISS. gasUsed feeds gasFee -> sender/miner balances -> the state root, so a quantity that
+        // depends on the node-local module cache (cleared on restart, empty after a snapshot pivot,
+        // evicted per local access order) forks consensus: a cold-cache validator would reject the
+        // honest block a warm producer built. The charge must be identical warm vs cold.
+        WasmVm.clearModuleCacheForTest();
+        ExecResult cold = vm.execute(COUNTER, new MapHostState(new byte[0], new byte[0], 0), new GasMeter(10_000_000));
+        assertEquals(ExecResult.Status.OK, cold.status(), "cold run should succeed");
+
+        // Second run: same code, same (empty) state -> identical execution, but the module is now
+        // cached. Only the cache warmth differs between the two calls.
+        ExecResult warm = vm.execute(COUNTER, new MapHostState(new byte[0], new byte[0], 0), new GasMeter(10_000_000));
+        assertEquals(ExecResult.Status.OK, warm.status(), "warm run should succeed");
+
+        assertEquals(cold.gasUsed(), warm.gasUsed(),
+            "gasUsed must not depend on module-cache warmth (consensus determinism)");
+    }
 }

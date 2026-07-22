@@ -158,6 +158,32 @@ class BlockUnclesTest {
     }
 
     @Test
+    void baseWorkExcludesUncleWorkThatTotalWorkIncludes() {
+        // The reorg PREFILTER now ranks branches by baseWork() (Σ 2^difficulty, no uncle term), the
+        // same metric as the base-only ADOPTION gate — so heavy local uncle work can no longer make a
+        // node refuse to even look at a base-heavier peer, the deadlock the two-metric mismatch caused
+        // (audit 5th-pass, reorg-gate metric). baseWork must count only own-block work; totalWork adds
+        // the validated uncle weight on top; both must revert exactly on pop.
+        engine.addBlock(mineNext(List.of())); // height 2
+        BlockImpl orphan = registerOrphanSiblingOfTip();
+        BigInteger baseBefore = engine.baseWork();
+        BigInteger totalBefore = engine.totalWork();
+        assertEquals(baseBefore, totalBefore, "no uncles yet -> base == total");
+
+        BlockImpl tip = mineNext(List.of(ref(orphan))); // height 3 with an uncle
+        assertEquals(ExecutionStatus.SUCCESS, engine.addBlock(tip));
+        BigInteger blockWork = BigInteger.TWO.pow(tip.difficulty());
+        BigInteger uncleWork = BigInteger.TWO.pow(orphan.difficulty());
+        assertEquals(baseBefore.add(blockWork), engine.baseWork(), "base gains only own-block work");
+        assertEquals(totalBefore.add(blockWork).add(uncleWork), engine.totalWork(), "total adds uncle work");
+        assertTrue(engine.baseWork().compareTo(engine.totalWork()) < 0, "uncle work lives only in total");
+
+        engine.popBlock();
+        assertEquals(baseBefore, engine.baseWork(), "base work reverts on pop");
+        assertEquals(totalBefore, engine.totalWork(), "total work reverts on pop");
+    }
+
+    @Test
     void uncleWorkSurvivesPopAndRebuild() {
         engine.addBlock(mineNext(List.of())); // height 2
         BlockImpl orphan = registerOrphanSiblingOfTip();
@@ -197,6 +223,23 @@ class BlockUnclesTest {
         engine.addBlock(mineNext(List.of()));
         assertEquals(ExecutionStatus.INVALID_UNCLES,
             engine.addBlock(mineNext(List.of(new UncleRef(SHA256Hash.random(), 3, PublicAddress.random())))));
+        assertEquals(2, engine.height());
+    }
+
+    @Test
+    void blocksOwnPowIsVerifiedBeforeUncleWork() {
+        // Audit 5th-pass (uncle-PoW-before-block-PoW DoS): validateUncles runs a memory-hard PoW hash
+        // per referenced uncle, and it used to run BEFORE the block's own PoW — so a PoW-free /submit
+        // forced up to maxUnclesPerBlock uncle hashes it was never budgeted for (the submitPowGate sizes
+        // for one hash/submit). The block's own PoW must be checked first: a block whose own nonce is
+        // invalid is rejected as INVALID_NONCE regardless of its uncle list, so no uncle hashing runs.
+        engine.addBlock(mineNext(List.of())); // height 2
+
+        // A block that carries an (unknown, would-be-INVALID_UNCLES) uncle AND an invalid own PoW.
+        BlockImpl bad = mineNext(List.of(new UncleRef(SHA256Hash.random(), 3, PublicAddress.random())));
+        do { bad.nonce(SHA256Hash.random()); } while (bad.verifyNonce(params.powAlgorithm())); // fails PoW
+        // Own-PoW gate fires first -> INVALID_NONCE (before the reorder this returned INVALID_UNCLES).
+        assertEquals(ExecutionStatus.INVALID_NONCE, engine.addBlock(bad));
         assertEquals(2, engine.height());
     }
 

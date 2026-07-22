@@ -200,6 +200,45 @@ class ExecutorTest {
         Transaction t = Transaction.of(PublicAddress.of(ghostKey), recipient, new TransactionAmount(100),
             ghostKey, new TransactionAmount(0), 1234L, params.chainId(), 0);
         t.sign(new PrivateKey((Ed25519PrivateKeyParameters) pair.getPrivate()));
-        assertEquals(ExecutionStatus.SENDER_DOES_NOT_EXIST, execute(block(2, coinbase(2), t)));
+        // A funded (>0) spend from a sender with no confirmed balance is still rejected — now via
+        // BALANCE_TOO_LOW (absent wallet == balance 0) rather than SENDER_DOES_NOT_EXIST. The
+        // accept/reject decision is unchanged; only key-presence no longer drives it (consensus
+        // Finding 1: validity is a pure function of balance).
+        assertEquals(ExecutionStatus.BALANCE_TOO_LOW, execute(block(2, coinbase(2), t)));
+    }
+
+    @Test
+    void zeroValueTransferIsValidRegardlessOfWhetherTheSenderWalletExists() {
+        // Consensus Finding 1 (phantom-wallet fork): a 0-amount, 0-fee transfer's validity must NOT
+        // depend on ledger key-presence. hasWallet returns true for a 0-balance "phantom" left behind
+        // by any apply-then-rollback (failed block, popBlock reorg, stampStateRoot undo), while the
+        // state root treats a 0 balance as absent. If validity keyed off hasWallet, the SAME canonical
+        // block would be SUCCESS on a node that had reverted the sender into existence and rejected on
+        // a node that synced the winning chain directly → permanent partition. Both cases must agree.
+        var pair = generateKeyPair();
+        var wKey = PublicKey.of(pair.getPublic());
+        var wPriv = new PrivateKey((Ed25519PrivateKeyParameters) pair.getPrivate());
+        var w = PublicAddress.of(wKey);
+
+        // Case A — "clean" node: W was never created.
+        InMemoryLedger clean = new InMemoryLedger();
+        clean.createWallet(miner);
+        Transaction tA = Transaction.of(w, recipient, new TransactionAmount(0), wKey,
+            new TransactionAmount(0), 1234L, params.chainId(), 0);
+        tA.sign(wPriv);
+        ExecutionStatus a = Executor.executeBlock(block(2, coinbase(2), tA), clean, h -> false, params);
+
+        // Case B — "phantom" node: W exists at balance 0 (exactly the post-rollback residue).
+        InMemoryLedger phantom = new InMemoryLedger();
+        phantom.createWallet(miner);
+        phantom.createWallet(w); // balance 0 — the phantom
+        Transaction tB = Transaction.of(w, recipient, new TransactionAmount(0), wKey,
+            new TransactionAmount(0), 1234L, params.chainId(), 0);
+        tB.sign(wPriv);
+        ExecutionStatus b = Executor.executeBlock(block(2, coinbase(2), tB), phantom, h -> false, params);
+
+        assertEquals(ExecutionStatus.SUCCESS, a, "clean node must accept the 0/0 transfer");
+        assertEquals(ExecutionStatus.SUCCESS, b, "phantom node must accept the 0/0 transfer");
+        assertEquals(a, b, "block validity must not depend on ledger key-presence (fork risk)");
     }
 }

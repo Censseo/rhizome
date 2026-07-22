@@ -87,14 +87,70 @@ public final class NodeService {
     static final int SUBMIT_POW_MAX_PER_SEC = 25;
     private final RateLimiter submitPowGate;
 
+    /**
+     * Aggregate compute budget for {@code /call_readonly} dry-runs, in gas units per second, summed
+     * across every source IP. A dry-run runs the VM interpreter for up to {@code MAX_READONLY_GAS}
+     * (50M) instructions synchronously on the single event-loop thread; the per-IP HTTP rate limiter
+     * bounds only one IP, so a few IPs each within their per-IP budget could still pin the loop with
+     * back-to-back gas-sink runs and starve block ingestion/sync (audit 5th-pass, net Finding 1 —
+     * the same aggregate-vs-per-IP gap the F1 submitPowGate closed for /submit). This single global
+     * bucket caps total dry-run gas/s below loop capacity; an over-budget call is shed (HTTP 429)
+     * WITHOUT running the VM. Sized to admit many cheap dashboard queries while throttling repeated
+     * max-gas sinks to a couple per second. Charged the (clamped) gasLimit up-front — the actual run
+     * cannot exceed it — so the gate always sheds before the work happens.
+     */
+    static final int READONLY_GAS_MAX_PER_SEC = 100_000_000;
+    private final RateLimiter readonlyGasGate;
+
+    /**
+     * Aggregate budget for the explorer read endpoints that fully decode blocks from RocksDB <em>under
+     * the consensus lock</em> ({@code /stats}, {@code /blocks}, {@code /block}, {@code /transaction},
+     * {@code /address_txs}), in {@code requestCost} units per second summed across every source IP. The
+     * per-IP rate limiter weights these by the blocks they read, but bounds only one IP — so a
+     * distributed flood of many IPs, each within its per-IP budget, still sums to unbounded
+     * lock-guarded block decodes on the single event-loop thread, contending block production and sync
+     * (audit 5th-pass, net Finding 2 — the aggregate-vs-per-IP gap already closed for /submit and
+     * /call_readonly). This single global bucket caps the total; an over-budget read is shed (HTTP 429)
+     * before it decodes anything. Sized well above heavy multi-client dashboard use (each client is
+     * already ≤ the per-IP budget) yet far below loop capacity, so it only bites a genuine flood. The
+     * peer-sync reads (/sync, /headers) are deliberately NOT gated here — like submitPowGate leaving
+     * sync ungated, honest chain progress must never be throttled by this browser-facing cap.
+     */
+    static final int READ_DECODE_MAX_PER_SEC = 8_000;
+    private final RateLimiter readGate;
+
     public NodeService(ChainEngine engine, MemPool mempool) {
-        this(engine, mempool, new RateLimiter(SUBMIT_POW_MAX_PER_SEC, 1000, 1));
+        this(engine, mempool, new RateLimiter(SUBMIT_POW_MAX_PER_SEC, 1000, 1),
+            new RateLimiter(READONLY_GAS_MAX_PER_SEC, 1000, 1),
+            new RateLimiter(READ_DECODE_MAX_PER_SEC, 1000, 1));
     }
 
     NodeService(ChainEngine engine, MemPool mempool, RateLimiter submitPowGate) {
+        this(engine, mempool, submitPowGate, new RateLimiter(READONLY_GAS_MAX_PER_SEC, 1000, 1),
+            new RateLimiter(READ_DECODE_MAX_PER_SEC, 1000, 1));
+    }
+
+    NodeService(ChainEngine engine, MemPool mempool, RateLimiter submitPowGate, RateLimiter readonlyGasGate) {
+        this(engine, mempool, submitPowGate, readonlyGasGate,
+            new RateLimiter(READ_DECODE_MAX_PER_SEC, 1000, 1));
+    }
+
+    NodeService(ChainEngine engine, MemPool mempool, RateLimiter submitPowGate, RateLimiter readonlyGasGate,
+                RateLimiter readGate) {
         this.submitPowGate = submitPowGate;
+        this.readonlyGasGate = readonlyGasGate;
+        this.readGate = readGate;
         this.engine = engine;
         this.mempool = mempool;
+    }
+
+    /**
+     * Reserves {@code cost} units from the process-wide explorer-read budget, returning false if the
+     * aggregate lock-guarded block-decode budget this second is exhausted (the caller then sheds the
+     * request with 429 before touching the store). See {@link #READ_DECODE_MAX_PER_SEC}.
+     */
+    public boolean tryReadBudget(int cost) {
+        return readGate.allow("read", cost);
     }
 
     /** Called when a freshly submitted block/transaction is accepted (for gossip). */
@@ -207,6 +263,18 @@ public final class NodeService {
     public boolean dryRunAvailable() {
         return contracts != null;
     }
+
+    /**
+     * Reserves {@code gasLimit} from the process-wide dry-run gas budget, returning false if the
+     * aggregate {@code /call_readonly} compute this second is exhausted (the caller then sheds the
+     * request with 429 instead of running the VM on the event loop). See {@link #READONLY_GAS_MAX_PER_SEC}.
+     */
+    public boolean tryReadonlyGasBudget(long gasLimit) {
+        // gasLimit is clamped to MAX_READONLY_GAS (50M) < Integer.MAX_VALUE before it reaches here.
+        return readonlyGasGate.allow("readonly", (int) Math.min(gasLimit, MAX_READONLY_GAS_CHARGE));
+    }
+
+    private static final long MAX_READONLY_GAS_CHARGE = 50_000_000L;
 
     /** Runs a read-only CALL against committed state, discarding writes (no ledger effect). */
     public rhizome.core.blockchain.ContractProcessor.ContractResult dryRun(

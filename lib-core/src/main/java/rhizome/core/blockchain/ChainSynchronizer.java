@@ -49,7 +49,11 @@ public final class ChainSynchronizer {
     }
 
     public Result syncFrom(PeerSource peer) {
-        if (peer.totalWork().compareTo(engine.totalWork()) <= 0) {
+        // Prefilter against BASE work (not the uncle-inclusive total), matching the base-only adoption
+        // gate below — see HeaderSynchronizer.syncFrom for the full rationale (audit 5th-pass,
+        // reorg-gate metric). peer.totalWork() bounds the peer's base work from above, so this never
+        // skips a peer the adoption gate would accept, and over-reporting still can't force a reorg.
+        if (peer.totalWork().compareTo(engine.baseWork()) <= 0) {
             return Result.NO_CHANGE;
         }
 
@@ -147,7 +151,10 @@ public final class ChainSynchronizer {
             return Result.PEER_INVALID;
         }
         if (verifiedWork(branch).compareTo(localWorkAboveFork(forkHeight)) <= 0) {
-            return Result.PEER_INVALID; // claimed heavy, proved light
+            // Claimed heavy, proved light: a structurally valid branch that merely loses the fork race
+            // is not a protocol violation — return NO_CHANGE so an honest total-heavier/base-lighter
+            // peer is not banned on the first strike (audit 5th-pass, reorg-gate metric).
+            return Result.NO_CHANGE;
         }
 
         // --- Stateful apply, with exact restore on failure ---

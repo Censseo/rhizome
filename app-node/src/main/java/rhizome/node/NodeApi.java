@@ -59,8 +59,12 @@ public final class NodeApi {
     private static final HttpHeader H_XFO = HttpHeaders.of("X-Frame-Options");
     private static final HttpHeader H_XCTO = HttpHeaders.of("X-Content-Type-Options");
     private static final HttpHeader H_REFERRER = HttpHeaders.of("Referrer-Policy");
-    private static final HttpHeader H_ORIGIN = HttpHeaders.of("Origin");
-    private static final HttpHeader H_HOST = HttpHeaders.of("Host");
+    // Well-known ActiveJ header tokens: the HTTP parser interns incoming Origin/Host under these, and
+    // a custom HttpHeaders.of("Origin"/"Host") token no longer matches them (it did in 6.0-beta2, but
+    // 6.0-rc2 tightened the lookup) — so reading the CSRF/rebinding guard's Origin/Host through of(...)
+    // silently returned null and fail-opened. Use the interned constants so the guard sees the values.
+    private static final HttpHeader H_ORIGIN = HttpHeaders.ORIGIN;
+    private static final HttpHeader H_HOST = HttpHeaders.HOST;
     /** Non-simple header the dashboard sends on every state-changing POST; forces a CORS preflight
      *  a cross-site/rebinding page cannot satisfy, so its POST is blocked by the browser. */
     private static final HttpHeader H_RZ_REQUEST = HttpHeaders.of("X-Rhizome-Request");
@@ -180,9 +184,19 @@ public final class NodeApi {
             .build();
 
         return request -> {
-            if (!limiter.allow(clientKey(request), requestCost(request))) {
+            int cost = requestCost(request);
+            if (!limiter.allow(clientKey(request), cost)) {
                 return HttpResponse.ofCode(429)
                     .withJson(new JSONObject().put("error", "rate limited").toString())
+                    .toPromise();
+            }
+            // Aggregate (all-IP) budget for the explorer reads that decode blocks under the consensus
+            // lock: the per-IP limiter above cannot stop a distributed flood from summing past it, so a
+            // process-wide bucket bounds the total lock-guarded decode work on the event-loop thread
+            // (audit 5th-pass, net Finding 2). Shed over-budget reads before they touch the store.
+            if (isConsensusLockRead(request) && !node.tryReadBudget(cost)) {
+                return HttpResponse.ofCode(429)
+                    .withJson(new JSONObject().put("error", "read budget exceeded").toString())
                     .toPromise();
             }
             // CSRF / DNS-rebinding guard on state-changing requests. A browser attaches an Origin
@@ -492,7 +506,39 @@ public final class NodeApi {
         if ("/headers".equals(path)) {
             return rangeCost(request, SCAN_COST_PER_BLOCKS, Constants.BLOCK_HEADERS_PER_FETCH);
         }
+        // The explorer read endpoints also fully decode blocks from RocksDB under the consensus lock
+        // (ChainEngine.blockAt), yet were left at cost 1 by the M2 weighting pass. /blocks serves up to
+        // BLOCKS_RANGE_MAX full blocks and /stats reads STATS_WINDOW of them per call, so at cost 1 one
+        // IP could drive tens of thousands of lock-guarded block decodes/s, contending block production
+        // and sync. Weight them by the blocks they actually read (audit 5th-pass, net Finding 2).
+        if ("/blocks".equals(path)) {
+            return rangeCost(request, 1, BLOCKS_RANGE_MAX); // full-block reads: ~1 unit per block
+        }
+        if ("/stats".equals(path)) {
+            // STATS_WINDOW full-block decodes, each under the consensus lock — weight ~1 per block like
+            // /sync and /blocks (NOT divided by SCAN_COST_PER_BLOCKS, which is the lighter header-scan
+            // rate and rounds 32/20 down to 1, leaving /stats effectively unweighted).
+            return STATS_WINDOW;
+        }
         return 1;
+    }
+
+    /**
+     * The browser-facing explorer reads that fully decode blocks from RocksDB under the consensus lock
+     * (ChainEngine.blockAt). These are additionally charged to the process-wide aggregate read budget
+     * (NodeService.tryReadBudget) so a distributed flood can't sum past the per-IP limiter and pin the
+     * event loop / contend the lock (audit 5th-pass, net Finding 2). The peer-sync paths /sync and
+     * /headers are deliberately excluded — throttling them would slow honest chain sync.
+     */
+    private static boolean isConsensusLockRead(HttpRequest request) {
+        String path;
+        try {
+            path = request.getPath();
+        } catch (RuntimeException e) {
+            return false;
+        }
+        return "/stats".equals(path) || "/blocks".equals(path) || "/block".equals(path)
+            || "/transaction".equals(path) || "/address_txs".equals(path);
     }
 
     /**
@@ -619,6 +665,14 @@ public final class NodeApi {
         // Clamp the caller-supplied gas: a dry-run is free and unauthenticated, so an
         // unbounded gasLimit would let anyone burn arbitrary node CPU. Bound it server-side.
         long gasLimit = Math.min(Math.max(1L, body.optLong("gasLimit", 10_000_000L)), MAX_READONLY_GAS);
+
+        // Aggregate (all-IP) dry-run gas budget: the per-IP RateLimiter cannot stop a handful of IPs
+        // from pinning the event loop with back-to-back max-gas sink runs, so shed the call before it
+        // reaches the VM once the global budget is spent (audit 5th-pass, net Finding 1).
+        if (!node.tryReadonlyGasBudget(gasLimit)) {
+            return HttpResponse.ofCode(429)
+                .withJson(new JSONObject().put("error", "readonly compute budget exceeded").toString()).build();
+        }
 
         var result = node.dryRun(from, to, input, value, gasLimit);
         org.json.JSONArray logs = new org.json.JSONArray();

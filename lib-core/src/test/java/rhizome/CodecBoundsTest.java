@@ -7,9 +7,17 @@ import java.nio.ByteBuffer;
 
 import org.junit.jupiter.api.Test;
 
+import rhizome.core.block.BlockCodec;
+import rhizome.core.block.BlockImpl;
 import rhizome.core.block.HeaderCodec;
+import rhizome.core.block.UncleRef;
 import rhizome.core.block.dto.BlockDto;
 import rhizome.core.common.Constants;
+import rhizome.core.crypto.SHA256Hash;
+import rhizome.core.ledger.PublicAddress;
+import rhizome.core.merkletree.MerkleTree;
+import rhizome.core.transaction.Transaction;
+import rhizome.core.transaction.TransactionAmount;
 
 /**
  * Regression guard for the decode-time OOM (H1/H2): attacker-controlled count and
@@ -70,6 +78,31 @@ class CodecBoundsTest {
     void rejectsHugeUncleDifficulty() {
         assertThrows(IllegalArgumentException.class, () -> HeaderCodec.decode(header(0, 1, Integer.MAX_VALUE)));
         assertThrows(IllegalArgumentException.class, () -> HeaderCodec.decode(header(0, 1, -1)));
+    }
+
+    @Test
+    void blockCodecRejectsOutOfRangeUncleDifficulty() {
+        // The full-block codec now bounds uncle difficulty like HeaderCodec (codec parity): a valid
+        // difficulty round-trips, an out-of-range one is rejected at decode before it could reach
+        // BigInteger.TWO.pow in validateUncles.
+        assertDoesNotThrow(() -> BlockCodec.decode(BlockCodec.encode(blockWithUncleDifficulty(5))));
+        assertThrows(IllegalArgumentException.class,
+            () -> BlockCodec.decode(BlockCodec.encode(blockWithUncleDifficulty(Integer.MAX_VALUE))));
+        assertThrows(IllegalArgumentException.class,
+            () -> BlockCodec.decode(BlockCodec.encode(blockWithUncleDifficulty(-1))));
+    }
+
+    private static BlockImpl blockWithUncleDifficulty(int uncleDifficulty) {
+        var b = (BlockImpl) BlockImpl.builder().id(2).timestamp(5000).difficulty(4)
+            .lastBlockHash(SHA256Hash.empty())
+            .uncles(java.util.List.of(new UncleRef(SHA256Hash.random(), uncleDifficulty, PublicAddress.random())))
+            .build();
+        b.addTransaction(Transaction.of(PublicAddress.random(), new TransactionAmount(50)));
+        MerkleTree tree = new MerkleTree();
+        tree.setItems(b.transactions());
+        b.merkleRoot(tree.getRootHash());
+        b.nonce(SHA256Hash.empty());
+        return b;
     }
 
     @Test

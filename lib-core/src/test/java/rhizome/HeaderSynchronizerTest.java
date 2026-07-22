@@ -128,7 +128,11 @@ class HeaderSynchronizerTest {
 
         ChainSynchronizer.Result r = new HeaderSynchronizer(local).syncFrom(liar);
 
-        assertEquals(ChainSynchronizer.Result.PEER_INVALID, r);
+        // The peer served structurally VALID headers that simply prove less base work — it loses the
+        // fork race but committed no protocol violation, so it is left alone (NO_CHANGE), not banned as
+        // PEER_INVALID (audit 5th-pass, reorg-gate metric: don't ban honest total-heavier/base-lighter
+        // peers). Local is still untouched and no body was downloaded.
+        assertEquals(ChainSynchronizer.Result.NO_CHANGE, r);
         assertEquals(6, local.height(), "local chain untouched");
         assertEquals(0, liar.blockFetches, "gate rejected on headers alone — no body downloaded");
     }

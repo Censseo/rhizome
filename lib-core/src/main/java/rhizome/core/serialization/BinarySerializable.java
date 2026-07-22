@@ -31,8 +31,22 @@ public interface BinarySerializable {
         return buffer.array();
     }
 
+    /**
+     * Strict single-object decode: the whole {@code buffer} must be exactly one {@code T}. Trailing
+     * bytes are rejected so a wire object has a unique encoding, matching the P7 strictness of
+     * BlockCodec/HeaderCodec.decode (identity is content-hash, so this is wire-hygiene, not a
+     * correctness fix — but it closes the last non-strict single-object path, /add_transaction).
+     * The offset overload below stays lenient: PeerInterface reads consecutive objects from one
+     * multi-object buffer through it, where remaining bytes are the next object, not junk.
+     */
     static <T extends BinarySerializable> T fromBuffer(byte[] buffer, Class<T> clazz) {
-        return fromBuffer(buffer, 0, clazz);
+        ByteBuffer bb = ByteBuffer.wrap(buffer);
+        T result = clazz.cast(read(bb, clazz));
+        if (bb.hasRemaining()) {
+            throw new IllegalArgumentException(
+                "trailing bytes after " + clazz.getSimpleName() + " (" + bb.remaining() + " left)");
+        }
+        return result;
     }
 
     static <T extends BinarySerializable> T fromBuffer(byte[] buffer, int pos, Class<T> clazz) {

@@ -154,6 +154,12 @@ public final class WasmVm {
             // also caps code size, so a cache miss is bounded work.
             module = moduleFor(wasmCode, gas);
         } catch (Throwable e) {
+            // The deterministic module-parse charge is levied here (cache hit and miss alike), so a
+            // budget too small to cover it must surface as OUT_OF_GAS — a full-limit, node-independent
+            // outcome — not as a "malformed module" revert.
+            if (isOutOfGas(e)) {
+                return ExecResult.outOfGas(gas.used());
+            }
             // Malformed bytecode (or a module using non-deterministic float/SIMD opcodes) never
             // reaches instantiation — deterministic revert.
             return ExecResult.reverted(gas.used(), "invalid module: " + e.getMessage());
@@ -302,21 +308,31 @@ public final class WasmVm {
 
     /**
      * Returns the parsed, validated module for {@code wasmCode}, parsing on a cache miss. When a
-     * {@code gas} meter is supplied (a runtime CALL, not deploy-time validation), a cache miss is
-     * charged for the O(code) parse + non-determinism/allocation scan, so cycling more distinct
-     * max-size contracts than the LRU holds cannot force that work unpriced (audit vm F3).
+     * {@code gas} meter is supplied (a runtime CALL, not deploy-time validation), the O(code) parse +
+     * non-determinism/allocation scan is charged so cycling more distinct max-size contracts than the
+     * LRU holds cannot force that work unpriced (audit vm F3).
+     *
+     * <p>The charge is levied on <em>every</em> runtime call — cache hit and miss alike — deliberately.
+     * {@code gasUsed} feeds {@code gasFee}, hence the sender/miner balances and the authenticated state
+     * root ({@code Executor.applyContract}), so it must be a pure function of the block's contents. The
+     * {@code MODULE_CACHE} is a process-wide, non-persistent LRU whose occupancy differs across nodes
+     * (cleared on restart, empty after a snapshot-sync pivot, evicted per local access history). Charging
+     * only on a miss would make {@code gasUsed} — and thus the state root — depend on that node-local
+     * state, so a validator with a cold cache would reject an honest block a warm producer built
+     * ({@code INVALID_STATE_ROOT}) and fork off. The cache therefore stays a pure CPU optimization; the
+     * fixed, length-derived parse cost is deterministic on every node (audit 5th-pass, VM Finding 1).
      */
     private static WasmModule moduleFor(byte[] wasmCode, GasMeter gas) {
+        if (gas != null) {
+            gas.charge(GasSchedule.MODULE_PARSE_BASE
+                + (long) wasmCode.length * GasSchedule.MODULE_PARSE_PER_BYTE);
+        }
         String key = sha256Hex(wasmCode);
         synchronized (MODULE_CACHE) {
             WasmModule cached = MODULE_CACHE.get(key);
             if (cached != null) {
                 return cached;
             }
-        }
-        if (gas != null) {
-            gas.charge(GasSchedule.MODULE_PARSE_BASE
-                + (long) wasmCode.length * GasSchedule.MODULE_PARSE_PER_BYTE);
         }
         WasmModule module = Parser.parse(wasmCode);
         rejectNonDeterministic(module);
@@ -325,6 +341,16 @@ public final class WasmVm {
             MODULE_CACHE.put(key, module);
         }
         return module;
+    }
+
+    /**
+     * Empties the process-wide module cache. Test-only hook: lets a test reproduce a cold-cache node
+     * (fresh restart / post-snapshot pivot) and assert that {@code gasUsed} is identical warm vs cold.
+     */
+    static void clearModuleCacheForTest() {
+        synchronized (MODULE_CACHE) {
+            MODULE_CACHE.clear();
+        }
     }
 
     private static String sha256Hex(byte[] data) {

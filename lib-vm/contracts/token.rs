@@ -87,7 +87,11 @@ fn do_transfer(from: &[u8; ADDR_LEN], to: &[u8; ADDR_LEN], amount: u64) -> bool 
     if from_bal < amount { return false; }
     write_balance(from, from_bal - amount);
     let to_bal = read_balance(to);
-    write_balance(to, to_bal + amount);
+    // checked_add: supply conservation keeps to_bal + amount <= supply <= u64::MAX in the shipped
+    // template, so this never trips here — but a derivative that adds a mint/rebase selector, or a
+    // reader copying do_transfer, must not silently wrap a balance toward zero (audit 5th-pass; same
+    // checked-arithmetic discipline as pair/amm reserves, P9).
+    write_balance(to, to_bal.checked_add(amount).unwrap_or_else(|| fail()));
 
     // log: from(25) || to(25) || amount(8 LE)
     let mut data = [0u8; ADDR_LEN * 2 + 8];
