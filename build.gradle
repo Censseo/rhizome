@@ -32,7 +32,7 @@ subprojects {
 
     }
 
-    // ActiveJ 6.0-beta2 pulls ASM 9.4, which cannot read Java 21 bytecode
+    // ActiveJ 6.0-rc2 pulls ASM 9.4, which cannot read Java 21 bytecode
     // (class file major version 65). Force a version that supports it so the
     // ActiveJ serializer codegen works on the toolchain JDK.
     configurations.all {
@@ -46,23 +46,23 @@ subprojects {
     dependencies {
 
         // ActiveJ
-        implementation 'io.activej:activej:6.0-beta2'
-        implementation 'io.activej:activej-inject:6.0-beta2'
-        implementation 'io.activej:activej-config:6.0-beta2'
-        implementation 'io.activej:activej-launcher:6.0-beta2'
-        implementation 'io.activej:activej-launchers-common:6.0-beta2'
-        implementation 'io.activej:activej-rpc:6.0-beta2'
-        implementation 'io.activej:activej-datastream:6.0-beta2'
-        implementation 'io.activej:activej-servicegraph:6.0-beta2'
-        implementation 'io.activej:activej-workers:6.0-beta2'
-        implementation 'io.activej:activej-serializer:6.0-beta2'
-        implementation 'io.activej:activej-boot:6.0-beta2'
-        implementation 'io.activej:activej-promise:6.0-beta2'
-        implementation 'io.activej:activej-eventloop:6.0-beta2'
-        implementation 'io.activej:activej-http:6.0-beta2'
-        implementation 'io.activej:activej-common:6.0-beta2'
-        implementation 'io.activej:activej-jmxapi:6.0-beta2'
-        implementation 'io.activej:activej-net:6.0-beta2'
+        implementation 'io.activej:activej:6.0-rc2'
+        implementation 'io.activej:activej-inject:6.0-rc2'
+        implementation 'io.activej:activej-config:6.0-rc2'
+        implementation 'io.activej:activej-launcher:6.0-rc2'
+        implementation 'io.activej:activej-launchers-common:6.0-rc2'
+        implementation 'io.activej:activej-rpc:6.0-rc2'
+        implementation 'io.activej:activej-datastream:6.0-rc2'
+        implementation 'io.activej:activej-servicegraph:6.0-rc2'
+        implementation 'io.activej:activej-workers:6.0-rc2'
+        implementation 'io.activej:activej-serializer:6.0-rc2'
+        implementation 'io.activej:activej-boot:6.0-rc2'
+        implementation 'io.activej:activej-promise:6.0-rc2'
+        implementation 'io.activej:activej-eventloop:6.0-rc2'
+        implementation 'io.activej:activej-http:6.0-rc2'
+        implementation 'io.activej:activej-common:6.0-rc2'
+        implementation 'io.activej:activej-jmxapi:6.0-rc2'
+        implementation 'io.activej:activej-net:6.0-rc2'
         
         // Logback
         implementation 'ch.qos.logback:logback-classic:1.5.3'

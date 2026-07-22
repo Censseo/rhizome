@@ -59,8 +59,12 @@ public final class NodeApi {
     private static final HttpHeader H_XFO = HttpHeaders.of("X-Frame-Options");
     private static final HttpHeader H_XCTO = HttpHeaders.of("X-Content-Type-Options");
     private static final HttpHeader H_REFERRER = HttpHeaders.of("Referrer-Policy");
-    private static final HttpHeader H_ORIGIN = HttpHeaders.of("Origin");
-    private static final HttpHeader H_HOST = HttpHeaders.of("Host");
+    // Well-known ActiveJ header tokens: the HTTP parser interns incoming Origin/Host under these, and
+    // a custom HttpHeaders.of("Origin"/"Host") token no longer matches them (it did in 6.0-beta2, but
+    // 6.0-rc2 tightened the lookup) — so reading the CSRF/rebinding guard's Origin/Host through of(...)
+    // silently returned null and fail-opened. Use the interned constants so the guard sees the values.
+    private static final HttpHeader H_ORIGIN = HttpHeaders.ORIGIN;
+    private static final HttpHeader H_HOST = HttpHeaders.HOST;
     /** Non-simple header the dashboard sends on every state-changing POST; forces a CORS preflight
      *  a cross-site/rebinding page cannot satisfy, so its POST is blocked by the browser. */
     private static final HttpHeader H_RZ_REQUEST = HttpHeaders.of("X-Rhizome-Request");

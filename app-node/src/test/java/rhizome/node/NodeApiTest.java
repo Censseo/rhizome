@@ -204,23 +204,28 @@ class NodeApiTest {
 
     @Test
     void browserPostIsRefusedUnlessSameOriginWithTheCsrfHeader() throws Exception {
-        var origin = io.activej.http.HttpHeaders.of("Origin");
+        // Use the well-known Origin/Host tokens (the interned ones the guard and the real HTTP parser
+        // use), and set Host explicitly the way every browser does — so this exercises the guard the
+        // same way a parsed network request would, independent of ActiveJ's URL-derived-Host behavior.
+        var origin = io.activej.http.HttpHeaders.ORIGIN;
+        var host = io.activej.http.HttpHeaders.HOST;
         var marker = io.activej.http.HttpHeaders.of("X-Rhizome-Request");
         Transaction t = signedSend(100_000, 0);
 
         // A browser POST (carries Origin) that is same-origin but lacks the custom header is refused
         // — this is the DNS-rebinding case the plain Origin==Host check used to let through.
         assertEquals(403, call(HttpRequest.post("http://x/add_transaction")
-            .withHeader(origin, "http://x").withBody(t.serialize().toBuffer()).build()).getCode());
+            .withHeader(origin, "http://x").withHeader(host, "x")
+            .withBody(t.serialize().toBuffer()).build()).getCode());
 
         // Cross-origin is refused regardless of the header.
         assertEquals(403, call(HttpRequest.post("http://x/add_transaction")
-            .withHeader(origin, "http://evil").withHeader(marker, "1")
+            .withHeader(origin, "http://evil").withHeader(host, "x").withHeader(marker, "1")
             .withBody(t.serialize().toBuffer()).build()).getCode());
 
         // Same-origin WITH the custom header passes the guard (the dashboard's own requests).
         assertEquals(200, call(HttpRequest.post("http://x/add_transaction")
-            .withHeader(origin, "http://x").withHeader(marker, "1")
+            .withHeader(origin, "http://x").withHeader(host, "x").withHeader(marker, "1")
             .withBody(t.serialize().toBuffer()).build()).getCode());
 
         // A non-browser client (no Origin — a peer/CLI) is never blocked.

@@ -1,3 +1,21 @@
+# Rhizome — Dependency bump: ActiveJ 6.0-beta2 → 6.0-rc2
+
+**Date:** 2026-07-22. Updated the ActiveJ stack from the `6.0-beta2` pre-release to
+the `6.0-rc2` release candidate. The bump surfaced one **security-relevant behavior
+change** the test suite caught: reading a request header through a custom
+`HttpHeaders.of("Origin"/"Host")` token no longer matches the interned well-known
+token the HTTP parser stores incoming Origin/Host under (it did in `6.0-beta2`), so
+the CSRF / DNS-rebinding guard (`NodeApi.isForbiddenBrowserPost`) read `null` for the
+Host and **fail-opened** — silently disabling the browser-POST protection in
+production. Fixed by reading Origin/Host through the interned constants
+`HttpHeaders.ORIGIN` / `HttpHeaders.HOST`; `browserPostIsRefusedUnlessSameOriginWithTheCsrfHeader`
+now sets Host explicitly (as every browser does) and exercises the guard the way a
+parsed network request would. No other header read was affected (the response
+security headers are written by name, and `X-Rhizome-Request` is a custom header used
+consistently on both sides). Full suite green on `6.0-rc2`.
+
+---
+
 # Rhizome — Fifth-pass follow-up: documented findings now implemented
 
 **Date:** 2026-07-22. After the deep-dive re-verification below, every remaining
