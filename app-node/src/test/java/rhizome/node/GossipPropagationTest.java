@@ -38,7 +38,8 @@ class GossipPropagationTest {
 
         // Receiver: no miner, no peers -> it never pulls; it can only advance via
         // blocks pushed to its /submit endpoint.
-        NodeConfig receiverConfig = NodeConfig.defaults(FAST, tempDir.resolve("recv").toString(), portReceiver);
+        NodeConfig receiverConfig = NodeConfig.defaults(FAST, tempDir.resolve("recv").toString(), portReceiver)
+            .withAllowPrivatePeers(true);
 
         try (RhizomeNode receiver = new RhizomeNode(receiverConfig)) {
             receiver.start();
@@ -46,7 +47,7 @@ class GossipPropagationTest {
 
             int portMiner = freePort();
             NodeConfig minerConfig = NodeConfig.defaults(FAST, tempDir.resolve("miner").toString(), portMiner)
-                .withMiner(PublicAddress.random())
+                .withMiner(PublicAddress.random()).withAllowPrivatePeers(true)
                 .withBlockIntervalMs(50)
                 .withPeers(java.util.List.of("http://localhost:" + portReceiver));
 

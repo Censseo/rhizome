@@ -50,17 +50,20 @@ blocks still arrive via sync, which calls the engine directly and is not gated. 
 locking/threading change. Regression:
 `NodeApiTest.submitPowGateShedsBlocksOnceTheGlobalBudgetIsSpent`.
 
-**net F4 — SSRF posture keyed off `selfUrl`: verified real, FIX RECOMMENDED (low
-risk).** `blockPrivatePeers` is derived from whether the *advertised* `selfUrl` is
-loopback (`RhizomeNode.java:125-129`), but the node always binds `0.0.0.0` and
-`/add_peer` is unauthenticated. So an exposed **testnet/custom-net** node left at the
-default (loopback) advertise URL runs with the SSRF host filter + DNS-pin rejection
-**off** — any network-reachable party (not just a browser) can add a
-`169.254.169.254`/RFC1918 peer, which `syncRound` then GETs. (Mainnet is safe by
-default; the SSRF is *blind* with fixed paths, so moderate, not credential-grade.)
-*Minimal fix:* derive `blockPrivatePeers` from an explicit opt-out
-(`!RHIZOME_ALLOW_PRIVATE_PEERS`) rather than `selfUrl` — secure-by-default; seed
-peers (`RHIZOME_PEERS`) bypass the filter so configured devnets are unaffected.
+**net F4 — SSRF posture keyed off `selfUrl`: verified real, FIXED.**
+`blockPrivatePeers` was derived from whether the *advertised* `selfUrl` was loopback
+(`RhizomeNode.java`), but the node always binds `0.0.0.0` and `/add_peer` is
+unauthenticated. So an exposed **testnet/custom-net** node left at the default
+(loopback) advertise URL ran with the SSRF host filter + DNS-pin rejection **off** —
+any network-reachable party (not just a browser) could add a `169.254.169.254`/RFC1918
+peer that `syncRound` then GETs. (Mainnet was safe by default; the SSRF is *blind*
+with fixed paths, so moderate, not credential-grade.) *Fix:* the filter is now
+**secure-by-default** — `blockPrivatePeers = !(config.allowPrivatePeers() ||
+RHIZOME_ALLOW_PRIVATE_PEERS)`, no longer keyed off `selfUrl`. Local dev/devnets opt in
+via `NodeConfig.withAllowPrivatePeers(true)` or the env var; configured seed peers
+bypass the filter regardless, so seeded deployments are unaffected. Regression:
+`PeerDiscoveryTest.loopbackPeersAreNotDiscoveredByDefault` (default-off blocks loopback
+PEX) alongside the existing opt-in mesh test.
 
 **crypto F4 — SMT `load` does not re-hash the node blob: verified, LEAVE DOCUMENTED.**
 Not remotely triggerable — the node store is content-addressed and written only by

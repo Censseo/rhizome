@@ -19,6 +19,10 @@ import rhizome.core.ledger.PublicAddress;
  * @param syncPeriodMs   how often to run a sync/discovery round
  * @param blockIntervalMs producer pacing target
  * @param mempoolSize    max pooled transactions
+ * @param allowPrivatePeers  opt out of the SSRF host filter so the node may peer over loopback /
+ *                       private IPs discovered via PEX (local dev / devnets). Off by default —
+ *                       secure-by-default (audit F4); the env var RHIZOME_ALLOW_PRIVATE_PEERS=true
+ *                       also forces it. Configured seed peers bypass the filter regardless.
  */
 public record NodeConfig(
     NetworkParameters params,
@@ -30,11 +34,12 @@ public record NodeConfig(
     Optional<String> advertisedUrl,
     long syncPeriodMs,
     long blockIntervalMs,
-    int mempoolSize) {
+    int mempoolSize,
+    boolean allowPrivatePeers) {
 
     public static NodeConfig defaults(NetworkParameters params, String dataDir, int apiPort) {
         return new NodeConfig(params, dataDir, apiPort, Optional.empty(), Optional.empty(),
-            List.of(), Optional.empty(), 10_000L, params.desiredBlockTimeSec() * 1000L, 100_000);
+            List.of(), Optional.empty(), 10_000L, params.desiredBlockTimeSec() * 1000L, 100_000, false);
     }
 
     /** The URL peers use to reach this node. */
@@ -44,26 +49,31 @@ public record NodeConfig(
 
     public NodeConfig withMiner(PublicAddress address) {
         return new NodeConfig(params, dataDir, apiPort, snapshotPath, Optional.of(address),
-            peers, advertisedUrl, syncPeriodMs, blockIntervalMs, mempoolSize);
+            peers, advertisedUrl, syncPeriodMs, blockIntervalMs, mempoolSize, allowPrivatePeers);
     }
 
     public NodeConfig withPeers(List<String> peerUrls) {
         return new NodeConfig(params, dataDir, apiPort, snapshotPath, miner,
-            peerUrls, advertisedUrl, syncPeriodMs, blockIntervalMs, mempoolSize);
+            peerUrls, advertisedUrl, syncPeriodMs, blockIntervalMs, mempoolSize, allowPrivatePeers);
     }
 
     public NodeConfig withSnapshot(String path) {
         return new NodeConfig(params, dataDir, apiPort, Optional.of(path), miner,
-            peers, advertisedUrl, syncPeriodMs, blockIntervalMs, mempoolSize);
+            peers, advertisedUrl, syncPeriodMs, blockIntervalMs, mempoolSize, allowPrivatePeers);
     }
 
     public NodeConfig withBlockIntervalMs(long intervalMs) {
         return new NodeConfig(params, dataDir, apiPort, snapshotPath, miner,
-            peers, advertisedUrl, syncPeriodMs, intervalMs, mempoolSize);
+            peers, advertisedUrl, syncPeriodMs, intervalMs, mempoolSize, allowPrivatePeers);
     }
 
     public NodeConfig withAdvertisedUrl(String url) {
         return new NodeConfig(params, dataDir, apiPort, snapshotPath, miner,
-            peers, Optional.of(url), syncPeriodMs, blockIntervalMs, mempoolSize);
+            peers, Optional.of(url), syncPeriodMs, blockIntervalMs, mempoolSize, allowPrivatePeers);
+    }
+
+    public NodeConfig withAllowPrivatePeers(boolean allow) {
+        return new NodeConfig(params, dataDir, apiPort, snapshotPath, miner,
+            peers, advertisedUrl, syncPeriodMs, blockIntervalMs, mempoolSize, allow);
     }
 }
