@@ -29,7 +29,7 @@ Four goals drive the design:
    GHOST-style fork choice (§9) that credits and rewards orphaned (uncle) work, making
    the fast cadence safe against the orphaning a naïve longest chain suffers.
 
-The node is functional and covered by **401 tests**: consensus, the WASM contract VM
+The node is functional and covered by **418 tests**: consensus, the WASM contract VM
 and its persistence, execution, storage, mempool, HTTP API, block production, P2P
 synchronisation with reorganisation, GHOST uncles, data boxes (agent-facing on-chain
 storage with typed registers, an anti-dust deposit and storage rent), native tokens
@@ -786,7 +786,7 @@ inflated reward, **negative amounts** (money minting), **balance overflow**, tim
 and difficulty (time-warp) manipulation, deep reorg (finality), lying peer (claimed but
 unproven work), transaction-layer censorship, block/request flooding, and network DoS
 (bounded bodies, ban-score). This section is the consolidated security reference; the
-history below records five successive review passes and the invariants they established.
+history below records six successive review passes and the invariants they established.
 
 ### 7.1 Load-bearing invariants (must never regress)
 
@@ -820,9 +820,13 @@ history below records five successive review passes and the invariants they esta
 
 The largest residual fork risk in a metered-VM chain is **node-local nondeterminism**, so
 the VM is deterministic by construction: scalar float, `V128`, and vector-float lanes are
-rejected at deploy; gas is integer/saturating; the WASM call-depth cap, per-instance and
-**tree-wide** linear-memory caps, table count/aggregate caps and locals cap are fixed
-network constants (not `-Xmx`/`-Xss`-dependent), reserved *before* the runtime allocates;
+rejected at deploy (matched anywhere in the opcode name, so the integer↔float conversions
+cannot slip a prefix filter); gas is integer/saturating; the WASM call-depth cap, per-instance
+and **tree-wide** linear-memory caps, table count/aggregate caps and a **tree-wide live-locals**
+reservation are fixed network constants (not `-Xmx`/`-Xss`-dependent), reserved *before* the
+runtime allocates — and declared locals are bounded straight from the raw code bytes *before*
+the parser can eagerly expand them into memory, so neither a many-group parse-time blow-up nor a
+locals×depth recursion can OOM one node while another reverts (a heap-dependent fork);
 `OutOfMemoryError`/`StackOverflowError` normalise to a deterministic full-gas out-of-gas.
 Gas that feeds the fee — and hence the state root — is charged identically on every node:
 notably the module-parse cost is levied on **every** call, cache hit or miss, so a warm/cold
@@ -842,8 +846,10 @@ sit above the per-IP rate limiter, each shedding with HTTP 429 before doing the 
 bounding submit-triggered PoW hashes, one bounding `/call_readonly` VM gas, one bounding the
 explorer reads that decode blocks under the lock. **Transaction layer:** a per-sender cap
 plus eviction of *fully-parked* (nonce-gapped, never-minable) transactions in favour of ready
-or higher-fee ones, so the pool cannot be cheaply and permanently stuffed to censor honest
-traffic. **Storage** growth is gas-priced and reorg-reversible via the persistent undo journal.
+or higher-fee ones — and that eviction runs only *after* the newcomer's signature verifies, so
+it is never a free unauthenticated lever — so the pool cannot be cheaply and permanently stuffed
+to censor honest traffic. **Storage** growth is gas-priced and reorg-reversible via the
+persistent undo journal.
 
 ### 7.4 Network
 
@@ -851,6 +857,9 @@ The node binds `0.0.0.0` with an unauthenticated `/add_peer`, so peer handling i
 secure-by-default: added peers must resolve to routable IPs (SSRF/rebinding filter on by
 default, opt-out only), the connect target is re-pinned to the validated literal on every
 send, redirects are refused, PEX is capped, subnet-bucketed and ban-scored (Sybil/eclipse),
+every outbound peer read is size-bounded (the PEX `/peers` body included, so a hostile peer
+cannot OOM the node with a giant response on the automatic discovery round), a peer that
+throws or returns garbage mid-probe is dropped rather than crashing the sync pass,
 and a browser state-changing POST must be same-origin *and* carry a non-simple
 `X-Rhizome-Request` header the origin's own dashboard sets but a cross-site/DNS-rebinding
 page cannot (CSRF). BouncyCastle is pinned to a patched release. Snapshot bootstrap is
@@ -875,13 +884,19 @@ PoW chain removes it entirely. **Coinbase maturity** (a UTXO concept) does not a
 balance-based ledger — the reward is immediately fungible with no distinct coinbase coin to
 mature — and the orphaned-reward risk is already covered by the finality window.
 
-Five parallel-subsystem review passes hardened this model: from the first (negative-amount
+Six parallel-subsystem review passes hardened this model: from the first (negative-amount
 minting, deposit-overflow rollback) through consensus-fork classes (unscaled uncle-reward
 rollback, heap-dependent VM OOM, cache-dependent gas, phantom-wallet validity, reorg-gate
 work-metric mismatch), theft and liveness (unsigned `BOX_COLLECT` drain, mempool-poisoning
-and nonce-gap censorship), and DoS amplifiers (submit/readonly/read aggregate gates). Every
-fix carries a regression test; a dependency bump is validated by the same suite (one caught a
-silent CSRF-guard fail-open from a library header-lookup change).
+and nonce-gap censorship), and DoS amplifiers (submit/readonly/read aggregate gates). The
+sixth pass closed the last heap-dependent VM vectors — a many-group WASM parse-time OOM
+(now bounded from the raw bytes ahead of the parse) and a locals×depth allocation fork (now a
+tree-wide live-locals reservation) — an unbounded PEX `/peers` body, mempool eviction ahead of
+signature verification, and an orphan-pool eviction that could force a full resync (a rejected
+reorg now restores its own suffix by trusting the already-validated uncle references its blocks
+commit, instead of re-checking the churnable pool). Every fix carries a regression test; a
+dependency bump is validated by the same suite (one caught a silent CSRF-guard fail-open from a
+library header-lookup change).
 
 ---
 
@@ -901,7 +916,7 @@ ledger of a synchronised Pandanite node.
 (`addBlock`/`popBlock`, nonces, work, difficulty); RocksDB storage; mempool; HTTP API;
 block production; synchronisation + reorg by cumulative work; wallet CLI; gossip & peer
 discovery; hardening (checkpoints, finality, bounded rate limiting, ban-score, block-size
-cap); five parallel-subsystem security-review passes (§7); the **WASM smart-contract layer** — a Chicory-backed
+cap); six parallel-subsystem security-review passes (§7); the **WASM smart-contract layer** — a Chicory-backed
 metered VM, a persistent contract store, `DEPLOY`/`CALL` transactions with gas fees,
 atomic per-block contract state with exact reorg reversal, and wallet `deploy`/`call`
 commands; and the **data-box layer** (§5.5) — stable-id, typed-register storage objects
@@ -922,7 +937,7 @@ nonces plus an `ACCOUNT_NONCE` state domain (§6.5) so the engine's derived stat
 configurable body pruning (`RHIZOME_PRUNE`) with a `/sync` 410 and a `prunedBelow` advert, and
 trust-minimised snap-sync (`RHIZOME_SYNC=snap`) — periodic per-domain snapshot materialisation,
 `/state/snapshot/*`, and a bootstrap that adopts a peer's state at a buried pivot only when it
-reproduces a PoW-validated header's root. **401 tests, 0 failures.**
+reproduces a PoW-validated header's root. **418 tests, 0 failures.**
 
 **GHOST fork choice.** A fast single longest chain orphans blocks because propagation
 takes a meaningful fraction of the interval (§6.3). A GHOST-style fork choice — the
