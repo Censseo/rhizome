@@ -112,29 +112,83 @@ Regression: `BlockUnclesTest.blocksOwnPowIsVerifiedBeforeUncleWork`.
 decode blocks from RocksDB **while holding the consensus lock** (`ChainEngine.blockAt`),
 yet were weighted cost 1 — so one IP could drive tens of thousands of lock-guarded
 decodes/s, contending block production and sync. **Fix:** weight `/blocks` by its block
-span (like `/sync`) and `/stats` by `STATS_WINDOW`. *Documented, not changed:* serving
-these reads from a lock-free snapshot view (so explorer traffic never takes the consensus
-lock) is the deeper fix, left as a dedicated change to avoid consensus-path risk.
+span (like `/sync`) and `/stats` by `STATS_WINDOW` (=32; a first cut wrote
+`STATS_WINDOW / SCAN_COST_PER_BLOCKS`, which integer-divides 32/20 to 1 and left `/stats`
+effectively unweighted — corrected to the full block count, ~1 unit per full-block decode).
+*Documented, not changed:* (a) there is still **no aggregate (all-IP) read gate** — a
+distributed flood aggregates past the per-IP weighting, the same gap `submitPowGate`/
+`readonlyGasGate` close for their endpoints; (b) serving these reads from a lock-free
+snapshot view (or reading bytes under the lock and decoding outside it — confined to an
+explorer-only path, never the consensus `blockAt`, which the sync/reorg paths need locked)
+is the deeper fix, left as a dedicated change to avoid consensus-path risk.
 
 ### Documented (verified, not changed this pass)
 
-- **Reorg-gate work metric mismatch (Low).** `HeaderSynchronizer.syncFrom` early-outs on
-  uncle-*inclusive* `totalWork` while the adoption gate compares base-only work; with
-  genuine (costly) uncle work this could in principle stabilize a split. A refinement of
-  the accepted M4 base-only tradeoff; make both gates use one metric if hardened.
-- **Snapshot bootstrap buffering (Low).** `SnapshotBootstrap` accumulates every header to
-  the untrusted peer height and all chunks before validation; bounded only by the
-  operator-chosen seed trust boundary (the live `HeaderSynchronizer` caps at
-  `MAX_HEADER_WINDOW`). Cap the bootstrap span and stream chunks.
-- **Dead experimental P2P package (Info).** `lib-net/.../p2p/*` (`PeerSystem`,
-  `GossipSystem`, `DiscoveryService`, `FloodDiscovery`, …) is unused by the live node
-  (which uses `rhizome.node`); recommend removing it (and `FloodDiscoveryTest`) so future
-  audits don't treat it as reachable surface. Left in place this pass (has a test) to keep
-  the change minimal.
-- **Codec parity (Info).** `BlockCodec.decode` doesn't bound uncle difficulty (unreachable
-  today — forced equal to a registered orphan's bounded difficulty before use);
-  `TransactionDto` single-object decode accepts trailing bytes (nil impact — identity is
-  content-hash, not raw bytes). Add for defense-in-depth/wire uniqueness.
+A follow-up deep-dive (four parallel code traces) re-verified each of these against the
+current source. All prior dispositions held; refinements noted inline.
+
+- **Reorg-gate work-metric mismatch (Low — confirmed REAL, not merely theoretical).**
+  `HeaderSynchronizer.syncFrom`'s early-out prefilter (`:44`) ranks chains by *self-reported,
+  uncle-inclusive* `totalWork`, while its adoption gate (`:80`, `localWorkAboveFork`) ranks
+  by *base-only* work (the M4 fix); `ChainSynchronizer` has the same shape (`:52`/`:149`). An
+  opposite-ordering pair — `B.total > A.total` yet `B.base < A.base`, reachable with a single
+  2-uncle block against a short base lead — deadlocks: a node on A downloads B then rejects it
+  on base (`PEER_INVALID`), a node on B never even looks at A (`NO_CHANGE`). The realistic
+  trigger is a **healed network partition** between an orphan-heavy high-hashpower cluster and
+  a tight low-hashpower one; the `totalWork`-inflation *attack* self-defeats (rejected at the
+  base gate, then banned). It stays Low: producing `B.total > A.total` needs **real aggregate
+  hashpower** (uncle work is PoW-verified and difficulty-bounded), unequal hashrates resolve
+  the split after a bounded delay, and seeds are ban-exempt (`PeerRegistry.java:131`, "audit M4
+  collateral bans") preserving convergence anchors. Aggravator: `PENALTY_INVALID ==
+  BAN_THRESHOLD` (`RhizomeNode.java:77-78`) bans the honest total-heavier peer on the first
+  strike. **Recommended fix (small, safe, keeps base-only as the single fork-choice metric —
+  do NOT go uncle-inclusive, which reopens the M4/P3 fake-uncle DoS):** (1) make the gate-A
+  early-out conservative w.r.t. base work (`peer.totalWork()` is an upper bound on the peer's
+  base work, so only skip when it cannot beat local base work) in both synchronizers; (2)
+  return `NO_CHANGE` instead of `PEER_INVALID` for a structurally-valid-but-base-lighter branch
+  so honest peers are not banned.
+- **Snapshot bootstrap buffering (Low).** The genuine residual is **header** buffering:
+  `SnapshotBootstrap.fetchHeaders` (`:160-172`) accumulates every header to the untrusted
+  `peer.height()` (`:81`, unbounded) *before* `HeaderChain.validate` (`:98`) — cheap garbage
+  reaches OOM with no attacker PoW (~1 GB fills a 2 GB heap). The **chunk** path is largely
+  self-defending: it runs only after the header chain is PoW-validated and the root pinned from
+  the validated pivot (`:98-114`), so an attacker must already hold a valid chain. Trust
+  boundary: operator-chosen `config.peers()`, first-boot-only, availability-only. Cheap
+  mitigation: bound the bootstrap header span (the live `HeaderSynchronizer` caps at
+  `MAX_HEADER_WINDOW`) before buffering; stream chunks for the rest.
+- **Dead experimental P2P package (Info).** Correction to this note's earlier framing: the
+  `rhizome.net.**` tree (`PeerSystem`, `GossipSystem`, `DiscoveryService`, `FloodDiscovery`,
+  `protocol/*`, `transport/*`) is dead **relative to the live node** (`app-node`/`app-wallet`
+  import none of it — their P2P stack is entirely in `rhizome.node`), but it is still compiled
+  and wired into **`app-dnsseeder`**, itself a non-functional stub (its declared main
+  `rhizome.server.App` **does not exist**; `GossipSystem`/`TransportChannels` bodies are
+  `UnsupportedOperationException`/`null`; no `Api` listener is installed — **zero inbound attack
+  surface** anywhere in the cluster). So removal is a **multi-module** deletion (`lib-net/net/**`
+  + `FloodDiscoveryTest` + the `app-dnsseeder` module + the source-unused
+  `implementation project(':lib-net')` in `app-node`/`app-wallet`), not the single-package
+  delete implied earlier. Safe and worthwhile but non-urgent. (Note: prior passes spent
+  hardening on this unreachable code — `FloodDiscovery.MAX_DISCOVERED`, `Api.escapeHtml` — the
+  concrete cost of leaving it.)
+- **Codec parity (Info — verified inert).** `BlockCodec.decode` (`:79-85`) doesn't bound uncle
+  difficulty, but `validateUncles` forces `ref.difficulty()` to equal a registered orphan's
+  *bounded* difficulty (`ChainEngine.java:1108`) before the `BigInteger.TWO.pow` (`:1121`), and
+  `decode` itself allocates nothing from the value — unreachable (becomes live only if a future
+  refactor consumes `ref.difficulty()` before that equality gate). `TransactionDto` single-object
+  decode accepts trailing bytes (`BinarySerializable.fromBuffer:38`) but identity is the content
+  hash and gossip re-serializes canonically, so trailing bytes are inert (no double-execute, no
+  malleable txid). Both are ~2–3-line defense-in-depth / P7-parity additions; defer.
+- **`token.rs do_transfer` unchecked add (Info — verified inert for the shipped template).**
+  `to_bal + amount` (`token.rs:90`) is an unchecked `u64` add, but supply conservation bounds it
+  by `Σ balances = supply ≤ u64::MAX`, so it never wraps in the shipped `token` (only `init`
+  mints, once). A latent footgun for a derivative that adds a mint/rebase selector; add
+  `checked_add` at the next `token.wasm` recompile.
+- **`SparseMerkleTree.load` no re-hash (Info — verified local-availability-only).** The store is
+  content-addressed and written only locally (`put` computes `hash = sha256(node)` on the spot);
+  snap-sync transports raw `(key,value)` bindings (not tree nodes) and gates on the PoW-committed
+  root; the light-client `verify` is stateless. No untrusted `(hash, blob)` reaches `load`; the
+  only trigger is local disk corruption (availability, never a forged-yet-accepted proof). The
+  guard sits on the per-key/per-block apply hot path — keep it off there; gate to the `prove`
+  path only if a corruption-hardening pass is ever done.
 
 ---
 

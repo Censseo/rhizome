@@ -501,7 +501,10 @@ public final class NodeApi {
             return rangeCost(request, 1, BLOCKS_RANGE_MAX); // full-block reads: ~1 unit per block
         }
         if ("/stats".equals(path)) {
-            return Math.max(1, STATS_WINDOW / SCAN_COST_PER_BLOCKS);
+            // STATS_WINDOW full-block decodes, each under the consensus lock — weight ~1 per block like
+            // /sync and /blocks (NOT divided by SCAN_COST_PER_BLOCKS, which is the lighter header-scan
+            // rate and rounds 32/20 down to 1, leaving /stats effectively unweighted).
+            return STATS_WINDOW;
         }
         return 1;
     }
