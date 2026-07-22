@@ -21,17 +21,39 @@ parallel; every prior finding was re-verified against the *current* source
 | P8 | Low | codec | Codec uncle bound (128) was 64× the consensus max (2) → decode-accepted header/block bloat (L7) | **Fixed** ✅ (→16) |
 | P9 | Low | contracts | `pair`/`amm` swap updated reserves with unchecked `+` → silent `u64` wrap corrupts the pool at extremes (residual T4) | **Fixed** ✅ (recompiled) |
 
-**Documented (verified real, deliberately not changed this pass — deployment
-trade-offs or template redesigns):** net F1 `/submit` runs one memory-hard hash
-per structurally-valid bad-PoW block on the consensus lock (already mitigated by
-cheap pre-checks + rate weight; a full fix offloads the hash to a worker thread);
-net F2 CSRF guard is `Origin==Host` only, so DNS-rebinding defeats it (needs a
-Host-header allowlist — an operator/deployment call); net F3 `/headers` still
-buffers its window server-side (mirror the `/sync` streaming fix); net F4 SSRF
-posture derives from the advertised `selfUrl` rather than the actual bind
-address; vm F3 module reparse+validate on a `MODULE_CACHE` miss is unmetered
-(price it by code length); crypto F4 SMT `load` does not re-hash the node blob
-(content-addressed, defence-in-depth only).
+**Also fixed (net/vm hardening batch):** net F2 CSRF/DNS-rebinding — the
+`Origin==Host` guard was defeated by rebinding (which makes Origin==Host); a
+state-changing browser POST now must also carry a non-simple `X-Rhizome-Request`
+header, which a cross-site/rebinding page cannot set without a CORS preflight the
+node never grants, so the browser blocks it (peers/CLI send no Origin and are
+unaffected; the dashboard sends the header). net F3 `/headers` now streams its
+window header-by-header instead of buffering it (mirrors the `/sync` M5 fix). vm
+F3 a CALL that misses the module cache is now charged for the O(code) reparse +
+scan (`MODULE_PARSE_BASE/_PER_BYTE`), so cycling distinct max-size contracts can't
+force that work unpriced.
+
+**Documented (verified real, deliberately not changed — deployment trade-offs or
+diminishing returns):** net F4 SSRF posture derives from the advertised `selfUrl`
+rather than the actual bind address (an operator/deployment call); crypto F4 SMT
+`load` does not re-hash the node blob (content-addressed store, defence-in-depth
+only, hot-path cost).
+
+**net F1 — `/submit` memory-hard-hash DoS: verified GENUINELY exploitable, fix
+recommended.** A deeper analysis confirmed the H3 mitigation only removed the
+*double* hash, not the DoS primitive: a single source IP resending one **PoW-free**
+crafted block (valid public parent hash, in-window id, garbage nonce) forces one
+memory-hard Pufferfish2 hash per submit at both `ChainEngine.addBlock` (verifyNonce
+last check) and `registerOrphan`, **synchronously on the single ActiveJ event-loop
+thread under the global consensus lock**. Measured ~25 ms/hash (~40 hashes/s/thread);
+the per-IP rate budget is ~125 submits/s and there is **no global cap**, so one IP
+pins the node's only I/O thread (and starves block production + sync on the shared
+lock). *Recommended minimal fix (low risk):* a process-wide token bucket bounding
+**aggregate** submit-triggered PoW verifications/second (below loop capacity),
+dropping the block when exhausted — semantically safe because both call sites
+already drop non-verifying blocks (orphan admission is best-effort; a rejected
+addBlock is already a non-accept), with no locking/threading change. Offloading the
+hash to a worker is a larger follow-up (needs tip-revalidation after the off-lock
+hash) and is not required to close the DoS.
 
 ### Contract-template redesigns (T1, T3, T4) — now fixed
 

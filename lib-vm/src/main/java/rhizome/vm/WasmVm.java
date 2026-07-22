@@ -152,7 +152,7 @@ public final class WasmVm {
             // every CALL re-parsed the whole module and re-scanned every instruction (O(code)
             // work) unpriced, so a large module could be spammed to amplify node CPU. Deploy
             // also caps code size, so a cache miss is bounded work.
-            module = moduleFor(wasmCode);
+            module = moduleFor(wasmCode, gas);
         } catch (Throwable e) {
             // Malformed bytecode (or a module using non-deterministic float/SIMD opcodes) never
             // reaches instantiation — deterministic revert.
@@ -297,17 +297,26 @@ public final class WasmVm {
             throw new IllegalArgumentException(
                 "contract code too large: " + wasmCode.length + " > " + MAX_CODE_SIZE);
         }
-        moduleFor(wasmCode);
+        moduleFor(wasmCode, null);
     }
 
-    /** Returns the parsed, validated module for {@code wasmCode}, parsing on a cache miss. */
-    private static WasmModule moduleFor(byte[] wasmCode) {
+    /**
+     * Returns the parsed, validated module for {@code wasmCode}, parsing on a cache miss. When a
+     * {@code gas} meter is supplied (a runtime CALL, not deploy-time validation), a cache miss is
+     * charged for the O(code) parse + non-determinism/allocation scan, so cycling more distinct
+     * max-size contracts than the LRU holds cannot force that work unpriced (audit vm F3).
+     */
+    private static WasmModule moduleFor(byte[] wasmCode, GasMeter gas) {
         String key = sha256Hex(wasmCode);
         synchronized (MODULE_CACHE) {
             WasmModule cached = MODULE_CACHE.get(key);
             if (cached != null) {
                 return cached;
             }
+        }
+        if (gas != null) {
+            gas.charge(GasSchedule.MODULE_PARSE_BASE
+                + (long) wasmCode.length * GasSchedule.MODULE_PARSE_PER_BYTE);
         }
         WasmModule module = Parser.parse(wasmCode);
         rejectNonDeterministic(module);

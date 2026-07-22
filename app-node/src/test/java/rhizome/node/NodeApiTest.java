@@ -156,6 +156,32 @@ class NodeApiTest {
     }
 
     @Test
+    void browserPostIsRefusedUnlessSameOriginWithTheCsrfHeader() throws Exception {
+        var origin = io.activej.http.HttpHeaders.of("Origin");
+        var marker = io.activej.http.HttpHeaders.of("X-Rhizome-Request");
+        Transaction t = signedSend(100_000, 0);
+
+        // A browser POST (carries Origin) that is same-origin but lacks the custom header is refused
+        // — this is the DNS-rebinding case the plain Origin==Host check used to let through.
+        assertEquals(403, call(HttpRequest.post("http://x/add_transaction")
+            .withHeader(origin, "http://x").withBody(t.serialize().toBuffer()).build()).getCode());
+
+        // Cross-origin is refused regardless of the header.
+        assertEquals(403, call(HttpRequest.post("http://x/add_transaction")
+            .withHeader(origin, "http://evil").withHeader(marker, "1")
+            .withBody(t.serialize().toBuffer()).build()).getCode());
+
+        // Same-origin WITH the custom header passes the guard (the dashboard's own requests).
+        assertEquals(200, call(HttpRequest.post("http://x/add_transaction")
+            .withHeader(origin, "http://x").withHeader(marker, "1")
+            .withBody(t.serialize().toBuffer()).build()).getCode());
+
+        // A non-browser client (no Origin — a peer/CLI) is never blocked.
+        assertEquals(200, call(HttpRequest.post("http://x/add_transaction")
+            .withBody(signedSend(100_000, 1).serialize().toBuffer()).build()).getCode());
+    }
+
+    @Test
     void submitTransactionThenBlockUpdatesState() throws Exception {
         Transaction t = signedSend(100_000, 0);
         HttpResponse add = call(HttpRequest.post("http://x/add_transaction")
