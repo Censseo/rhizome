@@ -79,6 +79,12 @@ public final class BlockCodec {
             byte[] h = new byte[rhizome.core.crypto.SHA256Hash.SIZE];
             buffer.get(h);
             int difficulty = buffer.getInt();
+            // Bound uncle difficulty at decode, exactly as HeaderCodec.readFrom does (codec parity):
+            // ChainEngine.validateUncles folds it into BigInteger.TWO.pow(difficulty), so a raw wire
+            // int must never reach that pow — reject out-of-range here for defense in depth.
+            if (difficulty < 0 || difficulty > rhizome.core.common.Constants.MAX_DIFFICULTY) {
+                throw new IllegalArgumentException("uncleDifficulty out of range: " + difficulty);
+            }
             byte[] m = new byte[rhizome.core.ledger.PublicAddress.SIZE];
             buffer.get(m);
             uncles.add(new UncleRef(rhizome.core.crypto.SHA256Hash.of(h), difficulty,

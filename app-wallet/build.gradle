@@ -4,7 +4,6 @@ plugins {
 
 dependencies {
     implementation project(':lib-core')
-    implementation project(':lib-net')
 
     // The end-to-end wallet test drives a real node.
     testImplementation project(':app-node')

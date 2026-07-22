@@ -1,7 +1,9 @@
 package rhizome;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static rhizome.core.common.Crypto.generateKeyPair;
 
 import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters;
@@ -50,6 +52,27 @@ class BinaryCodecTest {
         assertEquals(3, restored.chainId());
         assertEquals(11, restored.nonce());
         assertEquals(1234, restored.amount());
+    }
+
+    @Test
+    void strictSingleObjectDecodeRejectsTrailingBytes() {
+        // The single-object entry (used by POST /add_transaction) must consume the whole buffer, so a
+        // wire tx has a unique form — closing the last non-strict single-object path (audit codec P7
+        // parity). The offset overload stays lenient: PeerInterface streams consecutive objects through
+        // it, where the "remaining" bytes are the next object, not junk.
+        var pair = generateKeyPair();
+        var key = PublicKey.of(pair.getPublic());
+        Transaction t = Transaction.of(PublicAddress.of(key), PublicAddress.random(),
+            new TransactionAmount(1234), key, new TransactionAmount(7), 999L, 3, 11);
+        t.sign(new PrivateKey((Ed25519PrivateKeyParameters) pair.getPrivate()));
+        byte[] bytes = t.serialize().toBuffer();
+        byte[] withTrailer = java.util.Arrays.copyOf(bytes, bytes.length + 1);
+
+        assertDoesNotThrow(() -> BinarySerializable.fromBuffer(bytes, TransactionDto.class));
+        assertThrows(IllegalArgumentException.class,
+            () -> BinarySerializable.fromBuffer(withTrailer, TransactionDto.class));
+        // Offset overload remains lenient (multi-object streaming relies on it).
+        assertDoesNotThrow(() -> BinarySerializable.fromBuffer(withTrailer, 0, TransactionDto.class));
     }
 
     @Test

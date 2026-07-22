@@ -149,9 +149,14 @@ class ChainSynchronizerTest {
                 return h == 1 ? local.blockAt(1).hash() : SHA256Hash.random(); // fork at genesis
             }
             public List<Block> blocks(long start, long end) {
-                // A structurally invalid block (bad merkle/nonce/chaining).
+                // A structurally invalid block with NO valid PoW. difficulty 30 (not 4) so a random
+                // nonce fails verifyNonce deterministically: the branch is rejected at the stateless
+                // branchChainsFromFork gate as PEER_INVALID (a real protocol violation), never reaching
+                // the work-comparison gate — which, since the 5th-pass reorg-gate fix, correctly returns
+                // NO_CHANGE for a merely-lighter VALID branch. (At difficulty 4 the nonce passed PoW ~1/16
+                // of runs and slipped through to that gate, a latent flake the fix exposed.)
                 var bad = (BlockImpl) BlockImpl.builder().id((int) start).timestamp(9_000_000)
-                    .difficulty(4).lastBlockHash(local.blockAt(1).hash())
+                    .difficulty(30).lastBlockHash(local.blockAt(1).hash())
                     .merkleRoot(SHA256Hash.random()).nonce(SHA256Hash.random()).build();
                 return List.of(bad);
             }

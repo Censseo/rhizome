@@ -41,7 +41,15 @@ public final class HeaderSynchronizer {
     }
 
     public ChainSynchronizer.Result syncFrom(PeerSource peer) {
-        if (peer.totalWork().compareTo(engine.totalWork()) <= 0) {
+        // Prefilter against our BASE work, not our uncle-inclusive total. The adoption gate below
+        // ranks branches by base-only work (localWorkAboveFork, the M4 rule); ranking this early-out
+        // by the uncle-inflated total instead let a node with heavy local uncle work refuse to even
+        // look at a peer whose base work would win adoption — the two gates disagreeing produced a
+        // stable partition after a healed split (audit 5th-pass, reorg-gate metric). peer.totalWork()
+        // is self-reported but is an upper bound on the peer's base work, so skipping only when it
+        // cannot beat our base work never skips a peer the adoption gate would accept — and a peer that
+        // over-reports still can't force a pop/restore, which stays gated on validated base work.
+        if (peer.totalWork().compareTo(engine.baseWork()) <= 0) {
             return ChainSynchronizer.Result.NO_CHANGE;
         }
         try {
@@ -78,7 +86,11 @@ public final class HeaderSynchronizer {
             return ChainSynchronizer.Result.PEER_INVALID;
         }
         if (validated.work().compareTo(localWorkAboveFork(forkHeight)) <= 0) {
-            return ChainSynchronizer.Result.PEER_INVALID; // claimed heavy, proved light
+            // Claimed heavy, proved light: the branch is structurally valid (PoW/continuity/difficulty
+            // all held) but not base-heavier, so it simply loses the fork race — NOT a protocol
+            // violation. Returning PEER_INVALID here banned honest total-heavier/base-lighter peers on
+            // the first strike, entrenching a split; NO_CHANGE leaves the peer connected (audit 5th-pass).
+            return ChainSynchronizer.Result.NO_CHANGE;
         }
 
         // The headers prove the peer is heavier, but if it has pruned the bodies we need there

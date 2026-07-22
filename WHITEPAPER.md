@@ -88,8 +88,8 @@ native compilation.
 
 `lib-vm` depends on `lib-core` and implements its `ContractProcessor` interface, so the
 consensus core dispatches contracts without ever depending on the WASM runtime. Gradle
-multi-module project (Java 21): `lib-core`, `lib-vm`, `lib-persistence`, `lib-net`,
-`lib-crypto` (reserved), `app-node`, `app-wallet`, `app-dnsseeder`.
+multi-module project (Java 21): `lib-core`, `lib-vm`, `lib-persistence`,
+`lib-crypto` (reserved), `app-node`, `app-wallet`.
 
 ---
 

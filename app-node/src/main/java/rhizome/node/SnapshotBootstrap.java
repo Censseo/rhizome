@@ -90,17 +90,32 @@ final class SnapshotBootstrap {
         Block genesis = GenesisBlock.build(params, genesisSnapshot);
         BlockHeader genesisHeader = BlockHeader.of(genesis);
 
-        // Validate the peer's whole header chain above genesis under full PoW.
-        List<BlockHeader> headers = fetchHeaders(peer, 2, peerHeight);
-        if (headers == null) {
-            return false;
-        }
-        HeaderChain.Result validated = HeaderChain.validate(
-            params, h -> genesisHeader, GenesisBlock.GENESIS_ID, headers, nowMillis);
-        if (!validated.valid()) {
-            log.warn("Peer headers invalid at {} ({}); refusing snapshot", validated.rejectedHeight(),
-                validated.rejection());
-            return false;
+        // Validate the peer's header chain above genesis under full PoW, in bounded windows: fetch a
+        // window, validate it chaining from the prefix already validated, then advance — so a peer that
+        // serves cheap invalid headers is rejected after ONE window instead of OOM-ing us by buffering
+        // its whole advertised span before a single check (audit 5th-pass, bootstrap buffering). We
+        // validate only up to pivot+maxReorgDepth — enough to prove the pivot is buried (final) — never
+        // the peer's untrusted advertised height. The below-pivot headers are retained because they are
+        // adopted below; a genuinely large chain still costs O(pivot) retained headers, but those must
+        // carry real PoW to pass validation, so there is no cheap OOM primitive left.
+        long validateTo = pivot + params.maxReorgDepth();
+        List<BlockHeader> headers = new ArrayList<>();
+        for (long start = 2; start <= validateTo; start += Constants.BLOCK_HEADERS_PER_FETCH) {
+            long end = Math.min(validateTo, start + Constants.BLOCK_HEADERS_PER_FETCH - 1);
+            List<BlockHeader> window = fetchHeaders(peer, start, end);
+            if (window == null || window.isEmpty()) {
+                return false;
+            }
+            List<BlockHeader> prefix = headers; // validated heights 2..start-1, at index h-2
+            HeaderChain.Result validated = HeaderChain.validate(params,
+                h -> h <= GenesisBlock.GENESIS_ID ? genesisHeader : prefix.get((int) (h - 2)),
+                start - 1, window, nowMillis);
+            if (!validated.valid()) {
+                log.warn("Peer headers invalid at {} ({}); refusing snapshot", validated.rejectedHeight(),
+                    validated.rejection());
+                return false;
+            }
+            headers.addAll(window);
         }
 
         // The authority for the expected root is the VALIDATED HEADER at the pivot —

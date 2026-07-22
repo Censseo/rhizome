@@ -1,3 +1,26 @@
+# Rhizome — Fifth-pass follow-up: documented findings now implemented
+
+**Date:** 2026-07-22. After the deep-dive re-verification below, every remaining
+*documented* finding was implemented (no longer deferred), each with a regression
+test where one is expressible:
+
+| Finding | Fix shipped |
+|---|---|
+| Reorg-gate work-metric mismatch (Low, real) | `ChainEngine` now tracks a base-only work accumulator `baseWork()` (Σ 2^difficulty, no uncle term); both synchronizers' early-out prefilter compares the peer's self-reported total against **our base work** (a conservative bound that never skips a peer the base-only adoption gate would accept), and a structurally-valid-but-base-lighter branch returns `NO_CHANGE` instead of `PEER_INVALID` so honest total-heavier/base-lighter peers are no longer banned on the first strike. Regressions: `BlockUnclesTest.baseWorkExcludesUncleWorkThatTotalWorkIncludes`, updated `HeaderSynchronizerTest`. |
+| Snapshot bootstrap buffering (Low) | `SnapshotBootstrap` now validates the header chain **incrementally, window-by-window**, chaining each window from the validated prefix, so a peer serving cheap invalid headers is rejected after one window instead of buffering its whole advertised span first; the validated span is capped at `pivot + maxReorgDepth` (enough to prove finality), never the untrusted advertised height. |
+| Codec parity — `BlockCodec` uncle difficulty (Info) | `BlockCodec.decode` now bounds uncle difficulty to `[0, MAX_DIFFICULTY]`, mirroring `HeaderCodec`. Regression: `CodecBoundsTest.blockCodecRejectsOutOfRangeUncleDifficulty`. |
+| Codec parity — `TransactionDto` trailing bytes (Info) | The strict single-object `BinarySerializable.fromBuffer(bytes, class)` now rejects trailing bytes (closing the `/add_transaction` path); the offset overload stays lenient for `PeerInterface`'s multi-object streaming. Regression: `BinaryCodecTest.strictSingleObjectDecodeRejectsTrailingBytes`. |
+| `token.rs do_transfer` unchecked add (Info) | Credit is now `to_bal.checked_add(amount).unwrap_or_else(\|\| fail())`, matching the `pair`/`amm` checked-arithmetic discipline; `token.wasm` recompiled (test + dashboard copies). Unreachable via the shipped ABI (supply conservation), so no trigger test is expressible — the existing token suite confirms no regression. |
+| Dead p2p cluster (Info) | Removed the whole unreachable cluster: the `lib-net` module (`rhizome.net.**` + `FloodDiscoveryTest`) and the non-functional `app-dnsseeder` module, plus their `settings.gradle` entries, the source-unused `lib-net` deps in `app-node`/`app-wallet`, and the dead commented `Peer` references in `NodeInterface`. No live code path referenced any of it (no inbound listener existed). |
+| `/stats` rate-limit weight (bug in the 5th-pass fix) | Corrected the integer-division `STATS_WINDOW / SCAN_COST_PER_BLOCKS` (=1) to `STATS_WINDOW`. |
+
+Not implemented (unchanged, by design): `SparseMerkleTree.load` re-hash stays off
+the per-key apply hot path (local-corruption-only, no remote trigger); and an
+*aggregate* (all-IP) read-compute gate for the explorer endpoints — the deeper
+lock-free-reads change — remains a recommended dedicated hardening, noted below.
+
+---
+
 # Rhizome — Blockchain Security & Exploit Audit (fifth pass)
 
 **Date:** 2026-07-22 · **Scope:** whole tree · **Baseline:** post-`#8` (four
