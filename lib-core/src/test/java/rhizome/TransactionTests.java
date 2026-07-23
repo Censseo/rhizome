@@ -68,6 +68,33 @@ class TransactionTests {
     }
 
     @Test
+    void sizeBytesMatchesTheSerializedLengthForEveryKind() {
+        // P7: the block-size pre-check now sums sizeBytes() instead of building a DTO per tx via
+        // serialize().getSize(). The two must be exactly equal for every kind or the block-size cap
+        // check would diverge from the real wire size.
+        User u = User.create();
+        Transaction transfer = u.send(User.create(), 12.5);
+        Transaction coinbase = u.mine();
+        assertEquals(transfer.serialize().getSize(), ((TransactionImpl) transfer).sizeBytes());
+        assertEquals(coinbase.serialize().getSize(), ((TransactionImpl) coinbase).sizeBytes());
+
+        // A payload-carrying kind (CALL) with varying data lengths exercises the contract suffix.
+        for (byte[] data : new byte[][] { new byte[0], new byte[1], new byte[257] }) {
+            var call = TransactionImpl.builder()
+                .from(rhizome.core.ledger.PublicAddress.random())
+                .to(rhizome.core.ledger.PublicAddress.random())
+                .signingKey(rhizome.crypto.PublicKey.empty())
+                .amount(new rhizome.core.transaction.TransactionAmount(1))
+                .fee(new rhizome.core.transaction.TransactionAmount(1))
+                .chainId(1).nonce(0).timestamp(1L)
+                .kind(rhizome.core.transaction.TransactionKind.CALL)
+                .data(data).gasLimit(5).gasPrice(2).build();
+            assertEquals(call.serialize().getSize(), call.sizeBytes(),
+                "sizeBytes must equal the serialized length for CALL with data.length=" + data.length);
+        }
+    }
+
+    @Test
     void checkTransactionCopy() {
         User miner = User.create();
         User receiver = User.create();

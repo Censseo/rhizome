@@ -54,7 +54,14 @@ public final class MemPool {
     private final int maxSize;
     private final int maxPerSender;
 
-    private final Map<PublicAddress, NavigableMap<Long, Transaction>> bySender = new HashMap<>();
+    /** Senders in unsigned-address order, so a block's transactions are selected deterministically. */
+    private static final java.util.Comparator<PublicAddress> ADDRESS_ORDER =
+        (a, b) -> java.util.Arrays.compareUnsigned(a.toBytes(), b.toBytes());
+    // A sorted map, so getTransactionsForBlock iterates senders in address order without re-sorting
+    // all keys on every block build (audit P11). The selection order is byte-identical to the old
+    // explicit sort, so produced blocks (and their merkle roots) are unchanged.
+    private final NavigableMap<PublicAddress, NavigableMap<Long, Transaction>> bySender =
+        new TreeMap<>(ADDRESS_ORDER);
     private final Set<SHA256Hash> contentHashes = new HashSet<>();
     private final ReentrantLock lock = new ReentrantLock();
     private int size;
@@ -210,10 +217,9 @@ public final class MemPool {
         lock.lock();
         try {
             List<Transaction> selected = new ArrayList<>(Math.min(maxTransactions, size));
-            List<PublicAddress> senders = new ArrayList<>(bySender.keySet());
-            senders.sort((a, b) -> java.util.Arrays.compareUnsigned(a.toBytes(), b.toBytes()));
-
-            for (PublicAddress sender : senders) {
+            // bySender is already ordered by ADDRESS_ORDER, so its keySet yields senders in the
+            // deterministic address order the block needs — no per-build re-sort (audit P11).
+            for (PublicAddress sender : bySender.keySet()) {
                 if (selected.size() >= maxTransactions) {
                     break;
                 }

@@ -1109,7 +1109,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
     private static long serializedSize(Block block) {
         long size = rhizome.core.block.dto.BlockDto.BUFFER_SIZE + Integer.BYTES;
         for (Transaction t : block.transactions()) {
-            size += t.serialize().getSize();
+            size += ((TransactionImpl) t).sizeBytes(); // exact wire length without building the DTO (P7)
         }
         size += (long) block.uncles().size()
             * (SHA256Hash.SIZE + Integer.BYTES + rhizome.core.ledger.PublicAddress.SIZE);

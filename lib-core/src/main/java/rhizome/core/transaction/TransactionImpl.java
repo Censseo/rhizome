@@ -85,6 +85,22 @@ public final class TransactionImpl implements Transaction, Comparable<Transactio
        return serialize(this);
     }
 
+    /**
+     * The exact serialized byte length WITHOUT building the wire form (audit P7). The block-size
+     * pre-check summed {@code serialize().getSize()} over every transaction, allocating a full DTO
+     * (and copying signature/key/data) per tx only to read a length — then the block was serialized
+     * again to store it. This mirrors {@link TransactionDto#getSize()} exactly; a mismatch would make
+     * the block-size cap wrong, so it is pinned by a test asserting equality for every kind.
+     */
+    public int sizeBytes() {
+        int size = TransactionDto.FIXED_SIZE + 1; // fixed transfer prefix + the kind byte
+        if (kind != TransactionKind.TRANSFER) {
+            // contract/box/token suffix: gasLimit(8) + gasPrice(8) + dataLen(4) + data
+            size += Long.BYTES + Long.BYTES + Integer.BYTES + data.length;
+        }
+        return size;
+    }
+
     public JSONObject toJson() {
         return toJson(this);
     }
