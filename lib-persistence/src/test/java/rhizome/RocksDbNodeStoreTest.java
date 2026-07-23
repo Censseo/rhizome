@@ -62,6 +62,26 @@ class RocksDbNodeStoreTest {
     }
 
     @Test
+    void stagedLedgerWritesAreVisibleWithinTheBlockAndDroppedOnDiscard() throws IOException {
+        // The ledger writes made during a block stage in an overlay so they flush atomically with the
+        // block/height in append (audit S3). Within the open commit they read back (read-your-writes);
+        // if the commit is discarded (a rejected/failed block) they never touch the column family.
+        try (RocksDbNodeStore store = new RocksDbNodeStore(tempDir.resolve("db").toString())) {
+            ChainStore chain = store.chainStore();
+            Ledger ledger = store.ledger();
+            PublicAddress w = PublicAddress.random();
+            ledger.createWallet(w);
+            ledger.deposit(w, new TransactionAmount(100)); // committed value (no open block commit)
+
+            chain.beginBlockCommit();
+            ledger.deposit(w, new TransactionAmount(50));
+            assertEquals(150, ledger.getWalletValue(w).amount()); // visible within the block
+            chain.discardBlockCommit();
+            assertEquals(100, ledger.getWalletValue(w).amount()); // dropped: the column family is untouched
+        }
+    }
+
+    @Test
     void chainStoreAppendPopIsAtomicAndIndexed() throws IOException {
         NetworkParameters params = fastParams();
         try (RocksDbNodeStore store = new RocksDbNodeStore(tempDir.resolve("db").toString())) {

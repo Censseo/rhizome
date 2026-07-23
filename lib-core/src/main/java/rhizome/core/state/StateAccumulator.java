@@ -37,6 +37,11 @@ public final class StateAccumulator {
         return roots.latestHeight() >= 0;
     }
 
+    /** The highest block height whose state root is committed (−1 if none) — for boot reconciliation. */
+    public long committedHeight() {
+        return roots.latestHeight();
+    }
+
     /** The root recorded for {@code height}, or {@code null} if none. */
     public byte[] rootAt(long height) {
         return roots.getRoot(height);

@@ -627,7 +627,16 @@ model.
 - **RocksDB storage** — one database with column families (chain, ledger, txdb); append
   and pop are atomic `WriteBatch`es, so a crash never leaves half-written state. Chosen
   over iq80 LevelDB (pure-Java, slower) and LMDB for its write throughput and atomic
-  batches.
+  batches. A block's **ledger** writes ride that same append/pop batch (they buffer in a
+  read-your-writes overlay during execution and flush with the block and height), so the
+  ledger can never end a block ahead of, or behind, the chain height. The other state
+  stores — boxes, tokens, contracts and the sparse-Merkle root — are separate databases
+  committed just before the height; if a process crash lands between them and the height,
+  boot **reconciliation** rewinds any store found ahead of the chain height back down to it
+  via its per-block undo journal (bounded by the reorg window), so the node comes up at one
+  consistent height rather than wedging on the next block's state-root check. (Full
+  power-loss durability across the independent state databases additionally needs a per-store
+  fsync; process-crash consistency is complete without it.)
 - **Parallel, cached signature verification** — signatures are verified once at mempool
   admission and cached, so block execution gets a cache hit; batches verify in parallel.
   Measured ≈140 blocks/s with a warm cache versus ≈6.6 sequentially — the single change

@@ -203,9 +203,45 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         } else if (!GenesisBlock.matches(store.blockAt(GenesisBlock.GENESIS_ID), params, snapshot)) {
             throw new IllegalStateException("Stored genesis does not match network parameters and snapshot");
         }
+        engine.reconcilePeripheralStores();
         engine.rebuildDerivedState();
         engine.seedGenesisStateRoot();
         return engine;
+    }
+
+    /**
+     * Boot recovery for a torn multi-store commit (audit S3). A block's state commits in program order
+     * — contract, box, token processors, then the state accumulator, then the atomic block/height/ledger
+     * batch last. The ledger rides that final batch so it can never disagree with the height, but the
+     * peripheral stores commit first and, if the process died before the height landed, are left one (or,
+     * on a power loss, more) block ahead. Rewind each back down to the chain height using its per-block
+     * undo journal, so the node comes up at one consistent height instead of wedging on the next block's
+     * state-root check. Bounded by the reorg window: journals older than that are gone (a deeper tear is
+     * unrecoverable — impossible on a clean process crash, only on a power loss without per-store fsync).
+     *
+     * <p>Processor {@code revertBlock} is a no-op when there is no journal at that height, so sweeping
+     * the window is safe on a normal (untorn) boot; the accumulator's is not, so it is driven by its
+     * exact committed height.
+     */
+    private void reconcilePeripheralStores() {
+        long chainHeight = store.height();
+        if (stateAccumulator != null) {
+            for (long h = stateAccumulator.committedHeight(); h > chainHeight; h--) {
+                stateAccumulator.revertBlock(h);
+            }
+        }
+        long scanTop = chainHeight + params.maxReorgDepth();
+        for (long h = scanTop; h > chainHeight; h--) {
+            if (contractProcessor != null) {
+                contractProcessor.revertBlock(h);
+            }
+            if (boxProcessor != null) {
+                boxProcessor.revertBlock(h);
+            }
+            if (tokenProcessor != null) {
+                tokenProcessor.revertBlock(h);
+            }
+        }
     }
 
     /**
@@ -328,71 +364,84 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             }
 
             java.util.Set<PublicAddress> touched = stateAccumulator == null ? null : new java.util.HashSet<>();
-            ExecutionStatus status = Executor.executeBlock(
-                block, ledger, store::hasTransaction, params, verifier,
-                contractProcessor, boxProcessor, tokenProcessor, touched);
-            if (status != SUCCESS) {
-                return status;
-            }
+            // Open a block commit: the ledger writes below stage in the store and flush atomically with
+            // the block/height in store.append, so a crash can never leave the ledger ahead of the
+            // height (audit S3). Every exit before append must discard the staged writes, so the whole
+            // mutation runs under a finally.
+            store.beginBlockCommit();
+            boolean appended = false;
+            try {
+                ExecutionStatus status = Executor.executeBlock(
+                    block, ledger, store::hasTransaction, params, verifier,
+                    contractProcessor, boxProcessor, tokenProcessor, touched);
+                if (status != SUCCESS) {
+                    return status;
+                }
 
-            // Authenticated state root: fold this block's state changes into the accumulator
-            // and require the resulting root to equal the header's. On mismatch the block was
-            // fully applied, so undo it (ledger + processors + accumulator) before rejecting.
-            if (stateAccumulator != null) {
-                long height2 = b.id();
-                byte[] newRoot = stateAccumulator.applyBlock(height2, collectStateChanges(block, touched, height2));
-                if (!java.util.Arrays.equals(newRoot, b.stateRoot().toBytes())) {
-                    stateAccumulator.revertBlock(height2);
-                    Executor.rollbackBlock(block, ledger, contractProcessor, boxProcessor, height2, params);
+                // Authenticated state root: fold this block's state changes into the accumulator
+                // and require the resulting root to equal the header's. On mismatch the block was
+                // fully applied, so undo it (ledger + processors + accumulator) before rejecting.
+                if (stateAccumulator != null) {
+                    long height2 = b.id();
+                    byte[] newRoot = stateAccumulator.applyBlock(height2, collectStateChanges(block, touched, height2));
+                    if (!java.util.Arrays.equals(newRoot, b.stateRoot().toBytes())) {
+                        stateAccumulator.revertBlock(height2);
+                        Executor.rollbackBlock(block, ledger, contractProcessor, boxProcessor, height2, params);
+                        if (contractProcessor != null) {
+                            contractProcessor.revertBlock(height2);
+                        }
+                        if (boxProcessor != null) {
+                            boxProcessor.revertBlock(height2);
+                        }
+                        if (tokenProcessor != null) {
+                            tokenProcessor.revertBlock(height2);
+                        }
+                        return INVALID_STATE_ROOT;
+                    }
+                } else if (!java.util.Arrays.equals(b.stateRoot().toBytes(),
+                        rhizome.crypto.SHA256Hash.empty().toBytes())) {
+                    // No accumulator to recompute the root, yet the block commits a non-empty one we
+                    // cannot verify. Accepting it blindly would fork this node from every validating
+                    // node (audit M6: state-root validation must not depend on local configuration),
+                    // so refuse a block whose committed state we are unable to check.
+                    Executor.rollbackBlock(block, ledger, contractProcessor, boxProcessor, b.id(), params);
                     if (contractProcessor != null) {
-                        contractProcessor.revertBlock(height2);
+                        contractProcessor.revertBlock(b.id());
                     }
                     if (boxProcessor != null) {
-                        boxProcessor.revertBlock(height2);
+                        boxProcessor.revertBlock(b.id());
                     }
                     if (tokenProcessor != null) {
-                        tokenProcessor.revertBlock(height2);
+                        tokenProcessor.revertBlock(b.id());
                     }
                     return INVALID_STATE_ROOT;
                 }
-            } else if (!java.util.Arrays.equals(b.stateRoot().toBytes(),
-                    rhizome.crypto.SHA256Hash.empty().toBytes())) {
-                // No accumulator to recompute the root, yet the block commits a non-empty one we
-                // cannot verify. Accepting it blindly would fork this node from every validating
-                // node (audit M6: state-root validation must not depend on local configuration),
-                // so refuse a block whose committed state we are unable to check.
-                Executor.rollbackBlock(block, ledger, contractProcessor, boxProcessor, b.id(), params);
-                if (contractProcessor != null) {
-                    contractProcessor.revertBlock(b.id());
-                }
-                if (boxProcessor != null) {
-                    boxProcessor.revertBlock(b.id());
-                }
-                if (tokenProcessor != null) {
-                    tokenProcessor.revertBlock(b.id());
-                }
-                return INVALID_STATE_ROOT;
-            }
 
-            store.append(block);
-            commitAccountNonces(block);
-            nonceStore.markSyncedThrough(b.id()); // nonces now reflect this new tip
-            totalWork = totalWork.add(BlockWork.of(b.difficulty())).add(uncleWork);
-            baseWork = baseWork.add(BlockWork.of(b.difficulty()));
-            uncleWorkByHeight.put((long) b.id(), uncleWork);
-            // A legal reorg pops at most maxReorgDepth blocks, so uncle-work for heights older
-            // than that is never subtracted again — evict it instead of retaining one BigInteger
-            // per height for the life of the process (audit: unbounded derived-state growth).
-            long uncleWorkFloor = b.id() - params.maxReorgDepth();
-            if (uncleWorkFloor > 0) {
-                uncleWorkByHeight.keySet().removeIf(h -> h < uncleWorkFloor);
+                store.append(block); // flushes the staged ledger writes + block + height in one batch
+                appended = true;
+                commitAccountNonces(block);
+                nonceStore.markSyncedThrough(b.id()); // nonces now reflect this new tip
+                totalWork = totalWork.add(BlockWork.of(b.difficulty())).add(uncleWork);
+                baseWork = baseWork.add(BlockWork.of(b.difficulty()));
+                uncleWorkByHeight.put((long) b.id(), uncleWork);
+                // A legal reorg pops at most maxReorgDepth blocks, so uncle-work for heights older
+                // than that is never subtracted again — evict it instead of retaining one BigInteger
+                // per height for the life of the process (audit: unbounded derived-state growth).
+                long uncleWorkFloor = b.id() - params.maxReorgDepth();
+                if (uncleWorkFloor > 0) {
+                    uncleWorkByHeight.keySet().removeIf(h -> h < uncleWorkFloor);
+                }
+                currentDifficulty = computeDifficultyFromChain();
+                applyVotingAt(b.id()); // tally this epoch's votes if a boundary; effective next block
+                if (onBlockApplied != null) {
+                    onBlockApplied.accept(b.id()); // fast/non-blocking by contract (see setter)
+                }
+                return SUCCESS;
+            } finally {
+                if (!appended) {
+                    store.discardBlockCommit(); // drop the staged (and possibly rolled-back) ledger writes
+                }
             }
-            currentDifficulty = computeDifficultyFromChain();
-            applyVotingAt(b.id()); // tally this epoch's votes if a boundary; effective next block
-            if (onBlockApplied != null) {
-                onBlockApplied.accept(b.id()); // fast/non-blocking by contract (see setter)
-            }
-            return SUCCESS;
         } finally {
             lock.unlock();
         }
@@ -417,20 +466,31 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
                 throw new IllegalStateException("Cannot pop genesis");
             }
             Block tip = store.tip();
-            Executor.rollbackBlock(tip, ledger, contractProcessor, boxProcessor, height, params);
-            if (contractProcessor != null) {
-                contractProcessor.revertBlock(height); // undo this block's contract-state changes
+            // Stage the ledger reversals so store.pop() flushes them atomically with the height
+            // decrement — the pop is then atomic for the ledger too (audit S3).
+            store.beginBlockCommit();
+            boolean popped = false;
+            try {
+                Executor.rollbackBlock(tip, ledger, contractProcessor, boxProcessor, height, params);
+                if (contractProcessor != null) {
+                    contractProcessor.revertBlock(height); // undo this block's contract-state changes
+                }
+                if (boxProcessor != null) {
+                    boxProcessor.revertBlock(height); // undo this block's box-state changes
+                }
+                if (tokenProcessor != null) {
+                    tokenProcessor.revertBlock(height); // undo this block's token-state changes
+                }
+                if (stateAccumulator != null) {
+                    stateAccumulator.revertBlock(height); // move the state root back one block
+                }
+                store.pop(); // flushes the staged ledger reversals + height decrement in one batch
+                popped = true;
+            } finally {
+                if (!popped) {
+                    store.discardBlockCommit();
+                }
             }
-            if (boxProcessor != null) {
-                boxProcessor.revertBlock(height); // undo this block's box-state changes
-            }
-            if (tokenProcessor != null) {
-                tokenProcessor.revertBlock(height); // undo this block's token-state changes
-            }
-            if (stateAccumulator != null) {
-                stateAccumulator.revertBlock(height); // move the state root back one block
-            }
-            store.pop();
             // Drop any memoised retarget-boundary difficulty at or above the popped height: the block
             // (hence a boundary's timestamps) may be rewritten by the reorg, so those cached values are
             // no longer trusted and are recomputed on demand. Buried boundaries below stay valid (P1).

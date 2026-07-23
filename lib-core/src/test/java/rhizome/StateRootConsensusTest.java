@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static rhizome.crypto.Crypto.generateKeyPair;
 
@@ -140,6 +141,56 @@ class StateRootConsensusTest {
 
     private byte[] ledgerValue(long balance) {
         return Utils.longToBytes(balance);
+    }
+
+    @Test
+    void bootReconciliationRewindsPeripheralStoresAheadOfTheChainHeight() {
+        // Simulate a torn multi-store commit (audit S3): the box store and state accumulator committed
+        // a block whose atomic block/height/ledger batch never landed (a crash in between). On restart
+        // the engine must rewind the peripheral stores back down to the chain height, not come up
+        // inconsistent and wedge on the next block's state-root check.
+        InMemoryChainStore chain = new InMemoryChainStore();
+        InMemoryLedger led = new InMemoryLedger();
+        InMemoryBoxStore boxStore = new InMemoryBoxStore();
+        DefaultBoxProcessor boxProc = new DefaultBoxProcessor(boxStore, params);
+        StateAccumulator acc = new StateAccumulator(new InMemorySmtNodeStore(), new InMemoryRootStore(),
+            params.maxReorgDepth());
+        LedgerSnapshot snap = new LedgerSnapshot("t", 0, params.chainId());
+        snap.put(sender, new TransactionAmount(10_000_000L));
+
+        ChainEngine e1 = ChainEngine.init(params, led, chain, snap, null, clock::get,
+            null, null, boxProc, null, acc);
+        // A real coinbase-only block 2: chain and accumulator commit at height 2.
+        var b = (BlockImpl) BlockImpl.builder().id(2).timestamp(clock.addAndGet(1000))
+            .difficulty(e1.difficulty()).lastBlockHash(e1.tipHash()).build();
+        b.addTransaction(Transaction.of(miner, new TransactionAmount(params.miningReward(2))));
+        var tree = new MerkleTree();
+        tree.setItems(b.transactions());
+        b.merkleRoot(tree.getRootHash());
+        e1.stampStateRoot(b);
+        b.nonce(Miner.mineNonce(b.hash(), b.difficulty(), params.powAlgorithm()));
+        assertEquals(ExecutionStatus.SUCCESS, e1.addBlock(b));
+        assertEquals(2, e1.height());
+        byte[] rootAt2 = e1.stateRoot();
+
+        // Tear: commit a phantom block 3 to the peripheral stores ONLY — the chain height stays at 2.
+        byte[] phantomId = rhizome.core.box.Box.deriveId(sender, 99);
+        boxStore.applyBlock(3, java.util.List.of(rhizome.core.box.BoxStore.BoxMutation.write(
+            new rhizome.core.box.Box(phantomId, sender, 1_000, 3, 3, java.util.List.of()))));
+        acc.applyBlock(3, java.util.List.of(rhizome.core.state.StateChange.set(
+            rhizome.core.state.StateKeys.LEDGER, sender.toBytes(), ledgerValue(123))));
+        assertEquals(3, acc.committedHeight());
+        assertNotNull(boxStore.get(phantomId));
+        assertEquals(2, chain.height());
+
+        // Restart: a fresh engine + fresh box processor over the SAME stores reconciles down to 2.
+        DefaultBoxProcessor boxProc2 = new DefaultBoxProcessor(boxStore, params);
+        ChainEngine e2 = ChainEngine.init(params, led, chain, snap, null, clock::get,
+            null, null, boxProc2, null, acc);
+        assertEquals(2, e2.height());
+        assertEquals(2, acc.committedHeight(), "state accumulator rewound to the chain height");
+        assertArrayEquals(rootAt2, e2.stateRoot(), "state root restored to the consistent height");
+        assertNull(boxStore.get(phantomId), "phantom box rewound by the reconciliation sweep");
     }
 
     @Test
