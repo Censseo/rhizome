@@ -197,6 +197,16 @@ public final class NodeApi {
                     .withJson(new JSONObject().put("error", "read budget exceeded").toString())
                     .toPromise();
             }
+            // Aggregate submit gate, consumed BEFORE the /submit handler decodes the block body. The
+            // decode (up to maxBlockSizeBytes, ~25 000 tx allocations) and the memory-hard PoW hash it
+            // triggers both run on the event-loop thread; the per-IP limiter cannot stop a distributed
+            // flood from summing past it. Shedding here — rather than inside submitBlock, after the
+            // decode already ran — closes the decode-before-gate asymmetry (audit S6).
+            if (isSubmitPost(request) && !node.trySubmitBudget()) {
+                return HttpResponse.ofCode(429)
+                    .withJson(new JSONObject().put("error", "submit throttled").toString())
+                    .toPromise();
+            }
             // CSRF / DNS-rebinding guard on state-changing requests. A browser attaches an Origin
             // header on every POST, so any POST carrying an Origin is browser-originated. Such a
             // request is refused unless it is (a) same-origin AND (b) carries the non-simple
@@ -329,6 +339,18 @@ public final class NodeApi {
         }
         return "/stats".equals(path) || "/blocks".equals(path) || "/block".equals(path)
             || "/transaction".equals(path) || "/address_txs".equals(path);
+    }
+
+    /** True for a POST /submit — the block-ingest route whose body decode must be gated (audit S6). */
+    private static boolean isSubmitPost(HttpRequest request) {
+        if (request.getMethod() != POST) {
+            return false;
+        }
+        try {
+            return "/submit".equals(request.getPath());
+        } catch (RuntimeException e) {
+            return false;
+        }
     }
 
     /**

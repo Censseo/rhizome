@@ -160,14 +160,22 @@ class NodeApiTest {
     }
 
     @Test
-    void submitPowGateShedsBlocksOnceTheGlobalBudgetIsSpent() {
-        // A global budget of one verification per (long) window: the first /submit is verified and
-        // accepted; the second is shed as SUBMIT_THROTTLED without touching the chain — the
-        // aggregate anti-DoS cap the per-IP limiter lacks (audit F1).
+    void submitPowGateShedsBlocksBeforeTheBodyIsDecoded() throws Exception {
+        // A global budget of one submit per (long) window, gated at the HTTP boundary BEFORE the block
+        // body is decoded (audit F1 + S6): the first /submit is accepted; the second is shed with 429
+        // without decoding the body or touching the chain — the aggregate anti-DoS cap the per-IP
+        // limiter lacks, now applied ahead of the decode rather than after it.
         NodeService gated = new NodeService(engine, mempool, new RateLimiter(1, 3_600_000, 1));
-        assertEquals(rhizome.core.mempool.ExecutionStatus.SUCCESS, gated.submitBlock(mineNext(List.of())));
+        var gatedServlet = NodeApi.servlet(eventloop, gated);
+
+        HttpResponse first = callWith(gatedServlet,
+            HttpRequest.post("http://x/submit").withBody(BlockCodec.encode(mineNext(List.of()))).build());
+        assertEquals(200, first.getCode());
         long height = engine.height();
-        assertEquals(rhizome.core.mempool.ExecutionStatus.SUBMIT_THROTTLED, gated.submitBlock(mineNext(List.of())));
+
+        HttpResponse second = callWith(gatedServlet,
+            HttpRequest.post("http://x/submit").withBody(BlockCodec.encode(mineNext(List.of()))).build());
+        assertEquals(429, second.getCode(), "an over-budget submit must be shed with 429");
         assertEquals(height, engine.height(), "a throttled submit must not extend the chain");
     }
 
