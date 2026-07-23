@@ -61,6 +61,13 @@ public final class RocksDbNodeStore implements AutoCloseable {
     private static final byte[] NONCE_HEIGHT_KEY = "nonceHeight".getBytes();
     /** Set while a snap-sync bootstrap is seeding the several stores; cleared only on success. */
     private static final byte[] BOOTSTRAP_KEY = "bootstrapInProgress".getBytes();
+    /**
+     * Highest height through which the one-time header backfill migration is known complete. Advanced
+     * in every {@link RocksChainStore#append} batch (each append writes its header in the same batch)
+     * so a fully-migrated chain skips the O(height) boot sweep in {@link #backfillHeaders} in O(1),
+     * instead of re-probing every height on every restart (audit P12).
+     */
+    private static final byte[] HEADERS_BACKFILLED_KEY = "headersBackfilledThrough".getBytes();
 
     private static final long GENESIS_HEIGHT = 1L;
 
@@ -166,6 +173,14 @@ public final class RocksDbNodeStore implements AutoCloseable {
             return; // fresh database: nothing to migrate
         }
         try {
+            byte[] done = db.get(metaCf, HEADERS_BACKFILLED_KEY);
+            if (done != null && bytesToLong(done) >= height) {
+                return; // already backfilled through the tip; appends since kept the header CF complete
+            }
+        } catch (RocksDBException e) {
+            throw new IOException("Failed to read header backfill watermark", e);
+        }
+        try {
             long migrated = 0;
             for (long h = 1; h <= height; h++) {
                 byte[] key = heightKey(h);
@@ -183,6 +198,9 @@ public final class RocksDbNodeStore implements AutoCloseable {
             if (migrated > 0) {
                 System.out.println("[RocksDbNodeStore] backfilled " + migrated + " block header(s)");
             }
+            // Record that the header CF is now complete through the tip, so the next restart skips this
+            // sweep in O(1). Appends past this point keep it current (see HEADERS_BACKFILLED_KEY).
+            db.put(metaCf, writeOptions, HEADERS_BACKFILLED_KEY, longToBytes(height));
         } catch (RocksDBException e) {
             throw new IOException("Failed to backfill block headers", e);
         }
@@ -355,6 +373,9 @@ public final class RocksDbNodeStore implements AutoCloseable {
                     }
                 }
                 batch.put(metaCf, HEIGHT_KEY, key);
+                // Keep the header-backfill watermark at the tip: this append wrote its own header
+                // above, so the header CF stays complete and a restart skips the migration sweep (P12).
+                batch.put(metaCf, HEADERS_BACKFILLED_KEY, key);
                 // This block's ledger writes ride the SAME batch as the height, so the ledger can
                 // never be a block ahead of (or behind) the chain height after a crash (audit S3).
                 stagePendingLedgerInto(batch);
