@@ -8,12 +8,12 @@ dependencies {
     implementation project(':lib-persistence')
     implementation project(':lib-vm')
 
-    implementation "io.activej:activej-http:${activejVersion}"
+    implementation "${activejGroup}:activej-http:${activejVersion}"
     // activej-eventloop also provides the io.activej.reactor package.
-    implementation "io.activej:activej-eventloop:${activejVersion}"
-    implementation "io.activej:activej-promise:${activejVersion}"
-    implementation "io.activej:activej-csp:${activejVersion}"
-    implementation "io.activej:activej-bytebuf:${activejVersion}"
+    implementation "${activejGroup}:activej-eventloop:${activejVersion}"
+    implementation "${activejGroup}:activej-promise:${activejVersion}"
+    implementation "${activejGroup}:activej-csp:${activejVersion}"
+    implementation "${activejGroup}:activej-bytebuf:${activejVersion}"
 
     implementation "org.json:json:${jsonVersion}"
 
