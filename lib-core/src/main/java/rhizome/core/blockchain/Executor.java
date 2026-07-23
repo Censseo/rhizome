@@ -671,7 +671,18 @@ public final class Executor {
                 ledger.revertDeposit(miner, new TransactionAmount(fee));
             }
             ledger.revertDeposit(tx.to(), tx.amount());
-            ledger.revertSend(tx.from(), new TransactionAmount(tx.amount().amount() + fee));
+            // Exact inverse of the forward path (executeBlock): the sender is only debited when
+            // `charged = amount + fee > 0` (a 0-amount/0-fee transfer from a never-funded key never
+            // touches `from`, deliberately — validity is balance-based, audit consensus Finding 1).
+            // Reverting `from` unconditionally called revertSend(from, 0) → ledger.add → getWalletValue
+            // on an absent wallet → LedgerException thrown mid-rollback, corrupting a reorg (popBlock
+            // has no restore path): ledger left partially reverted while store/nonces/processors/root
+            // stayed applied — a planted-block state-corruption vector. Guard mirrors the forward
+            // `charged > 0`, matching revertToken/revertBox/revertContract which already guard `> 0`.
+            long charged = tx.amount().amount() + fee;
+            if (charged > 0) {
+                ledger.revertSend(tx.from(), new TransactionAmount(charged));
+            }
         }
     }
 

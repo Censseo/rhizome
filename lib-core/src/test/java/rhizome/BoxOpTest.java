@@ -226,6 +226,46 @@ class BoxOpTest {
         assertEquals(before + 5000, ledger.getWalletValue(sender).amount());
     }
 
+    @Test
+    void spendByNonOwnerRejectedAndCannotStealTheDeposit() {
+        // The highest-value box authorization gate (audit: no prior negative test): BOX_SPEND releases
+        // the full locked deposit to the signer. A non-owner spend must NOT delete the box or move its
+        // value to the attacker; it is a soft revert (the block stays valid) with the box untouched.
+        assertEquals(ExecutionStatus.SUCCESS, execute(block(2, coinbase(2), create(5000, 0))));
+        byte[] id = Box.deriveId(sender, 0);
+
+        var otherPair = generateKeyPair();
+        PublicKey otherKey = PublicKey.of(otherPair.getPublic());
+        PrivateKey otherPriv = new PrivateKey((Ed25519PrivateKeyParameters) otherPair.getPrivate());
+        PublicAddress other = PublicAddress.of(otherKey);
+        ledger.createWallet(other);
+        ledger.deposit(other, new TransactionAmount(10_000));
+        long attackerBefore = ledger.getWalletValue(other).amount();
+
+        var tx = TransactionImpl.builder().from(other).to(other).signingKey(otherKey)
+            .amount(new TransactionAmount(0)).fee(new TransactionAmount(0))
+            .chainId(params.chainId()).nonce(0).timestamp(1L)
+            .kind(TransactionKind.BOX_SPEND).data(BoxPayload.encodeTarget(id))
+            .build();
+        tx.sign(otherPriv);
+
+        assertEquals(ExecutionStatus.SUCCESS, execute(block(3, coinbase(3), tx)));
+        Box box = boxes.getCommitted(id);
+        assertNotNull(box, "a non-owner spend must not delete the box");
+        assertEquals(sender, box.owner());
+        assertEquals(5000, box.value(), "the locked deposit must remain in the box");
+        assertEquals(attackerBefore, ledger.getWalletValue(other).amount(),
+            "a non-owner must not receive the box's deposit");
+    }
+
+    @Test
+    void spendOfNonExistentBoxSoftRevertsAndKeepsBlockValid() {
+        // BOX_NOT_FOUND is a soft revert (block stays valid), like a contract precondition failure.
+        byte[] ghost = Box.deriveId(sender, 99);
+        assertEquals(ExecutionStatus.SUCCESS, execute(block(2, coinbase(2), spend(ghost, 0))));
+        assertNull(boxes.getCommitted(ghost));
+    }
+
     // ---- rent collection ----
 
     @Test

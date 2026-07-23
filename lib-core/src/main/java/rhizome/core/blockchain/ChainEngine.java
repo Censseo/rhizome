@@ -941,10 +941,13 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         // body at all.
         long nonceSynced = nonceStore.syncedThroughHeight();
         long backfillFrom = Math.max(GenesisBlock.GENESIS_ID + 1, nonceSynced + 1);
-        if (backfillFrom <= height && backfillFrom <= store.prunedBelow()) {
+        if (backfillFrom <= height && backfillFrom < store.prunedBelow()) {
             // The nonces we must rebuild live in bodies that have been pruned — an
             // inconsistent store (a pruned node whose nonces were not persisted). Fail loudly
             // rather than dying later on a missing body or, worse, undercounting nonces.
+            // prunedBelow() is the EXCLUSIVE upper bound of the pruned range, so the body *at*
+            // prunedBelow() is retained: backfillFrom == prunedBelow() is rebuildable and must not
+            // trip this guard (audit S8, off-by-one — was <=).
             throw new IllegalStateException(
                 "cannot rebuild account nonces from pruned bodies (synced through " + nonceSynced
                     + ", pruned below " + store.prunedBelow() + ")");
@@ -964,6 +967,14 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         }
         if (height > nonceSynced) {
             nonceStore.markSyncedThrough(height); // persist the catch-up so the next restart skips it
+        }
+        // Evict uncle-work below the reorg horizon, mirroring the addBlock path: the rebuild loop above
+        // populated one BigInteger per height genesis->tip, but a legal reorg pops at most maxReorgDepth
+        // blocks, so older entries are never subtracted again. Without this a fresh boot at height H
+        // holds O(H) BigIntegers until the next addBlock prunes them (audit S10, benign but unbounded).
+        long uncleWorkFloor = height - params.maxReorgDepth();
+        if (uncleWorkFloor > 0) {
+            uncleWorkByHeight.keySet().removeIf(h -> h < uncleWorkFloor);
         }
         currentDifficulty = computeDifficultyFromChain();
         syncVoteableHolder();

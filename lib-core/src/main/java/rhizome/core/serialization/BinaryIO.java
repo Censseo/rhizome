@@ -16,14 +16,19 @@ public final class BinaryIO {
 
     private BinaryIO() {}
 
-    /** Writes exactly {@code size} bytes: right-pads with zeros if shorter, truncates if longer. */
+    /**
+     * Writes exactly {@code size} bytes. The source must already be exactly {@code size} long — every
+     * consensus field written here is a fixed-width type ({@code SHA256Hash}, {@code PublicAddress},
+     * {@code PublicKey}, {@code TransactionSignature}) whose {@code toBytes()} is length-validated at
+     * construction. Silently right-padding a short array or truncating a long one would emit a
+     * different-but-valid-looking canonical preimage (hence a different hash / PoW) instead of failing,
+     * so a wrong-length field is rejected here rather than corrupting the wire form (audit S10).
+     */
     public static void putFixed(ByteBuffer buffer, byte[] src, int size) {
-        if (src.length >= size) {
-            buffer.put(src, 0, size);
-        } else {
-            buffer.put(src);
-            buffer.put(new byte[size - src.length]);
+        if (src.length != size) {
+            throw new IllegalArgumentException("fixed field must be " + size + " bytes, got " + src.length);
         }
+        buffer.put(src, 0, size);
     }
 
     /** Reads exactly {@code size} bytes into a fresh array. */

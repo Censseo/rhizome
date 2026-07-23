@@ -1,6 +1,7 @@
 package rhizome;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static rhizome.crypto.Crypto.generateKeyPair;
 
 import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters;
@@ -240,5 +241,39 @@ class ExecutorTest {
         assertEquals(ExecutionStatus.SUCCESS, a, "clean node must accept the 0/0 transfer");
         assertEquals(ExecutionStatus.SUCCESS, b, "phantom node must accept the 0/0 transfer");
         assertEquals(a, b, "block validity must not depend on ledger key-presence (fork risk)");
+    }
+
+    @Test
+    void rollbackOfZeroValueWalletlessTransferIsExactInverseAndDoesNotThrow() {
+        // Regression for the apply/rollback asymmetry (audit S1). A 0-amount/0-fee transfer from a
+        // never-funded key is a *valid* block (see the phantom-wallet test above), but rollbackBlock
+        // used to call revertSend(from, 0) unconditionally → ledger.add → getWalletValue on the absent
+        // wallet → LedgerException thrown mid-rollback. popBlock/reorg has no restore path, so a
+        // planted block of this shape corrupted the ledger on the next reorg that popped it. Apply then
+        // rollback must be an exact, throw-free inverse.
+        var pair = generateKeyPair();
+        var wKey = PublicKey.of(pair.getPublic());
+        var wPriv = new PrivateKey((Ed25519PrivateKeyParameters) pair.getPrivate());
+        var w = PublicAddress.of(wKey);
+
+        InMemoryLedger clean = new InMemoryLedger();
+        clean.createWallet(miner);
+        clean.deposit(miner, new TransactionAmount(500L));
+        long minerBefore = clean.getWalletValue(miner).amount();
+
+        Transaction poison = Transaction.of(w, recipient, new TransactionAmount(0), wKey,
+            new TransactionAmount(0), 1234L, params.chainId(), 0);
+        poison.sign(wPriv);
+        Block block = block(2, coinbase(2), poison);
+
+        assertEquals(ExecutionStatus.SUCCESS, Executor.executeBlock(block, clean, h -> false, params));
+        assertFalse(clean.hasWallet(w), "a 0/0 transfer must not create the walletless sender on apply");
+
+        // The reorg path. Before the fix this threw LedgerException; it must now be a clean inverse.
+        Executor.rollbackBlock(block, clean, null, 2, params);
+
+        assertEquals(minerBefore, clean.getWalletValue(miner).amount(),
+            "miner balance must be exactly restored after rollback");
+        assertFalse(clean.hasWallet(w), "rollback must not create the walletless sender");
     }
 }

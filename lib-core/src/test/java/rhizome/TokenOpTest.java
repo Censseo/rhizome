@@ -162,6 +162,45 @@ class TokenOpTest {
     }
 
     @Test
+    void remintingAnExistingIdIsRejectedAndDoesNotInflateSupply() {
+        // The anti-inflation gate for tokens (audit: no prior negative test): a token id is
+        // SHA-256(minter||nonce||"rztoken"), and re-minting the same id must fail TOKEN_ALREADY_EXISTS.
+        // Reusing the same nonce derives the same id; the second mint is a soft revert (block valid)
+        // that must NOT create a second token or add to supply/balance.
+        assertEquals(ExecutionStatus.SUCCESS, execute(block(2, coinbase(2), mint(1_000_000, 0))));
+        byte[] id = TokenMeta.deriveId(sender, 0);
+        // Second mint reusing nonce 0 -> same id. (The engine's per-sender nonce rule blocks this
+        // upstream; here we exercise the processor's own id-collision guard directly.)
+        assertEquals(ExecutionStatus.SUCCESS, execute(block(3, coinbase(3), mint(5_000_000, 0))));
+        assertEquals(1_000_000, tokens.meta(id).totalSupply(), "supply must not change on a re-mint");
+        assertEquals(1_000_000, tokens.balance(id, sender.toBytes()), "balance must not change on a re-mint");
+    }
+
+    @Test
+    void burnBeyondBalanceSoftRevertsAndKeepsSupply() {
+        // TOKEN_BURN's insufficient-balance guard (audit: only transfer's short-balance path was
+        // tested). Burning more than held is a soft revert: supply and balance stay intact.
+        execute(block(2, coinbase(2), mint(100, 0)));
+        byte[] id = TokenMeta.deriveId(sender, 0);
+        assertEquals(ExecutionStatus.SUCCESS, execute(block(3, coinbase(3), burn(id, 101, 1))));
+        assertEquals(100, tokens.balance(id, sender.toBytes()));
+        assertEquals(100, tokens.meta(id).totalSupply());
+    }
+
+    @Test
+    void mintToThirdPartyCreditsRecipientAndNotTheMinter() {
+        // A mint to a recipient != minter must credit the whole supply to the recipient and leave the
+        // minter holding zero (the setBalance(id, to, amount) path — audit: untested).
+        var mintToBob = tokenTx(TransactionKind.TOKEN_MINT, bob,
+            TokenPayload.encodeMint(777, 2, "PNDA", "Panda"), 0, 0);
+        assertEquals(ExecutionStatus.SUCCESS, execute(block(2, coinbase(2), mintToBob)));
+        byte[] id = TokenMeta.deriveId(sender, 0);
+        assertEquals(777, tokens.balance(id, bob.toBytes()), "recipient holds the full mint");
+        assertEquals(0, tokens.balance(id, sender.toBytes()), "the minter holds none of it");
+        assertEquals(sender, tokens.meta(id).minter());
+    }
+
+    @Test
     void rejectsNonzeroGasAndAmount() {
         // Nonzero PDN amount on a token tx.
         var badAmount = TransactionImpl.builder()
