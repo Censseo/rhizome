@@ -78,6 +78,14 @@ public final class HeaderCodec {
 
     public static BlockHeader readFrom(ByteBuffer buffer) {
         int id = buffer.getInt();
+        // A header id is a positive height (genesis = 1). Bound it at decode for fail-closed parity
+        // with difficulty/numTransactions/vote/uncle fields: HeaderChain rejects id != expectedId, but
+        // a negative/zero wire int should never reach the derived-state arithmetic (h % lookback,
+        // height comparisons) as a valid-looking value (audit S10, defense-in-depth / wire canonicality).
+        // Genesis height is 1 (GenesisBlock.GENESIS_ID); a literal avoids a block->blockchain package cycle.
+        if (id < 1) {
+            throw new IllegalArgumentException("header id out of range: " + id);
+        }
         long timestamp = buffer.getLong();
         int difficulty = buffer.getInt();
         // Bound the header's own difficulty at decode (matches uncleDifficulty below): it feeds

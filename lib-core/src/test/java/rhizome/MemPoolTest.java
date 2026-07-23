@@ -133,6 +133,24 @@ class MemPoolTest {
     }
 
     @Test
+    void configuredMinFeeRejectsFreeTransactionsBoundingNonceDomainGrowth() {
+        // Audit S7: the ACCOUNT_NONCE state domain keeps a permanent leaf for every account that has
+        // ever sent a transaction — unlike the ledger domain it cannot self-prune at zero balance
+        // without reintroducing replay. The bound on an attacker cycling a fixed principal through
+        // fresh accounts to bloat that domain is the minFee floor: with it configured, a zero-fee
+        // transfer is refused at admission, so every nonce-creating hop costs a real fee.
+        NetworkParameters withFloor = params.toBuilder().minFee(10L).build();
+        MemPool floored = new MemPool(withFloor, verifier, accounts, 100);
+        assertEquals(ExecutionStatus.TRANSACTION_FEE_TOO_LOW, floored.addTransaction(send(100, 0, 0)));
+        assertEquals(ExecutionStatus.TRANSACTION_FEE_TOO_LOW, floored.addTransaction(send(100, 9, 0)));
+        assertEquals(ExecutionStatus.SUCCESS, floored.addTransaction(send(100, 10, 0)));
+
+        // The floor is off by default (0): the same free transfer is admitted. This is the residual —
+        // the lever exists but must be turned on to charge for nonce-domain growth.
+        assertEquals(ExecutionStatus.SUCCESS, mempool.addTransaction(send(100, 0, 0)));
+    }
+
+    @Test
     void rejectsStaleNonce() {
         accounts.nonces.put(sender, 5L);
         assertEquals(ExecutionStatus.INVALID_TRANSACTION_NONCE, mempool.addTransaction(send(100, 1, 4)));

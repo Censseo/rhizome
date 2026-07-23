@@ -15,12 +15,14 @@ import java.util.List;
 public final class StateAccumulator {
 
     private final SparseMerkleTree tree;
+    private final SmtNodeStore nodes;
     private final RootStore roots;
     private final int retainDepth;
     private volatile byte[] currentRoot;
 
     public StateAccumulator(SmtNodeStore nodes, RootStore roots, int retainDepth) {
         this.tree = new SparseMerkleTree(nodes);
+        this.nodes = nodes;
         this.roots = roots;
         this.retainDepth = Math.max(1, retainDepth);
         long latest = roots.latestHeight();
@@ -37,6 +39,11 @@ public final class StateAccumulator {
         return roots.latestHeight() >= 0;
     }
 
+    /** The highest block height whose state root is committed (−1 if none) — for boot reconciliation. */
+    public long committedHeight() {
+        return roots.latestHeight();
+    }
+
     /** The root recorded for {@code height}, or {@code null} if none. */
     public byte[] rootAt(long height) {
         return roots.getRoot(height);
@@ -44,12 +51,32 @@ public final class StateAccumulator {
 
     /** The root that applying {@code changes} to the current root would yield — no persistence. */
     public byte[] dryApply(List<StateChange> changes) {
-        return applyTo(currentRoot, changes);
+        // Buffer the nodes this trial creates and drop them: a dry run (the producer stamping a
+        // candidate root) must not grow the store with nodes that may never be committed. They are
+        // content-addressed, so the real applyBlock re-derives the identical nodes if the block lands.
+        nodes.beginBatch();
+        try {
+            return applyTo(currentRoot, changes);
+        } finally {
+            nodes.discardBatch();
+        }
     }
 
     /** Applies {@code changes} at {@code height}, persists the new root, and advances the current root. */
     public byte[] applyBlock(long height, List<StateChange> changes) {
-        byte[] root = applyTo(currentRoot, changes);
+        // Stage this block's new SMT nodes and flush them in one batch (audit P8). The nodes are made
+        // durable BEFORE putRoot, so the committed root always references nodes that are already on
+        // disk — a crash between them leaves only harmless orphan nodes (re-created on re-apply), never
+        // a root pointing at a missing node.
+        nodes.beginBatch();
+        byte[] root;
+        try {
+            root = applyTo(currentRoot, changes);
+        } catch (RuntimeException e) {
+            nodes.discardBatch();
+            throw e;
+        }
+        nodes.flushBatch();
         roots.putRoot(height, root);
         currentRoot = root;
         long cutoff = height - retainDepth;

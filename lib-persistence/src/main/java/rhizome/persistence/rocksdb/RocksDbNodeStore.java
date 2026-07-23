@@ -61,6 +61,13 @@ public final class RocksDbNodeStore implements AutoCloseable {
     private static final byte[] NONCE_HEIGHT_KEY = "nonceHeight".getBytes();
     /** Set while a snap-sync bootstrap is seeding the several stores; cleared only on success. */
     private static final byte[] BOOTSTRAP_KEY = "bootstrapInProgress".getBytes();
+    /**
+     * Highest height through which the one-time header backfill migration is known complete. Advanced
+     * in every {@link RocksChainStore#append} batch (each append writes its header in the same batch)
+     * so a fully-migrated chain skips the O(height) boot sweep in {@link #backfillHeaders} in O(1),
+     * instead of re-probing every height on every restart (audit P12).
+     */
+    private static final byte[] HEADERS_BACKFILLED_KEY = "headersBackfilledThrough".getBytes();
 
     private static final long GENESIS_HEIGHT = 1L;
 
@@ -76,6 +83,19 @@ public final class RocksDbNodeStore implements AutoCloseable {
     private final ColumnFamilyHandle ledgerCf;
     private final ColumnFamilyHandle noncesCf;
     private final WriteOptions writeOptions = new WriteOptions();
+
+    /**
+     * Ledger writes staged for the current block, so they commit in the SAME atomic {@link WriteBatch}
+     * as the block body and chain height (audit S3). The ledger lives in this DB but was written
+     * per-wallet during executeBlock, before the separate height append — a crash between the two left
+     * the ledger a block ahead of the height with no journal to rewind it, an unrecoverable tear. While
+     * a block commit is open ({@code pendingLedger != null}, set under the engine's single write lock)
+     * ledger writes buffer here and reads see them (read-your-writes within the block); {@code append}/
+     * {@code pop} flush them into their batch. Null outside a block commit, so genesis/snapshot seeding
+     * and every read fall straight through to the column family, unchanged. Concurrent so a reader that
+     * (like today) observes mid-block ledger state never corrupts the map.
+     */
+    private volatile java.util.concurrent.ConcurrentHashMap<rhizome.core.ledger.PublicAddress, Long> pendingLedger;
 
     public RocksDbNodeStore(String path) throws IOException {
         this(path, 0);
@@ -153,6 +173,14 @@ public final class RocksDbNodeStore implements AutoCloseable {
             return; // fresh database: nothing to migrate
         }
         try {
+            byte[] done = db.get(metaCf, HEADERS_BACKFILLED_KEY);
+            if (done != null && bytesToLong(done) >= height) {
+                return; // already backfilled through the tip; appends since kept the header CF complete
+            }
+        } catch (RocksDBException e) {
+            throw new IOException("Failed to read header backfill watermark", e);
+        }
+        try {
             long migrated = 0;
             for (long h = 1; h <= height; h++) {
                 byte[] key = heightKey(h);
@@ -170,6 +198,9 @@ public final class RocksDbNodeStore implements AutoCloseable {
             if (migrated > 0) {
                 System.out.println("[RocksDbNodeStore] backfilled " + migrated + " block header(s)");
             }
+            // Record that the header CF is now complete through the tip, so the next restart skips this
+            // sweep in O(1). Appends past this point keep it current (see HEADERS_BACKFILLED_KEY).
+            db.put(metaCf, writeOptions, HEADERS_BACKFILLED_KEY, longToBytes(height));
         } catch (RocksDBException e) {
             throw new IOException("Failed to backfill block headers", e);
         }
@@ -215,6 +246,17 @@ public final class RocksDbNodeStore implements AutoCloseable {
 
     public Ledger ledger() {
         return new RocksLedger();
+    }
+
+    /** Adds the block commit's staged ledger writes (if any) to {@code batch}, for an atomic flush. */
+    private void stagePendingLedgerInto(WriteBatch batch) throws RocksDBException {
+        var pending = pendingLedger;
+        if (pending != null) {
+            for (var e : pending.entrySet()) {
+                batch.put(ledgerCf, e.getKey().toBytes(),
+                    ByteBuffer.allocate(8).putLong(e.getValue()).array());
+            }
+        }
     }
 
     /** Persisted next-nonce-per-sender, so the engine need not replay bodies at boot. */
@@ -331,6 +373,12 @@ public final class RocksDbNodeStore implements AutoCloseable {
                     }
                 }
                 batch.put(metaCf, HEIGHT_KEY, key);
+                // Keep the header-backfill watermark at the tip: this append wrote its own header
+                // above, so the header CF stays complete and a restart skips the migration sweep (P12).
+                batch.put(metaCf, HEADERS_BACKFILLED_KEY, key);
+                // This block's ledger writes ride the SAME batch as the height, so the ledger can
+                // never be a block ahead of (or behind) the chain height after a crash (audit S3).
+                stagePendingLedgerInto(batch);
                 // Incremental pruning (amortised O(1)): the body that just fell out of the
                 // retention window is discarded in the same batch. Genesis is never pruned.
                 if (keepBlocks > 0) {
@@ -341,9 +389,20 @@ public final class RocksDbNodeStore implements AutoCloseable {
                     }
                 }
                 db.write(writeOptions, batch);
+                pendingLedger = null; // the block (ledger + height) is now durably one unit
             } catch (RocksDBException e) {
                 throw new LedgerException("Failed to append block " + expected, e);
             }
+        }
+
+        @Override
+        public void beginBlockCommit() {
+            pendingLedger = new java.util.concurrent.ConcurrentHashMap<>();
+        }
+
+        @Override
+        public void discardBlockCommit() {
+            pendingLedger = null;
         }
 
         @Override
@@ -402,7 +461,11 @@ public final class RocksDbNodeStore implements AutoCloseable {
                     }
                 }
                 batch.put(metaCf, HEIGHT_KEY, heightKey(height - 1));
+                // The block's ledger reversals (staged during rollbackBlock) ride the same batch as
+                // the height decrement, so the pop is atomic for the ledger too (audit S3).
+                stagePendingLedgerInto(batch);
                 db.write(writeOptions, batch);
+                pendingLedger = null;
             } catch (RocksDBException e) {
                 throw new LedgerException("Failed to pop block " + height, e);
             }
@@ -484,6 +547,15 @@ public final class RocksDbNodeStore implements AutoCloseable {
         }
 
         private byte[] rawValue(PublicAddress wallet) {
+            // Read-your-writes: within an open block commit, a wallet already touched this block is
+            // read back from the staging overlay, not the not-yet-flushed column family (audit S3).
+            var pending = pendingLedger;
+            if (pending != null) {
+                Long staged = pending.get(wallet);
+                if (staged != null) {
+                    return ByteBuffer.allocate(8).putLong(staged).array();
+                }
+            }
             try {
                 return db.get(ledgerCf, wallet.toBytes());
             } catch (RocksDBException e) {
@@ -492,6 +564,13 @@ public final class RocksDbNodeStore implements AutoCloseable {
         }
 
         private void setValue(PublicAddress wallet, long amount) {
+            // Inside a block commit, buffer the write so it flushes atomically with the height in
+            // append/pop; otherwise (genesis/snapshot seeding) write straight through (audit S3).
+            var pending = pendingLedger;
+            if (pending != null) {
+                pending.put(wallet, amount);
+                return;
+            }
             try {
                 db.put(ledgerCf, writeOptions, wallet.toBytes(), ByteBuffer.allocate(8).putLong(amount).array());
             } catch (RocksDBException e) {

@@ -523,16 +523,28 @@ public final class WasmVm {
             }
             long totalEntries = 0;
             for (int i = 0; i < tableCount; i++) {
-                // Only the initial (min) count is allocated eagerly at instantiation; table.grow is
-                // metered by its operand (see meter), so a large max ceiling is already priced.
-                long initial = tables.getTable(i).limits().min();
-                if (initial > MAX_TABLE_ENTRIES) {
-                    throw new IllegalArgumentException("contract declares too large a table: "
-                        + initial + " entries (max " + MAX_TABLE_ENTRIES + ")");
+                var limits = tables.getTable(i).limits();
+                long initial = limits.min();
+                // Bound the growth CEILING (max), not only the eagerly-allocated min. table.grow
+                // extends the backing int[]/Instance[] arrays at runtime and was metered by gas ONLY —
+                // no tree-wide reservation, unlike linear memory (TREE_MAX_PAGES) and locals
+                // (MAX_TREE_LIVE_LOCALS). A module declaring `(table 1 10000000 funcref)` — or an
+                // unbounded max, which Chicory treats as LIMIT_MAX = 10M — could table.grow into
+                // ~gigabytes bounded only by gasLimit (itself bounded only by the sender's balance).
+                // A small-heap validator then hits OutOfMemoryError (normalized to full-gas
+                // out-of-gas) where a large-heap one completes with partial gas → gasUsed diverges →
+                // state-root fork: exactly the heap-dependent-OOM class the audit closed for memory
+                // and locals, left open for tables (audit S2). Capping the ceiling — and summing
+                // ceilings for the aggregate — makes the whole table footprint a deterministic network
+                // constant reserved before Chicory can allocate it.
+                long ceiling = limits.max();
+                if (initial > MAX_TABLE_ENTRIES || ceiling > MAX_TABLE_ENTRIES) {
+                    throw new IllegalArgumentException("contract declares too large a table: min "
+                        + initial + " max " + ceiling + " entries (max " + MAX_TABLE_ENTRIES + ")");
                 }
-                totalEntries += initial;
-                // Bound the AGGREGATE across all tables, not just each one: many mid-size tables sum
-                // to the same multi-GB eager allocation a single oversized table would (audit H4).
+                totalEntries += ceiling;
+                // Bound the AGGREGATE growth ceiling across all tables, not just each one: many
+                // mid-size tables sum to the same multi-GB allocation a single oversized table would.
                 if (totalEntries > MAX_TOTAL_TABLE_ENTRIES) {
                     throw new IllegalArgumentException("contract declares too many total table entries: "
                         + totalEntries + " (max " + MAX_TOTAL_TABLE_ENTRIES + ")");
@@ -763,8 +775,13 @@ public final class WasmVm {
         HostFunction transferValue = new HostFunction(ENV, "transfer_value",
             List.of(ValType.I32, ValType.I32, ValType.I64), List.of(ValType.I32),
             (Instance inst, long... args) -> {
-                gas.charge(GasSchedule.CALL_BASE); // priced like a call: it mutates ledger state
                 int toLen = asLen(args[1]);
+                // Charge per byte of the contract-controlled `to` read BEFORE the readBytes allocation,
+                // exactly like call_contract/storage_read/box_read/copyOut (audit M3). A flat CALL_BASE
+                // let a hostile contract loop transfer_value(ptr, ~64 MiB, 0): each call allocated and
+                // copied up to the memory cap for 500 gas, then returned -1 — ~10^5x underpriced, a
+                // deterministic block-filling CPU/GC DoS that defeated gas-as-a-DoS-bound (audit S5).
+                gas.charge(GasSchedule.CALL_BASE + (long) toLen * GasSchedule.PER_BYTE);
                 byte[] to = inst.memory().readBytes(asOffset(args[0]), toLen);
                 return new long[] {host.transferValue(to, args[2])};
             });

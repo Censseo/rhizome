@@ -56,10 +56,26 @@ public interface ChainStore {
         // Archive stores keep everything; no-op.
     }
 
-    /** Appends the next block (must be height()+1). */
+    /**
+     * Opens a block commit: ledger writes made until the matching {@link #append} or {@link #pop}
+     * are staged and flushed atomically with the block/height, so a crash can never leave the ledger
+     * a block ahead of the height (audit S3). Persistent stores that co-locate the ledger override
+     * this; an in-memory store has no crash to defend against, so the default is a no-op and the
+     * ledger writes through immediately.
+     */
+    default void beginBlockCommit() {
+        // no-op for stores whose ledger has no separate durability from the height
+    }
+
+    /** Abandons the current block commit's staged ledger writes (a rejected/failed block). */
+    default void discardBlockCommit() {
+        // no-op; see beginBlockCommit
+    }
+
+    /** Appends the next block (must be height()+1), flushing any staged ledger writes atomically. */
     void append(Block block);
 
-    /** Removes the tip block and de-indexes its transactions. */
+    /** Removes the tip block and de-indexes its transactions, flushing staged ledger reverts atomically. */
     void pop();
 
     /** True if a transaction with this content hash is in an applied block. */

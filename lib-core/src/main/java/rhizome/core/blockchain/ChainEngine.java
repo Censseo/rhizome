@@ -86,6 +86,25 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
      * dropped on a pop, so it is reorg-safe without a reversible tally.
      */
     private final java.util.TreeMap<Long, long[]> voteParamsByBoundary = new java.util.TreeMap<>();
+    /**
+     * Memoised difficulty at each completed retarget boundary (audit P1). Difficulty is piecewise
+     * constant between boundaries and each boundary's value is a pure function of two stored header
+     * timestamps, so the full O(height/lookback) fold in {@link #computeDifficultyFromChain} need run
+     * only for boundaries not yet cached — amortised O(1) per add instead of O(height) (which made
+     * initial sync O(height²)). Entries above the tip are dropped on pop, since a reorg can rewrite a
+     * boundary's timestamps; boundaries buried past the reorg window are immutable, so their cached
+     * value is exact. The memoised value is byte-identical to the full fold — no consensus quantity moves.
+     */
+    private final java.util.TreeMap<Long, Integer> difficultyByBoundary = new java.util.TreeMap<>();
+    /**
+     * Ring of the last {@code medianTimeWindow} header timestamps in ascending height order (audit P6).
+     * Maintained incrementally on add/pop and rebuilt at boot, so {@link #medianTimePast} sorts a small
+     * {@code long[]} copy instead of re-reading and re-boxing the whole window from the store on every
+     * {@code addBlock} and {@code nextBlockTimestamp}. It holds exactly the heights the store-read
+     * version would ({@code [max(genesis, tip-W+1), tip]}), so the median is byte-identical — pinned by
+     * an equivalence test over a random add/pop/reorg walk.
+     */
+    private final java.util.ArrayDeque<Long> mtpWindow = new java.util.ArrayDeque<>();
 
     private ChainEngine(NetworkParameters params, Ledger ledger, ChainStore store,
                         NonceStore nonceStore,
@@ -193,9 +212,45 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         } else if (!GenesisBlock.matches(store.blockAt(GenesisBlock.GENESIS_ID), params, snapshot)) {
             throw new IllegalStateException("Stored genesis does not match network parameters and snapshot");
         }
+        engine.reconcilePeripheralStores();
         engine.rebuildDerivedState();
         engine.seedGenesisStateRoot();
         return engine;
+    }
+
+    /**
+     * Boot recovery for a torn multi-store commit (audit S3). A block's state commits in program order
+     * — contract, box, token processors, then the state accumulator, then the atomic block/height/ledger
+     * batch last. The ledger rides that final batch so it can never disagree with the height, but the
+     * peripheral stores commit first and, if the process died before the height landed, are left one (or,
+     * on a power loss, more) block ahead. Rewind each back down to the chain height using its per-block
+     * undo journal, so the node comes up at one consistent height instead of wedging on the next block's
+     * state-root check. Bounded by the reorg window: journals older than that are gone (a deeper tear is
+     * unrecoverable — impossible on a clean process crash, only on a power loss without per-store fsync).
+     *
+     * <p>Processor {@code revertBlock} is a no-op when there is no journal at that height, so sweeping
+     * the window is safe on a normal (untorn) boot; the accumulator's is not, so it is driven by its
+     * exact committed height.
+     */
+    private void reconcilePeripheralStores() {
+        long chainHeight = store.height();
+        if (stateAccumulator != null) {
+            for (long h = stateAccumulator.committedHeight(); h > chainHeight; h--) {
+                stateAccumulator.revertBlock(h);
+            }
+        }
+        long scanTop = chainHeight + params.maxReorgDepth();
+        for (long h = scanTop; h > chainHeight; h--) {
+            if (contractProcessor != null) {
+                contractProcessor.revertBlock(h);
+            }
+            if (boxProcessor != null) {
+                boxProcessor.revertBlock(h);
+            }
+            if (tokenProcessor != null) {
+                tokenProcessor.revertBlock(h);
+            }
+        }
     }
 
     /**
@@ -239,10 +294,31 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
      * references (via the Executor), so they are applied identically with or without the pool.
      */
     public ExecutionStatus restoreBlock(Block block) {
-        return addBlock(block, true);
+        return addBlock(block, true, false);
+    }
+
+    /**
+     * Applies a body during headers-first sync whose proof of work is ALREADY proven — its hash equals
+     * a header that {@link HeaderChain#validate} PoW-verified (memory-hard Pufferfish2). Skips only the
+     * redundant re-run of that same memory-hard hash in {@link #addBlock}; every other check (merkle
+     * root, account nonces, difficulty, uncles, state root, executor) runs in full. PoW is the single
+     * most expensive validation step, so not re-hashing every synced body roughly halves body-sync CPU.
+     *
+     * <p><b>Caller contract (audit P4):</b> the caller MUST have confirmed {@code block.hash()} equals
+     * an already-PoW-validated header for this height before calling this — otherwise it accepts
+     * unproven work. Only {@link HeaderSynchronizer#applyBodies} does so, immediately after its
+     * hash-equality check against the {@code HeaderChain}-validated branch. Package-private so no
+     * external caller can reach the PoW-skipping path.
+     */
+    ExecutionStatus addValidatedBody(Block block) {
+        return addBlock(block, false, true);
     }
 
     private ExecutionStatus addBlock(Block block, boolean trustedRestore) {
+        return addBlock(block, trustedRestore, false);
+    }
+
+    private ExecutionStatus addBlock(Block block, boolean trustedRestore, boolean trustedPow) {
         lock.lock();
         try {
             var b = (BlockImpl) block;
@@ -293,7 +369,12 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             if (nonceCheck != SUCCESS) {
                 return nonceCheck;
             }
-            if (!block.verifyNonce(params.powAlgorithm())) {
+            // Proof of work, verified last so an invalid block can't burn CPU (Pandanite lesson) — unless
+            // the caller already proved it: a headers-first-synced body whose hash equals a header
+            // HeaderChain.validate PoW-verified carries the same memory-hard proof, so re-hashing it is
+            // pure waste (audit P4). trustedPow is reachable only via addValidatedBody, whose contract
+            // pins that hash-equality guarantee.
+            if (!trustedPow && !block.verifyNonce(params.powAlgorithm())) {
                 return INVALID_NONCE;
             }
 
@@ -318,71 +399,89 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             }
 
             java.util.Set<PublicAddress> touched = stateAccumulator == null ? null : new java.util.HashSet<>();
-            ExecutionStatus status = Executor.executeBlock(
-                block, ledger, store::hasTransaction, params, verifier,
-                contractProcessor, boxProcessor, tokenProcessor, touched);
-            if (status != SUCCESS) {
-                return status;
-            }
+            // Open a block commit: the ledger writes below stage in the store and flush atomically with
+            // the block/height in store.append, so a crash can never leave the ledger ahead of the
+            // height (audit S3). Every exit before append must discard the staged writes, so the whole
+            // mutation runs under a finally.
+            store.beginBlockCommit();
+            boolean appended = false;
+            try {
+                ExecutionStatus status = Executor.executeBlock(
+                    block, ledger, store::hasTransaction, params, verifier,
+                    contractProcessor, boxProcessor, tokenProcessor, touched);
+                if (status != SUCCESS) {
+                    return status;
+                }
 
-            // Authenticated state root: fold this block's state changes into the accumulator
-            // and require the resulting root to equal the header's. On mismatch the block was
-            // fully applied, so undo it (ledger + processors + accumulator) before rejecting.
-            if (stateAccumulator != null) {
-                long height2 = b.id();
-                byte[] newRoot = stateAccumulator.applyBlock(height2, collectStateChanges(block, touched, height2));
-                if (!java.util.Arrays.equals(newRoot, b.stateRoot().toBytes())) {
-                    stateAccumulator.revertBlock(height2);
-                    Executor.rollbackBlock(block, ledger, contractProcessor, boxProcessor, height2, params);
+                // Authenticated state root: fold this block's state changes into the accumulator
+                // and require the resulting root to equal the header's. On mismatch the block was
+                // fully applied, so undo it (ledger + processors + accumulator) before rejecting.
+                if (stateAccumulator != null) {
+                    long height2 = b.id();
+                    byte[] newRoot = stateAccumulator.applyBlock(height2, collectStateChanges(block, touched, height2));
+                    if (!java.util.Arrays.equals(newRoot, b.stateRoot().toBytes())) {
+                        stateAccumulator.revertBlock(height2);
+                        Executor.rollbackBlock(block, ledger, contractProcessor, boxProcessor, height2, params);
+                        if (contractProcessor != null) {
+                            contractProcessor.revertBlock(height2);
+                        }
+                        if (boxProcessor != null) {
+                            boxProcessor.revertBlock(height2);
+                        }
+                        if (tokenProcessor != null) {
+                            tokenProcessor.revertBlock(height2);
+                        }
+                        return INVALID_STATE_ROOT;
+                    }
+                } else if (!java.util.Arrays.equals(b.stateRoot().toBytes(),
+                        rhizome.crypto.SHA256Hash.empty().toBytes())) {
+                    // No accumulator to recompute the root, yet the block commits a non-empty one we
+                    // cannot verify. Accepting it blindly would fork this node from every validating
+                    // node (audit M6: state-root validation must not depend on local configuration),
+                    // so refuse a block whose committed state we are unable to check.
+                    Executor.rollbackBlock(block, ledger, contractProcessor, boxProcessor, b.id(), params);
                     if (contractProcessor != null) {
-                        contractProcessor.revertBlock(height2);
+                        contractProcessor.revertBlock(b.id());
                     }
                     if (boxProcessor != null) {
-                        boxProcessor.revertBlock(height2);
+                        boxProcessor.revertBlock(b.id());
                     }
                     if (tokenProcessor != null) {
-                        tokenProcessor.revertBlock(height2);
+                        tokenProcessor.revertBlock(b.id());
                     }
                     return INVALID_STATE_ROOT;
                 }
-            } else if (!java.util.Arrays.equals(b.stateRoot().toBytes(),
-                    rhizome.crypto.SHA256Hash.empty().toBytes())) {
-                // No accumulator to recompute the root, yet the block commits a non-empty one we
-                // cannot verify. Accepting it blindly would fork this node from every validating
-                // node (audit M6: state-root validation must not depend on local configuration),
-                // so refuse a block whose committed state we are unable to check.
-                Executor.rollbackBlock(block, ledger, contractProcessor, boxProcessor, b.id(), params);
-                if (contractProcessor != null) {
-                    contractProcessor.revertBlock(b.id());
-                }
-                if (boxProcessor != null) {
-                    boxProcessor.revertBlock(b.id());
-                }
-                if (tokenProcessor != null) {
-                    tokenProcessor.revertBlock(b.id());
-                }
-                return INVALID_STATE_ROOT;
-            }
 
-            store.append(block);
-            commitAccountNonces(block);
-            nonceStore.markSyncedThrough(b.id()); // nonces now reflect this new tip
-            totalWork = totalWork.add(BigInteger.TWO.pow(b.difficulty())).add(uncleWork);
-            baseWork = baseWork.add(BigInteger.TWO.pow(b.difficulty()));
-            uncleWorkByHeight.put((long) b.id(), uncleWork);
-            // A legal reorg pops at most maxReorgDepth blocks, so uncle-work for heights older
-            // than that is never subtracted again — evict it instead of retaining one BigInteger
-            // per height for the life of the process (audit: unbounded derived-state growth).
-            long uncleWorkFloor = b.id() - params.maxReorgDepth();
-            if (uncleWorkFloor > 0) {
-                uncleWorkByHeight.keySet().removeIf(h -> h < uncleWorkFloor);
+                store.append(block); // flushes the staged ledger writes + block + height in one batch
+                appended = true;
+                // Slide the median-time window forward: the new tip enters, the oldest leaves (P6).
+                mtpWindow.addLast(b.timestamp());
+                if (mtpWindow.size() > params.medianTimeWindow()) {
+                    mtpWindow.removeFirst();
+                }
+                commitAccountNonces(block);
+                nonceStore.markSyncedThrough(b.id()); // nonces now reflect this new tip
+                totalWork = totalWork.add(BlockWork.of(b.difficulty())).add(uncleWork);
+                baseWork = baseWork.add(BlockWork.of(b.difficulty()));
+                uncleWorkByHeight.put((long) b.id(), uncleWork);
+                // A legal reorg pops at most maxReorgDepth blocks, so uncle-work for heights older
+                // than that is never subtracted again — evict it instead of retaining one BigInteger
+                // per height for the life of the process (audit: unbounded derived-state growth).
+                long uncleWorkFloor = b.id() - params.maxReorgDepth();
+                if (uncleWorkFloor > 0) {
+                    uncleWorkByHeight.keySet().removeIf(h -> h < uncleWorkFloor);
+                }
+                currentDifficulty = computeDifficultyFromChain();
+                applyVotingAt(b.id()); // tally this epoch's votes if a boundary; effective next block
+                if (onBlockApplied != null) {
+                    onBlockApplied.accept(b.id()); // fast/non-blocking by contract (see setter)
+                }
+                return SUCCESS;
+            } finally {
+                if (!appended) {
+                    store.discardBlockCommit(); // drop the staged (and possibly rolled-back) ledger writes
+                }
             }
-            currentDifficulty = computeDifficultyFromChain();
-            applyVotingAt(b.id()); // tally this epoch's votes if a boundary; effective next block
-            if (onBlockApplied != null) {
-                onBlockApplied.accept(b.id()); // fast/non-blocking by contract (see setter)
-            }
-            return SUCCESS;
         } finally {
             lock.unlock();
         }
@@ -407,20 +506,41 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
                 throw new IllegalStateException("Cannot pop genesis");
             }
             Block tip = store.tip();
-            Executor.rollbackBlock(tip, ledger, contractProcessor, boxProcessor, height, params);
-            if (contractProcessor != null) {
-                contractProcessor.revertBlock(height); // undo this block's contract-state changes
+            // Stage the ledger reversals so store.pop() flushes them atomically with the height
+            // decrement — the pop is then atomic for the ledger too (audit S3).
+            store.beginBlockCommit();
+            boolean popped = false;
+            try {
+                Executor.rollbackBlock(tip, ledger, contractProcessor, boxProcessor, height, params);
+                if (contractProcessor != null) {
+                    contractProcessor.revertBlock(height); // undo this block's contract-state changes
+                }
+                if (boxProcessor != null) {
+                    boxProcessor.revertBlock(height); // undo this block's box-state changes
+                }
+                if (tokenProcessor != null) {
+                    tokenProcessor.revertBlock(height); // undo this block's token-state changes
+                }
+                if (stateAccumulator != null) {
+                    stateAccumulator.revertBlock(height); // move the state root back one block
+                }
+                store.pop(); // flushes the staged ledger reversals + height decrement in one batch
+                popped = true;
+            } finally {
+                if (!popped) {
+                    store.discardBlockCommit();
+                }
             }
-            if (boxProcessor != null) {
-                boxProcessor.revertBlock(height); // undo this block's box-state changes
+            // Slide the median-time window back one block (P6): the popped tip leaves the window, and a
+            // lower height re-enters at the front when the chain is still taller than the window.
+            mtpWindow.removeLast();
+            if (height - params.medianTimeWindow() >= GenesisBlock.GENESIS_ID) {
+                mtpWindow.addFirst(store.headerAt(height - params.medianTimeWindow()).timestamp());
             }
-            if (tokenProcessor != null) {
-                tokenProcessor.revertBlock(height); // undo this block's token-state changes
-            }
-            if (stateAccumulator != null) {
-                stateAccumulator.revertBlock(height); // move the state root back one block
-            }
-            store.pop();
+            // Drop any memoised retarget-boundary difficulty at or above the popped height: the block
+            // (hence a boundary's timestamps) may be rewritten by the reorg, so those cached values are
+            // no longer trusted and are recomputed on demand. Buried boundaries below stay valid (P1).
+            difficultyByBoundary.tailMap(height, true).clear();
             revertAccountNonces(tip);
             nonceStore.markSyncedThrough(height - 1); // nonces now reflect the tip after the pop
             // Drop the vote tally established at this height (if it was an epoch boundary),
@@ -429,8 +549,8 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
                 syncVoteableHolder();
             }
             BigInteger uncleWork = uncleWorkByHeight.remove(height);
-            totalWork = totalWork.subtract(BigInteger.TWO.pow(((BlockImpl) tip).difficulty()));
-            baseWork = baseWork.subtract(BigInteger.TWO.pow(((BlockImpl) tip).difficulty()));
+            totalWork = totalWork.subtract(BlockWork.of(((BlockImpl) tip).difficulty()));
+            baseWork = baseWork.subtract(BlockWork.of(((BlockImpl) tip).difficulty()));
             if (uncleWork != null) {
                 totalWork = totalWork.subtract(uncleWork);
             }
@@ -826,6 +946,10 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             return;
         }
         lock.lock();
+        // Stage this dry-run's ledger writes in the overlay so they never touch the column family and
+        // are dropped wholesale by discardBlockCommit — a producer-only apply-then-revert that leaves
+        // zero ledger residue even if the process dies mid-stamp (audit S3).
+        store.beginBlockCommit();
         try {
             var b = (BlockImpl) candidate;
             java.util.Set<PublicAddress> touched = new java.util.HashSet<>();
@@ -848,6 +972,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
                 tokenProcessor.revertBlock(h);
             }
         } finally {
+            store.discardBlockCommit(); // drop the dry-run's staged ledger writes
             lock.unlock();
         }
     }
@@ -931,6 +1056,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         baseWork = BigInteger.ZERO;
         uncleWorkByHeight.clear();
         voteParamsByBoundary.clear();
+        difficultyByBoundary.clear(); // recomputed from headers by computeDifficultyFromChain (P1)
         long height = store.height();
         // Work, uncle weight and votes are recomputed from headers alone. Account nonces are
         // persisted and maintained incrementally, so they are reconstructed from the bodies
@@ -941,10 +1067,13 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         // body at all.
         long nonceSynced = nonceStore.syncedThroughHeight();
         long backfillFrom = Math.max(GenesisBlock.GENESIS_ID + 1, nonceSynced + 1);
-        if (backfillFrom <= height && backfillFrom <= store.prunedBelow()) {
+        if (backfillFrom <= height && backfillFrom < store.prunedBelow()) {
             // The nonces we must rebuild live in bodies that have been pruned — an
             // inconsistent store (a pruned node whose nonces were not persisted). Fail loudly
             // rather than dying later on a missing body or, worse, undercounting nonces.
+            // prunedBelow() is the EXCLUSIVE upper bound of the pruned range, so the body *at*
+            // prunedBelow() is retained: backfillFrom == prunedBelow() is rebuildable and must not
+            // trip this guard (audit S8, off-by-one — was <=).
             throw new IllegalStateException(
                 "cannot rebuild account nonces from pruned bodies (synced through " + nonceSynced
                     + ", pruned below " + store.prunedBelow() + ")");
@@ -958,14 +1087,23 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             // cumulative weight is restored exactly even with an empty orphan pool.
             BigInteger uncleWork = uncleWorkOf(header);
             uncleWorkByHeight.put(h, uncleWork);
-            totalWork = totalWork.add(BigInteger.TWO.pow(header.difficulty())).add(uncleWork);
-            baseWork = baseWork.add(BigInteger.TWO.pow(header.difficulty()));
+            totalWork = totalWork.add(BlockWork.of(header.difficulty())).add(uncleWork);
+            baseWork = baseWork.add(BlockWork.of(header.difficulty()));
             applyVotingAt(h); // replay epoch tallies so the votable params are restored
         }
         if (height > nonceSynced) {
             nonceStore.markSyncedThrough(height); // persist the catch-up so the next restart skips it
         }
+        // Evict uncle-work below the reorg horizon, mirroring the addBlock path: the rebuild loop above
+        // populated one BigInteger per height genesis->tip, but a legal reorg pops at most maxReorgDepth
+        // blocks, so older entries are never subtracted again. Without this a fresh boot at height H
+        // holds O(H) BigIntegers until the next addBlock prunes them (audit S10, benign but unbounded).
+        long uncleWorkFloor = height - params.maxReorgDepth();
+        if (uncleWorkFloor > 0) {
+            uncleWorkByHeight.keySet().removeIf(h -> h < uncleWorkFloor);
+        }
         currentDifficulty = computeDifficultyFromChain();
+        rebuildMtpWindow(); // repopulate the median-time ring from headers (P6)
         syncVoteableHolder();
     }
 
@@ -973,7 +1111,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
     private static BigInteger uncleWorkOf(BlockHeader header) {
         BigInteger work = BigInteger.ZERO;
         for (rhizome.core.block.UncleRef uncle : header.uncles()) {
-            work = work.add(BigInteger.TWO.pow(uncle.difficulty()));
+            work = work.add(BlockWork.of(uncle.difficulty()));
         }
         return work;
     }
@@ -987,9 +1125,18 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
      */
     private int computeDifficultyFromChain() {
         int lookback = params.difficultyLookback();
-        int difficulty = params.genesisDifficulty();
         long height = store.height();
-        for (long boundary = lookback; boundary <= height; boundary += lookback) {
+        if (height < lookback) {
+            return params.genesisDifficulty(); // no completed retarget window yet
+        }
+        long lastBoundary = (height / lookback) * lookback; // highest completed boundary <= height
+        // Resume the fold from the highest already-cached boundary (or genesis) rather than replaying
+        // it from height 1 on every add/pop. Cached boundaries are immutable buried history; a pop
+        // clears any that were above the new tip, so this never returns a stale value (audit P1).
+        var floor = difficultyByBoundary.floorEntry(lastBoundary);
+        long fromBoundary = floor == null ? 0 : floor.getKey();
+        int difficulty = floor == null ? params.genesisDifficulty() : floor.getValue();
+        for (long boundary = fromBoundary + lookback; boundary <= lastBoundary; boundary += lookback) {
             long windowStart = boundary - lookback + 1;
             // Exclude the genesis interval from the first window: genesis carries an artificial
             // timestamp (genesisTimestamp, conventionally 0), so measuring from it would treat
@@ -997,26 +1144,49 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             // first retarget. Start the measurement at the first real block instead (audit L2).
             long measureStart = Math.max(windowStart, GenesisBlock.GENESIS_ID + 1);
             long intervals = boundary - measureStart;
-            if (intervals <= 0) {
-                continue; // not enough real blocks in this window yet
+            if (intervals > 0) { // else not enough real blocks in this window yet (difficulty unchanged)
+                long observedMs = store.headerAt(boundary).timestamp()
+                    - store.headerAt(measureStart).timestamp();
+                difficulty = DifficultyAdjustment.nextDifficulty(
+                    params, difficulty, intervals, observedMs / 1000);
             }
-            long observedMs = store.headerAt(boundary).timestamp()
-                - store.headerAt(measureStart).timestamp();
-            difficulty = DifficultyAdjustment.nextDifficulty(
-                params, difficulty, intervals, observedMs / 1000);
+            difficultyByBoundary.put(boundary, difficulty); // cache every boundary so floorEntry advances
         }
         return difficulty;
     }
 
     private long medianTimePast() {
-        long height = store.height();
-        int window = (int) Math.min(params.medianTimeWindow(), height);
-        List<Long> timestamps = new ArrayList<>(window);
-        for (long h = height - window + 1; h <= height; h++) {
-            timestamps.add(store.headerAt(h).timestamp());
+        int size = mtpWindow.size();
+        if (size == 0) {
+            return 0; // no chain yet (defensive; the ring holds >= genesis whenever height >= 1)
         }
-        timestamps.sort(Long::compare);
-        return timestamps.get(timestamps.size() / 2);
+        long[] ts = new long[size];
+        int i = 0;
+        for (long t : mtpWindow) {
+            ts[i++] = t;
+        }
+        java.util.Arrays.sort(ts);
+        return ts[size / 2];
+    }
+
+    /** The median-time window, rebuilt from headers (boot / reorg base). Ascending height order. */
+    private void rebuildMtpWindow() {
+        mtpWindow.clear();
+        long height = store.height();
+        long lo = Math.max(GenesisBlock.GENESIS_ID, height - params.medianTimeWindow() + 1);
+        for (long h = lo; h <= height; h++) {
+            mtpWindow.addLast(store.headerAt(h).timestamp());
+        }
+    }
+
+    /** Test hook (audit P6): the ring-based median, compared in tests to a fresh store computation. */
+    public long medianTimePastForTest() {
+        lock.lock();
+        try {
+            return medianTimePast();
+        } finally {
+            lock.unlock();
+        }
     }
 
     // ---- account nonces ----
@@ -1074,7 +1244,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
     private static long serializedSize(Block block) {
         long size = rhizome.core.block.dto.BlockDto.BUFFER_SIZE + Integer.BYTES;
         for (Transaction t : block.transactions()) {
-            size += t.serialize().getSize();
+            size += ((TransactionImpl) t).sizeBytes(); // exact wire length without building the DTO (P7)
         }
         size += (long) block.uncles().size()
             * (SHA256Hash.SIZE + Integer.BYTES + rhizome.core.ledger.PublicAddress.SIZE);
@@ -1137,7 +1307,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
     private static BigInteger uncleWorkFromRefs(BlockImpl block) {
         BigInteger work = BigInteger.ZERO;
         for (UncleRef ref : block.uncles()) {
-            work = work.add(BigInteger.TWO.pow(ref.difficulty()));
+            work = work.add(BlockWork.of(ref.difficulty()));
         }
         return work;
     }
@@ -1179,7 +1349,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             if (!uncleEligible(uncle, h, depth, tipHeight, ctx, block.difficulty())) {
                 return null;
             }
-            uncleWork = uncleWork.add(BigInteger.TWO.pow(ref.difficulty()));
+            uncleWork = uncleWork.add(BlockWork.of(ref.difficulty()));
         }
         return uncleWork;
     }

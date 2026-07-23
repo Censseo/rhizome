@@ -166,6 +166,8 @@ public final class ChainSynchronizer {
         }
 
         // --- Stateful apply, with exact restore on failure ---
+        // Uncle-inclusive chain weight before we touch anything — the authoritative GHOST metric (§3.7).
+        BigInteger localTotal = engine.totalWork();
         List<Block> localBranch = new ArrayList<>();
         for (long h = forkHeight + 1; h <= engine.height(); h++) {
             localBranch.add(engine.blockAt(h));
@@ -179,6 +181,15 @@ public final class ChainSynchronizer {
                 restore(forkHeight, localBranch);
                 return Result.PEER_INVALID;
             }
+        }
+        // GHOST fork choice (§3.7, audit S4): the base-only gate above is the anti-DoS prefilter;
+        // the authoritative choice, now that the bodies applied and addBlock validated every uncle
+        // ref, weights genuine uncle work via engine.totalWork(). Adopt the peer branch only if its
+        // uncle-inclusive total strictly exceeds ours — a base-heavier but subtree-lighter branch must
+        // not displace our heavier GHOST subtree. Validated uncle work only, so no M4 inflation lever.
+        if (engine.totalWork().compareTo(localTotal) <= 0) {
+            restore(forkHeight, localBranch);
+            return Result.NO_CHANGE;
         }
         // The branch we just replaced is valid work that lost the fork race; keep its
         // blocks as orphans so a later block can reference them as uncles (GHOST).
@@ -238,7 +249,7 @@ public final class ChainSynchronizer {
     private BigInteger verifiedWork(List<Block> branch) {
         BigInteger work = BigInteger.ZERO;
         for (Block block : branch) {
-            work = work.add(BigInteger.TWO.pow(((BlockImpl) block).difficulty()));
+            work = work.add(BlockWork.of(((BlockImpl) block).difficulty()));
         }
         return work;
     }
@@ -247,7 +258,7 @@ public final class ChainSynchronizer {
     private BigInteger localWorkAboveFork(long forkHeight) {
         BigInteger work = BigInteger.ZERO;
         for (long h = forkHeight + 1; h <= engine.height(); h++) {
-            work = work.add(BigInteger.TWO.pow(((BlockImpl) engine.blockAt(h)).difficulty()));
+            work = work.add(BlockWork.of(((BlockImpl) engine.blockAt(h)).difficulty()));
         }
         return work;
     }

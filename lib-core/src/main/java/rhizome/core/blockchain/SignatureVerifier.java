@@ -41,8 +41,22 @@ public final class SignatureVerifier {
      * signature bytes defends against Ed25519 malleability; including the signing key means a
      * cached "valid" verdict is bound to the exact key that produced it, not just to
      * {@code (hash, sig)} (defense-in-depth, audit L5).
+     *
+     * <p>Keyed on the raw bytes, not hex strings: building two {@code toHexString()} strings (128 +
+     * 64 chars) on every verify/isCached was ~half the warm-cache cost measured in ValidationBenchmark
+     * and throttled parallel scaling (audit P3). {@link Bytes} gives a byte[] value-based equals/hash.
+     * The cache is node-local and never consensus-visible, so this is a pure CPU/allocation win.
      */
-    private record CacheKey(SHA256Hash contentHash, String signatureHex, String signingKeyHex) {}
+    private record Bytes(byte[] value) {
+        @Override public boolean equals(Object o) {
+            return o instanceof Bytes b && java.util.Arrays.equals(value, b.value);
+        }
+        @Override public int hashCode() {
+            return java.util.Arrays.hashCode(value);
+        }
+    }
+
+    private record CacheKey(SHA256Hash contentHash, Bytes signature, Bytes signingKey) {}
 
     public SignatureVerifier() {
         this(Math.max(1, Runtime.getRuntime().availableProcessors()), 1 << 20);
@@ -55,7 +69,7 @@ public final class SignatureVerifier {
 
     private static CacheKey key(Transaction t) {
         var tx = (TransactionImpl) t;
-        return new CacheKey(t.hashContents(), tx.signature().toHexString(), tx.signingKey().toHexString());
+        return new CacheKey(t.hashContents(), new Bytes(tx.signature().toBytes()), new Bytes(tx.signingKey().toBytes()));
     }
 
     /** True if this exact transaction (content + signature) was already verified. */

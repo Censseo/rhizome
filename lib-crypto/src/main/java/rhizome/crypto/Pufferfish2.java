@@ -221,12 +221,18 @@ final class Pufferfish2 {
         r = rr;
     }
 
-    private static byte[] hmac(byte[] key, byte[] data) {
-        HMac mac = new HMac(new SHA512Digest());
-        mac.init(new KeyParameter(key));
-        mac.update(data, 0, data.length);
+    // One HMAC-SHA512 reused for the thousands of hmac calls a single hash performs (sbox fill +
+    // rekey rounds), instead of allocating a fresh HMac+SHA512Digest each time (audit P5). init()
+    // and doFinal() both reset the MAC, so re-initialising per call is bit-identical to a fresh
+    // instance — verified by the golden-vector test. A Pufferfish2 is single-use and single-threaded
+    // (its s-boxes/P-array are per-hash instance state), so an instance-field MAC is safe.
+    private final HMac reusableMac = new HMac(new SHA512Digest());
+
+    private byte[] hmac(byte[] key, byte[] data) {
+        reusableMac.init(new KeyParameter(key));
+        reusableMac.update(data, 0, data.length);
         byte[] out = new byte[PF_DIGEST_LENGTH];
-        mac.doFinal(out, 0);
+        reusableMac.doFinal(out, 0);
         return out;
     }
 

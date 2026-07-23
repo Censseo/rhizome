@@ -495,15 +495,22 @@ public final class NodeService {
         return status;
     }
 
+    /**
+     * The aggregate (all-IP) anti-DoS gate for {@code /submit}, consumed at the HTTP boundary
+     * <em>before</em> the block body is decoded (audit F1 + S6). {@code /submit} triggers both a full
+     * block decode (up to {@code maxBlockSizeBytes}, ~25 000 tx allocations) and, in {@link
+     * #submitBlock}, a memory-hard Pufferfish2 hash — all on the single event-loop thread for a
+     * ~0-cost attacker input, and the per-IP HTTP limiter has no aggregate cap. Gating in the servlet
+     * middleware sheds an over-budget submit with 429 before the decode runs, not after it (the
+     * decode-before-gate asymmetry the S6 finding closed); internal/direct callers of {@link
+     * #submitBlock} (block production, tests) legitimately bypass this network-boundary shed.
+     */
+    public boolean trySubmitBudget() {
+        return submitPowGate.allow("submit");
+    }
+
     /** Accepts a mined block; on success the mempool is purged of its transactions. */
     public ExecutionStatus submitBlock(Block block) {
-        // Global anti-DoS shed: bound the aggregate rate of memory-hard PoW verifications /submit
-        // can trigger, across ALL source IPs (the per-IP HTTP limiter has no aggregate cap). Both
-        // addBlock and registerOrphan below run one memory-hard Pufferfish2 hash on the event-loop
-        // thread for a ~0-cost attacker input; over budget we drop the block un-hashed (audit F1).
-        if (!submitPowGate.allow("submit")) {
-            return ExecutionStatus.SUBMIT_THROTTLED;
-        }
         ExecutionStatus status = engine.addBlock(block);
         if (status == ExecutionStatus.SUCCESS) {
             mempool.onBlockApplied(block);

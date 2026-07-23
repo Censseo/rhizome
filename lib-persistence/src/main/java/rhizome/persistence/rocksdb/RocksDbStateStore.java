@@ -39,6 +39,17 @@ public final class RocksDbStateStore implements SmtNodeStore, RootStore, AutoClo
     private final ColumnFamilyHandle rootsCf;
     private final WriteOptions writeOptions = new WriteOptions();
 
+    /**
+     * SMT nodes staged for the block being applied, keyed by hash hex (audit P8). Applying a block
+     * updates the tree once per touched key, each creating ~depth new content-addressed nodes that the
+     * next update reads back, so a plain per-node {@code db.put} is hundreds of point writes a block.
+     * Buffering them here and flushing one {@link org.rocksdb.WriteBatch} cuts that to a single write;
+     * reads consult the overlay first (read-your-writes) so an update sees the nodes an earlier update
+     * in the same block just wrote. Null outside a batch, so proofs and snapshot import write through
+     * unchanged. Node bytes are content-addressed and immutable, so this only changes write timing.
+     */
+    private volatile java.util.concurrent.ConcurrentHashMap<String, byte[]> pendingNodes;
+
     public RocksDbStateStore(String path) throws IOException {
         List<ColumnFamilyDescriptor> descriptors = List.of(
             new ColumnFamilyDescriptor(RocksDB.DEFAULT_COLUMN_FAMILY),
@@ -60,16 +71,63 @@ public final class RocksDbStateStore implements SmtNodeStore, RootStore, AutoClo
 
     @Override
     public byte[] get(byte[] hash) {
+        var pending = pendingNodes;
+        if (pending != null) {
+            byte[] staged = pending.get(hex(hash));
+            if (staged != null) {
+                return staged; // read-your-writes: a node an earlier update in this block just wrote
+            }
+        }
         return raw(nodesCf, hash);
     }
 
     @Override
     public void put(byte[] hash, byte[] node) {
+        var pending = pendingNodes;
+        if (pending != null) {
+            pending.put(hex(hash), node);
+            return;
+        }
         try {
             db.put(nodesCf, writeOptions, hash, node);
         } catch (RocksDBException e) {
             throw new IllegalStateException("state node write failed", e);
         }
+    }
+
+    @Override
+    public void beginBatch() {
+        pendingNodes = new java.util.concurrent.ConcurrentHashMap<>();
+    }
+
+    @Override
+    public void flushBatch() {
+        var pending = pendingNodes;
+        pendingNodes = null;
+        if (pending == null || pending.isEmpty()) {
+            return;
+        }
+        try (org.rocksdb.WriteBatch batch = new org.rocksdb.WriteBatch()) {
+            for (var e : pending.entrySet()) {
+                batch.put(nodesCf, hexToBytes(e.getKey()), e.getValue());
+            }
+            db.write(writeOptions, batch);
+        } catch (RocksDBException e) {
+            throw new IllegalStateException("state node batch write failed", e);
+        }
+    }
+
+    @Override
+    public void discardBatch() {
+        pendingNodes = null; // dry-run nodes are content-addressed and re-derived on a real apply
+    }
+
+    private static String hex(byte[] b) {
+        return rhizome.core.common.Utils.bytesToHex(b);
+    }
+
+    private static byte[] hexToBytes(String s) {
+        return rhizome.core.common.Utils.hexStringToByteArray(s);
     }
 
     // ---- RootStore ----

@@ -1,5 +1,6 @@
 package rhizome;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -58,6 +59,26 @@ class RocksDbNodeStoreTest {
             assertEquals(100, ledger.getWalletValue(wallet).amount());
             assertThrows(LedgerException.class, () -> ledger.withdraw(wallet, new TransactionAmount(200)));
             assertEquals(100, ledger.getWalletValue(wallet).amount());
+        }
+    }
+
+    @Test
+    void stagedLedgerWritesAreVisibleWithinTheBlockAndDroppedOnDiscard() throws IOException {
+        // The ledger writes made during a block stage in an overlay so they flush atomically with the
+        // block/height in append (audit S3). Within the open commit they read back (read-your-writes);
+        // if the commit is discarded (a rejected/failed block) they never touch the column family.
+        try (RocksDbNodeStore store = new RocksDbNodeStore(tempDir.resolve("db").toString())) {
+            ChainStore chain = store.chainStore();
+            Ledger ledger = store.ledger();
+            PublicAddress w = PublicAddress.random();
+            ledger.createWallet(w);
+            ledger.deposit(w, new TransactionAmount(100)); // committed value (no open block commit)
+
+            chain.beginBlockCommit();
+            ledger.deposit(w, new TransactionAmount(50));
+            assertEquals(150, ledger.getWalletValue(w).amount()); // visible within the block
+            chain.discardBlockCommit();
+            assertEquals(100, ledger.getWalletValue(w).amount()); // dropped: the column family is untouched
         }
     }
 
@@ -217,6 +238,57 @@ class RocksDbNodeStoreTest {
     }
 
     @Test
+    void headerBackfillWatermarkTracksTheTipSoARestartSkipsTheSweep() throws Exception {
+        // Every append advances the "headersBackfilledThrough" watermark to the new tip (audit P12),
+        // so a fully-populated chain reopens in O(1) instead of re-probing every height's header.
+        NetworkParameters params = fastParams();
+        String path = tempDir.resolve("db").toString();
+        AtomicLong clock = new AtomicLong(0);
+        PublicAddress miner = PublicAddress.random();
+        try (RocksDbNodeStore store = new RocksDbNodeStore(path)) {
+            ChainEngine engine = ChainEngine.init(params, store.ledger(), store.chainStore(),
+                new LedgerSnapshot("test", 0, params.chainId()), null, clock::get);
+            for (int i = 0; i < 3; i++) {
+                assertEquals(ExecutionStatus.SUCCESS, engine.addBlock(mine(engine, params, miner, List.of(), clock)));
+            }
+            assertEquals(4, store.chainStore().height());
+        }
+        // White-box: the watermark equals the tip height, so backfillHeaders early-returns on reopen.
+        assertArrayEquals(rhizome.core.common.Utils.longToBytes(4L),
+            rawGet(path, 4 /*meta*/, "headersBackfilledThrough".getBytes()));
+    }
+
+    @Test
+    void aReopenSkipsHeaderBackfillOnceTheWatermarkCoversTheTip() throws Exception {
+        // A legacy database (bodies, no headers CF) is backfilled and its watermark recorded on the
+        // first open. We then delete a header behind the store's back, leaving its body and the
+        // watermark intact: a sweep, had it run, would re-derive the header from the body. Proving
+        // the header stays absent after reopen proves the O(height) sweep was skipped (audit P12).
+        String path = tempDir.resolve("legacy-db").toString();
+        Block b1 = looseBlock(1, rhizome.crypto.SHA256Hash.random());
+        Block b2 = looseBlock(2, b1.hash());
+        Block b3 = looseBlock(3, b2.hash());
+        writeLegacyDb(path, List.of(b1, b2, b3));
+
+        // First open backfills the missing headers and records the watermark (= 3).
+        try (RocksDbNodeStore store = new RocksDbNodeStore(path)) {
+            assertEquals(b2.hash(), store.chainStore().headerAt(2L).hash());
+        }
+        assertArrayEquals(rhizome.core.common.Utils.longToBytes(3L),
+            rawGet(path, 4 /*meta*/, "headersBackfilledThrough".getBytes()));
+
+        // Delete header@2 (body@2 and the watermark stay).
+        rawDelete(path, 2 /*headers*/, rhizome.core.common.Utils.longToBytes(2L));
+
+        // Reopen: watermark already covers the tip → the sweep is skipped, header@2 not re-derived.
+        try (RocksDbNodeStore store = new RocksDbNodeStore(path)) {
+            assertEquals(3, store.chainStore().height());
+        }
+        assertFalse(rawGet(path, 2 /*headers*/, rhizome.core.common.Utils.longToBytes(2L)) != null,
+            "backfill sweep must have been skipped; header@2 must remain absent");
+    }
+
+    @Test
     void prunedStoreKeepsHeadersRecentBodiesAndGenesis() throws IOException {
         NetworkParameters params = fastParams();
         String path = tempDir.resolve("db").toString();
@@ -354,6 +426,79 @@ class RocksDbNodeStoreTest {
         @Override public void append(Block block) { inner.append(block); }
         @Override public void pop() { inner.pop(); }
         @Override public boolean hasTransaction(rhizome.crypto.SHA256Hash h) { return inner.hasTransaction(h); }
+    }
+
+    /** The modern node-store column families, in the store's own open order. */
+    private static List<org.rocksdb.ColumnFamilyDescriptor> modernCfs() {
+        return List.of(
+            new org.rocksdb.ColumnFamilyDescriptor(org.rocksdb.RocksDB.DEFAULT_COLUMN_FAMILY),
+            new org.rocksdb.ColumnFamilyDescriptor("blocks".getBytes()),
+            new org.rocksdb.ColumnFamilyDescriptor("headers".getBytes()),
+            new org.rocksdb.ColumnFamilyDescriptor("txindex".getBytes()),
+            new org.rocksdb.ColumnFamilyDescriptor("meta".getBytes()),
+            new org.rocksdb.ColumnFamilyDescriptor("ledger".getBytes()),
+            new org.rocksdb.ColumnFamilyDescriptor("nonces".getBytes()));
+    }
+
+    /** Reads one key from a column family of an existing modern database, opened directly. */
+    private static byte[] rawGet(String path, int cfIndex, byte[] key) throws Exception {
+        org.rocksdb.RocksDB.loadLibrary();
+        List<org.rocksdb.ColumnFamilyHandle> handles = new java.util.ArrayList<>();
+        try (org.rocksdb.DBOptions opts = new org.rocksdb.DBOptions()) {
+            org.rocksdb.RocksDB raw = org.rocksdb.RocksDB.open(opts, path, modernCfs(), handles);
+            try {
+                return raw.get(handles.get(cfIndex), key);
+            } finally {
+                handles.forEach(org.rocksdb.ColumnFamilyHandle::close);
+                raw.close();
+            }
+        }
+    }
+
+    /** Deletes one key from a column family of an existing modern database, opened directly. */
+    private static void rawDelete(String path, int cfIndex, byte[] key) throws Exception {
+        org.rocksdb.RocksDB.loadLibrary();
+        List<org.rocksdb.ColumnFamilyHandle> handles = new java.util.ArrayList<>();
+        try (org.rocksdb.DBOptions opts = new org.rocksdb.DBOptions();
+             org.rocksdb.WriteOptions wo = new org.rocksdb.WriteOptions()) {
+            org.rocksdb.RocksDB raw = org.rocksdb.RocksDB.open(opts, path, modernCfs(), handles);
+            try {
+                raw.delete(handles.get(cfIndex), wo, key);
+            } finally {
+                handles.forEach(org.rocksdb.ColumnFamilyHandle::close);
+                raw.close();
+            }
+        }
+    }
+
+    /** Writes a pre-headers legacy database: block bodies + height, no {@code headers} CF. */
+    private static void writeLegacyDb(String path, List<Block> blocks) throws Exception {
+        org.rocksdb.RocksDB.loadLibrary();
+        List<org.rocksdb.ColumnFamilyDescriptor> legacy = List.of(
+            new org.rocksdb.ColumnFamilyDescriptor(org.rocksdb.RocksDB.DEFAULT_COLUMN_FAMILY),
+            new org.rocksdb.ColumnFamilyDescriptor("blocks".getBytes()),
+            new org.rocksdb.ColumnFamilyDescriptor("txindex".getBytes()),
+            new org.rocksdb.ColumnFamilyDescriptor("meta".getBytes()),
+            new org.rocksdb.ColumnFamilyDescriptor("ledger".getBytes()));
+        List<org.rocksdb.ColumnFamilyHandle> handles = new java.util.ArrayList<>();
+        try (org.rocksdb.DBOptions options = new org.rocksdb.DBOptions()
+                .setCreateIfMissing(true).setCreateMissingColumnFamilies(true);
+             org.rocksdb.WriteOptions wo = new org.rocksdb.WriteOptions()) {
+            org.rocksdb.RocksDB raw = org.rocksdb.RocksDB.open(options, path, legacy, handles);
+            try {
+                org.rocksdb.ColumnFamilyHandle blocksCf = handles.get(1);
+                org.rocksdb.ColumnFamilyHandle metaCf = handles.get(3);
+                for (int i = 0; i < blocks.size(); i++) {
+                    raw.put(blocksCf, wo, rhizome.core.common.Utils.longToBytes(i + 1L),
+                        BlockCodec.encode(blocks.get(i)));
+                }
+                raw.put(metaCf, wo, "height".getBytes(),
+                    rhizome.core.common.Utils.longToBytes((long) blocks.size()));
+            } finally {
+                handles.forEach(org.rocksdb.ColumnFamilyHandle::close);
+                raw.close();
+            }
+        }
     }
 
     /** A standalone, un-mined block (valid encoding; not chain-validated) for storage tests. */

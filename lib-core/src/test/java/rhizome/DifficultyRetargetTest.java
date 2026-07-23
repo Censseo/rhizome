@@ -73,4 +73,36 @@ class DifficultyRetargetTest {
             "difficulty must rise to track hashrate when blocks beat the target, was "
                 + engine.difficulty());
     }
+
+    @Test
+    void difficultyIsRecomputedExactlyAfterAPopAcrossARetargetBoundary() {
+        // Regression for the difficulty memoisation (audit P1): the cached per-boundary difficulty
+        // must be invalidated when a pop rewrites a boundary's timestamps, or a reorg would keep the
+        // pre-reorg difficulty and fork. Fill past boundary 10 with FAST blocks (difficulty rises),
+        // pop back below the boundary, then re-fill with SLOW blocks so boundary 10 must retarget the
+        // other way — and assert the result equals a cold full fold on the identical final chain.
+        for (long ts = 1; engine.height() < PARAMS.difficultyLookback() + 5; ts++) {
+            assertEquals(rhizome.core.mempool.ExecutionStatus.SUCCESS, engine.addBlock(blockAt(ts)));
+        }
+        assertTrue(engine.difficulty() > 4, "difficulty should have risen on the fast branch");
+
+        while (engine.height() > 8) {
+            engine.popBlock(); // back below boundary 10
+        }
+        long ts = 20_000_000L;
+        while (engine.height() < PARAMS.difficultyLookback() + 5) {
+            ts += 5_000_000L; // 5000 s gaps — far slower than the 1 s target
+            assertEquals(rhizome.core.mempool.ExecutionStatus.SUCCESS, engine.addBlock(blockAt(ts)));
+        }
+
+        // Ground truth: a fresh engine replaying the exact same final chain folds difficulty cold.
+        ChainEngine fresh = ChainEngine.init(PARAMS, new InMemoryLedger(), new InMemoryChainStore(),
+            new LedgerSnapshot("t", 0, PARAMS.chainId()), null, clock::get);
+        for (long h = 2; h <= engine.height(); h++) {
+            assertEquals(rhizome.core.mempool.ExecutionStatus.SUCCESS, fresh.addBlock(engine.blockAt(h)));
+        }
+        assertEquals(fresh.difficulty(), engine.difficulty(),
+            "memoised difficulty after a cross-boundary pop must equal a cold full fold");
+        assertEquals(fresh.totalWork(), engine.totalWork(), "cumulative work must match the cold fold");
+    }
 }

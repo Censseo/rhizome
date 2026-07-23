@@ -141,4 +141,36 @@ class SparseMerkleTreeTest {
         assertNull(t.prove(r1, h("b")));
         assertTrue(SparseMerkleTree.verify(r2, h("b"), h("vb"), t.prove(r2, h("b"))));
     }
+
+    @Test
+    void fabricatedProofsDoNotVerifyAgainstTheCommittedRoot() {
+        // Proof SOUNDNESS is the light-client security property (audit S10 / crypto F3): an attacker
+        // who does not know a preimage cannot forge a (key, value, siblings) that folds to the honest
+        // root. Soundness holds by construction (a leaf commits its full 256-bit key; the bottom-up
+        // fold is collision-resistant), but the forgery surface had no negative test.
+        SparseMerkleTree t = tree();
+        byte[] root = SparseMerkleTree.EMPTY_ROOT;
+        for (int i = 0; i < 40; i++) {
+            root = t.update(root, h("k" + i), h("v" + i));
+        }
+        StateProof real = t.prove(root, h("k5"));
+        assertTrue(SparseMerkleTree.verify(root, h("k5"), h("v5"), real));
+
+        // (a) A fabricated value for a real key, reusing that key's real siblings, must fail.
+        assertFalse(SparseMerkleTree.verify(root, h("k5"), h("forged-value"), real));
+
+        // (b) Non-membership presented as membership: an absent key, with a real key's proof, must fail.
+        assertFalse(SparseMerkleTree.verify(root, h("absent-key"), h("v5"), real));
+
+        // (c) A wholly fabricated proof (random 32-byte siblings) for a plausible key must fail.
+        List<byte[]> junk = new ArrayList<>();
+        for (int i = 0; i < real.siblings().size(); i++) {
+            junk.add(h("junk-sibling-" + i));
+        }
+        assertFalse(SparseMerkleTree.verify(root, h("k5"), h("v5"), new StateProof(h("v5"), junk)));
+
+        // (d) A genuine proof under one root must not verify against a different root.
+        byte[] otherRoot = t.update(root, h("k5"), h("changed"));
+        assertFalse(SparseMerkleTree.verify(otherRoot, h("k5"), h("v5"), real));
+    }
 }

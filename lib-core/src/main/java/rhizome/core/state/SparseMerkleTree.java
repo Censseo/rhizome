@@ -252,11 +252,22 @@ public final class SparseMerkleTree {
         }
     }
 
-    private static byte[] sha256(byte[] data) {
+    // A SHA-256 instance per thread, reset and reused across the many hashes a single state-root
+    // update performs (~depth per touched key). Replaces MessageDigest.getInstance per hash — a JCA
+    // provider lookup on the consensus-critical accumulate/rollback path — with a reset() (audit P2).
+    // Per-thread so concurrent proof reads (API threads) and the engine's single writer never share
+    // one Digest. The digest OUTPUT is byte-for-byte identical; only the allocation/lookup changes.
+    private static final ThreadLocal<MessageDigest> DIGEST = ThreadLocal.withInitial(() -> {
         try {
-            return MessageDigest.getInstance("SHA-256").digest(data);
+            return MessageDigest.getInstance("SHA-256");
         } catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException("SHA-256 unavailable", e);
         }
+    });
+
+    private static byte[] sha256(byte[] data) {
+        MessageDigest md = DIGEST.get();
+        md.reset();
+        return md.digest(data);
     }
 }

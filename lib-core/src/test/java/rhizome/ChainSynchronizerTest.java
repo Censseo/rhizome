@@ -32,7 +32,7 @@ import rhizome.core.transaction.TransactionAmount;
 class ChainSynchronizerTest {
 
     private static final NetworkParameters PARAMS = NetworkParameters.testnet().toBuilder()
-        .powAlgorithm(PowAlgorithm.SHA256).genesisDifficulty(4).build();
+        .powAlgorithm(PowAlgorithm.SHA256).genesisDifficulty(4).minDifficulty(4).build();
 
     // Wall-clock "now" is far ahead of the (historical) block timestamps we mine,
     // as it is for a real node syncing past blocks — so the future-time check passes.
@@ -130,6 +130,77 @@ class ChainSynchronizerTest {
         assertEquals(peer.tipHash(), local.tipHash());
         assertTrue(local.totalWork().compareTo(peer.totalWork()) == 0);
         assertTrue(!local.tipHash().equals(localTipBefore));
+    }
+
+    /** Mines and registers an orphan sibling of {@code engine}'s tip (forks from the tip's parent). */
+    private static BlockImpl orphanSiblingOfTip(ChainEngine engine, AtomicLong clock, PublicAddress orphanMiner) {
+        long tipHeight = engine.height();
+        SHA256Hash grandparent = engine.blockAt(tipHeight - 1).hash();
+        var orphan = (BlockImpl) BlockImpl.builder().id((int) tipHeight)
+            .timestamp(clock.addAndGet(500)).difficulty(engine.difficulty())
+            .lastBlockHash(grandparent).uncles(new ArrayList<>()).build();
+        orphan.addTransaction(Transaction.of(orphanMiner, new TransactionAmount(PARAMS.miningReward(tipHeight))));
+        var tree = new MerkleTree();
+        tree.setItems(orphan.transactions());
+        orphan.merkleRoot(tree.getRootHash());
+        orphan.nonce(Miner.mineNonce(orphan.hash(), orphan.difficulty(), PARAMS.powAlgorithm()));
+        engine.registerOrphan(orphan);
+        return orphan;
+    }
+
+    /** Mines a next block on {@code engine}'s tip carrying the given uncle references. */
+    private static BlockImpl mineNephew(ChainEngine engine, AtomicLong clock, List<rhizome.core.block.UncleRef> uncles) {
+        long height = engine.height() + 1;
+        var b = (BlockImpl) BlockImpl.builder().id((int) height)
+            .timestamp(clock.addAndGet(1000)).difficulty(engine.difficulty())
+            .lastBlockHash(engine.tipHash()).uncles(new ArrayList<>(uncles)).build();
+        b.addTransaction(Transaction.of(PublicAddress.random(), new TransactionAmount(PARAMS.miningReward(height))));
+        var tree = new MerkleTree();
+        tree.setItems(b.transactions());
+        b.merkleRoot(tree.getRootHash());
+        b.nonce(Miner.mineNonce(b.hash(), b.difficulty(), PARAMS.powAlgorithm()));
+        return b;
+    }
+
+    private static rhizome.core.block.UncleRef ref(BlockImpl orphan) {
+        return new rhizome.core.block.UncleRef(orphan.hash(), orphan.difficulty(),
+            ((rhizome.core.transaction.TransactionImpl) orphan.transactions().get(0)).to());
+    }
+
+    @Test
+    void keepsAHeavierGhostSubtreeAgainstABaseHeavierPeer() {
+        // GHOST fork choice (§3.7, audit S4). The LOCAL chain is base-lighter but carries uncle work:
+        // height 2 + a height-3 nephew citing two height-2 uncle orphans (base 2 + uncles 2 = 4 units
+        // above genesis). The PEER is a plain 3-block chain (base 3, no uncles). The peer has strictly
+        // more BASE work (3 > 2), so the base-only anti-DoS gate lets it in — but the authoritative
+        // fork choice weights uncle work, and the local SUBTREE (4) is heavier than the peer's (3), so
+        // the peer must be REFUSED and the local chain restored. Before the fix, fork choice was
+        // base-only and the node wrongly abandoned its heavier subtree for the peer.
+        AtomicLong localClock = new AtomicLong(1000);
+        ChainEngine local = newEngine();
+        mineBlocks(local, PublicAddress.random(), localClock, 1);       // height 2 (canonical)
+        BlockImpl u1 = orphanSiblingOfTip(local, localClock, PublicAddress.random());
+        BlockImpl u2 = orphanSiblingOfTip(local, localClock, PublicAddress.random());
+        assertEquals(ExecutionStatus.SUCCESS,
+            local.addBlock(mineNephew(local, localClock, List.of(ref(u1), ref(u2)))));  // height 3 + 2 uncles
+        long localHeightBefore = local.height();
+        SHA256Hash localTipBefore = local.tipHash();
+        BigInteger localTotalBefore = local.totalWork();
+
+        AtomicLong peerClock = new AtomicLong(9000);
+        ChainEngine peer = newEngine();
+        mineBlocks(peer, PublicAddress.random(), peerClock, 3);          // height 4, base-only
+
+        // Sanity: the peer is base-heavier (would win a longest-base race) but subtree-lighter.
+        assertTrue(peer.totalWork().compareTo(local.baseWork()) > 0, "peer must clear the base-only gate");
+        assertTrue(local.totalWork().compareTo(peer.totalWork()) > 0, "local subtree must be GHOST-heavier");
+
+        Result result = new ChainSynchronizer(local).syncFrom(new EnginePeer(peer));
+
+        assertEquals(Result.NO_CHANGE, result, "a base-heavier but GHOST-lighter peer must be refused");
+        assertEquals(localHeightBefore, local.height(), "local chain must be intact");
+        assertEquals(localTipBefore, local.tipHash());
+        assertEquals(localTotalBefore, local.totalWork(), "local subtree weight must be exactly restored");
     }
 
     @Test

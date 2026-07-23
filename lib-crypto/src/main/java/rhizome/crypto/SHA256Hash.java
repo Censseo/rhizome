@@ -46,13 +46,12 @@ public record SHA256Hash(byte[] hash) implements SimpleHashType, Comparable<SHA2
 
     @Override
     public int compareTo(SHA256Hash o) {
-        for (int i = 0; i < this.hash.length; i++) {
-            int compare = Byte.compare(this.hash[i], o.hash[i]);
-            if (compare != 0) {
-                return compare;
-            }
-        }
-        return 0;
+        // Arrays.compare is total: it handles a length mismatch (shorter sorts first) instead of
+        // indexing o.hash past its end. The old loop ran to this.hash.length and read o.hash[i],
+        // throwing ArrayIndexOutOfBounds when o was shorter — SHA256Hash is also used in Crypto as a
+        // wrapper over arbitrary-length PoW preimages, so equal length is not guaranteed (audit S9).
+        // For the 32-byte consensus identities this is byte-for-byte the previous signed ordering.
+        return java.util.Arrays.compare(this.hash, o.hash);
     }
 
     public static final int SIZE = 32;

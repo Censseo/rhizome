@@ -116,15 +116,18 @@ public final class BlockCodec {
     public static List<Block> decodeStreamed(java.io.InputStream in, int maxBlocks, int maxBlockBytes)
             throws java.io.IOException {
         List<Block> blocks = new ArrayList<>();
-        byte[] carry = new byte[0];
-        // Read in large chunks: a trailing partial block is re-decoded from its start on every append,
-        // so a peer dribbling a near-maxBlockBytes block forces O(blockSize²/chunk) parse work. A 512
-        // KiB chunk (vs 64 KiB) cuts that constant ~8×, keeping the quadratic tail negligible against
-        // the maxBlockBytes/maxBlocks ceilings while peak memory stays one block plus one chunk (V6b).
         final int chunk = 512 * 1024;
+        // A single growable buffer with [start, end) offsets, rather than re-merging the whole carry
+        // with each chunk. Only the UNCONSUMED tail is ever moved, and only when it must make room for
+        // the next chunk (audit P10): a block that spans many chunks costs O(blockSize) copying in
+        // total instead of the old O(blockSize²/chunk) re-copy. Peak memory stays one block plus one
+        // chunk. Same decoded blocks — this is purely how the bytes are buffered.
+        byte[] buf = new byte[chunk];
+        int start = 0; // first undecoded byte
+        int end = 0;   // one past the last valid byte
         while (true) {
-            // Try to decode as many complete blocks as the carry currently holds.
-            ByteBuffer buffer = ByteBuffer.wrap(carry);
+            // Decode every complete block currently buffered in [start, end), advancing `start`.
+            ByteBuffer buffer = ByteBuffer.wrap(buf, start, end - start);
             boolean progressed = true;
             while (buffer.hasRemaining() && progressed) {
                 int mark = buffer.position();
@@ -139,21 +142,33 @@ public final class BlockCodec {
                     progressed = false;
                 }
             }
-            carry = java.util.Arrays.copyOfRange(carry, buffer.position(), carry.length);
-            if (carry.length > maxBlockBytes) {
+            start = buffer.position();
+            if (end - start > maxBlockBytes) {
                 throw new java.io.IOException("sync stream single block exceeds " + maxBlockBytes + " bytes");
             }
             byte[] more = in.readNBytes(chunk);
             if (more.length == 0) {
                 break; // stream exhausted
             }
-            byte[] merged = new byte[carry.length + more.length];
-            System.arraycopy(carry, 0, merged, 0, carry.length);
-            System.arraycopy(more, 0, merged, carry.length, more.length);
-            carry = merged;
+            int unconsumed = end - start;
+            if (buf.length - end < more.length) {
+                // Not enough room after `end`. Compact the unconsumed tail to the front (if that alone
+                // frees space) or grow, copying only the tail — never the already-decoded prefix.
+                if (start > 0 && buf.length - unconsumed >= more.length) {
+                    System.arraycopy(buf, start, buf, 0, unconsumed);
+                } else {
+                    byte[] bigger = new byte[Math.max(buf.length * 2, unconsumed + more.length)];
+                    System.arraycopy(buf, start, bigger, 0, unconsumed);
+                    buf = bigger;
+                }
+                start = 0;
+                end = unconsumed;
+            }
+            System.arraycopy(more, 0, buf, end, more.length);
+            end += more.length;
         }
-        if (carry.length != 0) {
-            throw new java.io.IOException("sync stream ended mid-block (" + carry.length + " trailing bytes)");
+        if (end - start != 0) {
+            throw new java.io.IOException("sync stream ended mid-block (" + (end - start) + " trailing bytes)");
         }
         return blocks;
     }
