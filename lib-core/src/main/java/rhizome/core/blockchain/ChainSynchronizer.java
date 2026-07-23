@@ -249,7 +249,7 @@ public final class ChainSynchronizer {
     private BigInteger verifiedWork(List<Block> branch) {
         BigInteger work = BigInteger.ZERO;
         for (Block block : branch) {
-            work = work.add(BigInteger.TWO.pow(((BlockImpl) block).difficulty()));
+            work = work.add(BlockWork.of(((BlockImpl) block).difficulty()));
         }
         return work;
     }
@@ -258,7 +258,7 @@ public final class ChainSynchronizer {
     private BigInteger localWorkAboveFork(long forkHeight) {
         BigInteger work = BigInteger.ZERO;
         for (long h = forkHeight + 1; h <= engine.height(); h++) {
-            work = work.add(BigInteger.TWO.pow(((BlockImpl) engine.blockAt(h)).difficulty()));
+            work = work.add(BlockWork.of(((BlockImpl) engine.blockAt(h)).difficulty()));
         }
         return work;
     }

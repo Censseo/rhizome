@@ -286,7 +286,7 @@ public final class HeaderSynchronizer {
         // engine.totalWork() once the bodies validate.
         BigInteger work = BigInteger.ZERO;
         for (long h = forkHeight + 1; h <= engine.height(); h++) {
-            work = work.add(BigInteger.TWO.pow(engine.headerAt(h).difficulty()));
+            work = work.add(BlockWork.of(engine.headerAt(h).difficulty()));
         }
         return work;
     }

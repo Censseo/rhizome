@@ -127,7 +127,7 @@ public final class HeaderChain {
             if (uncleWork(header, params) == null) {
                 return Result.reject(Rejection.INVALID_UNCLES, h);
             }
-            work = work.add(BigInteger.TWO.pow(header.difficulty()));
+            work = work.add(BlockWork.of(header.difficulty()));
 
             prevHash = header.hash();
             expectedId++;
@@ -208,7 +208,7 @@ public final class HeaderChain {
             if (d < params.minDifficulty() || d > header.difficulty()) {
                 return null;
             }
-            work = work.add(BigInteger.TWO.pow(d));
+            work = work.add(BlockWork.of(d));
         }
         return work;
     }

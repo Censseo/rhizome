@@ -86,6 +86,16 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
      * dropped on a pop, so it is reorg-safe without a reversible tally.
      */
     private final java.util.TreeMap<Long, long[]> voteParamsByBoundary = new java.util.TreeMap<>();
+    /**
+     * Memoised difficulty at each completed retarget boundary (audit P1). Difficulty is piecewise
+     * constant between boundaries and each boundary's value is a pure function of two stored header
+     * timestamps, so the full O(height/lookback) fold in {@link #computeDifficultyFromChain} need run
+     * only for boundaries not yet cached — amortised O(1) per add instead of O(height) (which made
+     * initial sync O(height²)). Entries above the tip are dropped on pop, since a reorg can rewrite a
+     * boundary's timestamps; boundaries buried past the reorg window are immutable, so their cached
+     * value is exact. The memoised value is byte-identical to the full fold — no consensus quantity moves.
+     */
+    private final java.util.TreeMap<Long, Integer> difficultyByBoundary = new java.util.TreeMap<>();
 
     private ChainEngine(NetworkParameters params, Ledger ledger, ChainStore store,
                         NonceStore nonceStore,
@@ -367,8 +377,8 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             store.append(block);
             commitAccountNonces(block);
             nonceStore.markSyncedThrough(b.id()); // nonces now reflect this new tip
-            totalWork = totalWork.add(BigInteger.TWO.pow(b.difficulty())).add(uncleWork);
-            baseWork = baseWork.add(BigInteger.TWO.pow(b.difficulty()));
+            totalWork = totalWork.add(BlockWork.of(b.difficulty())).add(uncleWork);
+            baseWork = baseWork.add(BlockWork.of(b.difficulty()));
             uncleWorkByHeight.put((long) b.id(), uncleWork);
             // A legal reorg pops at most maxReorgDepth blocks, so uncle-work for heights older
             // than that is never subtracted again — evict it instead of retaining one BigInteger
@@ -421,6 +431,10 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
                 stateAccumulator.revertBlock(height); // move the state root back one block
             }
             store.pop();
+            // Drop any memoised retarget-boundary difficulty at or above the popped height: the block
+            // (hence a boundary's timestamps) may be rewritten by the reorg, so those cached values are
+            // no longer trusted and are recomputed on demand. Buried boundaries below stay valid (P1).
+            difficultyByBoundary.tailMap(height, true).clear();
             revertAccountNonces(tip);
             nonceStore.markSyncedThrough(height - 1); // nonces now reflect the tip after the pop
             // Drop the vote tally established at this height (if it was an epoch boundary),
@@ -429,8 +443,8 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
                 syncVoteableHolder();
             }
             BigInteger uncleWork = uncleWorkByHeight.remove(height);
-            totalWork = totalWork.subtract(BigInteger.TWO.pow(((BlockImpl) tip).difficulty()));
-            baseWork = baseWork.subtract(BigInteger.TWO.pow(((BlockImpl) tip).difficulty()));
+            totalWork = totalWork.subtract(BlockWork.of(((BlockImpl) tip).difficulty()));
+            baseWork = baseWork.subtract(BlockWork.of(((BlockImpl) tip).difficulty()));
             if (uncleWork != null) {
                 totalWork = totalWork.subtract(uncleWork);
             }
@@ -931,6 +945,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         baseWork = BigInteger.ZERO;
         uncleWorkByHeight.clear();
         voteParamsByBoundary.clear();
+        difficultyByBoundary.clear(); // recomputed from headers by computeDifficultyFromChain (P1)
         long height = store.height();
         // Work, uncle weight and votes are recomputed from headers alone. Account nonces are
         // persisted and maintained incrementally, so they are reconstructed from the bodies
@@ -961,8 +976,8 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             // cumulative weight is restored exactly even with an empty orphan pool.
             BigInteger uncleWork = uncleWorkOf(header);
             uncleWorkByHeight.put(h, uncleWork);
-            totalWork = totalWork.add(BigInteger.TWO.pow(header.difficulty())).add(uncleWork);
-            baseWork = baseWork.add(BigInteger.TWO.pow(header.difficulty()));
+            totalWork = totalWork.add(BlockWork.of(header.difficulty())).add(uncleWork);
+            baseWork = baseWork.add(BlockWork.of(header.difficulty()));
             applyVotingAt(h); // replay epoch tallies so the votable params are restored
         }
         if (height > nonceSynced) {
@@ -984,7 +999,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
     private static BigInteger uncleWorkOf(BlockHeader header) {
         BigInteger work = BigInteger.ZERO;
         for (rhizome.core.block.UncleRef uncle : header.uncles()) {
-            work = work.add(BigInteger.TWO.pow(uncle.difficulty()));
+            work = work.add(BlockWork.of(uncle.difficulty()));
         }
         return work;
     }
@@ -998,9 +1013,18 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
      */
     private int computeDifficultyFromChain() {
         int lookback = params.difficultyLookback();
-        int difficulty = params.genesisDifficulty();
         long height = store.height();
-        for (long boundary = lookback; boundary <= height; boundary += lookback) {
+        if (height < lookback) {
+            return params.genesisDifficulty(); // no completed retarget window yet
+        }
+        long lastBoundary = (height / lookback) * lookback; // highest completed boundary <= height
+        // Resume the fold from the highest already-cached boundary (or genesis) rather than replaying
+        // it from height 1 on every add/pop. Cached boundaries are immutable buried history; a pop
+        // clears any that were above the new tip, so this never returns a stale value (audit P1).
+        var floor = difficultyByBoundary.floorEntry(lastBoundary);
+        long fromBoundary = floor == null ? 0 : floor.getKey();
+        int difficulty = floor == null ? params.genesisDifficulty() : floor.getValue();
+        for (long boundary = fromBoundary + lookback; boundary <= lastBoundary; boundary += lookback) {
             long windowStart = boundary - lookback + 1;
             // Exclude the genesis interval from the first window: genesis carries an artificial
             // timestamp (genesisTimestamp, conventionally 0), so measuring from it would treat
@@ -1008,13 +1032,13 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             // first retarget. Start the measurement at the first real block instead (audit L2).
             long measureStart = Math.max(windowStart, GenesisBlock.GENESIS_ID + 1);
             long intervals = boundary - measureStart;
-            if (intervals <= 0) {
-                continue; // not enough real blocks in this window yet
+            if (intervals > 0) { // else not enough real blocks in this window yet (difficulty unchanged)
+                long observedMs = store.headerAt(boundary).timestamp()
+                    - store.headerAt(measureStart).timestamp();
+                difficulty = DifficultyAdjustment.nextDifficulty(
+                    params, difficulty, intervals, observedMs / 1000);
             }
-            long observedMs = store.headerAt(boundary).timestamp()
-                - store.headerAt(measureStart).timestamp();
-            difficulty = DifficultyAdjustment.nextDifficulty(
-                params, difficulty, intervals, observedMs / 1000);
+            difficultyByBoundary.put(boundary, difficulty); // cache every boundary so floorEntry advances
         }
         return difficulty;
     }
@@ -1148,7 +1172,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
     private static BigInteger uncleWorkFromRefs(BlockImpl block) {
         BigInteger work = BigInteger.ZERO;
         for (UncleRef ref : block.uncles()) {
-            work = work.add(BigInteger.TWO.pow(ref.difficulty()));
+            work = work.add(BlockWork.of(ref.difficulty()));
         }
         return work;
     }
@@ -1190,7 +1214,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             if (!uncleEligible(uncle, h, depth, tipHeight, ctx, block.difficulty())) {
                 return null;
             }
-            uncleWork = uncleWork.add(BigInteger.TWO.pow(ref.difficulty()));
+            uncleWork = uncleWork.add(BlockWork.of(ref.difficulty()));
         }
         return uncleWork;
     }
