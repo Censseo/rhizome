@@ -311,10 +311,33 @@ public final class RhizomeNode implements AutoCloseable {
         }
     }
 
+    /** Wall-clock budget for one sync round: past this, remaining peers are left for the next round so
+     *  one slow (but not-yet-timed-out) peer, or a long tail of them, cannot starve later peers or delay
+     *  the schedule (audit net #2). A single in-progress sync is never cut — the check is between peers,
+     *  so a legitimate long catch-up from a good peer still completes. */
+    private static final long SYNC_ROUND_BUDGET_MS = 60_000L;
+
+    /** Rotates the per-round starting peer (single sync thread, so no synchronization needed). */
+    private long syncRoundCursor;
+
     /** One sync round across all known peers; peer failures are isolated. */
     public void syncRound() {
         var synchronizer = new HeaderSynchronizer(engine);
-        for (String peerUrl : registry.snapshot()) {
+        java.util.List<String> peers = registry.snapshot();
+        int n = peers.size();
+        if (n == 0) {
+            return;
+        }
+        // Rotate the starting index each round so that if the peers visited first are slow and eat the
+        // round budget, the ones skipped this round are visited first next round — every peer gets a turn.
+        int start = (int) Math.floorMod(syncRoundCursor++, n);
+        long deadline = System.currentTimeMillis() + SYNC_ROUND_BUDGET_MS;
+        for (int i = 0; i < n; i++) {
+            if (System.currentTimeMillis() >= deadline) {
+                log.debug("Sync round budget reached; deferring {} of {} peers to the next round", n - i, n);
+                break;
+            }
+            String peerUrl = peers.get((start + i) % n);
             if (registry.isBanned(peerUrl)) {
                 continue;
             }
@@ -418,6 +441,9 @@ public final class RhizomeNode implements AutoCloseable {
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
+        }
+        if (discovery != null) {
+            discovery.close(); // stop the PEX fan-out pool (daemon threads, best-effort)
         }
         if (broadcaster != null) {
             broadcaster.close();
