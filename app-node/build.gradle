@@ -110,7 +110,7 @@ tasks.named('test') {
 // GraalVM native-image build of the node. Reachability metadata (RocksDB JNI
 // resource, logback configurators, dashboard assets) ships inside the jar under
 // META-INF/native-image/rhizome/rhizome-node/ and is picked up automatically.
-// Gradle 8.5 itself must run on JDK 21 (e.g. JAVA_HOME=~/.sdkman/candidates/java/21.0.7-tem);
+// Gradle itself must run on JDK 21 (e.g. JAVA_HOME=~/.sdkman/candidates/java/21.0.7-tem);
 // native-image is resolved from PATH, so use a GraalVM as the sdkman/current JDK.
 def nativeImageOut = layout.buildDirectory.dir('native')
 
