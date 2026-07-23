@@ -1,8 +1,8 @@
 package rhizome.node;
 
+import java.security.SecureRandom;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicInteger;
 
 import rhizome.core.box.ScanPredicate;
 
@@ -19,15 +19,23 @@ final class ScanRegistry {
     private static final int MAX_SCANS = 1024;
 
     private final Map<Integer, ScanPredicate> scans = new ConcurrentHashMap<>();
-    private final AtomicInteger nextId = new AtomicInteger(1);
+    // Unguessable ids from a CSPRNG rather than a 1,2,3… counter: the endpoints are unauthenticated, so
+    // a sequential id let any caller enumerate 1..N and deregister (wipe) every app's scans. A sparse
+    // random id in a 2^31 space makes that enumeration infeasible while keeping the int-id API (audit S-10).
+    private final SecureRandom rng = new SecureRandom();
 
     int register(ScanPredicate predicate) {
-        if (scans.size() >= MAX_SCANS) {
-            throw new IllegalStateException("scan registry full (max " + MAX_SCANS + ")");
+        synchronized (scans) {
+            if (scans.size() >= MAX_SCANS) {
+                throw new IllegalStateException("scan registry full (max " + MAX_SCANS + ")");
+            }
+            int id;
+            do {
+                id = rng.nextInt() & 0x7FFF_FFFF; // positive, non-sequential
+            } while (id == 0 || scans.containsKey(id));
+            scans.put(id, predicate);
+            return id;
         }
-        int id = nextId.getAndIncrement();
-        scans.put(id, predicate);
-        return id;
     }
 
     ScanPredicate get(int id) {

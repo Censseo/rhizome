@@ -363,6 +363,15 @@ public final class NodeService {
     }
 
     /**
+     * Peers safe to disclose to an unauthenticated caller: non-seed, publicly-routable only.
+     * Seeds may be private operator infrastructure, so {@code GET /peers} serves this, not the
+     * full {@link #knownPeers()} snapshot (audit S-6).
+     */
+    public java.util.List<String> publicPeers() {
+        return peers == null ? java.util.List.of() : peers.publicSnapshot();
+    }
+
+    /**
      * Queues a self-announced peer ({@code /add_peer}) for admission on the off-loop worker and
      * returns immediately. Admission resolves DNS, which must not block the event-loop (see
      * {@link #peerAdmission}); the registry decides off-loop whether the peer is actually added.
@@ -408,6 +417,43 @@ public final class NodeService {
 
     public long blockCount() {
         return engine.height();
+    }
+
+    /** Aggregate over the last stats window: total tx count and the first/last block timestamps. */
+    public record StatsWindow(long windowStart, long height, long txCount, long firstTs, long lastTs) {}
+
+    private volatile StatsWindow statsWindowCache;
+
+    /**
+     * Cached aggregate over the last {@code window} blocks for {@code GET /stats}. The dashboard polls
+     * stats on a timer, but this window only changes when the tip advances, so it is recomputed (and
+     * the {@code window} blocks re-decoded under the read path) only when {@code blockCount()} moved
+     * since the last call (audit optimization). Live scalars (mempool, peers, difficulty) are cheap and
+     * stay uncached in the handler.
+     */
+    public StatsWindow statsWindow(int window) {
+        long height = blockCount();
+        StatsWindow cached = statsWindowCache;
+        if (cached != null && cached.height() == height) {
+            return cached;
+        }
+        long windowStart = Math.max(1, height - window + 1);
+        long txCount = 0;
+        long firstTs = 0;
+        long lastTs = 0;
+        for (long h = windowStart; h <= height; h++) {
+            var b = (rhizome.core.block.BlockImpl) block(h);
+            txCount += b.transactions().size();
+            if (h == windowStart) {
+                firstTs = b.timestamp();
+            }
+            if (h == height) {
+                lastTs = b.timestamp();
+            }
+        }
+        StatsWindow w = new StatsWindow(windowStart, height, txCount, firstTs, lastTs);
+        statsWindowCache = w;
+        return w;
     }
 
     /** Exclusive upper bound of pruned block bodies (0 = archive node). */

@@ -108,4 +108,22 @@ class BlockCodecStreamTest {
         assertThrows(IOException.class, () -> BlockCodec.decodeStreamed(
             new ByteArrayInputStream(truncated), 200, Constants.MAX_BLOCK_SIZE_BYTES));
     }
+
+    /**
+     * Regression (audit S-1): a block carrying a non-zero miner vote must round-trip through the
+     * binary codec with an identical hash. {@code vote} is folded into the PoW preimage
+     * (BlockHeader.hash), so a decoder that drops it produces a body whose hash no longer matches
+     * the mined header — every peer would reject a voted block. Guards both the single-block and
+     * streamed decode paths.
+     */
+    @Test
+    void preservesNonZeroVoteThroughBinaryRoundTrip() {
+        for (int vote : new int[] { 1, -1, 2, -2 }) {
+            var b = block(7);
+            b.vote(vote);
+            Block decoded = BlockCodec.decode(BlockCodec.encode(b));
+            assertEquals(vote, ((BlockImpl) decoded).vote(), "vote must survive binary decode");
+            assertEquals(b.hash(), decoded.hash(), "voted block hash must round-trip");
+        }
+    }
 }

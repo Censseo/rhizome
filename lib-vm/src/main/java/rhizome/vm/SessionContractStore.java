@@ -1,6 +1,7 @@
 package rhizome.vm;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -16,59 +17,60 @@ import rhizome.core.ledger.PublicAddress;
  *
  * <p>Flushing also captures an undo journal (the base's prior value for every
  * written key), so a reorg can restore the exact pre-block state.
+ *
+ * <p>Keys are typed ({@link PublicAddress} and {@link Slot}, both value-equality) rather than hex
+ * Strings: storage read/write is on the block's hottest path, so per-op {@code StringBuilder} hex
+ * encoding and per-byte {@code Integer.parseInt} decoding on flush were pure allocation/CPU churn.
  */
 final class SessionContractStore implements ContractStore {
 
     private final ContractStore base;
-    private final Map<String, byte[]> codeWrites = new HashMap<>();
-    private final Map<String, byte[]> storageWrites = new HashMap<>();
+    private final Map<PublicAddress, byte[]> codeWrites = new HashMap<>();
+    private final Map<Slot, byte[]> storageWrites = new HashMap<>();
+
+    /** A (contract, storage-key) pair with value-based equality, for use as a map key. */
+    private record Slot(PublicAddress contract, byte[] key) {
+        @Override public boolean equals(Object o) {
+            return o instanceof Slot s && contract.equals(s.contract) && Arrays.equals(key, s.key);
+        }
+        @Override public int hashCode() {
+            return 31 * contract.hashCode() + Arrays.hashCode(key);
+        }
+    }
 
     SessionContractStore(ContractStore base) {
         this.base = base;
     }
 
-    private static String hex(byte[] b) {
-        StringBuilder sb = new StringBuilder(b.length * 2);
-        for (byte x : b) {
-            sb.append(Character.forDigit((x >> 4) & 0xF, 16)).append(Character.forDigit(x & 0xF, 16));
-        }
-        return sb.toString();
-    }
-
-    private static String slot(PublicAddress contract, byte[] key) {
-        return hex(contract.toBytes()) + ":" + hex(key);
-    }
-
     @Override
     public byte[] getCode(PublicAddress contract) {
-        String k = hex(contract.toBytes());
-        return codeWrites.containsKey(k) ? codeWrites.get(k).clone() : base.getCode(contract);
+        return codeWrites.containsKey(contract) ? codeWrites.get(contract).clone() : base.getCode(contract);
     }
 
     @Override
     public void putCode(PublicAddress contract, byte[] code) {
-        codeWrites.put(hex(contract.toBytes()), code.clone());
+        codeWrites.put(contract, code.clone());
     }
 
     @Override
     public void deleteCode(PublicAddress contract) {
-        codeWrites.remove(hex(contract.toBytes()));
+        codeWrites.remove(contract);
     }
 
     @Override
     public byte[] getStorage(PublicAddress contract, byte[] key) {
-        String k = slot(contract, key);
+        Slot k = new Slot(contract, key);
         return storageWrites.containsKey(k) ? storageWrites.get(k).clone() : base.getStorage(contract, key);
     }
 
     @Override
     public void putStorage(PublicAddress contract, byte[] key, byte[] value) {
-        storageWrites.put(slot(contract, key), value.clone());
+        storageWrites.put(new Slot(contract, key), value.clone());
     }
 
     @Override
     public void deleteStorage(PublicAddress contract, byte[] key) {
-        storageWrites.remove(slot(contract, key));
+        storageWrites.remove(new Slot(contract, key));
     }
 
     /**
@@ -78,15 +80,11 @@ final class SessionContractStore implements ContractStore {
      */
     List<rhizome.core.blockchain.ContractProcessor.ContractChange> forwardChanges() {
         List<rhizome.core.blockchain.ContractProcessor.ContractChange> out = new ArrayList<>();
-        codeWrites.forEach((k, v) ->
+        codeWrites.forEach((contract, v) ->
+            out.add(new rhizome.core.blockchain.ContractProcessor.ContractChange(true, contract, null, v)));
+        storageWrites.forEach((slot, v) ->
             out.add(new rhizome.core.blockchain.ContractProcessor.ContractChange(
-                true, PublicAddress.of(hexToBytes(k)), null, v)));
-        storageWrites.forEach((slot, v) -> {
-            int sep = slot.indexOf(':');
-            PublicAddress contract = PublicAddress.of(hexToBytes(slot.substring(0, sep)));
-            byte[] key = hexToBytes(slot.substring(sep + 1));
-            out.add(new rhizome.core.blockchain.ContractProcessor.ContractChange(false, contract, key, v));
-        });
+                false, slot.contract(), slot.key(), v)));
         return out;
     }
 
@@ -97,26 +95,16 @@ final class SessionContractStore implements ContractStore {
      */
     List<ContractUndo> flushWithJournal() {
         List<ContractUndo> journal = new ArrayList<>();
-        codeWrites.forEach((k, v) -> {
-            PublicAddress contract = PublicAddress.of(hexToBytes(k));
+        codeWrites.forEach((contract, v) -> {
             journal.add(new ContractUndo(true, contract, null, base.getCode(contract)));
             base.putCode(contract, v);
         });
         storageWrites.forEach((slot, v) -> {
-            int sep = slot.indexOf(':');
-            PublicAddress contract = PublicAddress.of(hexToBytes(slot.substring(0, sep)));
-            byte[] key = hexToBytes(slot.substring(sep + 1));
+            PublicAddress contract = slot.contract();
+            byte[] key = slot.key();
             journal.add(new ContractUndo(false, contract, key, base.getStorage(contract, key)));
             base.putStorage(contract, key, v);
         });
         return journal;
-    }
-
-    private static byte[] hexToBytes(String hex) {
-        byte[] out = new byte[hex.length() / 2];
-        for (int i = 0; i < out.length; i++) {
-            out[i] = (byte) Integer.parseInt(hex.substring(i * 2, i * 2 + 2), 16);
-        }
-        return out;
     }
 }

@@ -171,12 +171,17 @@ public final class HeaderChain {
     /** Median timestamp of the last {@code medianTimeWindow} headers up to {@code tip} (inclusive). */
     private static long medianTimePast(NetworkParameters params, LongFunction<BlockHeader> at, long tip) {
         int window = (int) Math.min(params.medianTimeWindow(), tip);
-        List<Long> timestamps = new ArrayList<>(window);
+        // Primitive long[] instead of a boxed List<Long>: this runs once per candidate header over a
+        // sync window of up to MAX_HEADER_WINDOW, so the per-header boxing + comparator churn added up
+        // (the engine's own add path already uses a primitive ring, audit P6). Same median: sort, take
+        // index size/2.
+        long[] timestamps = new long[window];
+        int i = 0;
         for (long h = tip - window + 1; h <= tip; h++) {
-            timestamps.add(at.apply(h).timestamp());
+            timestamps[i++] = at.apply(h).timestamp();
         }
-        timestamps.sort(Long::compare);
-        return timestamps.get(timestamps.size() / 2);
+        java.util.Arrays.sort(timestamps);
+        return timestamps[window / 2];
     }
 
     /**

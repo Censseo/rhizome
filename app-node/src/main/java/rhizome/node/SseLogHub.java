@@ -82,16 +82,26 @@ final class SseLogHub {
      * Publishes a block's logs to every subscriber. Callable from any thread;
      * the work runs on the event loop. Blocks without logs still produce a
      * heartbeat comment, so idle streams stay alive.
+     *
+     * <p>The logs are supplied lazily and materialized on the event loop only when at least one
+     * subscriber is connected. Building a height's logs merges contract/box/token events (audit
+     * optimization) — with no subscriber (the common case) that whole merge ran for nothing on the
+     * block-apply thread, so the supplier defers it until {@link #deliver} confirms a listener exists.
      */
-    void publish(long height, List<ContractLog> logs) {
-        eventloop.execute(() -> deliver(height, logs));
+    void publish(long height, java.util.function.Supplier<List<ContractLog>> logsSupplier) {
+        eventloop.execute(() -> deliver(height, logsSupplier));
     }
 
-    private void deliver(long height, List<ContractLog> logs) {
+    /** Convenience overload for already-materialized logs (tests, callers with no lazy source). */
+    void publish(long height, List<ContractLog> logs) {
+        publish(height, () -> logs);
+    }
+
+    private void deliver(long height, java.util.function.Supplier<List<ContractLog>> logsSupplier) {
         if (subscribers.isEmpty()) {
             return;
         }
-        String payload = format(height, logs);
+        String payload = format(height, logsSupplier.get());
         Iterator<Subscriber> it = subscribers.iterator();
         while (it.hasNext()) {
             ChannelBuffer<ByteBuf> buffer = it.next().buffer();

@@ -26,8 +26,13 @@ public class UserImpl implements User {
         if (o == this) return true;
         if (!(o instanceof User)) return false;
         User user = (User) o;
+        // Compare the secret key in constant time: Arrays.equals short-circuits on the first differing
+        // byte, which leaks (via timing) how many leading bytes of a candidate private key match — the
+        // one place raw secret-key bytes are compared (audit hygiene). MessageDigest.isEqual is the JDK's
+        // constant-time byte-array comparison.
         return Arrays.equals(publicKey().toBytes(), user.publicKey().toBytes()) &&
-            Arrays.equals(privateKey().key().getEncoded(), user.privateKey().key().getEncoded());
+            java.security.MessageDigest.isEqual(
+                privateKey().key().getEncoded(), user.privateKey().key().getEncoded());
     }
 
     @Override

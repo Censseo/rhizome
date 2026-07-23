@@ -30,7 +30,7 @@ public final class StateKeys {
 
     /** The SMT key for {@code rawKey} in {@code domain}: {@code SHA-256(domain ‖ rawKey)}. */
     public static byte[] key(byte domain, byte[] rawKey) {
-        MessageDigest sha = sha256();
+        MessageDigest sha = digest();
         sha.update(domain);
         sha.update(rawKey);
         return sha.digest();
@@ -38,14 +38,25 @@ public final class StateKeys {
 
     /** The leaf value hash for {@code value}: {@code SHA-256(value)}. */
     public static byte[] valueHash(byte[] value) {
-        return sha256().digest(value);
+        return digest().digest(value);
     }
 
-    private static MessageDigest sha256() {
+    // A SHA-256 instance per thread, reset and reused across every StateChange in a block apply.
+    // Replaces MessageDigest.getInstance (a JCA provider lookup) per call on the consensus-critical
+    // accumulate path with a reset(), mirroring SparseMerkleTree.DIGEST (audit P2). Per-thread so the
+    // engine's single writer and concurrent API-thread proof reads never share one Digest. The digest
+    // OUTPUT is byte-for-byte identical; only the allocation/lookup changes.
+    private static final ThreadLocal<MessageDigest> DIGEST = ThreadLocal.withInitial(() -> {
         try {
             return MessageDigest.getInstance("SHA-256");
         } catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException("SHA-256 unavailable", e);
         }
+    });
+
+    private static MessageDigest digest() {
+        MessageDigest md = DIGEST.get();
+        md.reset();
+        return md;
     }
 }

@@ -21,9 +21,19 @@ public final class PersistentHostState implements HostState {
     private final BoxReader boxReader;
     private final NativeTransferHandler transferHandler;
 
-    private final Map<String, byte[]> pending = new HashMap<>();
+    private final Map<ByteKey, byte[]> pending = new HashMap<>();
     private final java.util.List<LogEntry> logs = new java.util.ArrayList<>();
     private byte[] output = new byte[0];
+
+    /** Immutable storage-key wrapper with value-based equals/hashCode, for use as a map key. */
+    private record ByteKey(byte[] bytes) {
+        @Override public boolean equals(Object o) {
+            return o instanceof ByteKey k && java.util.Arrays.equals(bytes, k.bytes);
+        }
+        @Override public int hashCode() {
+            return java.util.Arrays.hashCode(bytes);
+        }
+    }
 
     public PersistentHostState(ContractStore store, PublicAddress contract,
                                byte[] caller, byte[] input, long value) {
@@ -47,17 +57,9 @@ public final class PersistentHostState implements HostState {
         this.transferHandler = transferHandler;
     }
 
-    private static String hex(byte[] b) {
-        StringBuilder sb = new StringBuilder(b.length * 2);
-        for (byte x : b) {
-            sb.append(Character.forDigit((x >> 4) & 0xF, 16)).append(Character.forDigit(x & 0xF, 16));
-        }
-        return sb.toString();
-    }
-
     @Override
     public byte[] storageRead(byte[] key) {
-        String k = hex(key);
+        ByteKey k = new ByteKey(key);
         if (pending.containsKey(k)) {
             byte[] v = pending.get(k);
             return v == null ? null : v.clone();
@@ -67,20 +69,12 @@ public final class PersistentHostState implements HostState {
 
     @Override
     public void storageWrite(byte[] key, byte[] value) {
-        pending.put(hex(key), value.clone());
+        pending.put(new ByteKey(key.clone()), value.clone());
     }
 
     /** Flushes buffered writes to the backing store. Call only when the execution succeeded. */
     public void commit() {
-        pending.forEach((k, v) -> store.putStorage(contract, hexToBytes(k), v));
-    }
-
-    private static byte[] hexToBytes(String hex) {
-        byte[] out = new byte[hex.length() / 2];
-        for (int i = 0; i < out.length; i++) {
-            out[i] = (byte) Integer.parseInt(hex.substring(i * 2, i * 2 + 2), 16);
-        }
-        return out;
+        pending.forEach((k, v) -> store.putStorage(contract, k.bytes(), v));
     }
 
     @Override
@@ -125,9 +119,16 @@ public final class PersistentHostState implements HostState {
      */
     @Override
     public byte[] deployer() {
-        byte[] d = store.getStorage(contract, DEPLOYER_KEY);
-        return d == null ? new byte[0] : d;
+        // Memoized: the deployer is set once at deploy and never changes during a call session, so a
+        // contract reading it repeatedly should hit the backing store only once.
+        if (cachedDeployer == null) {
+            byte[] d = store.getStorage(contract, DEPLOYER_KEY);
+            cachedDeployer = d == null ? new byte[0] : d;
+        }
+        return cachedDeployer;
     }
+
+    private byte[] cachedDeployer;
 
     /** Reserved (zero-length) storage key holding the deployer address; unwritable by contracts. */
     static final byte[] DEPLOYER_KEY = new byte[0];

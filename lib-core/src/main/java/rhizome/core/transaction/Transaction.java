@@ -108,6 +108,9 @@ public sealed interface Transaction permits TransactionImpl {
         return serializer().serialize(transaction);
     }
 
+    /** Exact serialized byte length without building the wire form (see TransactionImpl#sizeBytes). */
+    public int sizeBytes();
+
     public JSONObject toJson();
     default JSONObject toJson(Transaction transaction) {
         return serializer().toJson(transaction);

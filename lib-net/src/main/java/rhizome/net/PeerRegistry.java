@@ -1,6 +1,7 @@
 package rhizome.net;
 
 import java.net.URI;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -163,6 +164,31 @@ public final class PeerRegistry {
 
     public List<String> snapshot() {
         return List.copyOf(peers);
+    }
+
+    /**
+     * Peers safe to advertise to an unauthenticated caller (e.g. {@code GET /peers}). Seeds are
+     * always withheld: they are exempt from the SSRF/subnet filter and may be an operator's private
+     * infrastructure (e.g. {@code http://10.0.0.5:3000}), so serving them verbatim leaks internal
+     * topology (audit S-6). On a public mainnet node ({@code blockPrivateHosts}) any non-routable
+     * host is withheld too, as defense in depth; on a private/dev network the loopback/private PEX
+     * mesh is legitimate, so discovered peers are advertised regardless of routability.
+     */
+    public List<String> publicSnapshot() {
+        List<String> out = new ArrayList<>();
+        for (String p : peers) {
+            if (seeds.contains(p)) {
+                continue;
+            }
+            if (blockPrivateHosts) {
+                String host = hostOf(p);
+                if (host == null || !isPubliclyRoutable(host)) {
+                    continue;
+                }
+            }
+            out.add(p);
+        }
+        return out;
     }
 
     public int size() {

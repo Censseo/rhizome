@@ -79,6 +79,38 @@ public final class TransactionImpl implements Transaction, Comparable<Transactio
     private long gasPrice = 0;
 
     /**
+     * Memoized content hash (audit P: verify-once cache). {@link #hashContents()} is on the hottest
+     * validation path — the signature verifier recomputes it for every {@code verify}/{@code isCached}/
+     * {@code markVerified}, mempool admission, block replay dedup and {@code compareTo}. The content
+     * fields are effectively immutable once a transaction is built/signed, so the hash is computed
+     * once and reused. Every content-field setter nulls this cache (below) to stay correct even if a
+     * field is mutated after a hash was taken. Excluded from Lombok accessors and from equals/hashCode.
+     */
+    @lombok.Getter(lombok.AccessLevel.NONE)
+    @lombok.Setter(lombok.AccessLevel.NONE)
+    @Builder.Default
+    private transient SHA256Hash cachedContentHash = null;
+
+    private void invalidateContentHash() {
+        this.cachedContentHash = null;
+    }
+
+    // Content-field setters override the Lombok-generated ones solely to invalidate the memoized
+    // content hash; they otherwise behave identically (fluent + chain, returning this).
+    public TransactionImpl from(PublicAddress from) { this.from = from; invalidateContentHash(); return this; }
+    public TransactionImpl to(PublicAddress to) { this.to = to; invalidateContentHash(); return this; }
+    public TransactionImpl amount(TransactionAmount amount) { this.amount = amount; invalidateContentHash(); return this; }
+    public TransactionImpl isTransactionFee(boolean v) { this.isTransactionFee = v; invalidateContentHash(); return this; }
+    public TransactionImpl timestamp(long timestamp) { this.timestamp = timestamp; invalidateContentHash(); return this; }
+    public TransactionImpl fee(TransactionAmount fee) { this.fee = fee; invalidateContentHash(); return this; }
+    public TransactionImpl chainId(int chainId) { this.chainId = chainId; invalidateContentHash(); return this; }
+    public TransactionImpl nonce(long nonce) { this.nonce = nonce; invalidateContentHash(); return this; }
+    public TransactionImpl kind(TransactionKind kind) { this.kind = kind; invalidateContentHash(); return this; }
+    public TransactionImpl gasLimit(long gasLimit) { this.gasLimit = gasLimit; invalidateContentHash(); return this; }
+    public TransactionImpl gasPrice(long gasPrice) { this.gasPrice = gasPrice; invalidateContentHash(); return this; }
+    public TransactionImpl data(byte[] data) { this.data = data; invalidateContentHash(); return this; }
+
+    /**
      * Serialization
      */
     public TransactionDto serialize() {
@@ -119,7 +151,8 @@ public final class TransactionImpl implements Transaction, Comparable<Transactio
         var hashContents = hashContents().toBytes();
         digest.update(hashContents, 0, hashContents.length);
         if(!isTransactionFee) {
-            digest.update(signature.toBytes(), 0, signature.toBytes().length);
+            var sig = signature.toBytes();
+            digest.update(sig, 0, sig.length);
         }
         digest.doFinal(sha256Hash, 0);
         return SHA256Hash.of(sha256Hash);
@@ -135,12 +168,18 @@ public final class TransactionImpl implements Transaction, Comparable<Transactio
      * nonce are clean-chain additions for replay protection.
      */
     public SHA256Hash hashContents() {
+        SHA256Hash cached = this.cachedContentHash;
+        if (cached != null) {
+            return cached;
+        }
         var digest = new SHA256Digest();
         var sha256Hash = new byte[SHA256Hash.SIZE];
 
-        digest.update(to.toBytes(), 0, to.toBytes().length);
+        var toBytes = to.toBytes();
+        digest.update(toBytes, 0, toBytes.length);
         if (!isTransactionFee) {
-            digest.update(from.toBytes(), 0, from.toBytes().length);
+            var fromBytes = from.toBytes();
+            digest.update(fromBytes, 0, fromBytes.length);
         }
         digest.update(longToBytes(fee.amount()), 0, 8);
         digest.update(longToBytes(amount.amount()), 0, 8);
@@ -158,7 +197,9 @@ public final class TransactionImpl implements Transaction, Comparable<Transactio
         }
         digest.doFinal(sha256Hash, 0);
 
-        return SHA256Hash.of(sha256Hash);
+        SHA256Hash result = SHA256Hash.of(sha256Hash);
+        this.cachedContentHash = result;
+        return result;
     }
 
     public Transaction sign(PrivateKey signingKey) {

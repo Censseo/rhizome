@@ -241,6 +241,12 @@ public final class RocksDbTokenStore implements TokenStore, AutoCloseable {
     private static List<Undo> decodeJournal(byte[] bytes) {
         ByteBuffer buffer = ByteBuffer.wrap(bytes);
         int count = buffer.getInt();
+        // Journals are written by this node from its own mutations, so this is defense-in-depth, not a
+        // remote vector — but bound count/length before allocating so a corrupt/truncated blob throws a
+        // clean error instead of new ArrayList<>(negative) or new byte[huge] (mirrors every wire decoder).
+        if (count < 0 || count > buffer.remaining()) {
+            throw new IllegalStateException("token journal count out of range: " + count);
+        }
         List<Undo> journal = new ArrayList<>(count);
         for (int i = 0; i < count; i++) {
             boolean isMeta = buffer.get() == 0;
@@ -249,7 +255,11 @@ public final class RocksDbTokenStore implements TokenStore, AutoCloseable {
             if (isMeta) {
                 byte[] priorMeta = null;
                 if (buffer.get() == 1) {
-                    priorMeta = new byte[buffer.getInt()];
+                    int len = buffer.getInt();
+                    if (len < 0 || len > buffer.remaining()) {
+                        throw new IllegalStateException("token journal meta length out of range: " + len);
+                    }
+                    priorMeta = new byte[len];
                     buffer.get(priorMeta);
                 }
                 journal.add(Undo.meta(tokenId, priorMeta));

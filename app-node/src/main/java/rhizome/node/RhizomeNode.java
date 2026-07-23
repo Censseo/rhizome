@@ -73,6 +73,9 @@ public final class RhizomeNode implements AutoCloseable {
     private PeerRegistry registry;
     private PeerDiscovery discovery;
     private PeerBanList banList;
+    /** One shared HTTP client for all sync rounds, so a fresh client (and its selector thread +
+     *  connection pool) is not built per peer per round, and keep-alive is reused (audit net #1). */
+    private final java.net.http.HttpClient syncHttpClient = HttpPeerSource.newClient();
     /** Whether to refuse/ pin private peer hosts (SSRF): on for internet-exposed mainnet. */
     private boolean blockPrivatePeers;
 
@@ -227,12 +230,13 @@ public final class RhizomeNode implements AutoCloseable {
         // whatever path the block arrived by: API submit, gossip, sync or the local
         // producer. The engine listener only enqueues onto the event loop.
         sseHub = new SseLogHub(eventloop, 256);
-        engine.setOnBlockApplied(height -> sseHub.publish(height, service.logsAt(height)));
+        engine.setOnBlockApplied(height -> sseHub.publish(height, () -> service.logsAt(height)));
         // Per-client rate limit (fixed 1s window) with a bounded client table
         // (the table cap is the memory-leak fix; the per-window count is generous
         // so honest peers on a shared host are never throttled).
         RateLimiter limiter = new RateLimiter(1000, 1000, 65_536);
-        httpServer = HttpServer.builder(eventloop, NodeApi.servlet(eventloop, service, limiter, sseHub))
+        httpServer = HttpServer.builder(eventloop,
+                NodeApi.servlet(eventloop, service, limiter, sseHub, allowedHosts(config)))
             .withListenPort(config.apiPort())
             .build();
         eventloop.keepAlive(true);
@@ -315,7 +319,8 @@ public final class RhizomeNode implements AutoCloseable {
                 continue;
             }
             try {
-                ChainSynchronizer.Result result = synchronizer.syncFrom(new HttpPeerSource(peerUrl, blockPrivatePeers));
+                ChainSynchronizer.Result result = synchronizer.syncFrom(
+                    new HttpPeerSource(peerUrl, blockPrivatePeers, syncHttpClient));
                 switch (result) {
                     case EXTENDED, REORGED ->
                         log.info("Synced from {}: {} -> height {}", peerUrl, result, engine.height());
@@ -367,6 +372,32 @@ public final class RhizomeNode implements AutoCloseable {
 
     public int apiPort() {
         return config.apiPort();
+    }
+
+    /**
+     * The legitimate {@code Host} authorities for the DNS-rebinding defense (audit S-2): the node's
+     * advertised host and the loopback names, each with and without the API port. A browser POST whose
+     * Host is not in this set is refused — a rebound page carries the attacker's hostname, not one of
+     * these. Lower-cased for case-insensitive matching.
+     */
+    private static java.util.Set<String> allowedHosts(NodeConfig config) {
+        java.util.Set<String> hosts = new java.util.HashSet<>();
+        int port = config.apiPort();
+        java.util.List<String> names = new java.util.ArrayList<>(java.util.List.of(
+            "localhost", "127.0.0.1", "[::1]"));
+        try {
+            String advertisedHost = java.net.URI.create(config.selfUrl()).getHost();
+            if (advertisedHost != null && !advertisedHost.isEmpty()) {
+                names.add(advertisedHost);
+            }
+        } catch (RuntimeException ignored) {
+            // malformed advertised URL: fall back to the loopback names only
+        }
+        for (String name : names) {
+            hosts.add(name.toLowerCase(java.util.Locale.ROOT));
+            hosts.add((name + ":" + port).toLowerCase(java.util.Locale.ROOT));
+        }
+        return hosts;
     }
 
     @Override

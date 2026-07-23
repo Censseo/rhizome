@@ -93,6 +93,18 @@ public final class NodeApi {
 
     /** As above, with an optional SSE hub backing {@code GET /logs/stream}. */
     public static AsyncServlet servlet(Reactor reactor, NodeService node, RateLimiter limiter, SseLogHub sse) {
+        return servlet(reactor, node, limiter, sse, null);
+    }
+
+    /**
+     * As above, with an optional allowlist of legitimate {@code Host} authorities (host or host:port)
+     * for the DNS-rebinding defense on state-changing POSTs. When non-null and non-empty, a browser POST
+     * is refused unless its {@code Host} is in the set — this is what actually stops rebinding, since a
+     * rebound page carries the attacker's own hostname as Host (audit S-2). Pass {@code null} to keep the
+     * Origin/marker-only behavior (tests and simple embeds that don't know their public host).
+     */
+    public static AsyncServlet servlet(Reactor reactor, NodeService node, RateLimiter limiter, SseLogHub sse,
+                                       java.util.Set<String> allowedHosts) {
         int maxBlockBody = node.params().maxBlockSizeBytes() + 1024;
         DashboardAssets dashboard = DashboardAssets.load();
 
@@ -130,7 +142,7 @@ public final class NodeApi {
                 .put("minValuePerByte", node.voteableParams()[1]))))
             // ---- peer registry ----
             .with(GET, "/peers", req -> ok(json(new JSONObject()
-                .put("peers", new org.json.JSONArray(node.knownPeers())))))
+                .put("peers", new org.json.JSONArray(node.publicPeers())))))
             .with(POST, "/add_peer", req -> req.loadBody(SMALL_BODY).map(body -> guardedResponse(() -> {
                 String url = new JSONObject(body.getString(StandardCharsets.UTF_8)).getString("url");
                 node.addPeer(url);
@@ -215,7 +227,7 @@ public final class NodeApi {
             // custom header without a CORS preflight this node never grants (no Access-Control-*
             // response), so the browser blocks the request. Peer and CLI clients send no Origin and
             // are unaffected, so P2P submit/gossip keeps working.
-            if (request.getMethod() == POST && isForbiddenBrowserPost(request)) {
+            if (request.getMethod() == POST && isForbiddenBrowserPost(request, allowedHosts)) {
                 return HttpResponse.ofCode(403)
                     .withJson(new JSONObject().put("error", "cross-origin request refused").toString())
                     .toPromise();
@@ -237,12 +249,16 @@ public final class NodeApi {
      * browser-originated (browsers attach Origin to every POST); it is allowed only when it is
      * same-origin ({@code Origin} authority == {@code Host}) AND carries the {@code X-Rhizome-Request}
      * header. The same-origin check stops classic cross-site POSTs; the custom-header requirement
-     * stops DNS rebinding (which makes Origin==Host) because a rebinding page cannot set a non-simple
-     * header without a CORS preflight this node never grants. Requests with no {@code Origin}
-     * (peers, CLI — not browsers, so not a CSRF vector) are always allowed. Fails open only when a
-     * present {@code Origin}/{@code Host} is unparseable.
+     * stops DNS rebinding at the Host layer: when {@code allowedHosts} is configured, the request's
+     * {@code Host} must be one of the node's legitimate authorities — a rebound page carries the
+     * attacker's own hostname as Host, so it is rejected even though Origin==Host makes it look
+     * same-origin (the marker/CORS-preflight reasoning alone does NOT stop rebinding, since a
+     * same-origin page sets custom headers freely — audit S-2). The Origin+marker check remains the
+     * cross-site layer. Requests with no {@code Origin} (peers, CLI — not browsers, so not a CSRF
+     * vector) are always allowed. Fails open only when a present {@code Origin}/{@code Host} is
+     * unparseable and no allowlist is configured.
      */
-    private static boolean isForbiddenBrowserPost(HttpRequest request) {
+    private static boolean isForbiddenBrowserPost(HttpRequest request, java.util.Set<String> allowedHosts) {
         try {
             String origin = request.getHeader(H_ORIGIN);
             if (origin == null || origin.isEmpty()) {
@@ -251,6 +267,12 @@ public final class NodeApi {
             String host = request.getHeader(H_HOST);
             if (host == null || host.isEmpty()) {
                 return false;
+            }
+            // Host allowlist: the load-bearing anti-rebinding control when configured. A rebound page's
+            // Host is the attacker's hostname, absent from the node's legitimate authorities → refuse.
+            if (allowedHosts != null && !allowedHosts.isEmpty()
+                && !allowedHosts.contains(host.toLowerCase(java.util.Locale.ROOT))) {
+                return true;
             }
             String authority = java.net.URI.create(origin).getAuthority();
             if (authority == null || !authority.equalsIgnoreCase(host)) {

@@ -52,20 +52,13 @@ final class DashboardApi {
     static HttpResponse stats(NodeService node) {
         long height = node.blockCount();
         var params = node.params();
-        long windowStart = Math.max(1, height - STATS_WINDOW + 1);
-        long txCount = 0;
-        long firstTs = 0;
-        long lastTs = 0;
-        for (long h = windowStart; h <= height; h++) {
-            var block = (rhizome.core.block.BlockImpl) node.block(h);
-            txCount += block.transactions().size();
-            if (h == windowStart) {
-                firstTs = block.timestamp();
-            }
-            if (h == height) {
-                lastTs = block.timestamp();
-            }
-        }
+        // The window aggregate (decodes STATS_WINDOW blocks) is cached by tip height in NodeService, so
+        // repeated dashboard polls at the same tip don't re-decode the blocks.
+        var window = node.statsWindow(STATS_WINDOW);
+        long windowStart = window.windowStart();
+        long txCount = window.txCount();
+        long firstTs = window.firstTs();
+        long lastTs = window.lastTs();
         long spanBlocks = height - windowStart;
         long avgIntervalMs = spanBlocks > 0 ? (lastTs - firstTs) / spanBlocks : 0;
         return json(new JSONObject()
