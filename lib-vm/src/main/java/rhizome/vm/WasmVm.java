@@ -824,8 +824,10 @@ public final class WasmVm {
             List.of(ValType.I32, ValType.I32, ValType.I32), List.of(ValType.I32),
             (Instance inst, long... args) -> {
                 Memory mem = inst.memory();
-                byte[] id = mem.readBytes(asOffset(args[0]), 32);
+                // Charge before touching guest memory, matching every other host fn (the id is a fixed
+                // 32 bytes so this is not an undercharge, only an ordering consistency fix).
                 gas.charge(GasSchedule.BOX_READ_BASE);
+                byte[] id = mem.readBytes(asOffset(args[0]), 32);
                 rhizome.core.box.Box box = host.boxRead(id);
                 if (box == null) {
                     return new long[] {-1L};

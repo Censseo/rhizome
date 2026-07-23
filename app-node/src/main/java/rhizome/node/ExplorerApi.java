@@ -8,6 +8,7 @@ import rhizome.core.ledger.PublicAddress;
 import rhizome.core.transaction.Transaction;
 
 import static rhizome.node.ApiResponses.badRequest;
+import static rhizome.node.ApiResponses.gone;
 import static rhizome.node.ApiResponses.hex;
 import static rhizome.node.ApiResponses.json;
 import static rhizome.node.ApiResponses.notFound;
@@ -44,6 +45,12 @@ final class ExplorerApi {
         if (end - start + 1 > BLOCKS_RANGE_MAX) {
             return badRequest("range too large (max " + BLOCKS_RANGE_MAX + ")");
         }
+        // Pruned node: the range dips into discarded bodies. Answer 410 GONE with the watermark like
+        // /sync, rather than letting node.block() throw into a generic 400.
+        long prunedBelow = node.prunedBelow();
+        if (prunedBelow > 0 && start < prunedBelow) {
+            return gone(prunedBelow);
+        }
         long cappedEnd = Math.min(end, node.blockCount());
         org.json.JSONArray arr = new org.json.JSONArray();
         for (long h = start; h <= cappedEnd; h++) {
@@ -64,6 +71,10 @@ final class ExplorerApi {
         long id = parseLong(req.getQueryParameter("blockId"));
         if (id < 1 || id > node.blockCount()) {
             return badRequest("blockId out of range");
+        }
+        long prunedBelow = node.prunedBelow();
+        if (prunedBelow > 0 && id < prunedBelow) {
+            return gone(prunedBelow); // body discarded by pruning — source it from an archive
         }
         return json(node.block(id).toJson());
     }
@@ -89,7 +100,8 @@ final class ExplorerApi {
         }
         long depth = scanDepth(req);
         long tip = node.blockCount();
-        long floor = Math.max(1, tip - depth + 1);
+        // Never scan below the prune watermark: those bodies are gone and node.block() would throw.
+        long floor = Math.max(Math.max(1, tip - depth + 1), node.prunedBelow());
         for (long h = tip; h >= floor; h--) {
             for (Transaction t : node.block(h).transactions()) {
                 if (t.hashContents().toHexString().equalsIgnoreCase(txid)) {
@@ -107,7 +119,8 @@ final class ExplorerApi {
         PublicAddress address = PublicAddress.of(req.getQueryParameter("address"));
         long depth = scanDepth(req);
         long tip = node.blockCount();
-        long floor = Math.max(1, tip - depth + 1);
+        // Never scan below the prune watermark: those bodies are gone and node.block() would throw.
+        long floor = Math.max(Math.max(1, tip - depth + 1), node.prunedBelow());
         org.json.JSONArray arr = new org.json.JSONArray();
         for (long h = tip; h >= floor && arr.length() < ADDRESS_TXS_MAX; h--) {
             for (Transaction t : node.block(h).transactions()) {

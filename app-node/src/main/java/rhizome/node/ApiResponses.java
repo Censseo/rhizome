@@ -83,6 +83,14 @@ final class ApiResponses {
             .build();
     }
 
+    /** 410 GONE with the prune watermark, matching /sync, so a client knows to source the block
+     *  (or a snapshot) from an archive node rather than treating a pruned height as a bad request. */
+    static HttpResponse gone(long prunedBelow) {
+        return HttpResponse.ofCode(410)
+            .withJson(new JSONObject().put("error", "pruned").put("prunedBelow", prunedBelow).toString())
+            .build();
+    }
+
     static String hex(byte[] bytes) {
         StringBuilder sb = new StringBuilder(bytes.length * 2);
         for (byte b : bytes) {

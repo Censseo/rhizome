@@ -128,6 +128,31 @@ class PrunedNodeApiTest {
     }
 
     @Test
+    void explorerReadsIntoPrunedRangeReturn410NotAGeneric400() throws Exception {
+        // A single pruned block and a range dipping below the watermark answer 410 GONE with the
+        // watermark, matching /sync — so a client sources the block from an archive rather than
+        // treating a pruned height as a malformed request.
+        HttpResponse<byte[]> single = get("/block?blockId=2");
+        assertEquals(410, single.statusCode());
+        assertEquals(prunedBelow, new JSONObject(new String(single.body())).getLong("prunedBelow"));
+
+        HttpResponse<byte[]> range = get("/blocks?start=2&end=4");
+        assertEquals(410, range.statusCode());
+        assertEquals(prunedBelow, new JSONObject(new String(range.body())).getLong("prunedBelow"));
+
+        // A retained block is still served normally.
+        assertEquals(200, get("/block?blockId=" + height).statusCode());
+    }
+
+    @Test
+    void transactionScanStaysWithinRetainedBodies() throws Exception {
+        // A tip-backward scan with a depth reaching into the pruned range must not touch discarded
+        // bodies (node.block would throw); it clamps its floor to the watermark and returns cleanly.
+        HttpResponse<byte[]> resp = get("/transaction?depth=1000&txid=" + "0".repeat(64));
+        assertEquals(404, resp.statusCode(), "not found in the retained range, not a 500 from a pruned read");
+    }
+
+    @Test
     void headersAreServedForEveryHeightIncludingPrunedOnes() throws Exception {
         HttpResponse<byte[]> resp = get("/headers?start=1&end=" + height);
         assertEquals(200, resp.statusCode());

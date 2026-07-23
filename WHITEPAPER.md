@@ -996,7 +996,14 @@ cache** (an attacker-influenced hostname key with no cap, reachable before the p
 checks, could accumulate one permanent entry per distinct resolvable name; now an access-order LRU),
 and removed an **O(n²) `transfer_value` reserved-balance rescan** (a running per-contract total,
 unwound exactly on a frame revert, replaces a full scan of the shared transfer list per call — O(1),
-byte-identical to the sum it replaced). Every fix carries a regression test; a
+byte-identical to the sum it replaced). It also closed a handful of smaller items: a box/token
+transaction is now refused at mempool admission below its activation height (the executor's gate was
+admission-asymmetric, so on a delayed-activation network a premature box/token tx would be selected
+into and invalidate every candidate block); the explorer reads answer `410 GONE` with the prune
+watermark on a discarded height instead of a generic `400`, and their tip-backward scans clamp to the
+watermark rather than reading pruned bodies; `box_read` charges its gas before touching guest memory
+like every other host function; and the runtime logging backend was moved onto a patched release.
+Every fix carries a regression test; a
 dependency bump is validated by the same suite (one caught a silent CSRF-guard fail-open from a
 library header-lookup change).
 

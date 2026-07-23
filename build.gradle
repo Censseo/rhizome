@@ -18,11 +18,15 @@ gradleLint {
 // Shared dependency versions. Each module declares only what it actually
 // uses in its own build.gradle; nothing is injected globally anymore.
 ext {
+    // 6.0-rc2 is the newest published activej release; the last stable line is 5.5, so this is the
+    // latest available, not a stale pin. Do not downgrade to 5.x — that is a breaking API change.
     activejVersion = '6.0-rc2'
     bouncycastleVersion = '1.78.1'  // 1.76 is vulnerable to CVE-2024-30172 — do not downgrade.
     jsonVersion = '20240303'
     slf4jVersion = '2.0.12'
-    logbackVersion = '1.5.3'
+    // Runtime-only logging backend. Kept on the latest 1.5.x patch: 1.5.13 fixed CVE-2024-12798 /
+    // CVE-2024-12801 (config-time expression/DTD injection). Do not drop below 1.5.13.
+    logbackVersion = '1.5.38'
 }
 
 subprojects {

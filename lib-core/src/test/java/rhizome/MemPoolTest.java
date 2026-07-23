@@ -40,9 +40,11 @@ class MemPoolTest {
     private static final class MutableAccounts implements AccountView {
         final Map<PublicAddress, Long> nonces = new HashMap<>();
         final Map<PublicAddress, Long> balances = new HashMap<>();
+        long height = Long.MAX_VALUE; // default: past any activation, so box/token admission is not gated
         public long confirmedNextNonce(PublicAddress s) { return nonces.getOrDefault(s, 0L); }
         public long confirmedBalance(PublicAddress s) { return balances.getOrDefault(s, 0L); }
         public boolean senderExists(PublicAddress s) { return balances.containsKey(s); }
+        public long confirmedHeight() { return height; }
     }
 
     @BeforeEach
@@ -114,6 +116,37 @@ class MemPoolTest {
         // gasLimit * gasPrice = 2_000_000 > balance 1_000_000.
         assertEquals(ExecutionStatus.BALANCE_TOO_LOW, mempool.addTransaction(contractCall(0, 1_000_000, 2)));
         assertEquals(0, mempool.size());
+    }
+
+    private Transaction boxCreate(long nonce) {
+        Transaction t = TransactionImpl.builder()
+            .from(sender).to(PublicAddress.random())
+            .amount(new TransactionAmount(0)).fee(new TransactionAmount(0))
+            .chainId(params.chainId()).nonce(nonce).signingKey(key)
+            .kind(rhizome.core.transaction.TransactionKind.BOX_CREATE)
+            .data(new byte[] {1, 2, 3}).gasLimit(0).gasPrice(0)
+            .build();
+        t.sign(priv);
+        return t;
+    }
+
+    @Test
+    void rejectsBoxTransactionBeforeItsActivationHeight() {
+        // A box tx submitted before boxActivationHeight would be selected into candidate blocks and
+        // hard-fail the executor (BOX_UNAVAILABLE), halting production. The pool must refuse it until
+        // the chain reaches activation, mirroring the executor's gate (audit: activation asymmetry).
+        NetworkParameters activated = params.toBuilder().boxActivationHeight(100).build();
+        MutableAccounts acc = new MutableAccounts();
+        acc.balances.put(sender, 1_000_000L);
+        MemPool pool = new MemPool(activated, verifier, acc, 100);
+
+        acc.height = 50; // next block 51 < 100: too early
+        assertEquals(ExecutionStatus.BOX_UNAVAILABLE, pool.addTransaction(boxCreate(0)));
+        assertEquals(0, pool.size());
+
+        acc.height = 99; // next block 100 == activation: now includable
+        assertEquals(ExecutionStatus.SUCCESS, pool.addTransaction(boxCreate(0)));
+        assertEquals(1, pool.size());
     }
 
     @Test
