@@ -4,8 +4,10 @@ import java.net.Inet6Address;
 import java.net.InetAddress;
 import java.net.URI;
 import java.net.UnknownHostException;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.Locale;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.Map;
 
 /**
  * Shared host classification and DNS-pinning for outbound peer traffic.
@@ -36,9 +38,26 @@ final class PeerHosts {
     /** How long a successful DNS resolution is reused before re-resolving. */
     private static final long CACHE_TTL_NANOS = 60L * 1_000_000_000L;
 
+    /**
+     * Hard cap on distinct hostnames cached at once. The cache key is an attacker-influenced
+     * hostname (peers arrive via the unauthenticated {@code /add_peer} and PEX, and every
+     * admission resolves the host before the capacity/dedup checks), so without a bound a stream
+     * of distinct resolvable names — e.g. {@code *.evil.example} behind one wildcard record — would
+     * accumulate one permanent entry each and exhaust the heap. Access-order LRU eviction keeps the
+     * live working set (the actual peer table is itself bounded well below this) while restoring the
+     * §7.3 "every unbounded surface is capped" invariant.
+     */
+    private static final int MAX_ENTRIES = 4_096;
+
     private record CacheEntry(InetAddress[] addrs, long expiresAtNanos) {}
 
-    private static final ConcurrentHashMap<String, CacheEntry> DNS_CACHE = new ConcurrentHashMap<>();
+    private static final Map<String, CacheEntry> DNS_CACHE = Collections.synchronizedMap(
+        new LinkedHashMap<String, CacheEntry>(64, 0.75f, true) {
+            @Override
+            protected boolean removeEldestEntry(Map.Entry<String, CacheEntry> eldest) {
+                return size() > MAX_ENTRIES;
+            }
+        });
 
     /**
      * All addresses {@code host} resolves to, via a short-TTL cache. Mirrors
@@ -60,6 +79,11 @@ final class PeerHosts {
     /** The first resolved address for {@code host} (cached), matching {@link InetAddress#getByName}. */
     static InetAddress resolveFirst(String host) throws UnknownHostException {
         return resolveAll(host)[0];
+    }
+
+    /** Visible for testing: number of cached DNS entries (bounded by {@link #MAX_ENTRIES}). */
+    static int cachedEntryCount() {
+        return DNS_CACHE.size();
     }
 
     /** True only if every address {@code host} resolves to is globally routable unicast. */

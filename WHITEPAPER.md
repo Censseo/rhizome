@@ -795,7 +795,7 @@ inflated reward, **negative amounts** (money minting), **balance overflow**, tim
 and difficulty (time-warp) manipulation, deep reorg (finality), lying peer (claimed but
 unproven work), transaction-layer censorship, block/request flooding, and network DoS
 (bounded bodies, ban-score). This section is the consolidated security reference; the
-history below records eight successive review passes and the invariants they established.
+history below records nine successive review passes and the invariants they established.
 
 ### 7.1 Load-bearing invariants (must never regress)
 
@@ -864,8 +864,17 @@ explorer reads that decode blocks under the lock. **Transaction layer:** a per-s
 plus eviction of *fully-parked* (nonce-gapped, never-minable) transactions in favour of ready
 or higher-fee ones — and that eviction runs only *after* the newcomer's signature verifies, so
 it is never a free unauthenticated lever — so the pool cannot be cheaply and permanently stuffed
-to censor honest traffic. **Storage** growth is gas-priced and reorg-reversible via the
-persistent undo journal.
+to censor honest traffic. **Consensus VM work** is bounded by a **block gas ceiling**: a
+contract transaction's `gasLimit` is otherwise limited only by affordability, and at
+`gasPrice = 0` (valid at consensus — the min-fee floor is a mempool-only policy) a free call
+can name an arbitrary limit, so a miner could put a `loop … br 0` call with a 10¹¹ limit in a
+block they mine, clear PoW, and force every validating node to run those billions of
+instructions synchronously under the consensus lock. Two network constants close this: a
+per-transaction cap (`maxTxGas`) and a per-block declared-gas total (`maxBlockGas`), both
+checked in `executeBlock`'s cheap structural pass **before any instruction runs**, so a
+"poison block" is rejected rather than executed. This is the consensus-side twin of the
+read-only VM gas cap that already bounded `/call_readonly`. **Storage** growth is gas-priced
+and reorg-reversible via the persistent undo journal.
 
 ### 7.4 Network
 
@@ -915,7 +924,7 @@ fresh accounts grows that domain by one leaf per hop. The growth is bounded — 
 the optional minimum-fee floor (each nonce-creating hop then costs a real fee) and by block
 space — rather than eliminated; the floor is off by default and is a per-operator policy knob.
 
-Eight parallel-subsystem review passes hardened this model: from the first (negative-amount
+Nine parallel-subsystem review passes hardened this model: from the first (negative-amount
 minting, deposit-overflow rollback) through consensus-fork classes (unscaled uncle-reward
 rollback, heap-dependent VM OOM, cache-dependent gas, phantom-wallet validity, reorg-gate
 work-metric mismatch), theft and liveness (unsigned `BOX_COLLECT` drain, mempool-poisoning
@@ -963,6 +972,37 @@ bounded-parallel PEX round, and a body fetch/apply **pipeline** that prefetches 
 the current one is applied — the apply staying strictly serial and in order under the single engine
 lock, so the block sequence and state root are identical (application is deliberately never
 parallelised across peers, which would only waste work and mislabel honest peers `PEER_INVALID`).
+A **ninth** pass — a fresh full-subsystem sweep — closed the last unbounded consensus surface: a
+contract transaction's `gasLimit` was bounded only by affordability, so at `gasPrice = 0` a miner
+could seal a block carrying a free 10¹¹-gas loop that cleared PoW and then forced every node to run
+those instructions synchronously under the consensus lock — a liveness DoS disproportionate to the
+attacker's hash power. A per-transaction (`maxTxGas`) and per-block (`maxBlockGas`) gas ceiling,
+checked in the structural pass before any instruction runs (and mirrored at mempool admission), now
+bounds a valid block's worst-case VM work — the consensus-side twin of the read-only VM cap (§7.3).
+It also made **chain reorganisation atomic**: a reorg is a multi-call pop→apply→restore sequence, and
+because it ran outside any single engine-lock hold while the block producer (its own thread) and
+`/submit` (the event loop) both append at `height+1`, an interleaved add could collide on block-id
+continuity and, worst case, make the restore path throw and silently truncate the chain to the fork
+height. The bounded small-reorg path now runs the whole sequence under one `withConsistentView` hold
+(the branch is prefetched, so no network I/O happens under the lock); the header-first path — which
+streams up to `MAX_HEADER_WINDOW` bodies and cannot hold the lock across that I/O — makes its
+capture/pop and restore/adopt phases individually atomic, so restore can never race an append and a
+forward-apply race becomes a clean, self-healing abort (§3.5/§4.9 single-writer restored). Alongside
+it corrected a **read-DoS amplifier** — the `/transaction` and `/address_txs` explorer scans decode up
+to `depth` full blocks under the consensus lock but were weighted at the light header-scan rate
+(`depth/20`), ~20× below the per-block cost the aggregate read gate was sized for, so both are now
+weighted by the blocks they actually decode like `/blocks` and `/stats` — bounded the **DNS resolver
+cache** (an attacker-influenced hostname key with no cap, reachable before the peer-table capacity
+checks, could accumulate one permanent entry per distinct resolvable name; now an access-order LRU),
+and removed an **O(n²) `transfer_value` reserved-balance rescan** (a running per-contract total,
+unwound exactly on a frame revert, replaces a full scan of the shared transfer list per call — O(1),
+byte-identical to the sum it replaced). It also closed a handful of smaller items: a box/token
+transaction is now refused at mempool admission below its activation height (the executor's gate was
+admission-asymmetric, so on a delayed-activation network a premature box/token tx would be selected
+into and invalidate every candidate block); the explorer reads answer `410 GONE` with the prune
+watermark on a discarded height instead of a generic `400`, and their tip-backward scans clamp to the
+watermark rather than reading pruned bodies; `box_read` charges its gas before touching guest memory
+like every other host function; and the runtime logging backend was moved onto a patched release.
 Every fix carries a regression test; a
 dependency bump is validated by the same suite (one caught a silent CSRF-guard fail-open from a
 library header-lookup change).
@@ -985,7 +1025,7 @@ ledger of a synchronised Pandanite node.
 (`addBlock`/`popBlock`, nonces, work, difficulty); RocksDB storage; mempool; HTTP API;
 block production; synchronisation + reorg by cumulative work; wallet CLI; gossip & peer
 discovery; hardening (checkpoints, finality, bounded rate limiting, ban-score, block-size
-cap); eight parallel-subsystem security-review passes (§7); the **WASM smart-contract layer** — a Chicory-backed
+cap); nine parallel-subsystem security-review passes (§7); the **WASM smart-contract layer** — a Chicory-backed
 metered VM, a persistent contract store, `DEPLOY`/`CALL` transactions with gas fees,
 atomic per-block contract state with exact reorg reversal, and wallet `deploy`/`call`
 commands; and the **data-box layer** (§5.5) — stable-id, typed-register storage objects

@@ -30,6 +30,11 @@ public enum ExecutionStatus {
     INVALID_TRANSACTION_AMOUNT,
     BALANCE_OVERFLOW,
     CONTRACT_EXECUTION_UNAVAILABLE,
+    /** A contract transaction declared a gasLimit above the per-transaction cap, or a block's
+     *  contract transactions together exceed the per-block gas ceiling — the consensus bound that
+     *  keeps a block's worst-case VM work finite so a mined "poison block" cannot stall every node
+     *  under the consensus lock (audit: unbounded consensus gas). */
+    GAS_LIMIT_EXCEEDED,
     TRANSACTION_FEE_TOO_LOW,
     WALLET_SIGNATURE_MISMATCH,
     IS_SYNCING,

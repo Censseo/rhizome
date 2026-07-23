@@ -686,6 +686,11 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         }
     }
 
+    @Override
+    public long confirmedHeight() {
+        return height();
+    }
+
     public NetworkParameters params() {
         return params;
     }

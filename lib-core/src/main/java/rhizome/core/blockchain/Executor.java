@@ -156,6 +156,7 @@ public final class Executor {
         Transaction coinbase = null;
         Set<SHA256Hash> seenInBlock = new HashSet<>();
         int boxCollects = 0;
+        long blockGas = 0;
         for (Transaction t : block.transactions()) {
             var tx = (TransactionImpl) t;
             if (tx.isTransactionFee()) {
@@ -171,8 +172,34 @@ public final class Executor {
             // Contract transactions execute only when a processor is wired; without
             // one, consensus does not run them, so a block carrying one is rejected —
             // no contract tx can be mistaken for a transfer.
-            if (tx.kind().isContract() && processor == null) {
-                return CONTRACT_EXECUTION_UNAVAILABLE;
+            if (tx.kind().isContract()) {
+                if (processor == null) {
+                    return CONTRACT_EXECUTION_UNAVAILABLE;
+                }
+                // Consensus gas ceiling. gasLimit is otherwise bounded only by affordability, and at
+                // gasPrice 0 (valid here — min-fee is mempool-only) a free call can name an arbitrary
+                // limit; the VM would then run that many instructions under the consensus lock on every
+                // node. Cap one call, and cap the block's declared-gas total, BEFORE Pass 2 runs any
+                // instruction — so a "poison block" is rejected on the cheap structural pass rather than
+                // executed (audit: unbounded consensus gas). Checked identically on every node, so it is
+                // a pure consensus rule; 0 disables either cap.
+                long gasLimit = tx.gasLimit();
+                if (gasLimit < 0) {
+                    return INVALID_TRANSACTION_AMOUNT;
+                }
+                if (params.maxTxGas() > 0 && gasLimit > params.maxTxGas()) {
+                    return GAS_LIMIT_EXCEEDED;
+                }
+                if (params.maxBlockGas() > 0) {
+                    try {
+                        blockGas = Math.addExact(blockGas, gasLimit);
+                    } catch (ArithmeticException overflow) {
+                        return GAS_LIMIT_EXCEEDED; // an unbounded-gasLimit sum can only be over the cap
+                    }
+                    if (blockGas > params.maxBlockGas()) {
+                        return GAS_LIMIT_EXCEEDED;
+                    }
+                }
             }
             if (tx.kind().isBox()) {
                 if (boxProcessor == null || height < params.boxActivationHeight()) {

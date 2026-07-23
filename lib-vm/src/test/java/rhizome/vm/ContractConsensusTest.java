@@ -220,4 +220,53 @@ class ContractConsensusTest {
         assertEquals(null, contracts.getStorage(ghost, new byte[] {0}));
         assertEquals(1, engine.nextNonce(sender));
     }
+
+    /** Re-init the engine over a fresh ledger with the given consensus gas caps. */
+    private void withGasCaps(long maxTxGas, long maxBlockGas) {
+        params = params.toBuilder().maxTxGas(maxTxGas).maxBlockGas(maxBlockGas).build();
+        ledger = new InMemoryLedger();
+        store = new InMemoryChainStore();
+        contracts = new InMemoryContractStore();
+        LedgerSnapshot snapshot = new LedgerSnapshot("t", 0, params.chainId());
+        snapshot.put(sender, new TransactionAmount(10_000_000L));
+        processor = new WasmContractProcessor(new WasmVm(), contracts);
+        engine = ChainEngine.init(params, ledger, store, snapshot, null, clock::get, null, processor);
+    }
+
+    @Test
+    void contractTxOverPerTxGasCapIsRejectedBeforeExecution() {
+        // A single contract call whose gasLimit exceeds maxTxGas is a "poison" tx: at gasPrice 0 it is
+        // free, yet the VM would run up to gasLimit instructions under the consensus lock on every node.
+        // Pass 1 must reject the whole block on the cheap structural pass, before any instruction runs.
+        withGasCaps(500_000L, 10_000_000L);
+        PublicAddress contract = Contracts.deriveAddress(sender, 0);
+
+        // deployTx uses GAS_LIMIT (1_000_000) > maxTxGas (500_000).
+        assertEquals(ExecutionStatus.GAS_LIMIT_EXCEEDED, mineBlock(List.of(deployTx(0, COUNTER))));
+
+        // Rejected before execution: no code deployed, sender not charged, tip unchanged.
+        assertEquals(null, contracts.getCode(contract), "over-cap block never executed the deploy");
+        assertEquals(10_000_000L, ledger.getWalletValue(sender).amount(), "over-cap block charged no gas");
+        assertEquals(1, engine.height(), "over-cap block was not appended");
+    }
+
+    @Test
+    void perTxUnderCapButBlockGasSumOverCapIsRejected() {
+        // Each call is within maxTxGas, but together their declared gas exceeds the block ceiling, so the
+        // block is still rejected — the bound holds against a block packed with many capped calls.
+        withGasCaps(GAS_LIMIT, GAS_LIMIT + GAS_LIMIT / 2); // two GAS_LIMIT deploys sum to 2x > 1.5x cap
+        assertEquals(ExecutionStatus.GAS_LIMIT_EXCEEDED,
+            mineBlock(List.of(deployTx(0, COUNTER), deployTx(1, EMITTER))));
+        assertEquals(1, engine.height(), "over-cap block was not appended");
+    }
+
+    @Test
+    void contractTxAtExactGasCapsIsAccepted() {
+        // Boundary: gasLimit == maxTxGas and the block's declared-gas total == maxBlockGas are both allowed
+        // (the rejection is strictly greater-than), so the caps do not reject legitimate blocks.
+        withGasCaps(GAS_LIMIT, GAS_LIMIT);
+        assertEquals(ExecutionStatus.SUCCESS, mineBlock(List.of(deployTx(0, COUNTER))));
+        assertArrayEquals(COUNTER, contracts.getCode(Contracts.deriveAddress(sender, 0)),
+            "a block exactly at the gas caps is valid");
+    }
 }

@@ -125,6 +125,12 @@ public final class MemPool {
         if (tx.kind().isContract() && (tx.gasLimit() < 0 || tx.gasPrice() < 0)) {
             return INVALID_TRANSACTION_AMOUNT;
         }
+        // Mirror the consensus per-transaction gas ceiling at admission so an over-cap call is never
+        // pooled or relayed (it would be rejected by executeBlock anyway). Defense in depth against the
+        // unbounded-consensus-gas vector; the block-wide ceiling stays a consensus-only rule.
+        if (tx.kind().isContract() && params.maxTxGas() > 0 && tx.gasLimit() > params.maxTxGas()) {
+            return GAS_LIMIT_EXCEEDED;
+        }
         // Box ops run no VM and cost no gas; the gas fields are reserved and must be zero.
         if (tx.kind().isBox() && (tx.gasLimit() != 0 || tx.gasPrice() != 0)) {
             return INVALID_TRANSACTION_AMOUNT;
@@ -132,6 +138,21 @@ public final class MemPool {
         // Token ops carry no gas and move no PDN (the token amount is in the payload).
         if (tx.kind().isToken() && (tx.gasLimit() != 0 || tx.gasPrice() != 0 || tx.amount().amount() != 0)) {
             return INVALID_TRANSACTION_AMOUNT;
+        }
+        // Activation-height gate, mirrored from the executor. A box/token tx is only valid in a block at
+        // or above its activation height; the executor otherwise hard-fails such a tx (BOX_UNAVAILABLE /
+        // TOKEN_UNAVAILABLE), which aborts the WHOLE block. Without this gate a pre-activation box/token
+        // tx would be admitted, selected into every candidate block, and halt production until activation.
+        // Reject it here so it never enters the pool. Compared as `confirmedHeight < activation - 1` to
+        // avoid overflowing the Long.MAX_VALUE "no gating" sentinel; the shipped networks activate at 0.
+        long confirmedHeight = accounts.confirmedHeight();
+        if (tx.kind().isBox() && params.boxActivationHeight() > 0
+            && confirmedHeight < params.boxActivationHeight() - 1) {
+            return BOX_UNAVAILABLE;
+        }
+        if (tx.kind().isToken() && params.tokenActivationHeight() > 0
+            && confirmedHeight < params.tokenActivationHeight() - 1) {
+            return TOKEN_UNAVAILABLE;
         }
         if (!PublicAddress.of(tx.signingKey()).equals(tx.from())) {
             return WALLET_SIGNATURE_MISMATCH;

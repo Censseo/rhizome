@@ -166,40 +166,57 @@ public final class ChainSynchronizer {
         }
 
         // --- Stateful apply, with exact restore on failure ---
-        // Uncle-inclusive chain weight before we touch anything — the authoritative GHOST metric (§3.7).
-        BigInteger localTotal = engine.totalWork();
-        List<Block> localBranch = new ArrayList<>();
-        for (long h = forkHeight + 1; h <= engine.height(); h++) {
-            localBranch.add(engine.blockAt(h));
-        }
-        while (engine.height() > forkHeight) {
-            engine.popBlock();
-        }
-
-        for (Block block : branch) {
-            if (engine.addBlock(block) != ExecutionStatus.SUCCESS) {
-                restore(forkHeight, localBranch);
-                return Result.PEER_INVALID;
+        // The whole pop→apply→(restore|adopt) sequence runs under ONE engine-lock hold via
+        // withConsistentView. Each ChainEngine call is individually locked, but a reorg is a
+        // multi-call sequence, and the block producer (its own thread) and /submit (the event loop)
+        // both call engine.addBlock at engine.height()+1 — exactly where we pop to and re-apply. An
+        // interleaved add between our pop and re-apply collided on block-id continuity and, worst case,
+        // made restore() throw "full resync required", silently truncating the chain to forkHeight
+        // (the exception is swallowed by the per-peer syncRound guard). Holding the lock across the
+        // sequence restores the single-writer guarantee (WHITEPAPER §3.5/§4.9); the branch is already
+        // prefetched, so no network I/O happens under the lock (audit: reorg atomicity). The reentrant
+        // lock lets the inner pop/add/restore calls re-acquire it freely.
+        Result outcome = engine.withConsistentView(() -> {
+            // Uncle-inclusive chain weight before we touch anything — the authoritative GHOST metric (§3.7).
+            BigInteger localTotal = engine.totalWork();
+            List<Block> localBranch = new ArrayList<>();
+            for (long h = forkHeight + 1; h <= engine.height(); h++) {
+                localBranch.add(engine.blockAt(h));
             }
+            while (engine.height() > forkHeight) {
+                engine.popBlock();
+            }
+
+            for (Block block : branch) {
+                if (engine.addBlock(block) != ExecutionStatus.SUCCESS) {
+                    restore(forkHeight, localBranch);
+                    return Result.PEER_INVALID;
+                }
+            }
+            // GHOST fork choice (§3.7, audit S4): the base-only gate above is the anti-DoS prefilter;
+            // the authoritative choice, now that the bodies applied and addBlock validated every uncle
+            // ref, weights genuine uncle work via engine.totalWork(). Adopt the peer branch only if its
+            // uncle-inclusive total strictly exceeds ours — a base-heavier but subtree-lighter branch must
+            // not displace our heavier GHOST subtree. Validated uncle work only, so no M4 inflation lever.
+            if (engine.totalWork().compareTo(localTotal) <= 0) {
+                restore(forkHeight, localBranch);
+                return Result.NO_CHANGE;
+            }
+            // The branch we just replaced is valid work that lost the fork race; keep its
+            // blocks as orphans so a later block can reference them as uncles (GHOST).
+            for (Block block : localBranch) {
+                engine.registerOrphan(block);
+            }
+            return Result.REORGED;
+        });
+        if (outcome == Result.REORGED) {
+            // Branch prefix applied and (by the gate) already heavier than what it replaced; keep
+            // extending toward the peer tip, best effort. Network I/O, so deliberately OUTSIDE the lock —
+            // each applyRange addBlock is individually locked and an interleaved peer/producer block just
+            // ends the best-effort extension early.
+            applyRange(peer, prefetchEnd + 1, peer.height());
         }
-        // GHOST fork choice (§3.7, audit S4): the base-only gate above is the anti-DoS prefilter;
-        // the authoritative choice, now that the bodies applied and addBlock validated every uncle
-        // ref, weights genuine uncle work via engine.totalWork(). Adopt the peer branch only if its
-        // uncle-inclusive total strictly exceeds ours — a base-heavier but subtree-lighter branch must
-        // not displace our heavier GHOST subtree. Validated uncle work only, so no M4 inflation lever.
-        if (engine.totalWork().compareTo(localTotal) <= 0) {
-            restore(forkHeight, localBranch);
-            return Result.NO_CHANGE;
-        }
-        // The branch we just replaced is valid work that lost the fork race; keep its
-        // blocks as orphans so a later block can reference them as uncles (GHOST).
-        for (Block block : localBranch) {
-            engine.registerOrphan(block);
-        }
-        // Branch prefix applied and (by the gate) already heavier than what it
-        // replaced; keep extending toward the peer tip, best effort.
-        applyRange(peer, prefetchEnd + 1, peer.height());
-        return Result.REORGED;
+        return outcome;
     }
 
     /** Fetches [from..to] in bounded batches; null on any transport/decode failure. */

@@ -200,6 +200,22 @@ class NodeApiTest {
     }
 
     @Test
+    void explorerScanEndpointsAreWeightedByBlocksActuallyDecoded() {
+        // /transaction and /address_txs decode up to `depth` FULL blocks under the consensus lock
+        // (ExplorerApi.findTransaction / addressTransactions), the same cost class as /blocks and /stats.
+        // They must be weighted ~1 unit per block, not the light header-scan rate (depth/20) that
+        // under-charged them ~20x and let one IP drive ~20x the lock-guarded decodes the read gate admits.
+        assertEquals(1000, NodeApi.requestCost(HttpRequest.get("http://x/transaction?depth=1000&txid=deadbeef").build()));
+        assertEquals(1000, NodeApi.requestCost(HttpRequest.get("http://x/address_txs?depth=1000&address=ab").build()));
+        assertEquals(250, NodeApi.requestCost(HttpRequest.get("http://x/transaction").build())); // SCAN_DEPTH_DEFAULT
+        // Depth is clamped to the scan cap before being charged, so an over-large depth cannot be cheap.
+        assertEquals(ExplorerApi.SCAN_DEPTH_MAX,
+            NodeApi.requestCost(HttpRequest.get("http://x/transaction?depth=1000000&txid=x").build()));
+        // A plain read that decodes no blocks stays at cost 1.
+        assertEquals(1, NodeApi.requestCost(HttpRequest.get("http://x/block_count").build()));
+    }
+
+    @Test
     void readonlyGasGateShedsCallsOnceTheGlobalBudgetIsSpent() {
         // Aggregate (all-IP) dry-run gas budget: with a global budget of 100 gas/window, the first
         // call reserving 60 is admitted and the second is shed (the /call_readonly handler then

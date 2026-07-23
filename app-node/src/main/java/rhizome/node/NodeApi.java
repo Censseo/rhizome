@@ -291,7 +291,7 @@ public final class NodeApi {
      * dry-run cost proportionally more so a single client cannot drive orders of magnitude more
      * work than the flat per-request budget implies (audit M2).
      */
-    private static int requestCost(HttpRequest request) {
+    static int requestCost(HttpRequest request) {
         String path;
         try {
             path = request.getPath();
@@ -309,7 +309,14 @@ public final class NodeApi {
                 // malformed depth: the handler will reject it; charge the default cost
             }
             depth = Math.max(1, Math.min(depth, ExplorerApi.SCAN_DEPTH_MAX));
-            return Math.max(1, depth / ExplorerApi.SCAN_COST_PER_BLOCKS);
+            // These two scans decode up to `depth` FULL blocks from RocksDB under the consensus lock
+            // (ExplorerApi.findTransaction / addressTransactions call node.block(h) per height, worst
+            // case a never-matching txid/address running the whole depth) — the same cost class as
+            // /blocks and /stats, which are weighted ~1 unit per block decoded. The old depth/20
+            // (SCAN_COST_PER_BLOCKS, a light header-scan rate) under-weighted them ~20x, so one IP
+            // could drive ~20x the lock-guarded block decodes/s the aggregate readGate was sized to
+            // admit. Weight by the blocks actually read (audit: explorer full-block scans under-weighted).
+            return depth;
         }
         if ("/call_readonly".equals(path)) {
             return CALL_READONLY_COST;
