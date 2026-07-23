@@ -222,6 +222,9 @@ public final class HeaderSynchronizer {
     }
 
     private ChainSynchronizer.Result reorg(PeerSource peer, long forkHeight, List<BlockHeader> branch) {
+        // Uncle-inclusive chain weight before we touch anything — the authoritative GHOST fork-choice
+        // metric (§3.7). Captured with the local branch still applied.
+        BigInteger localTotal = engine.totalWork();
         List<Block> localBranch = new ArrayList<>();
         for (long h = forkHeight + 1; h <= engine.height(); h++) {
             localBranch.add(engine.blockAt(h));
@@ -232,6 +235,18 @@ public final class HeaderSynchronizer {
         if (!applyBodies(peer, forkHeight, branch)) {
             restore(forkHeight, localBranch);
             return ChainSynchronizer.Result.PEER_INVALID;
+        }
+        // GHOST fork choice (§3.7, audit S4). The base-only header gate above is the anti-DoS
+        // PREFILTER — it stays base-only because a header's claimed uncle work is unverifiable and
+        // could otherwise be inflated with fake in-range refs to force a pop/restore (M4). The
+        // AUTHORITATIVE choice, made here after the bodies applied, weights genuine uncle work:
+        // engine.totalWork() now folds in each uncle addBlock proved eligible. Adopt the peer branch
+        // only if its uncle-inclusive total strictly exceeds ours — a branch with more BASE work but a
+        // lighter subtree (our local GHOST work) must not displace the heavier subtree. The uncle work
+        // counted here is validated, not the gate's unverifiable claim, so this adds no M4 lever.
+        if (engine.totalWork().compareTo(localTotal) <= 0) {
+            restore(forkHeight, localBranch);
+            return ChainSynchronizer.Result.NO_CHANGE;
         }
         // The branch we replaced is valid work that lost the fork race; keep its blocks as
         // orphans so a later block can reference them as uncles (GHOST).
