@@ -18,9 +18,12 @@ gradleLint {
 // Shared dependency versions. Each module declares only what it actually
 // uses in its own build.gradle; nothing is injected globally anymore.
 ext {
-    // 6.0-rc2 is the newest published activej release; the last stable line is 5.5, so this is the
-    // latest available, not a stale pin. Do not downgrade to 5.x — that is a breaking API change.
-    activejVersion = '6.0-rc2'
+    // Custom activej build published from the Censseo/activej fork via JitPack
+    // (group com.github.Censseo.activej), tracking the upstream 6.0 line. The last
+    // stable upstream line is 5.5, so this is still the latest API, not a stale pin.
+    // Do not downgrade to 5.x — that is a breaking API change.
+    activejGroup = 'com.github.Censseo.activej'
+    activejVersion = 'v6.0-ce1'
     bouncycastleVersion = '1.78.1'  // 1.76 is vulnerable to CVE-2024-30172 — do not downgrade.
     jsonVersion = '20240303'
     slf4jVersion = '2.0.12'
@@ -43,10 +46,11 @@ subprojects {
 
     repositories {
         mavenCentral()
-
+        // Custom activej build (activejGroup) is served from JitPack.
+        maven { url 'https://jitpack.io' }
     }
 
-    // ActiveJ 6.0-rc2 pulls ASM 9.4, which cannot read Java 21 bytecode
+    // The ActiveJ 6.0 line pulls ASM 9.4, which cannot read Java 21 bytecode
     // (class file major version 65). Force a version that supports it so the
     // ActiveJ serializer codegen works on the toolchain JDK.
     configurations.all {

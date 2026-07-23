@@ -7,8 +7,8 @@ dependencies {
     // Contract-store interface implemented by the RocksDB-backed store below.
     implementation project(':lib-vm')
 
-    implementation "io.activej:activej-bytebuf:${activejVersion}"
-    implementation "io.activej:activej-common:${activejVersion}"
+    implementation "${activejGroup}:activej-bytebuf:${activejVersion}"
+    implementation "${activejGroup}:activej-common:${activejVersion}"
 
     // https://mvnrepository.com/artifact/org.iq80.leveldb/leveldb
     // Pure-Java store: the native-image / test / light-node path.
