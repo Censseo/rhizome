@@ -47,6 +47,51 @@ class RocksDbStateStoreTest {
     }
 
     @Test
+    void batchedNodeWritesAreReadYourWritesFlushDurablyAndDropOnDiscard(@TempDir Path dir) throws Exception {
+        byte[] hash = new byte[32];
+        hash[0] = 0x42;
+        byte[] node = {9, 8, 7};
+        try (var store = new RocksDbStateStore(dir.toString())) {
+            // Staged then discarded: visible within the batch (read-your-writes), never persisted (P8).
+            store.beginBatch();
+            store.put(hash, node);
+            assertArrayEquals(node, store.get(hash));
+            store.discardBatch();
+            assertNull(store.get(hash));
+
+            // Staged then flushed: one atomic write, then durably readable.
+            store.beginBatch();
+            store.put(hash, node);
+            store.flushBatch();
+            assertArrayEquals(node, store.get(hash));
+        }
+        try (var store = new RocksDbStateStore(dir.toString())) {
+            assertArrayEquals(node, store.get(hash)); // survived the reopen
+        }
+    }
+
+    @Test
+    void batchedTreeBuildProducesTheSameRootAsUnbatched(@TempDir Path dir) throws Exception {
+        // Determinism: buffering the block's SMT nodes must not change the root. The batched build also
+        // exercises read-your-writes — each of the 30 updates reads back the new root node the previous
+        // update just staged in the overlay (P8).
+        try (var store = new RocksDbStateStore(dir.toString())) {
+            SparseMerkleTree tree = new SparseMerkleTree(store);
+            byte[] plain = SparseMerkleTree.EMPTY_ROOT;
+            for (int i = 1; i <= 30; i++) {
+                plain = tree.update(plain, key32(i), key32(i));
+            }
+            store.beginBatch();
+            byte[] batched = SparseMerkleTree.EMPTY_ROOT;
+            for (int i = 1; i <= 30; i++) {
+                batched = tree.update(batched, key32(i), key32(i));
+            }
+            store.flushBatch();
+            assertArrayEquals(plain, batched, "batching must not change the root");
+        }
+    }
+
+    @Test
     void rootStorePrunesAndReportsLatest(@TempDir Path dir) throws Exception {
         try (var store = new RocksDbStateStore(dir.toString())) {
             for (long h = 1; h <= 10; h++) {
