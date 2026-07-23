@@ -96,6 +96,15 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
      * value is exact. The memoised value is byte-identical to the full fold — no consensus quantity moves.
      */
     private final java.util.TreeMap<Long, Integer> difficultyByBoundary = new java.util.TreeMap<>();
+    /**
+     * Ring of the last {@code medianTimeWindow} header timestamps in ascending height order (audit P6).
+     * Maintained incrementally on add/pop and rebuilt at boot, so {@link #medianTimePast} sorts a small
+     * {@code long[]} copy instead of re-reading and re-boxing the whole window from the store on every
+     * {@code addBlock} and {@code nextBlockTimestamp}. It holds exactly the heights the store-read
+     * version would ({@code [max(genesis, tip-W+1), tip]}), so the median is byte-identical — pinned by
+     * an equivalence test over a random add/pop/reorg walk.
+     */
+    private final java.util.ArrayDeque<Long> mtpWindow = new java.util.ArrayDeque<>();
 
     private ChainEngine(NetworkParameters params, Ledger ledger, ChainStore store,
                         NonceStore nonceStore,
@@ -419,6 +428,11 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
 
                 store.append(block); // flushes the staged ledger writes + block + height in one batch
                 appended = true;
+                // Slide the median-time window forward: the new tip enters, the oldest leaves (P6).
+                mtpWindow.addLast(b.timestamp());
+                if (mtpWindow.size() > params.medianTimeWindow()) {
+                    mtpWindow.removeFirst();
+                }
                 commitAccountNonces(block);
                 nonceStore.markSyncedThrough(b.id()); // nonces now reflect this new tip
                 totalWork = totalWork.add(BlockWork.of(b.difficulty())).add(uncleWork);
@@ -490,6 +504,12 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
                 if (!popped) {
                     store.discardBlockCommit();
                 }
+            }
+            // Slide the median-time window back one block (P6): the popped tip leaves the window, and a
+            // lower height re-enters at the front when the chain is still taller than the window.
+            mtpWindow.removeLast();
+            if (height - params.medianTimeWindow() >= GenesisBlock.GENESIS_ID) {
+                mtpWindow.addFirst(store.headerAt(height - params.medianTimeWindow()).timestamp());
             }
             // Drop any memoised retarget-boundary difficulty at or above the popped height: the block
             // (hence a boundary's timestamps) may be rewritten by the reorg, so those cached values are
@@ -1057,6 +1077,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             uncleWorkByHeight.keySet().removeIf(h -> h < uncleWorkFloor);
         }
         currentDifficulty = computeDifficultyFromChain();
+        rebuildMtpWindow(); // repopulate the median-time ring from headers (P6)
         syncVoteableHolder();
     }
 
@@ -1109,14 +1130,37 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
     }
 
     private long medianTimePast() {
-        long height = store.height();
-        int window = (int) Math.min(params.medianTimeWindow(), height);
-        List<Long> timestamps = new ArrayList<>(window);
-        for (long h = height - window + 1; h <= height; h++) {
-            timestamps.add(store.headerAt(h).timestamp());
+        int size = mtpWindow.size();
+        if (size == 0) {
+            return 0; // no chain yet (defensive; the ring holds >= genesis whenever height >= 1)
         }
-        timestamps.sort(Long::compare);
-        return timestamps.get(timestamps.size() / 2);
+        long[] ts = new long[size];
+        int i = 0;
+        for (long t : mtpWindow) {
+            ts[i++] = t;
+        }
+        java.util.Arrays.sort(ts);
+        return ts[size / 2];
+    }
+
+    /** The median-time window, rebuilt from headers (boot / reorg base). Ascending height order. */
+    private void rebuildMtpWindow() {
+        mtpWindow.clear();
+        long height = store.height();
+        long lo = Math.max(GenesisBlock.GENESIS_ID, height - params.medianTimeWindow() + 1);
+        for (long h = lo; h <= height; h++) {
+            mtpWindow.addLast(store.headerAt(h).timestamp());
+        }
+    }
+
+    /** Test hook (audit P6): the ring-based median, compared in tests to a fresh store computation. */
+    public long medianTimePastForTest() {
+        lock.lock();
+        try {
+            return medianTimePast();
+        } finally {
+            lock.unlock();
+        }
     }
 
     // ---- account nonces ----
