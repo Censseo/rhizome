@@ -900,6 +900,10 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             return;
         }
         lock.lock();
+        // Stage this dry-run's ledger writes in the overlay so they never touch the column family and
+        // are dropped wholesale by discardBlockCommit — a producer-only apply-then-revert that leaves
+        // zero ledger residue even if the process dies mid-stamp (audit S3).
+        store.beginBlockCommit();
         try {
             var b = (BlockImpl) candidate;
             java.util.Set<PublicAddress> touched = new java.util.HashSet<>();
@@ -922,6 +926,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
                 tokenProcessor.revertBlock(h);
             }
         } finally {
+            store.discardBlockCommit(); // drop the dry-run's staged ledger writes
             lock.unlock();
         }
     }
