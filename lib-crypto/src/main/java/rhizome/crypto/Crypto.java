@@ -3,11 +3,9 @@ package rhizome.crypto;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
-import java.util.Random;
 import java.math.BigInteger;
 
 import org.bouncycastle.crypto.AsymmetricCipherKeyPair;
@@ -20,6 +18,9 @@ import org.bouncycastle.crypto.signers.Ed25519Signer;
 public class Crypto {
 
     private Crypto() {}
+
+    /** One shared, thread-safe CSPRNG for key generation; avoids a reseed on every {@code new SecureRandom()}. */
+    private static final SecureRandom KEYGEN_RNG = new SecureRandom();
 
     public static byte[] signWithPrivateKey(String content, PrivateKey privateKey) {
         return signWithPrivateKey(content.getBytes(), privateKey);
@@ -59,7 +60,7 @@ public class Crypto {
 
     public static AsymmetricCipherKeyPair generateKeyPair() {
         Ed25519KeyPairGenerator keyGen = new Ed25519KeyPairGenerator();
-        keyGen.init(new Ed25519KeyGenerationParameters(new SecureRandom()));
+        keyGen.init(new Ed25519KeyGenerationParameters(KEYGEN_RNG));
         return keyGen.generateKeyPair();
     }
 
@@ -122,59 +123,9 @@ public class Crypto {
         }
     }
 
-    public SHA256Hash mineHash(SHA256Hash target, byte challengeSize, boolean usePufferFish) {
-        int hashes = 0;
-        long st = System.currentTimeMillis();
-
-        byte[] concat = new byte[2 * 32];
-        Random rand = new SecureRandom();
-
-        // Copy the target hash into the first part of concat.
-        System.arraycopy(target.hash(), 0, concat, 0, 32);
-        // Fill with random data for privacy
-        byte[] randomBytes = new byte[32];
-        rand.nextBytes(randomBytes);
-        System.arraycopy(randomBytes, 0, concat, 32, 32);
-
-        long i = 0;
-        SHA256Hash solution;
-        while (true) {
-            if (++hashes > 1024) {
-                long elapsed = System.currentTimeMillis() - st;
-                double hps = hashes / (elapsed / 1000.0);
-                System.out.println("Mining at " + hps + " h/sec");
-                hashes = 0;
-                st = System.currentTimeMillis();
-            }
-
-            i++;
-            incrementByteArrayByOne(concat, 32);
-
-            // This assumes solution is mutable.
-            solution = SHA256Hash.of(Arrays.copyOfRange(concat, 32, 64));
-            SHA256Hash fullHash = concatHashes(target, solution, usePufferFish, false);
-
-            boolean found = checkLeadingZeroBits(fullHash, challengeSize);
-
-            if (found) {
-                break;
-            }
-        }
-
-        return solution;
-    }
-
     public static boolean verifyHash(SHA256Hash target, SHA256Hash nonce, int challengeSize, boolean usePufferFish, boolean useCache) {
         SHA256Hash fullHash = concatHashes(target, nonce, usePufferFish, useCache);
         return checkLeadingZeroBits(fullHash, challengeSize);
-    }
-
-    private void incrementByteArrayByOne(byte[] array, int offset) {
-        for (int i = offset; i < array.length; i++) {
-            if (++array[i] != 0) {
-                break;
-            }
-        }
     }
 
     public static SHA256Hash concatHashes(SHA256Hash a, SHA256Hash b, boolean usePufferFish, boolean useCache) {

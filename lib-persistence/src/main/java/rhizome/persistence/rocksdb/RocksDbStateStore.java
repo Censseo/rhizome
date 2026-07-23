@@ -47,8 +47,23 @@ public final class RocksDbStateStore implements SmtNodeStore, RootStore, AutoClo
      * reads consult the overlay first (read-your-writes) so an update sees the nodes an earlier update
      * in the same block just wrote. Null outside a batch, so proofs and snapshot import write through
      * unchanged. Node bytes are content-addressed and immutable, so this only changes write timing.
+     *
+     * <p>Keyed by a value-equality {@link ByteKey} rather than a hex String: the tree does hundreds of
+     * node put/read-back pairs per block, so hex-encoding every 32-byte hash to a 64-char String (and
+     * decoding it back on flush) was thousands of avoidable String allocations per block on the
+     * consensus-critical path.
      */
-    private volatile java.util.concurrent.ConcurrentHashMap<String, byte[]> pendingNodes;
+    private volatile java.util.concurrent.ConcurrentHashMap<ByteKey, byte[]> pendingNodes;
+
+    /** Immutable byte[] wrapper with value-based equals/hashCode, for use as a hash-map key. */
+    private record ByteKey(byte[] bytes) {
+        @Override public boolean equals(Object o) {
+            return o instanceof ByteKey k && java.util.Arrays.equals(bytes, k.bytes);
+        }
+        @Override public int hashCode() {
+            return java.util.Arrays.hashCode(bytes);
+        }
+    }
 
     public RocksDbStateStore(String path) throws IOException {
         List<ColumnFamilyDescriptor> descriptors = List.of(
@@ -73,7 +88,7 @@ public final class RocksDbStateStore implements SmtNodeStore, RootStore, AutoClo
     public byte[] get(byte[] hash) {
         var pending = pendingNodes;
         if (pending != null) {
-            byte[] staged = pending.get(hex(hash));
+            byte[] staged = pending.get(new ByteKey(hash));
             if (staged != null) {
                 return staged; // read-your-writes: a node an earlier update in this block just wrote
             }
@@ -85,7 +100,7 @@ public final class RocksDbStateStore implements SmtNodeStore, RootStore, AutoClo
     public void put(byte[] hash, byte[] node) {
         var pending = pendingNodes;
         if (pending != null) {
-            pending.put(hex(hash), node);
+            pending.put(new ByteKey(hash), node);
             return;
         }
         try {
@@ -109,7 +124,7 @@ public final class RocksDbStateStore implements SmtNodeStore, RootStore, AutoClo
         }
         try (org.rocksdb.WriteBatch batch = new org.rocksdb.WriteBatch()) {
             for (var e : pending.entrySet()) {
-                batch.put(nodesCf, hexToBytes(e.getKey()), e.getValue());
+                batch.put(nodesCf, e.getKey().bytes(), e.getValue());
             }
             db.write(writeOptions, batch);
         } catch (RocksDBException e) {
@@ -120,14 +135,6 @@ public final class RocksDbStateStore implements SmtNodeStore, RootStore, AutoClo
     @Override
     public void discardBatch() {
         pendingNodes = null; // dry-run nodes are content-addressed and re-derived on a real apply
-    }
-
-    private static String hex(byte[] b) {
-        return rhizome.core.common.Utils.bytesToHex(b);
-    }
-
-    private static byte[] hexToBytes(String s) {
-        return rhizome.core.common.Utils.hexStringToByteArray(s);
     }
 
     // ---- RootStore ----

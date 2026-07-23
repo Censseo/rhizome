@@ -148,13 +148,29 @@ public final class WasmVm {
      * and purely a performance cache — it never changes execution results — with a bounded size so
      * it cannot itself be a memory-growth vector.
      */
-    private static final java.util.LinkedHashMap<String, WasmModule> MODULE_CACHE =
+    private static final java.util.LinkedHashMap<CodeKey, WasmModule> MODULE_CACHE =
         new java.util.LinkedHashMap<>(64, 0.75f, true) {
             @Override
-            protected boolean removeEldestEntry(java.util.Map.Entry<String, WasmModule> eldest) {
+            protected boolean removeEldestEntry(java.util.Map.Entry<CodeKey, WasmModule> eldest) {
                 return size() > 256;
             }
         };
+
+    /**
+     * Value-equality wrapper over contract code bytes, used as the {@link #MODULE_CACHE} key. Replaces
+     * a per-call SHA-256 + hex-String of the whole module (up to MAX_CODE_SIZE) — O(code) crypto on
+     * every call, even a cache hit — with an {@code Arrays.hashCode} loop; equals only runs on a hash
+     * collision. The key never affects gas (charged unconditionally before the lookup), so this stays a
+     * pure CPU optimization with no consensus effect.
+     */
+    private record CodeKey(byte[] code) {
+        @Override public boolean equals(Object o) {
+            return o instanceof CodeKey k && java.util.Arrays.equals(code, k.code);
+        }
+        @Override public int hashCode() {
+            return java.util.Arrays.hashCode(code);
+        }
+    }
 
     /**
      * Handles a contract-to-contract call requested via the {@code call_contract}
@@ -199,20 +215,27 @@ public final class WasmVm {
         // Pages this frame reserves from the tree-wide budget (initial memory + every memory.grow);
         // released in the finally so the budget tracks concurrent nesting and unwinds on return.
         long[] frameAdded = new long[1];
+        // The linear memory this instance builds, captured so the memory.grow meter can read its
+        // current/maximum pages and reserve only what a grow will actually commit (see meter).
+        Memory[] memHolder = new Memory[1];
         try {
             Instance instance = Instance.builder(module)
                 .withImportValues(imports)
                 .withStart(false)
                 // Cap and meter linear memory so a contract cannot allocate gigabytes — per-instance
                 // AND tree-wide (see TREE_MAX_PAGES) so nested calls cannot sum past the budget.
-                .withMemoryFactory(limits -> boundedMemory(limits, gas, frameAdded))
+                .withMemoryFactory(limits -> {
+                    Memory m = boundedMemory(limits, gas, frameAdded);
+                    memHolder[0] = m;
+                    return m;
+                })
                 // Deterministic WASM call-depth cap: traps unbounded recursion at a fixed depth
                 // on every node, replacing the JVM-stack-dependent StackOverflowError that would
                 // otherwise fork consensus (see DepthLimitedInterpreterMachine).
                 .withMachineFactory(DepthLimitedInterpreterMachine::new)
                 // Meter every instruction; bulk-memory / memory.grow are charged by their
                 // runtime operand, not a flat 1, so O(N) work cannot cost O(1) gas.
-                .withUnsafeExecutionListener((instruction, stack) -> meter(instruction, stack, gas, frameAdded))
+                .withUnsafeExecutionListener((instruction, stack) -> meter(instruction, stack, gas, frameAdded, memHolder))
                 .build();
 
             ExportFunction call = instance.export(ENTRY);
@@ -370,7 +393,7 @@ public final class WasmVm {
             gas.charge(GasSchedule.MODULE_PARSE_BASE
                 + (long) wasmCode.length * GasSchedule.MODULE_PARSE_PER_BYTE);
         }
-        String key = sha256Hex(wasmCode);
+        CodeKey key = new CodeKey(wasmCode);
         synchronized (MODULE_CACHE) {
             WasmModule cached = MODULE_CACHE.get(key);
             if (cached != null) {
@@ -397,19 +420,6 @@ public final class WasmVm {
     static void clearModuleCacheForTest() {
         synchronized (MODULE_CACHE) {
             MODULE_CACHE.clear();
-        }
-    }
-
-    private static String sha256Hex(byte[] data) {
-        try {
-            byte[] d = java.security.MessageDigest.getInstance("SHA-256").digest(data);
-            StringBuilder sb = new StringBuilder(d.length * 2);
-            for (byte b : d) {
-                sb.append(Character.forDigit((b >> 4) & 0xF, 16)).append(Character.forDigit(b & 0xF, 16));
-            }
-            return sb.toString();
-        } catch (java.security.NoSuchAlgorithmException e) {
-            throw new IllegalStateException("SHA-256 unavailable", e);
         }
     }
 
@@ -440,7 +450,8 @@ public final class WasmVm {
      * (the count on top of the value stack when this fires, before execution), so they are
      * charged by that operand — otherwise a single instruction could memset megabytes for 1 gas.
      */
-    private static void meter(Instruction instruction, MStack stack, GasMeter gas, long[] frameAdded) {
+    private static void meter(Instruction instruction, MStack stack, GasMeter gas, long[] frameAdded,
+                              Memory[] memHolder) {
         gas.charge(GasSchedule.PER_INSTRUCTION);
         switch (instruction.opcode()) {
             case MEMORY_FILL, MEMORY_COPY, MEMORY_INIT, TABLE_FILL, TABLE_COPY, TABLE_INIT -> {
@@ -454,10 +465,24 @@ public final class WasmVm {
             case MEMORY_GROW -> {
                 if (stack.size() > 0) {
                     long requested = stack.peek() & 0xFFFF_FFFFL;
+                    // Charge by the operand even if the grow will fail: the anti-DoS invariant is that
+                    // a large operand can never be cheap, and the charge must be deterministic.
                     gas.charge(requested * GasSchedule.MEMORY_PER_PAGE);
-                    // Count growth against the tree-wide budget too, before Chicory allocates it, so
-                    // a grow chain across nested contracts cannot exceed TREE_MAX_PAGES on any heap.
-                    reserveTreePages(requested, frameAdded);
+                    // Reserve tree-wide pages BEFORE Chicory allocates, but only the amount the grow will
+                    // actually commit. WASM memory.grow is all-or-nothing: it commits `requested` iff
+                    // pages()+requested <= maximumPages(), else it fails (returns -1) and commits nothing.
+                    // Reserving `requested` unconditionally (the old behavior) left phantom pages held
+                    // against TREE_MAX_PAGES for a grow that never allocated — deterministic, but it could
+                    // make a later legitimate grow in the same call tree spuriously trip the budget
+                    // (audit VM #4). Reserve 0 when the grow cannot fit the instance cap.
+                    Memory mem = memHolder[0];
+                    long committable = requested;
+                    if (mem != null && requested > (long) mem.maximumPages() - mem.pages()) {
+                        committable = 0;
+                    }
+                    if (committable > 0) {
+                        reserveTreePages(committable, frameAdded);
+                    }
                 }
             }
             case TABLE_GROW -> {
@@ -766,7 +791,13 @@ public final class WasmVm {
         // front-run init and seize the contract (audit T1).
         HostFunction getDeployer = new HostFunction(ENV, "get_deployer",
             List.of(ValType.I32, ValType.I32), List.of(ValType.I32),
-            (Instance inst, long... args) -> new long[] {copyOut(inst, host.deployer(), args[0], args[1], gas)});
+            (Instance inst, long... args) -> {
+                // Charge the storage-read base like storage_read: deployer() performs a real backing-store
+                // lookup, so without this a contract could loop get_deployer to read the store cheaper than
+                // storage_read (copyOut alone charges only PER_BYTE). host.deployer() memoizes the value.
+                gas.charge(GasSchedule.STORAGE_READ_BASE);
+                return new long[] {copyOut(inst, host.deployer(), args[0], args[1], gas)};
+            });
 
         // transfer_value(to_ptr, to_len, amount) -> i32: pays `amount` native coin from THIS
         // contract's own balance to the 25-byte address at to_ptr. Returns 0 on success, -1 if

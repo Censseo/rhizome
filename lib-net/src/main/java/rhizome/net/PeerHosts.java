@@ -4,6 +4,8 @@ import java.net.Inet6Address;
 import java.net.InetAddress;
 import java.net.URI;
 import java.net.UnknownHostException;
+import java.util.Locale;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Shared host classification and DNS-pinning for outbound peer traffic.
@@ -17,10 +19,48 @@ import java.net.UnknownHostException;
  *       flip (rebinding) cannot redirect it to an internal service. The node API is not
  *       virtual-hosted, so dropping the hostname in favour of the IP is safe.</li>
  * </ul>
+ *
+ * <p>Resolution goes through a short-TTL cache ({@link #resolveAll}) so admitting and then
+ * fetching from one peer does not re-hit the resolver several times per round (admission alone
+ * did up to three lookups; discovery pinned twice per peer). This does NOT weaken the anti-rebinding
+ * guarantee: pinning's security property is "connect to a validated IP", which a short cache of
+ * already-validated addresses preserves — the cached entry is the exact address set we classify and
+ * pin to. Only successful resolutions are cached (never negatives, so an unresolvable host keeps
+ * being retried), and the full address array is cached so the all-addresses routability check and the
+ * first-address pin/subnet/ban keys stay consistent.
  */
 final class PeerHosts {
 
     private PeerHosts() {}
+
+    /** How long a successful DNS resolution is reused before re-resolving. */
+    private static final long CACHE_TTL_NANOS = 60L * 1_000_000_000L;
+
+    private record CacheEntry(InetAddress[] addrs, long expiresAtNanos) {}
+
+    private static final ConcurrentHashMap<String, CacheEntry> DNS_CACHE = new ConcurrentHashMap<>();
+
+    /**
+     * All addresses {@code host} resolves to, via a short-TTL cache. Mirrors
+     * {@link InetAddress#getAllByName}; {@link InetAddress#getByName} returns the first of these, so
+     * callers needing a single address use {@code resolveAll(host)[0]}. Only successes are cached.
+     */
+    static InetAddress[] resolveAll(String host) throws UnknownHostException {
+        String key = host.toLowerCase(Locale.ROOT);
+        long now = System.nanoTime();
+        CacheEntry cached = DNS_CACHE.get(key);
+        if (cached != null && cached.expiresAtNanos() - now > 0) {
+            return cached.addrs();
+        }
+        InetAddress[] addrs = InetAddress.getAllByName(host); // throws (uncached) on failure
+        DNS_CACHE.put(key, new CacheEntry(addrs, now + CACHE_TTL_NANOS));
+        return addrs;
+    }
+
+    /** The first resolved address for {@code host} (cached), matching {@link InetAddress#getByName}. */
+    static InetAddress resolveFirst(String host) throws UnknownHostException {
+        return resolveAll(host)[0];
+    }
 
     /** True only if every address {@code host} resolves to is globally routable unicast. */
     static boolean isPubliclyRoutable(String host) {
@@ -28,7 +68,7 @@ final class PeerHosts {
             return false;
         }
         try {
-            InetAddress[] addrs = InetAddress.getAllByName(host);
+            InetAddress[] addrs = resolveAll(host);
             if (addrs.length == 0) {
                 return false;
             }
@@ -69,7 +109,7 @@ final class PeerHosts {
             return "host:";
         }
         try {
-            byte[] b = InetAddress.getByName(host).getAddress();
+            byte[] b = resolveFirst(host).getAddress();
             if (b.length == 4) {
                 return "v4:" + (b[0] & 0xFF) + "." + (b[1] & 0xFF);
             }
@@ -84,7 +124,7 @@ final class PeerHosts {
     static InetAddress resolve(String url) {
         try {
             String host = URI.create(url).getHost();
-            return host == null ? null : InetAddress.getByName(host);
+            return host == null ? null : resolveFirst(host);
         } catch (IllegalArgumentException | UnknownHostException e) {
             return null;
         }
@@ -116,7 +156,7 @@ final class PeerHosts {
         }
         InetAddress addr;
         try {
-            addr = InetAddress.getByName(host);
+            addr = resolveFirst(host);
         } catch (UnknownHostException e) {
             if (blockPrivate) {
                 throw new SecurityException("unresolvable peer host: " + host);

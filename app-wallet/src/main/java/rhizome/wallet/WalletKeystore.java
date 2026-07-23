@@ -97,7 +97,18 @@ final class WalletKeystore {
     private static SecretKey deriveKey(char[] passphrase, byte[] salt, int iterations)
             throws GeneralSecurityException {
         SecretKeyFactory factory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256");
-        byte[] key = factory.generateSecret(new PBEKeySpec(passphrase, salt, iterations, KEY_BITS)).getEncoded();
-        return new SecretKeySpec(key, "AES");
+        // Clear the derived secret and the PBEKeySpec's internal copy of the passphrase once the key
+        // material has been copied into the SecretKeySpec, so neither lingers on the heap (audit S-9).
+        PBEKeySpec spec = new PBEKeySpec(passphrase, salt, iterations, KEY_BITS);
+        try {
+            byte[] key = factory.generateSecret(spec).getEncoded();
+            try {
+                return new SecretKeySpec(key, "AES"); // SecretKeySpec clones key into its own array
+            } finally {
+                java.util.Arrays.fill(key, (byte) 0);
+            }
+        } finally {
+            spec.clearPassword();
+        }
     }
 }

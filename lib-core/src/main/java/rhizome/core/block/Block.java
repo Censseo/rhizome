@@ -32,6 +32,8 @@ public sealed interface Block permits BlockImpl {
                 .merkleRoot(blockImpl.merkleRoot())
                 .lastBlockHash(blockImpl.lastBlockHash())
                 .nonce(blockImpl.nonce())
+                .stateRoot(blockImpl.stateRoot())
+                .vote(blockImpl.vote())
                 .transactions(blockImpl.transactions())
                 .uncles(blockImpl.uncles())
                 .build();
@@ -50,6 +52,7 @@ public sealed interface Block permits BlockImpl {
                 .lastBlockHash(blockDto.lastBlockHash())
                 .nonce(blockDto.nonce())
                 .stateRoot(blockDto.stateRoot())
+                .vote(blockDto.vote())
                 .transactions(transactions)
                 .uncles(new java.util.ArrayList<>(uncles))
                 .build();

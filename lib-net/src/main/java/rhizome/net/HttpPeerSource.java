@@ -35,7 +35,10 @@ public final class HttpPeerSource implements PeerSource {
     // giant /total_work string. The block stream is bounded by what a well-behaved
     // peer can return for one fetch window.
     private static final int SCALAR_CAP = 4 * 1024;
-    private static final int JSON_BLOCK_CAP = 1024 * 1024;
+    // A full block's JSON is hex-expanded binary, so it can be several times MAX_BLOCK_SIZE_BYTES; the
+    // old 1 MiB cap rejected the fork-detection /block fetch on any large legitimate block (audit net
+    // S-5). Bound it against the real block-size limit with headroom for the hex+JSON overhead instead.
+    private static final long JSON_BLOCK_CAP = 4L * Constants.MAX_BLOCK_SIZE_BYTES;
     // The /sync body is now stream-decoded block-by-block (see blocks()), so there is no
     // single-shot window buffer to cap here.
     // Headers are tiny and fixed-ish (≈156 B + a few uncle records); 1 KiB each is a
@@ -56,9 +59,25 @@ public final class HttpPeerSource implements PeerSource {
      *        resolved IP so a DNS rebind cannot redirect the fetch to an internal service (SSRF).
      */
     public HttpPeerSource(String baseUrl, boolean blockPrivateHosts) {
+        this(baseUrl, blockPrivateHosts, newClient());
+    }
+
+    /**
+     * As above, but reusing a caller-provided {@link HttpClient}. The sync loop creates one source per
+     * peer per round; each JDK {@code HttpClient} spawns a selector-manager thread and its own
+     * connection pool that is never closed, so building one per round churned threads/sockets and reused
+     * no keep-alive connection (audit net #1). The DNS pin is still recomputed per source, so sharing the
+     * client does not weaken the anti-rebinding guarantee — it only shares the transport.
+     */
+    public HttpPeerSource(String baseUrl, boolean blockPrivateHosts, HttpClient client) {
         String trimmed = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
         this.baseUrl = PeerHosts.pin(trimmed, blockPrivateHosts);
-        this.client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
+        this.client = client;
+    }
+
+    /** A default JDK client with the standard connect timeout; callers that share one build it once. */
+    public static HttpClient newClient() {
+        return HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
     }
 
     @Override

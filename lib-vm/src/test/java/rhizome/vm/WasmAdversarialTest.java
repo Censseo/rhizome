@@ -190,4 +190,90 @@ class WasmAdversarialTest {
         assertEquals((long) (bigLen - smallLen) * GasSchedule.PER_BYTE, big.gasUsed() - small.gasUsed(),
             "transfer_value must charge PER_BYTE of the read length (audit S5)");
     }
+
+    // ---- memory.grow per-page gas (audit S-4) ----
+
+    /** Builds a module whose {@code call} export runs {@code memory.grow(pages); drop} once. */
+    private byte[] memoryGrowModule(int pages) {
+        byte[] type = section(1, bytes(0x01, 0x60, 0x00, 0x00));      // 1 type: () -> ()
+        byte[] func = section(3, bytes(0x01, 0x00));                  // 1 function, type 0
+        byte[] mem = section(5, bytes(0x01, 0x00, 0x01));             // 1 memory, min 1 page, no max
+        byte[] export = section(7, bytes(0x01, 0x04, 0x63, 0x61, 0x6C, 0x6C, 0x00, 0x00)); // "call" -> func 0
+        // body: 0 locals; i32.const pages; memory.grow 0; drop; end
+        ByteArrayOutputStream body = new ByteArrayOutputStream();
+        body.write(0x00);
+        body.write(0x41); sleb(body, pages);
+        body.write(0x40); body.write(0x00);                          // memory.grow, memory index 0
+        body.write(0x1A);                                            // drop the prev-size i32
+        body.write(0x0B);                                            // end
+        ByteArrayOutputStream code = new ByteArrayOutputStream();
+        code.write(0x01);
+        uleb(code, body.size());
+        code.writeBytes(body.toByteArray());
+        return module(type, func, mem, export, section(10, code.toByteArray()));
+    }
+
+    @Test
+    void memoryGrowGasScalesWithThePageCountNotFlat() {
+        // memory.grow does O(pages) heap work, so it must be charged by its runtime page operand — a flat
+        // PER_INSTRUCTION would let one instruction claim megabytes for 1 gas (a deterministic memory /
+        // GC DoS). Two grows differing only in the page count must differ in gasUsed by exactly
+        // (bigPages - smallPages) * MEMORY_PER_PAGE. This is the only test pinning that invariant, which
+        // otherwise rests on an untested assumption about Chicory's unsafe-listener operand timing.
+        int smallPages = 2;
+        int bigPages = 20;                                            // both encode to a 1-byte LEB operand
+        byte[] smallMod = memoryGrowModule(smallPages);
+        byte[] bigMod = memoryGrowModule(bigPages);
+        assertEquals(smallMod.length, bigMod.length,
+            "modules must be equal length so the parse charge cancels out of the gas delta");
+        WasmVm.clearModuleCacheForTest();
+        ExecResult small = vm.execute(smallMod,
+            new MapHostState(new byte[0], new byte[0], 0), new GasMeter(10_000_000));
+        ExecResult big = vm.execute(bigMod,
+            new MapHostState(new byte[0], new byte[0], 0), new GasMeter(10_000_000));
+
+        assertEquals(ExecResult.Status.OK, small.status(), "small grow should complete");
+        assertEquals(ExecResult.Status.OK, big.status(), "big grow should complete");
+        assertEquals((long) (bigPages - smallPages) * GasSchedule.MEMORY_PER_PAGE,
+            big.gasUsed() - small.gasUsed(),
+            "memory.grow must charge MEMORY_PER_PAGE per requested page (audit S-4)");
+    }
+
+    /** {@code memory.grow(hi); drop; memory.grow(lo); drop} — the first grow overshoots the instance cap. */
+    private byte[] failedThenSucceedGrowModule(int hi, int lo) {
+        byte[] type = section(1, bytes(0x01, 0x60, 0x00, 0x00));      // () -> ()
+        byte[] func = section(3, bytes(0x01, 0x00));                  // 1 function, type 0
+        byte[] mem = section(5, bytes(0x01, 0x00, 0x01));            // 1 memory, min 1 page, no max
+        byte[] export = section(7, bytes(0x01, 0x04, 0x63, 0x61, 0x6C, 0x6C, 0x00, 0x00)); // "call" -> func 0
+        ByteArrayOutputStream body = new ByteArrayOutputStream();
+        body.write(0x00);
+        body.write(0x41); sleb(body, hi);
+        body.write(0x40); body.write(0x00);                          // memory.grow (fails at the cap)
+        body.write(0x1A);                                            // drop -1
+        body.write(0x41); sleb(body, lo);
+        body.write(0x40); body.write(0x00);                          // memory.grow (fits)
+        body.write(0x1A);                                            // drop prev size
+        body.write(0x0B);                                            // end
+        ByteArrayOutputStream code = new ByteArrayOutputStream();
+        code.write(0x01);
+        uleb(code, body.size());
+        code.writeBytes(body.toByteArray());
+        return module(type, func, mem, export, section(10, code.toByteArray()));
+    }
+
+    @Test
+    void aFailedGrowDoesNotConsumeTheTreePageBudget() {
+        // The instance is capped at MAX_CONTRACT_PAGES = 1024 (= TREE_MAX_PAGES). memory.grow(1024) from
+        // 1 page overshoots the cap, so it returns -1 and allocates nothing; memory.grow(1) then fits and
+        // must succeed. The old accounting reserved the full 1024 pages of the FAILED grow against the
+        // tree budget, so the second grow tripped TREE_MAX_PAGES and reverted the call for memory that was
+        // never allocated (audit VM #4). WASM grow is all-or-nothing, so a failed grow must reserve
+        // nothing — the call now completes.
+        byte[] mod = failedThenSucceedGrowModule(1024, 1);
+        WasmVm.clearModuleCacheForTest();
+        ExecResult r = vm.execute(mod,
+            new MapHostState(new byte[0], new byte[0], 0), new GasMeter(10_000_000));
+        assertEquals(ExecResult.Status.OK, r.status(),
+            "a grow that fails at the instance cap must not consume the tree-page budget");
+    }
 }

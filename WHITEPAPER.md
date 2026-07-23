@@ -795,7 +795,7 @@ inflated reward, **negative amounts** (money minting), **balance overflow**, tim
 and difficulty (time-warp) manipulation, deep reorg (finality), lying peer (claimed but
 unproven work), transaction-layer censorship, block/request flooding, and network DoS
 (bounded bodies, ban-score). This section is the consolidated security reference; the
-history below records seven successive review passes and the invariants they established.
+history below records eight successive review passes and the invariants they established.
 
 ### 7.1 Load-bearing invariants (must never regress)
 
@@ -824,6 +824,13 @@ history below records seven successive review passes and the invariants they est
   tokens, contract code/storage, account nonces) is in every header, stamped by the producer
   and revalidated by every node with full rollback on mismatch; the root is order-independent
   (a function of the binding *set*), so it can never fork on map iteration order.
+- **Codec round-trip fidelity.** Every codec (binary wire form and JSON) must decode a block or
+  transaction to one whose hash equals the original: a hash-committed field can never be silently
+  dropped on one path. This is load-bearing because the miner `vote` and `stateRoot` enter the
+  header preimage only when non-zero/non-empty, so a decoder that omits one produces a body whose
+  recomputed hash no longer matches the mined header — rejected by every peer, and hashing
+  differently across the two wire forms (a latent split). Pinned by a decode(encode(b)).hash()
+  round-trip test over non-zero votes and non-empty uncles.
 
 ### 7.2 Determinism and fork resistance
 
@@ -869,11 +876,16 @@ send, redirects are refused, PEX is capped, subnet-bucketed and ban-scored (Sybi
 every outbound peer read is size-bounded (the PEX `/peers` body included, so a hostile peer
 cannot OOM the node with a giant response on the automatic discovery round), a peer that
 throws or returns garbage mid-probe is dropped rather than crashing the sync pass,
-and a browser state-changing POST must be same-origin *and* carry a non-simple
-`X-Rhizome-Request` header the origin's own dashboard sets but a cross-site/DNS-rebinding
-page cannot (CSRF). BouncyCastle is pinned to a patched release. Snapshot bootstrap is
-pinned to a PoW-validated pivot root and rebuilds secondary indexes locally, so no untrusted
-state or index is ever adopted.
+and a browser state-changing POST must clear two gates (CSRF + DNS-rebinding): its `Host`
+must be one of the node's configured authorities (advertised host plus loopback — a rebound
+page carries the attacker's own hostname, so it is refused even though rebinding makes
+`Origin == Host` look same-origin), *and* it must be same-origin and carry a non-simple
+`X-Rhizome-Request` header. The Host allowlist is the load-bearing anti-rebinding control:
+the marker check alone does not stop rebinding, because a same-origin page sets custom headers
+freely. Outbound peer resolution is pinned per send and DNS-cached with a short TTL over the
+already-validated address, so the pin's "connect to a validated IP" property is preserved.
+BouncyCastle is pinned to a patched release. Snapshot bootstrap is pinned to a PoW-validated
+pivot root and rebuilds secondary indexes locally, so no untrusted state or index is ever adopted.
 
 ### 7.5 Contract sandbox
 
@@ -903,7 +915,7 @@ fresh accounts grows that domain by one leaf per hop. The growth is bounded — 
 the optional minimum-fee floor (each nonce-creating hop then costs a real fee) and by block
 space — rather than eliminated; the floor is off by default and is a per-operator policy knob.
 
-Seven parallel-subsystem review passes hardened this model: from the first (negative-amount
+Eight parallel-subsystem review passes hardened this model: from the first (negative-amount
 minting, deposit-overflow rollback) through consensus-fork classes (unscaled uncle-reward
 rollback, heap-dependent VM OOM, cache-dependent gas, phantom-wallet validity, reorg-gate
 work-metric mismatch), theft and liveness (unsigned `BOX_COLLECT` drain, mempool-poisoning
@@ -927,7 +939,31 @@ leaf per account, not an unbounded `(address, nonce)` seen-set), bounded against
 cycling by the minimum-fee floor (the residual above). Alongside, a dozen consensus-invariant-preserving
 **performance residuals** were removed with byte-identical outputs (difficulty and median-time
 memoised incrementally, digest and codec buffers reused, streamed block decode made linear, the
-boot header-backfill sweep skipped in `O(1)`). Every fix carries a regression test; a
+boot header-backfill sweep skipped in `O(1)`). An **eighth** pass — a full security-and-optimisation
+sweep — caught the one load-bearing regression the codec-fidelity invariant (§7.1) now guards: the
+binary block decoder silently dropped the miner `vote`, so a voted block re-hashed differently than it
+was mined (rejected network-wide) and hashed differently again as JSON than as binary (a latent split),
+with the copy constructor dropping `vote` and `stateRoot` the same way. It also hardened the browser
+surface (a `Host` allowlist that actually stops DNS-rebinding, where the prior marker-only check did
+not; `/peers` withholding private seed URLs; CSPRNG scan ids so an unauthenticated caller cannot
+enumerate and wipe another app's scans), the wallet (a loud warning and heap-zeroing around an
+unencrypted key), and the VM: `get_deployer` now charges the storage-read base and caches, the
+alternate `ContractExecutor` entry runs on the bounded stack, and — the subtler consensus item — a
+`memory.grow` that overshoots the instance cap reserves **zero** tree-wide pages instead of the full
+requested amount (WASM grow is all-or-nothing), so a failed grow can no longer strand phantom pages
+that revert a later legitimate grow. Alongside it removed another tranche of consensus-invariant-preserving
+**performance residuals** with byte-identical outputs — value-equality `byte[]` keys replacing
+hex-`String` keys across the sparse-Merkle overlay, the contract session/host stores and the WASM
+module cache (dropping a per-call SHA-256 of the whole module on every cache hit), a reused
+`ThreadLocal` digest and a memoised transaction content-hash on the validation path, per-field
+`ByteBuffer` allocations removed from hashing — and reshaped the sync layer without touching consensus
+order: one shared `HttpClient` across rounds, a short-TTL DNS cache over the already-validated address,
+a wall-clock-bounded and fairly-rotated sync round so a slow-peer tail cannot starve the schedule, a
+bounded-parallel PEX round, and a body fetch/apply **pipeline** that prefetches the next window while
+the current one is applied — the apply staying strictly serial and in order under the single engine
+lock, so the block sequence and state root are identical (application is deliberately never
+parallelised across peers, which would only waste work and mislabel honest peers `PEER_INVALID`).
+Every fix carries a regression test; a
 dependency bump is validated by the same suite (one caught a silent CSRF-guard fail-open from a
 library header-lookup change).
 
@@ -949,7 +985,7 @@ ledger of a synchronised Pandanite node.
 (`addBlock`/`popBlock`, nonces, work, difficulty); RocksDB storage; mempool; HTTP API;
 block production; synchronisation + reorg by cumulative work; wallet CLI; gossip & peer
 discovery; hardening (checkpoints, finality, bounded rate limiting, ban-score, block-size
-cap); seven parallel-subsystem security-review passes (§7); the **WASM smart-contract layer** — a Chicory-backed
+cap); eight parallel-subsystem security-review passes (§7); the **WASM smart-contract layer** — a Chicory-backed
 metered VM, a persistent contract store, `DEPLOY`/`CALL` transactions with gas fees,
 atomic per-block contract state with exact reorg reversal, and wallet `deploy`/`call`
 commands; and the **data-box layer** (§5.5) — stable-id, typed-register storage objects

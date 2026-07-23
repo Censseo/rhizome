@@ -1,5 +1,6 @@
 package rhizome.vm;
 
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -8,72 +9,58 @@ import rhizome.core.ledger.PublicAddress;
 /** In-memory {@link ContractStore} — the reference implementation and test backend. */
 public final class InMemoryContractStore implements ContractStore {
 
-    private final Map<String, byte[]> code = new HashMap<>();
-    private final Map<String, byte[]> storage = new HashMap<>();
+    private final Map<PublicAddress, byte[]> code = new HashMap<>();
+    private final Map<Slot, byte[]> storage = new HashMap<>();
 
-    private static String hex(byte[] b) {
-        StringBuilder sb = new StringBuilder(b.length * 2);
-        for (byte x : b) {
-            sb.append(Character.forDigit((x >> 4) & 0xF, 16)).append(Character.forDigit(x & 0xF, 16));
+    /** A (contract, storage-key) pair with value-based equality, for use as a map key. */
+    private record Slot(PublicAddress contract, byte[] key) {
+        @Override public boolean equals(Object o) {
+            return o instanceof Slot s && contract.equals(s.contract) && Arrays.equals(key, s.key);
         }
-        return sb.toString();
-    }
-
-    private static String slot(PublicAddress contract, byte[] key) {
-        return hex(contract.toBytes()) + ":" + hex(key);
+        @Override public int hashCode() {
+            return 31 * contract.hashCode() + Arrays.hashCode(key);
+        }
     }
 
     @Override
     public byte[] getCode(PublicAddress contract) {
-        byte[] c = code.get(hex(contract.toBytes()));
+        byte[] c = code.get(contract);
         return c == null ? null : c.clone();
     }
 
     @Override
     public void putCode(PublicAddress contract, byte[] c) {
-        code.put(hex(contract.toBytes()), c.clone());
+        code.put(contract, c.clone());
     }
 
     @Override
     public void deleteCode(PublicAddress contract) {
-        code.remove(hex(contract.toBytes()));
+        code.remove(contract);
     }
 
     @Override
     public byte[] getStorage(PublicAddress contract, byte[] key) {
-        byte[] v = storage.get(slot(contract, key));
+        byte[] v = storage.get(new Slot(contract, key));
         return v == null ? null : v.clone();
     }
 
     @Override
     public void putStorage(PublicAddress contract, byte[] key, byte[] value) {
-        storage.put(slot(contract, key), value.clone());
+        storage.put(new Slot(contract, key), value.clone());
     }
 
     @Override
     public void deleteStorage(PublicAddress contract, byte[] key) {
-        storage.remove(slot(contract, key));
+        storage.remove(new Slot(contract, key));
     }
 
     @Override
     public void forEachCode(java.util.function.BiConsumer<PublicAddress, byte[]> consumer) {
-        code.forEach((addrHex, c) -> consumer.accept(PublicAddress.of(unhex(addrHex)), c.clone()));
+        code.forEach((contract, c) -> consumer.accept(contract, c.clone()));
     }
 
     @Override
     public void forEachStorage(StorageConsumer consumer) {
-        storage.forEach((slot, value) -> {
-            int sep = slot.indexOf(':');
-            consumer.accept(PublicAddress.of(unhex(slot.substring(0, sep))),
-                unhex(slot.substring(sep + 1)), value.clone());
-        });
-    }
-
-    private static byte[] unhex(String hex) {
-        byte[] out = new byte[hex.length() / 2];
-        for (int i = 0; i < out.length; i++) {
-            out[i] = (byte) Integer.parseInt(hex.substring(i * 2, i * 2 + 2), 16);
-        }
-        return out;
+        storage.forEach((slot, value) -> consumer.accept(slot.contract(), slot.key().clone(), value.clone()));
     }
 }

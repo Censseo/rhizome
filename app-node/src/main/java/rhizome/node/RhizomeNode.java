@@ -73,6 +73,9 @@ public final class RhizomeNode implements AutoCloseable {
     private PeerRegistry registry;
     private PeerDiscovery discovery;
     private PeerBanList banList;
+    /** One shared HTTP client for all sync rounds, so a fresh client (and its selector thread +
+     *  connection pool) is not built per peer per round, and keep-alive is reused (audit net #1). */
+    private final java.net.http.HttpClient syncHttpClient = HttpPeerSource.newClient();
     /** Whether to refuse/ pin private peer hosts (SSRF): on for internet-exposed mainnet. */
     private boolean blockPrivatePeers;
 
@@ -227,12 +230,13 @@ public final class RhizomeNode implements AutoCloseable {
         // whatever path the block arrived by: API submit, gossip, sync or the local
         // producer. The engine listener only enqueues onto the event loop.
         sseHub = new SseLogHub(eventloop, 256);
-        engine.setOnBlockApplied(height -> sseHub.publish(height, service.logsAt(height)));
+        engine.setOnBlockApplied(height -> sseHub.publish(height, () -> service.logsAt(height)));
         // Per-client rate limit (fixed 1s window) with a bounded client table
         // (the table cap is the memory-leak fix; the per-window count is generous
         // so honest peers on a shared host are never throttled).
         RateLimiter limiter = new RateLimiter(1000, 1000, 65_536);
-        httpServer = HttpServer.builder(eventloop, NodeApi.servlet(eventloop, service, limiter, sseHub))
+        httpServer = HttpServer.builder(eventloop,
+                NodeApi.servlet(eventloop, service, limiter, sseHub, allowedHosts(config)))
             .withListenPort(config.apiPort())
             .build();
         eventloop.keepAlive(true);
@@ -307,15 +311,39 @@ public final class RhizomeNode implements AutoCloseable {
         }
     }
 
+    /** Wall-clock budget for one sync round: past this, remaining peers are left for the next round so
+     *  one slow (but not-yet-timed-out) peer, or a long tail of them, cannot starve later peers or delay
+     *  the schedule (audit net #2). A single in-progress sync is never cut — the check is between peers,
+     *  so a legitimate long catch-up from a good peer still completes. */
+    private static final long SYNC_ROUND_BUDGET_MS = 60_000L;
+
+    /** Rotates the per-round starting peer (single sync thread, so no synchronization needed). */
+    private long syncRoundCursor;
+
     /** One sync round across all known peers; peer failures are isolated. */
     public void syncRound() {
         var synchronizer = new HeaderSynchronizer(engine);
-        for (String peerUrl : registry.snapshot()) {
+        java.util.List<String> peers = registry.snapshot();
+        int n = peers.size();
+        if (n == 0) {
+            return;
+        }
+        // Rotate the starting index each round so that if the peers visited first are slow and eat the
+        // round budget, the ones skipped this round are visited first next round — every peer gets a turn.
+        int start = (int) Math.floorMod(syncRoundCursor++, n);
+        long deadline = System.currentTimeMillis() + SYNC_ROUND_BUDGET_MS;
+        for (int i = 0; i < n; i++) {
+            if (System.currentTimeMillis() >= deadline) {
+                log.debug("Sync round budget reached; deferring {} of {} peers to the next round", n - i, n);
+                break;
+            }
+            String peerUrl = peers.get((start + i) % n);
             if (registry.isBanned(peerUrl)) {
                 continue;
             }
             try {
-                ChainSynchronizer.Result result = synchronizer.syncFrom(new HttpPeerSource(peerUrl, blockPrivatePeers));
+                ChainSynchronizer.Result result = synchronizer.syncFrom(
+                    new HttpPeerSource(peerUrl, blockPrivatePeers, syncHttpClient));
                 switch (result) {
                     case EXTENDED, REORGED ->
                         log.info("Synced from {}: {} -> height {}", peerUrl, result, engine.height());
@@ -369,6 +397,32 @@ public final class RhizomeNode implements AutoCloseable {
         return config.apiPort();
     }
 
+    /**
+     * The legitimate {@code Host} authorities for the DNS-rebinding defense (audit S-2): the node's
+     * advertised host and the loopback names, each with and without the API port. A browser POST whose
+     * Host is not in this set is refused — a rebound page carries the attacker's hostname, not one of
+     * these. Lower-cased for case-insensitive matching.
+     */
+    private static java.util.Set<String> allowedHosts(NodeConfig config) {
+        java.util.Set<String> hosts = new java.util.HashSet<>();
+        int port = config.apiPort();
+        java.util.List<String> names = new java.util.ArrayList<>(java.util.List.of(
+            "localhost", "127.0.0.1", "[::1]"));
+        try {
+            String advertisedHost = java.net.URI.create(config.selfUrl()).getHost();
+            if (advertisedHost != null && !advertisedHost.isEmpty()) {
+                names.add(advertisedHost);
+            }
+        } catch (RuntimeException ignored) {
+            // malformed advertised URL: fall back to the loopback names only
+        }
+        for (String name : names) {
+            hosts.add(name.toLowerCase(java.util.Locale.ROOT));
+            hosts.add((name + ":" + port).toLowerCase(java.util.Locale.ROOT));
+        }
+        return hosts;
+    }
+
     @Override
     public synchronized void close() {
         if (producer != null) {
@@ -387,6 +441,9 @@ public final class RhizomeNode implements AutoCloseable {
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
+        }
+        if (discovery != null) {
+            discovery.close(); // stop the PEX fan-out pool (daemon threads, best-effort)
         }
         if (broadcaster != null) {
             broadcaster.close();

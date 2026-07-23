@@ -74,8 +74,20 @@ public final class Wallet {
     public void save(Path keyFile) throws IOException {
         String plaintext = toJson().toString(2);
         char[] pass = passphrase();
-        String content = pass == null ? plaintext : WalletKeystore.encrypt(plaintext, pass);
-        writeOwnerOnly(keyFile, content);
+        try {
+            if (pass == null) {
+                // A plaintext seed on disk (0600 or not) is a spendable key in any backup, snapshot,
+                // synced dotfile or image layer. Refuse to do it silently — warn loudly (audit S-3).
+                System.err.println("WARNING: writing wallet private key UNENCRYPTED to " + keyFile
+                    + " — set " + PASSPHRASE_ENV + " to encrypt the key at rest (AES-256-GCM).");
+            }
+            String content = pass == null ? plaintext : WalletKeystore.encrypt(plaintext, pass);
+            writeOwnerOnly(keyFile, content);
+        } finally {
+            if (pass != null) {
+                java.util.Arrays.fill(pass, '\0'); // don't leave the passphrase lingering on the heap
+            }
+        }
     }
 
     /**
@@ -116,7 +128,11 @@ public final class Wallet {
             if (pass == null) {
                 throw new IOException("wallet file is encrypted; set " + PASSPHRASE_ENV + " to load it");
             }
-            content = WalletKeystore.decrypt(content, pass);
+            try {
+                content = WalletKeystore.decrypt(content, pass);
+            } finally {
+                java.util.Arrays.fill(pass, '\0');
+            }
         }
         JSONObject json = new JSONObject(content);
         return fromPrivate(PrivateKey.of(json.getString("privateKey")));

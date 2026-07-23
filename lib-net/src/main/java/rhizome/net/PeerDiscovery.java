@@ -8,9 +8,14 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -37,12 +42,26 @@ public final class PeerDiscovery {
      * rather than buffering the whole body into a String first (audit V2).
      */
     private static final long MAX_PEERS_BODY_BYTES = 64 * 1024;
+    /** Peers contacted concurrently per round: the PEX fetches are independent blocking I/O, so a
+     *  small pool removes the sequential per-peer stall without opening a connection to every peer at
+     *  once (audit net #2). */
+    private static final int ROUND_CONCURRENCY = 8;
+    /** Wall-clock budget for one round; tasks not finished by then are cancelled and retried next round
+     *  (rotation keeps that fair), so one slow peer cannot delay the whole PEX round. */
+    private static final long ROUND_BUDGET_MS = 30_000L;
 
     private final PeerRegistry registry;
     private final String selfUrl;
     private final boolean blockPrivateHosts;
     private final HttpClient http;
     private final Map<String, Integer> failures = new ConcurrentHashMap<>();
+    private final ExecutorService pool = Executors.newFixedThreadPool(ROUND_CONCURRENCY, r -> {
+        Thread t = new Thread(r, "rhizome-pex");
+        t.setDaemon(true);
+        return t;
+    });
+    /** Rotates the round's peer order so a tail cut by the budget is visited first next round. */
+    private long roundCursor;
 
     public PeerDiscovery(PeerRegistry registry, String selfUrl) {
         this(registry, selfUrl, false);
@@ -55,29 +74,69 @@ public final class PeerDiscovery {
         this.http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build();
     }
 
-    /** One discovery round across all known peers. */
+    /**
+     * One discovery round across all known peers, fanned out over a bounded pool with an overall
+     * deadline. Each peer is pinned once and its PEX fetch + self-announce run together; a peer cut by
+     * the round deadline is not counted as a failure (it is retried next round, rotated to the front).
+     */
     public void round() {
-        for (String peer : registry.snapshot()) {
-            try {
-                registry.addAll(fetchPeers(peer));
-                announceTo(peer);
+        List<String> peers = registry.snapshot();
+        int n = peers.size();
+        if (n == 0) {
+            return;
+        }
+        int start = (int) Math.floorMod(roundCursor++, n);
+        List<Callable<Void>> tasks = new ArrayList<>(n);
+        for (int i = 0; i < n; i++) {
+            String peer = peers.get((start + i) % n);
+            tasks.add(() -> {
+                contactPeer(peer);
+                return null;
+            });
+        }
+        try {
+            pool.invokeAll(tasks, ROUND_BUDGET_MS, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    /** PEX fetch + self-announce against one peer, with failure bookkeeping. */
+    private void contactPeer(String peer) {
+        try {
+            // Pin once and reuse for both the /peers fetch and the /add_peer announce, instead of
+            // resolving the host twice per peer per round.
+            String pinned = PeerHosts.pin(peer, blockPrivateHosts);
+            registry.addAll(fetchPeersPinned(pinned));
+            announceToPinned(pinned);
+            failures.remove(peer);
+        } catch (InterruptedException e) {
+            // Cut by the round deadline (invokeAll cancelled the task) — not the peer's fault, so it is
+            // not penalised; it will be retried, rotated to the front, next round.
+            Thread.currentThread().interrupt();
+        } catch (Exception e) {
+            int f = failures.merge(peer, 1, Integer::sum);
+            if (f >= MAX_FAILURES) {
+                registry.remove(peer);
                 failures.remove(peer);
-            } catch (Exception e) {
-                int f = failures.merge(peer, 1, Integer::sum);
-                if (f >= MAX_FAILURES) {
-                    registry.remove(peer);
-                    failures.remove(peer);
-                    log.debug("dropped unreachable peer {}", peer);
-                }
+                log.debug("dropped unreachable peer {}", peer);
             }
         }
+    }
+
+    /** Shuts the round pool down (daemon threads, so this is best-effort cleanup on node close). */
+    public void close() {
+        pool.shutdownNow();
     }
 
     // Package-private (not private) so a regression test can assert the body cap directly.
     List<String> fetchPeers(String peer) throws Exception {
         // Pin the peer to its resolved IP (and refuse non-routable hosts on mainnet) so a DNS
         // rebind cannot point this fetch at an internal service (SSRF).
-        String pinned = PeerHosts.pin(peer, blockPrivateHosts);
+        return fetchPeersPinned(PeerHosts.pin(peer, blockPrivateHosts));
+    }
+
+    private List<String> fetchPeersPinned(String pinned) throws Exception {
         // Stream + bound the body: never buffer an unbounded response into memory (audit V2). The
         // MAX_PEX_PER_PEER limit below only caps how many entries we KEEP — it cannot stop an
         // attacker's giant body, which ofString() would have fully materialised before we ever parse.
@@ -108,12 +167,11 @@ public final class PeerDiscovery {
         return data;
     }
 
-    private void announceTo(String peer) throws Exception {
+    private void announceToPinned(String pinned) throws Exception {
         if (selfUrl == null || selfUrl.isEmpty()) {
             return;
         }
         String body = new JSONObject().put("url", selfUrl).toString();
-        String pinned = PeerHosts.pin(peer, blockPrivateHosts);
         http.send(
             HttpRequest.newBuilder(URI.create(pinned + "/add_peer"))
                 .timeout(Duration.ofSeconds(10))

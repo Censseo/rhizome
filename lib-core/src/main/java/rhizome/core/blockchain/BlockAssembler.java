@@ -50,9 +50,11 @@ public final class BlockAssembler {
         // Include transactions only while the block stays under the consensus size cap
         // (contract payloads are variable length), so the producer never builds a block
         // the network would reject as too large.
-        long size = rhizome.core.block.dto.BlockDto.BUFFER_SIZE + coinbase.serialize().getSize();
+        // Size the block from sizeBytes() rather than serialize().getSize() (audit P7): the latter
+        // allocates a full DTO (copying signature/key/data) per transaction just to read a length.
+        long size = rhizome.core.block.dto.BlockDto.BUFFER_SIZE + coinbase.sizeBytes();
         for (Transaction t : selected) {
-            long next = size + t.serialize().getSize();
+            long next = size + t.sizeBytes();
             if (next > params.maxBlockSizeBytes()) {
                 break;
             }
@@ -80,7 +82,7 @@ public final class BlockAssembler {
                     .timestamp(ts)
                     .data(BoxPayload.encodeTarget(boxId))
                     .build();
-                long next = size + collect.serialize().getSize();
+                long next = size + collect.sizeBytes();
                 if (next > params.maxBlockSizeBytes()) {
                     break;
                 }

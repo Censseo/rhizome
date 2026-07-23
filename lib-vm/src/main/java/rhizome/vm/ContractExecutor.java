@@ -71,7 +71,11 @@ public final class ContractExecutor {
         }
 
         PersistentHostState host = new PersistentHostState(store, contract, caller.toBytes(), input, value);
-        ExecResult result = vm.execute(code, host, new GasMeter(gasLimit));
+        // Run on the fixed-size bounded stack (as WasmContractProcessor does), so the interpreter's
+        // 1024-frame depth/locals guard is measured against the consensus stack size, not the host JVM's
+        // -Xss. Running directly on the caller thread could let a JVM StackOverflowError fire before the
+        // deterministic trap — a node-local outcome, i.e. a consensus-split risk if this path goes live.
+        ExecResult result = WasmVm.onBoundedStack(() -> vm.execute(code, host, new GasMeter(gasLimit)));
 
         long fee = Math.multiplyExact(result.gasUsed(), gasPrice);
         chargeFee(caller, feeRecipient, fee);

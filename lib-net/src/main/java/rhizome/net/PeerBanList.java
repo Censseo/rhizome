@@ -61,7 +61,7 @@ public final class PeerBanList {
             String host = URI.create(peerUrl.trim()).getHost();
             if (host != null && !host.isEmpty()) {
                 try {
-                    return java.net.InetAddress.getByName(host).getHostAddress();
+                    return PeerHosts.resolveFirst(host).getHostAddress();
                 } catch (java.net.UnknownHostException unresolved) {
                     return host.toLowerCase();
                 }

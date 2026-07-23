@@ -248,13 +248,22 @@ public final class RocksDbBoxStore implements BoxStore, AutoCloseable {
     private static List<JournalEntry> decodeJournal(byte[] bytes) {
         ByteBuffer buffer = ByteBuffer.wrap(bytes);
         int count = buffer.getInt();
+        // Defense-in-depth on a self-written blob: bound count/length before allocating so a corrupt or
+        // truncated journal throws a clean error rather than new ArrayList<>(negative) / new byte[huge].
+        if (count < 0 || count > buffer.remaining()) {
+            throw new IllegalStateException("box journal count out of range: " + count);
+        }
         List<JournalEntry> journal = new ArrayList<>(count);
         for (int i = 0; i < count; i++) {
             byte[] id = new byte[32];
             buffer.get(id);
             byte[] prior = null;
             if (buffer.get() == 1) {
-                prior = new byte[buffer.getInt()];
+                int len = buffer.getInt();
+                if (len < 0 || len > buffer.remaining()) {
+                    throw new IllegalStateException("box journal prior length out of range: " + len);
+                }
+                prior = new byte[len];
                 buffer.get(prior);
             }
             journal.add(new JournalEntry(id, prior));
