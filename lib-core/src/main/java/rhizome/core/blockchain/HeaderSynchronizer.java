@@ -3,6 +3,10 @@ package rhizome.core.blockchain;
 import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 import rhizome.core.block.Block;
 import rhizome.core.block.BlockHeader;
@@ -199,29 +203,64 @@ public final class HeaderSynchronizer {
 
     private boolean applyBodies(PeerSource peer, long forkHeight, List<BlockHeader> branch) {
         long to = forkHeight + branch.size();
+        List<long[]> windows = new ArrayList<>();
         for (long start = forkHeight + 1; start <= to; start += Constants.BLOCKS_PER_FETCH) {
-            long end = Math.min(to, start + Constants.BLOCKS_PER_FETCH - 1);
-            List<Block> blocks;
-            try {
-                blocks = peer.blocks(start, end);
-            } catch (RuntimeException e) {
-                return false;
-            }
-            for (Block block : blocks) {
-                long idx = ((BlockImpl) block).id() - forkHeight - 1;
-                if (idx < 0 || idx >= branch.size()
-                    || !block.hash().equals(branch.get((int) idx).hash())) {
-                    return false; // body does not match its validated header
-                }
-                // The header at this index was PoW-verified by HeaderChain.validate and the body's hash
-                // equals it (checked just above), so the body's work is already proven — apply it
-                // without re-running the memory-hard PoW hash (audit P4). Every other check still runs.
-                if (engine.addValidatedBody(block) != ExecutionStatus.SUCCESS) {
-                    return false;
-                }
-            }
+            windows.add(new long[] {start, Math.min(to, start + Constants.BLOCKS_PER_FETCH - 1)});
         }
-        return true;
+        if (windows.isEmpty()) {
+            return true;
+        }
+        // Pipeline the body download: while the current window's blocks are applied to the engine, the
+        // NEXT window is fetched over the network on a helper thread. Application stays strictly serial
+        // and in order (the engine is single-writer), so the applied sequence — and thus every consensus
+        // outcome and the state root — is byte-for-byte identical; only the network I/O of window K+1
+        // overlaps the disk/CPU apply of window K. Exactly one fetch is ever outstanding, so the peer
+        // source is still used from one thread at a time.
+        ExecutorService fetcher = Executors.newSingleThreadExecutor(r -> {
+            Thread t = new Thread(r, "rhizome-body-fetch");
+            t.setDaemon(true);
+            return t;
+        });
+        try {
+            Future<List<Block>> pending = submitFetch(fetcher, peer, windows.get(0));
+            for (int i = 0; i < windows.size(); i++) {
+                List<Block> blocks;
+                try {
+                    blocks = pending.get();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return false;
+                } catch (ExecutionException e) {
+                    return false; // transport/decode failure fetching this window (was a RuntimeException)
+                }
+                // Start the next window's fetch before applying the current one, so the two overlap.
+                if (i + 1 < windows.size()) {
+                    pending = submitFetch(fetcher, peer, windows.get(i + 1));
+                }
+                for (Block block : blocks) {
+                    long idx = ((BlockImpl) block).id() - forkHeight - 1;
+                    if (idx < 0 || idx >= branch.size()
+                        || !block.hash().equals(branch.get((int) idx).hash())) {
+                        return false; // body does not match its validated header
+                    }
+                    // The header at this index was PoW-verified by HeaderChain.validate and the body's
+                    // hash equals it (checked just above), so the body's work is already proven — apply
+                    // it without re-running the memory-hard PoW hash (audit P4). Every other check runs.
+                    if (engine.addValidatedBody(block) != ExecutionStatus.SUCCESS) {
+                        return false;
+                    }
+                }
+            }
+            return true;
+        } finally {
+            // Cancel any still-running prefetch (e.g. after a mismatch/failure returned early) and free
+            // the helper thread. The fetch is read-only network I/O, so a discarded result changes nothing.
+            fetcher.shutdownNow();
+        }
+    }
+
+    private static Future<List<Block>> submitFetch(ExecutorService fetcher, PeerSource peer, long[] window) {
+        return fetcher.submit(() -> peer.blocks(window[0], window[1]));
     }
 
     private ChainSynchronizer.Result reorg(PeerSource peer, long forkHeight, List<BlockHeader> branch) {

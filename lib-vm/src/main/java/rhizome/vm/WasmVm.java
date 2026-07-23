@@ -215,20 +215,27 @@ public final class WasmVm {
         // Pages this frame reserves from the tree-wide budget (initial memory + every memory.grow);
         // released in the finally so the budget tracks concurrent nesting and unwinds on return.
         long[] frameAdded = new long[1];
+        // The linear memory this instance builds, captured so the memory.grow meter can read its
+        // current/maximum pages and reserve only what a grow will actually commit (see meter).
+        Memory[] memHolder = new Memory[1];
         try {
             Instance instance = Instance.builder(module)
                 .withImportValues(imports)
                 .withStart(false)
                 // Cap and meter linear memory so a contract cannot allocate gigabytes — per-instance
                 // AND tree-wide (see TREE_MAX_PAGES) so nested calls cannot sum past the budget.
-                .withMemoryFactory(limits -> boundedMemory(limits, gas, frameAdded))
+                .withMemoryFactory(limits -> {
+                    Memory m = boundedMemory(limits, gas, frameAdded);
+                    memHolder[0] = m;
+                    return m;
+                })
                 // Deterministic WASM call-depth cap: traps unbounded recursion at a fixed depth
                 // on every node, replacing the JVM-stack-dependent StackOverflowError that would
                 // otherwise fork consensus (see DepthLimitedInterpreterMachine).
                 .withMachineFactory(DepthLimitedInterpreterMachine::new)
                 // Meter every instruction; bulk-memory / memory.grow are charged by their
                 // runtime operand, not a flat 1, so O(N) work cannot cost O(1) gas.
-                .withUnsafeExecutionListener((instruction, stack) -> meter(instruction, stack, gas, frameAdded))
+                .withUnsafeExecutionListener((instruction, stack) -> meter(instruction, stack, gas, frameAdded, memHolder))
                 .build();
 
             ExportFunction call = instance.export(ENTRY);
@@ -443,7 +450,8 @@ public final class WasmVm {
      * (the count on top of the value stack when this fires, before execution), so they are
      * charged by that operand — otherwise a single instruction could memset megabytes for 1 gas.
      */
-    private static void meter(Instruction instruction, MStack stack, GasMeter gas, long[] frameAdded) {
+    private static void meter(Instruction instruction, MStack stack, GasMeter gas, long[] frameAdded,
+                              Memory[] memHolder) {
         gas.charge(GasSchedule.PER_INSTRUCTION);
         switch (instruction.opcode()) {
             case MEMORY_FILL, MEMORY_COPY, MEMORY_INIT, TABLE_FILL, TABLE_COPY, TABLE_INIT -> {
@@ -457,10 +465,24 @@ public final class WasmVm {
             case MEMORY_GROW -> {
                 if (stack.size() > 0) {
                     long requested = stack.peek() & 0xFFFF_FFFFL;
+                    // Charge by the operand even if the grow will fail: the anti-DoS invariant is that
+                    // a large operand can never be cheap, and the charge must be deterministic.
                     gas.charge(requested * GasSchedule.MEMORY_PER_PAGE);
-                    // Count growth against the tree-wide budget too, before Chicory allocates it, so
-                    // a grow chain across nested contracts cannot exceed TREE_MAX_PAGES on any heap.
-                    reserveTreePages(requested, frameAdded);
+                    // Reserve tree-wide pages BEFORE Chicory allocates, but only the amount the grow will
+                    // actually commit. WASM memory.grow is all-or-nothing: it commits `requested` iff
+                    // pages()+requested <= maximumPages(), else it fails (returns -1) and commits nothing.
+                    // Reserving `requested` unconditionally (the old behavior) left phantom pages held
+                    // against TREE_MAX_PAGES for a grow that never allocated — deterministic, but it could
+                    // make a later legitimate grow in the same call tree spuriously trip the budget
+                    // (audit VM #4). Reserve 0 when the grow cannot fit the instance cap.
+                    Memory mem = memHolder[0];
+                    long committable = requested;
+                    if (mem != null && requested > (long) mem.maximumPages() - mem.pages()) {
+                        committable = 0;
+                    }
+                    if (committable > 0) {
+                        reserveTreePages(committable, frameAdded);
+                    }
                 }
             }
             case TABLE_GROW -> {

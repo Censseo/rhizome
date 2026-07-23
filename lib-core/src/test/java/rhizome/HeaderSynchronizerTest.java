@@ -99,6 +99,28 @@ class HeaderSynchronizerTest {
     }
 
     @Test
+    void extendsAcrossMultipleBodyWindowsInOrder() {
+        // More than BLOCKS_PER_FETCH (200) blocks, so applyBodies pipelines across at least two fetch
+        // windows: the "prefetch next window while applying current" path must apply every body in the
+        // right order and reach the exact peer tip (the pipeline overlaps I/O but must not reorder or
+        // drop blocks).
+        ChainEngine peer = newEngine();
+        mine(peer, PublicAddress.random(), new AtomicLong(0), 250);
+
+        ChainEngine local = newEngine();
+        ChainSynchronizer.Result r = new HeaderSynchronizer(local).syncFrom(new EnginePeer(peer));
+
+        assertEquals(ChainSynchronizer.Result.EXTENDED, r);
+        assertEquals(251, local.height());
+        assertEquals(peer.totalWork(), local.totalWork());
+        assertTrue(local.tipHash().equals(peer.tipHash()));
+        // Spot-check bodies landed at the right heights (in-order apply across the window boundary).
+        for (long h = 2; h <= 251; h += 37) {
+            assertEquals(peer.blockAt(h).hash(), local.blockAt(h).hash(), "block " + h + " must match");
+        }
+    }
+
+    @Test
     void reorgsToAHeavierBranch() {
         ChainEngine local = newEngine();
         mine(local, PublicAddress.random(), new AtomicLong(0), 3); // local: genesis + 3
