@@ -213,7 +213,10 @@ public final class HeaderSynchronizer {
                     || !block.hash().equals(branch.get((int) idx).hash())) {
                     return false; // body does not match its validated header
                 }
-                if (engine.addBlock(block) != ExecutionStatus.SUCCESS) {
+                // The header at this index was PoW-verified by HeaderChain.validate and the body's hash
+                // equals it (checked just above), so the body's work is already proven — apply it
+                // without re-running the memory-hard PoW hash (audit P4). Every other check still runs.
+                if (engine.addValidatedBody(block) != ExecutionStatus.SUCCESS) {
                     return false;
                 }
             }

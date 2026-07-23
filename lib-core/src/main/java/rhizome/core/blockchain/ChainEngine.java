@@ -294,10 +294,31 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
      * references (via the Executor), so they are applied identically with or without the pool.
      */
     public ExecutionStatus restoreBlock(Block block) {
-        return addBlock(block, true);
+        return addBlock(block, true, false);
+    }
+
+    /**
+     * Applies a body during headers-first sync whose proof of work is ALREADY proven — its hash equals
+     * a header that {@link HeaderChain#validate} PoW-verified (memory-hard Pufferfish2). Skips only the
+     * redundant re-run of that same memory-hard hash in {@link #addBlock}; every other check (merkle
+     * root, account nonces, difficulty, uncles, state root, executor) runs in full. PoW is the single
+     * most expensive validation step, so not re-hashing every synced body roughly halves body-sync CPU.
+     *
+     * <p><b>Caller contract (audit P4):</b> the caller MUST have confirmed {@code block.hash()} equals
+     * an already-PoW-validated header for this height before calling this — otherwise it accepts
+     * unproven work. Only {@link HeaderSynchronizer#applyBodies} does so, immediately after its
+     * hash-equality check against the {@code HeaderChain}-validated branch. Package-private so no
+     * external caller can reach the PoW-skipping path.
+     */
+    ExecutionStatus addValidatedBody(Block block) {
+        return addBlock(block, false, true);
     }
 
     private ExecutionStatus addBlock(Block block, boolean trustedRestore) {
+        return addBlock(block, trustedRestore, false);
+    }
+
+    private ExecutionStatus addBlock(Block block, boolean trustedRestore, boolean trustedPow) {
         lock.lock();
         try {
             var b = (BlockImpl) block;
@@ -348,7 +369,12 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             if (nonceCheck != SUCCESS) {
                 return nonceCheck;
             }
-            if (!block.verifyNonce(params.powAlgorithm())) {
+            // Proof of work, verified last so an invalid block can't burn CPU (Pandanite lesson) — unless
+            // the caller already proved it: a headers-first-synced body whose hash equals a header
+            // HeaderChain.validate PoW-verified carries the same memory-hard proof, so re-hashing it is
+            // pure waste (audit P4). trustedPow is reachable only via addValidatedBody, whose contract
+            // pins that hash-equality guarantee.
+            if (!trustedPow && !block.verifyNonce(params.powAlgorithm())) {
                 return INVALID_NONCE;
             }
 
