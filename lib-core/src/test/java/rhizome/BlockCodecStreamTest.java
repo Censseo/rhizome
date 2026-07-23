@@ -2,6 +2,7 @@ package rhizome;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -40,6 +41,46 @@ class BlockCodecStreamTest {
             out.writeBytes(p);
         }
         return out.toByteArray();
+    }
+
+    @Test
+    void decodesAStreamSpanningManyReadChunks() throws IOException {
+        // Exercises the offset buffer across the internal 512 KiB read chunk (audit P10): thousands of
+        // blocks, with partial blocks straddling chunk boundaries, must round-trip in order.
+        int n = 4000;
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        for (int i = 2; i < 2 + n; i++) {
+            out.writeBytes(BlockCodec.encode(block(i)));
+        }
+        byte[] stream = out.toByteArray();
+        assertTrue(stream.length > 512 * 1024, "stream must exceed one read chunk to exercise the buffer");
+        List<Block> decoded = BlockCodec.decodeStreamed(
+            new ByteArrayInputStream(stream), n + 10, Constants.MAX_BLOCK_SIZE_BYTES);
+        assertEquals(n, decoded.size());
+        assertEquals(2, ((BlockImpl) decoded.get(0)).id());
+        assertEquals(2 + n - 1, ((BlockImpl) decoded.get(n - 1)).id());
+    }
+
+    @Test
+    void decodesASingleBlockLargerThanTheReadChunk() throws IOException {
+        // The quadratic path P10 targets: one block that spans several read chunks, so its partial tail
+        // is carried and compacted across reads. It must still decode to the identical block.
+        var b = (BlockImpl) BlockImpl.builder().id(2).timestamp(1000L).difficulty(4)
+            .lastBlockHash(SHA256Hash.random()).build();
+        for (int i = 0; i < 6000; i++) {
+            b.addTransaction(Transaction.of(PublicAddress.random(), new TransactionAmount(i)));
+        }
+        MerkleTree tree = new MerkleTree();
+        tree.setItems(b.transactions());
+        b.merkleRoot(tree.getRootHash());
+        b.nonce(SHA256Hash.empty());
+        byte[] encoded = BlockCodec.encode(b);
+        assertTrue(encoded.length > 512 * 1024, "block must exceed one read chunk");
+        List<Block> decoded = BlockCodec.decodeStreamed(
+            new ByteArrayInputStream(encoded), 10, Constants.MAX_BLOCK_SIZE_BYTES);
+        assertEquals(1, decoded.size());
+        assertEquals(6000, decoded.get(0).transactions().size());
+        assertEquals(b.hash(), decoded.get(0).hash());
     }
 
     @Test
