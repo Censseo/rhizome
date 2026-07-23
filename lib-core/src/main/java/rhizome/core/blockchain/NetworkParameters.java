@@ -80,6 +80,30 @@ public final class NetworkParameters {
     private final int maxBlockSizeBytes;
 
     /**
+     * Maximum gas a single contract transaction may declare. A contract's {@code gasLimit} is
+     * otherwise bounded only by affordability, and with {@code gasPrice = 0} (valid at consensus —
+     * the min-fee floor is a mempool-only policy) a zero-cost call can name an arbitrary limit, so a
+     * miner could put a {@code loop … br 0} call with a 10^11 limit in a block they mine: it clears
+     * PoW (verified first), is relayed, then every validating node runs those billions of
+     * instructions synchronously under the consensus lock — a free liveness DoS disproportionate to
+     * the attacker's hash power. This is the consensus-side twin of the read-only VM cap
+     * ({@code ContractApi.MAX_READONLY_GAS}); a real call needs a few million gas, so the ceiling is
+     * generous. 0 disables the cap. See WHITEPAPER.md §7.3/§7.5.
+     */
+    @lombok.Builder.Default
+    private final long maxTxGas = 50_000_000L;
+
+    /**
+     * Maximum total {@code gasLimit} the contract transactions in one block may declare (the
+     * block gas limit). {@link #maxTxGas} bounds one transaction; this bounds the block, so a block
+     * packed with many capped calls still has a finite worst-case validation cost. Checked against
+     * declared limits (not gas actually used), so the bound holds before any instruction runs.
+     * 0 disables the ceiling. See WHITEPAPER.md §7.3.
+     */
+    @lombok.Builder.Default
+    private final long maxBlockGas = 250_000_000L;
+
+    /**
      * Maximum uncle references a block may carry (GHOST). Bounds header growth and
      * the extra work a single block can credit. 0 disables uncles.
      */
@@ -268,6 +292,13 @@ public final class NetworkParameters {
             .medianTimeWindow(60)
             .maxTransactionsPerBlock(25_000)
             .maxBlockSizeBytes(Constants.MAX_BLOCK_SIZE_BYTES)
+            // Consensus gas ceiling: one contract call is capped at 50M gas (ample — real calls use a
+            // few million; matches the read-only VM cap), and a block's contract calls total at most
+            // 250M declared gas, so the worst-case VM work a valid block can force on every node is
+            // finite regardless of gasPrice. Without these a mined block could carry a free 10^11-gas
+            // loop and stall the network under the consensus lock (audit: unbounded consensus gas).
+            .maxTxGas(50_000_000L)
+            .maxBlockGas(250_000_000L)
             .maxUnclesPerBlock(2)
             .uncleMaxDepth(7)
             // ~10 minutes of wall-clock finality at 5 s/block.

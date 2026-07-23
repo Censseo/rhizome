@@ -125,6 +125,12 @@ public final class MemPool {
         if (tx.kind().isContract() && (tx.gasLimit() < 0 || tx.gasPrice() < 0)) {
             return INVALID_TRANSACTION_AMOUNT;
         }
+        // Mirror the consensus per-transaction gas ceiling at admission so an over-cap call is never
+        // pooled or relayed (it would be rejected by executeBlock anyway). Defense in depth against the
+        // unbounded-consensus-gas vector; the block-wide ceiling stays a consensus-only rule.
+        if (tx.kind().isContract() && params.maxTxGas() > 0 && tx.gasLimit() > params.maxTxGas()) {
+            return GAS_LIMIT_EXCEEDED;
+        }
         // Box ops run no VM and cost no gas; the gas fields are reserved and must be zero.
         if (tx.kind().isBox() && (tx.gasLimit() != 0 || tx.gasPrice() != 0)) {
             return INVALID_TRANSACTION_AMOUNT;
