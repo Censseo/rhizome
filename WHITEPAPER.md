@@ -29,7 +29,7 @@ Four goals drive the design:
    GHOST-style fork choice (§9) that credits and rewards orphaned (uncle) work, making
    the fast cadence safe against the orphaning a naïve longest chain suffers.
 
-The node is functional and covered by **418 tests**: consensus, the WASM contract VM
+The node is functional and covered by **446 tests**: consensus, the WASM contract VM
 and its persistence, execution, storage, mempool, HTTP API, block production, P2P
 synchronisation with reorganisation, GHOST uncles, data boxes (agent-facing on-chain
 storage with typed registers, an anti-dust deposit and storage rent), native tokens
@@ -795,7 +795,7 @@ inflated reward, **negative amounts** (money minting), **balance overflow**, tim
 and difficulty (time-warp) manipulation, deep reorg (finality), lying peer (claimed but
 unproven work), transaction-layer censorship, block/request flooding, and network DoS
 (bounded bodies, ban-score). This section is the consolidated security reference; the
-history below records six successive review passes and the invariants they established.
+history below records seven successive review passes and the invariants they established.
 
 ### 7.1 Load-bearing invariants (must never regress)
 
@@ -893,7 +893,17 @@ PoW chain removes it entirely. **Coinbase maturity** (a UTXO concept) does not a
 balance-based ledger — the reward is immediately fungible with no distinct coinbase coin to
 mature — and the orphaned-reward risk is already covered by the finality window.
 
-Six parallel-subsystem review passes hardened this model: from the first (negative-amount
+Two engineering residuals are documented rather than closed. **Full power-loss durability**
+across the independent state databases needs a per-store `fsync`; process-crash consistency
+is already complete via the atomic ledger batch and boot reconciliation (§6.2). And the
+**account-nonce domain keeps one permanent leaf per account** that has ever transacted: unlike
+the ledger domain it cannot self-prune at zero balance without reopening replay (a re-funded
+account would accept its old nonces again), so an attacker cycling a fixed principal through
+fresh accounts grows that domain by one leaf per hop. The growth is bounded — economically by
+the optional minimum-fee floor (each nonce-creating hop then costs a real fee) and by block
+space — rather than eliminated; the floor is off by default and is a per-operator policy knob.
+
+Seven parallel-subsystem review passes hardened this model: from the first (negative-amount
 minting, deposit-overflow rollback) through consensus-fork classes (unscaled uncle-reward
 rollback, heap-dependent VM OOM, cache-dependent gas, phantom-wallet validity, reorg-gate
 work-metric mismatch), theft and liveness (unsigned `BOX_COLLECT` drain, mempool-poisoning
@@ -903,7 +913,21 @@ sixth pass closed the last heap-dependent VM vectors — a many-group WASM parse
 tree-wide live-locals reservation) — an unbounded PEX `/peers` body, mempool eviction ahead of
 signature verification, and an orphan-pool eviction that could force a full resync (a rejected
 reorg now restores its own suffix by trusting the already-validated uncle references its blocks
-commit, instead of re-checking the churnable pool). Every fix carries a regression test; a
+commit, instead of re-checking the churnable pool). A **seventh** pass swept the same subsystems
+for subtle residuals and closed a **torn multi-store commit** (the ledger could momentarily lead
+the chain height — it now rides the atomic append/pop batch, with a boot reconciliation that
+rewinds any peripheral store left ahead, §6.2), a **fork-choice metric slip** (a reorg now adopts
+by the uncle-inclusive GHOST total and is guarded so it can never lower the chain's total work,
+§3.7), a rollback that threw on an absent wallet mid-reorg, a WASM allocation ceiling that bounded
+only a growable table's minimum rather than its aggregate maximum, and a handful of smaller
+order/encoding guards (total-order hash comparison, header-id and fixed-length codec checks,
+submit-budget gate ahead of block decode, per-byte `transfer_value` gas). It also **locked the
+nonce-domain invariant** — replay protection is a per-account monotonic counter (one committed
+leaf per account, not an unbounded `(address, nonce)` seen-set), bounded against fresh-account
+cycling by the minimum-fee floor (the residual above). Alongside, a dozen consensus-invariant-preserving
+**performance residuals** were removed with byte-identical outputs (difficulty and median-time
+memoised incrementally, digest and codec buffers reused, streamed block decode made linear, the
+boot header-backfill sweep skipped in `O(1)`). Every fix carries a regression test; a
 dependency bump is validated by the same suite (one caught a silent CSRF-guard fail-open from a
 library header-lookup change).
 
@@ -925,7 +949,7 @@ ledger of a synchronised Pandanite node.
 (`addBlock`/`popBlock`, nonces, work, difficulty); RocksDB storage; mempool; HTTP API;
 block production; synchronisation + reorg by cumulative work; wallet CLI; gossip & peer
 discovery; hardening (checkpoints, finality, bounded rate limiting, ban-score, block-size
-cap); six parallel-subsystem security-review passes (§7); the **WASM smart-contract layer** — a Chicory-backed
+cap); seven parallel-subsystem security-review passes (§7); the **WASM smart-contract layer** — a Chicory-backed
 metered VM, a persistent contract store, `DEPLOY`/`CALL` transactions with gas fees,
 atomic per-block contract state with exact reorg reversal, and wallet `deploy`/`call`
 commands; and the **data-box layer** (§5.5) — stable-id, typed-register storage objects
@@ -946,7 +970,7 @@ nonces plus an `ACCOUNT_NONCE` state domain (§6.5) so the engine's derived stat
 configurable body pruning (`RHIZOME_PRUNE`) with a `/sync` 410 and a `prunedBelow` advert, and
 trust-minimised snap-sync (`RHIZOME_SYNC=snap`) — periodic per-domain snapshot materialisation,
 `/state/snapshot/*`, and a bootstrap that adopts a peer's state at a buried pivot only when it
-reproduces a PoW-validated header's root. **418 tests, 0 failures.**
+reproduces a PoW-validated header's root. **446 tests, 0 failures.**
 
 **GHOST fork choice.** A fast single longest chain orphans blocks because propagation
 takes a meaningful fraction of the interval (§6.3). A GHOST-style fork choice — the
