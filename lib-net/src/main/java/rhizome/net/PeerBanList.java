@@ -14,9 +14,11 @@ import java.util.function.LongSupplier;
  *
  * <p>The table is hard-bounded (like {@link RateLimiter}) so a spray of distinct
  * hosts cannot leak memory: when full, entries that are neither banned nor
- * recently active are swept, and if none can be reclaimed a brand-new host is
- * simply left untracked (fail-open on tracking, never unbounded growth). Active
- * bans are never swept.
+ * recently active are swept, and if none can be reclaimed the offence is metered
+ * against a shared OVERFLOW bucket instead of being dropped (fail-closed, mirroring
+ * {@link RateLimiter}'s overflow design — audit F7): once the spray itself crosses
+ * the threshold, every otherwise-untracked host is treated as banned, so an IP-spray
+ * cannot make the ban list fail open. Active bans are never swept.
  */
 public final class PeerBanList {
 
@@ -26,6 +28,13 @@ public final class PeerBanList {
     private final int maxTracked;
     private final LongSupplier nowMillis;
     private final Map<String, Entry> entries = new ConcurrentHashMap<>();
+    /**
+     * Shared conservative bucket for offences by hosts that cannot be tracked because the table
+     * is full and nothing is reclaimable. Rather than dropping the offence untracked (fail-open),
+     * the spray accumulates score here and, past the threshold, bans ALL untracked hosts for one
+     * window — tracked honest peers are unaffected, since their own entries are checked first.
+     */
+    private final Entry overflow = new Entry(0);
 
     private static final class Entry {
         long lastOffenseAt;
@@ -104,9 +113,13 @@ public final class PeerBanList {
         Entry entry = entries.get(key);
         if (entry == null) {
             if (entries.size() >= maxTracked && !sweep(now)) {
-                return false; // tracking full, nothing reclaimable: don't grow
+                // Fail closed (RateLimiter pattern): meter the untracked host against the shared
+                // overflow bucket rather than dropping the offence — an IP-spray must not be able
+                // to misbehave with impunity just because the table is full.
+                entry = overflow;
+            } else {
+                entry = entries.computeIfAbsent(key, k -> new Entry(now));
             }
-            entry = entries.computeIfAbsent(key, k -> new Entry(now));
         }
         synchronized (entry) {
             if (now < entry.bannedUntil) {
@@ -147,12 +160,13 @@ public final class PeerBanList {
 
     public boolean isBanned(String peerUrl) {
         long now = nowMillis.getAsLong();
-        return activeBan(hostKey(peerUrl), now) || activeBan(nameKey(peerUrl), now);
-    }
-
-    private boolean activeBan(String key, long now) {
-        Entry entry = entries.get(key);
-        return entry != null && now < entry.bannedUntil;
+        Entry byHost = entries.get(hostKey(peerUrl));
+        Entry byName = entries.get(nameKey(peerUrl));
+        if (byHost == null && byName == null) {
+            // Untracked host: banned only while the shared overflow bucket is hot (fail closed).
+            return now < overflow.bannedUntil;
+        }
+        return (byHost != null && now < byHost.bannedUntil) || (byName != null && now < byName.bannedUntil);
     }
 
     private void decay(Entry entry, long now) {

@@ -9,9 +9,12 @@ import org.rocksdb.ColumnFamilyHandle;
 import org.rocksdb.DBOptions;
 import org.rocksdb.RocksDB;
 import org.rocksdb.RocksDBException;
+import org.rocksdb.WriteBatch;
+import org.rocksdb.WriteOptions;
 
 import rhizome.core.ledger.PublicAddress;
 import rhizome.vm.ContractStore;
+import rhizome.vm.StorageChange;
 
 /**
  * RocksDB-backed {@link ContractStore}: contract code in one column family, all
@@ -25,20 +28,30 @@ public final class RocksDbContractStore implements ContractStore, AutoCloseable 
     // Persisted per-block undo journal (height BE(8) -> serialized journal), so a reorg after a
     // restart can be reversed exactly instead of relying only on the processor's RAM journals.
     private static final byte[] CF_JOURNAL = "contract_journal".getBytes();
+    // Persisted per-block contract receipts (height BE(8) -> encoded receipts), so the executor's
+    // rollback can reverse a block's contract-tx ledger effects even after a restart (audit F3).
+    private static final byte[] CF_RECEIPTS = "contract_receipts".getBytes();
 
     private final RocksDB db;
     private final ColumnFamilyHandle defaultCf;
     private final ColumnFamilyHandle codeCf;
     private final ColumnFamilyHandle storageCf;
     private final ColumnFamilyHandle journalCf;
+    private final ColumnFamilyHandle receiptsCf;
+    // Synced: the block commit must be durable before the node reports the height applied (audit F3).
+    private final WriteOptions writeOptions = new WriteOptions().setSync(true);
 
     public RocksDbContractStore(String path) throws IOException {
         List<ColumnFamilyDescriptor> descriptors = List.of(
             new ColumnFamilyDescriptor(RocksDB.DEFAULT_COLUMN_FAMILY),
             new ColumnFamilyDescriptor(CF_CODE),
             new ColumnFamilyDescriptor(CF_STORAGE),
-            new ColumnFamilyDescriptor(CF_JOURNAL));
+            new ColumnFamilyDescriptor(CF_JOURNAL),
+            new ColumnFamilyDescriptor(CF_RECEIPTS));
         List<ColumnFamilyHandle> handles = new ArrayList<>();
+        // DBOptions is NOT closed after open: closing it while the DB is live corrupts the
+        // native heap (rocksdbjni keeps referencing it) — the audit F12 leak note is
+        // superseded; the object is reclaimed with the process/DB.
         try {
             DBOptions options = new DBOptions()
                 .setCreateIfMissing(true)
@@ -51,6 +64,7 @@ public final class RocksDbContractStore implements ContractStore, AutoCloseable 
         this.codeCf = handles.get(1);
         this.storageCf = handles.get(2);
         this.journalCf = handles.get(3);
+        this.receiptsCf = handles.get(4);
     }
 
     private static byte[] heightKey(long height) {
@@ -70,6 +84,21 @@ public final class RocksDbContractStore implements ContractStore, AutoCloseable 
     @Override
     public void deleteJournal(long height) {
         delete(journalCf, heightKey(height));
+    }
+
+    @Override
+    public void putReceipts(long height, byte[] encoded) {
+        put(receiptsCf, heightKey(height), encoded);
+    }
+
+    @Override
+    public byte[] getReceipts(long height) {
+        return get(receiptsCf, heightKey(height));
+    }
+
+    @Override
+    public void deleteReceipts(long height) {
+        delete(receiptsCf, heightKey(height));
     }
 
     private static byte[] slot(PublicAddress contract, byte[] key) {
@@ -110,6 +139,59 @@ public final class RocksDbContractStore implements ContractStore, AutoCloseable 
         delete(storageCf, slot(contract, key));
     }
 
+    @Override
+    public void applyBlock(long height, List<StorageChange> changes, byte[] journal) {
+        // All slot mutations AND the undo journal land in ONE synced WriteBatch: a crash mid-flush
+        // can no longer leave storage half-applied with no journal to rewind it (audit F1).
+        if (get(journalCf, heightKey(height)) != null) {
+            // A double-apply would capture the already-mutated state as the journal's "prior" (audit F10).
+            throw new IllegalStateException("contract store already has a journal at height " + height);
+        }
+        try (WriteBatch batch = new WriteBatch()) {
+            for (StorageChange change : changes) {
+                stage(batch, change);
+            }
+            if (journal != null) {
+                batch.put(journalCf, heightKey(height), journal);
+            }
+            db.write(writeOptions, batch);
+        } catch (RocksDBException e) {
+            throw new IllegalStateException("contract store applyBlock failed", e);
+        }
+    }
+
+    @Override
+    public void revertBlock(long height, List<StorageChange> restores) {
+        // The restores and the journal drop commit as one atomic unit (audit F1).
+        try (WriteBatch batch = new WriteBatch()) {
+            for (StorageChange restore : restores) {
+                stage(batch, restore);
+            }
+            batch.delete(journalCf, heightKey(height));
+            db.write(writeOptions, batch);
+        } catch (RocksDBException e) {
+            throw new IllegalStateException("contract store revertBlock failed", e);
+        }
+    }
+
+    /** Adds one mutation (set, or delete when the value is null) to {@code batch}. */
+    private void stage(WriteBatch batch, StorageChange change) throws RocksDBException {
+        if (change.isCode()) {
+            if (change.value() == null) {
+                batch.delete(codeCf, change.contract().toBytes());
+            } else {
+                batch.put(codeCf, change.contract().toBytes(), change.value());
+            }
+        } else {
+            byte[] slot = slot(change.contract(), change.key());
+            if (change.value() == null) {
+                batch.delete(storageCf, slot);
+            } else {
+                batch.put(storageCf, slot, change.value());
+            }
+        }
+    }
+
     private byte[] get(ColumnFamilyHandle cf, byte[] key) {
         try {
             return db.get(cf, key);
@@ -120,7 +202,7 @@ public final class RocksDbContractStore implements ContractStore, AutoCloseable 
 
     private void put(ColumnFamilyHandle cf, byte[] key, byte[] value) {
         try {
-            db.put(cf, key, value);
+            db.put(cf, writeOptions, key, value);
         } catch (RocksDBException e) {
             throw new IllegalStateException("contract store write failed", e);
         }
@@ -128,7 +210,7 @@ public final class RocksDbContractStore implements ContractStore, AutoCloseable 
 
     private void delete(ColumnFamilyHandle cf, byte[] key) {
         try {
-            db.delete(cf, key);
+            db.delete(cf, writeOptions, key);
         } catch (RocksDBException e) {
             throw new IllegalStateException("contract store delete failed", e);
         }
@@ -161,6 +243,8 @@ public final class RocksDbContractStore implements ContractStore, AutoCloseable 
         codeCf.close();
         storageCf.close();
         journalCf.close();
+        receiptsCf.close();
+        writeOptions.close();
         db.close();
     }
 }

@@ -55,6 +55,81 @@ public interface ContractStore {
     /** Drops the persisted journal for {@code height}. */
     default void deleteJournal(long height) { }
 
+    // ---- Optional persistent per-block contract receipts (audit F3) ----
+    // The Executor's rollback consumes a block's contract receipts (gas used, success, native
+    // transfers) to reverse each contract tx's ledger effects on a reorg. Kept only in the
+    // processor's RAM, they are lost on restart: a reorg that follows one then crashes
+    // mid-rollback (indexing an empty receipt list) with the ledger half-reverted. A durable
+    // store persists them alongside the undo journal — same height key, same prune schedule.
+    // Default no-ops: the in-memory store keeps receipts in RAM, and light stores need none.
+
+    /** Persists the encoded contract receipts for {@code height} (durable stores only). */
+    default void putReceipts(long height, byte[] encoded) { }
+
+    /** The persisted encoded contract receipts for {@code height}, or {@code null} if none. */
+    default byte[] getReceipts(long height) {
+        return null;
+    }
+
+    /** Drops the persisted receipts for {@code height}. */
+    default void deleteReceipts(long height) { }
+
+    // ---- Atomic block commit (audit F1) ----
+    // Committing a block's contract mutations one slot at a time and only THEN persisting the
+    // undo journal was unrecoverable: a crash mid-flush left storage half-applied with no journal
+    // to rewind it. applyBlock commits the mutations and the journal as ONE unit on stores that
+    // support it (the RocksDB store uses a single synced WriteBatch); revertBlock likewise restores
+    // a block's prior state and drops its journal as one unit.
+
+    /**
+     * Commits one block's contract mutations together with its serialized undo journal, as a
+     * single atomic unit where the store supports it.
+     *
+     * <p>Semantics:
+     * <ul>
+     *   <li>{@code changes} are applied in list order; each is a set, or a delete when its value
+     *       is null (see {@link StorageChange}). They are exactly what
+     *       {@code SessionContractStore.flushWithJournal()} used to write one-by-one.</li>
+     *   <li>{@code journal} is the block's serialized undo journal, persisted at {@code height}
+     *       exactly as {@link #putJournal} would (a durable store keeps it so a reorg after a
+     *       restart can still reverse the block); may be null to commit changes without a
+     *       journal (e.g. a block that touched no contract state).</li>
+     *   <li>Implementations may refuse a height that already has a journal (double-apply would
+     *       capture already-mutated state as the "prior") by throwing
+     *       {@link IllegalStateException}.</li>
+     * </ul>
+     *
+     * <p>The default implementation loops the per-operation methods and then
+     * {@link #putJournal} — correct, just not atomic — so existing stores keep working.
+     */
+    default void applyBlock(long height, java.util.List<StorageChange> changes, byte[] journal) {
+        for (StorageChange change : changes) {
+            change.applyTo(this);
+        }
+        if (journal != null) {
+            putJournal(height, journal);
+        }
+    }
+
+    /**
+     * Reverts one block: applies {@code restores} (the block's undo journal turned back into
+     * mutations — each entry's <em>prior</em> value, or a delete where the key did not exist
+     * before the block) and drops the persisted journal at {@code height}, as a single atomic
+     * unit where the store supports it.
+     *
+     * <p>{@code restores} must already be in final application order (the caller applies its
+     * journal in reverse, so that repeated writes to the same key restore the earliest prior).
+     *
+     * <p>The default implementation loops the per-operation methods and then
+     * {@link #deleteJournal} — correct, just not atomic.
+     */
+    default void revertBlock(long height, java.util.List<StorageChange> restores) {
+        for (StorageChange restore : restores) {
+            restore.applyTo(this);
+        }
+        deleteJournal(height);
+    }
+
     @FunctionalInterface
     interface StorageConsumer {
         void accept(PublicAddress contract, byte[] key, byte[] value);

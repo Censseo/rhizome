@@ -5,14 +5,18 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.math.BigInteger;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 
 import org.junit.jupiter.api.Test;
 
 import rhizome.core.block.Block;
+import rhizome.core.block.BlockHeader;
 import rhizome.core.block.BlockImpl;
 import rhizome.core.blockchain.ChainEngine;
+import rhizome.core.blockchain.ChainStore;
 import rhizome.core.blockchain.ChainSynchronizer;
 import rhizome.core.blockchain.ChainSynchronizer.Result;
 import rhizome.core.blockchain.InMemoryChainStore;
@@ -255,5 +259,127 @@ class ChainSynchronizerTest {
 
         assertEquals(Result.INCOMPATIBLE, new ChainSynchronizer(local).syncFrom(new EnginePeer(peer)));
         assertEquals(2, local.height()); // untouched
+    }
+
+    /**
+     * A {@link ChainStore} simulating a pruned node: bodies for heights in
+     * {@code (1, watermark)} are gone and {@code blockAt} throws for them, while headers and the
+     * transaction index are retained — exactly what a real pruned store keeps (genesis always
+     * stays). Used to prove the fork probe reads headers, not bodies (audit F4).
+     */
+    private static final class PrunedChainStore implements ChainStore {
+        private final List<Block> blocks = new ArrayList<>();
+        private final Map<SHA256Hash, Long> txIndex = new HashMap<>();
+        private final long watermark;
+
+        PrunedChainStore(long watermark) {
+            this.watermark = watermark;
+        }
+
+        @Override
+        public long height() {
+            return blocks.size();
+        }
+
+        @Override
+        public Block blockAt(long height) {
+            if (height < 1 || height > blocks.size()) {
+                throw new IllegalArgumentException("No block at height " + height);
+            }
+            if (height > 1 && height < watermark) {
+                throw new IllegalStateException("body pruned at height " + height);
+            }
+            return blocks.get((int) height - 1);
+        }
+
+        @Override
+        public BlockHeader headerAt(long height) {
+            if (height < 1 || height > blocks.size()) {
+                throw new IllegalArgumentException("No block at height " + height);
+            }
+            return BlockHeader.of(blocks.get((int) height - 1));
+        }
+
+        @Override
+        public long prunedBelow() {
+            return watermark;
+        }
+
+        @Override
+        public void append(Block block) {
+            blocks.add(block);
+            for (var t : block.transactions()) {
+                if (!((rhizome.core.transaction.TransactionImpl) t).isTransactionFee()) {
+                    txIndex.put(t.hashContents(), (long) blocks.size());
+                }
+            }
+        }
+
+        @Override
+        public void pop() {
+            Block removed = blocks.remove(blocks.size() - 1);
+            for (var t : removed.transactions()) {
+                if (!((rhizome.core.transaction.TransactionImpl) t).isTransactionFee()) {
+                    txIndex.remove(t.hashContents());
+                }
+            }
+        }
+
+        @Override
+        public boolean hasTransaction(SHA256Hash contentHash) {
+            return txIndex.containsKey(contentHash);
+        }
+    }
+
+    /** Mines one block onto {@code engine} and returns it (so a pruned store never has to serve it back). */
+    private static BlockImpl mineOne(ChainEngine engine, PublicAddress miner, AtomicLong clock,
+                                     NetworkParameters params) {
+        long height = engine.height() + 1;
+        var b = (BlockImpl) BlockImpl.builder()
+            .id((int) height)
+            .timestamp(clock.addAndGet(90_000))
+            .difficulty(engine.difficulty())
+            .lastBlockHash(engine.tipHash())
+            .build();
+        b.addTransaction(Transaction.of(miner, new TransactionAmount(params.miningReward(height))));
+        var tree = new MerkleTree();
+        tree.setItems(b.transactions());
+        b.merkleRoot(tree.getRootHash());
+        b.nonce(Miner.mineNonce(b.hash(), b.difficulty(), params.powAlgorithm()));
+        assertEquals(ExecutionStatus.SUCCESS, engine.addBlock(b));
+        return b;
+    }
+
+    @Test
+    void prunedNodeForkProbeUsesHeadersNotBodies() {
+        // audit F4: the full-block sync fork probe compared engine.blockAt(h).hash(), which throws
+        // below the prune watermark — an honest archive peer whose fork point sits under the
+        // watermark was misjudged PEER_INVALID (banned) instead of simply refused as REORG_TOO_DEEP.
+        // Headers survive pruning and hash identically, so the probe must read them.
+        NetworkParameters prunedParams = PARAMS.toBuilder().maxReorgDepth(3).build();
+        // Local node: 7 blocks over a store pruned below height 7 (bodies for 2..6 gone).
+        AtomicLong localClock = new AtomicLong(1000);
+        PublicAddress localMiner = PublicAddress.random();
+        LedgerSnapshot snapshot = new LedgerSnapshot("test", 0, prunedParams.chainId());
+        ChainEngine local = ChainEngine.init(prunedParams, new InMemoryLedger(), new PrunedChainStore(7),
+            snapshot, null, () -> NOW);
+        List<Block> kept = new ArrayList<>();
+        for (int i = 0; i < 7; i++) {
+            kept.add(mineOne(local, localMiner, localClock, prunedParams)); // heights 2..8
+        }
+        SHA256Hash localTip = local.tipHash();
+
+        // An honest archive peer sharing blocks 1-2, then diverging with a base-heavier branch.
+        AtomicLong peerClock = new AtomicLong(9000);
+        ChainEngine peer = newEngine(prunedParams);
+        assertEquals(ExecutionStatus.SUCCESS, peer.addBlock(kept.get(0))); // shared height 2
+        mineBlocks(peer, PublicAddress.random(), peerClock, 8);            // heights 3..10
+
+        // The fork (height 2) is below the prune watermark: the probe must still FIND it (via
+        // headers) and refuse the deep reorg — never PEER_INVALID for an honest peer.
+        Result result = new ChainSynchronizer(local).syncFrom(new EnginePeer(peer));
+        assertEquals(Result.REORG_TOO_DEEP, result);
+        assertEquals(8, local.height());
+        assertEquals(localTip, local.tipHash(), "local chain must be untouched");
     }
 }

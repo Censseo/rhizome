@@ -51,7 +51,8 @@ public final class RocksDbTokenStore implements TokenStore, AutoCloseable {
     private final ColumnFamilyHandle minterCf;
     private final ColumnFamilyHandle holderCf;
     private final ColumnFamilyHandle journalCf;
-    private final WriteOptions writeOptions = new WriteOptions();
+    // Synced: apply/revert batches move token state across a height boundary (audit F3).
+    private final WriteOptions writeOptions = new WriteOptions().setSync(true);
 
     public RocksDbTokenStore(String path) throws IOException {
         List<ColumnFamilyDescriptor> descriptors = List.of(
@@ -62,6 +63,9 @@ public final class RocksDbTokenStore implements TokenStore, AutoCloseable {
             new ColumnFamilyDescriptor(CF_HOLDER),
             new ColumnFamilyDescriptor(CF_JOURNAL));
         List<ColumnFamilyHandle> handles = new ArrayList<>();
+        // DBOptions is NOT closed after open: closing it while the DB is live corrupts the
+        // native heap (rocksdbjni keeps referencing it) — the audit F12 leak note is
+        // superseded; the object is reclaimed with the process/DB.
         try {
             DBOptions options = new DBOptions().setCreateIfMissing(true).setCreateMissingColumnFamilies(true);
             this.db = RocksDB.open(options, path, descriptors, handles);
@@ -90,6 +94,11 @@ public final class RocksDbTokenStore implements TokenStore, AutoCloseable {
 
     @Override
     public void applyBlock(long height, List<TokenOp> ops) {
+        // Refuse a double-apply: re-applying a block would journal its own already-mutated state
+        // as the "prior", so a later revert would restore the wrong values (audit F10).
+        if (raw(journalCf, longToBytes(height)) != null) {
+            throw new IllegalStateException("token store already has a journal at height " + height);
+        }
         try (WriteBatch batch = new WriteBatch()) {
             List<Undo> journal = new ArrayList<>(ops.size());
             for (TokenOp op : ops) {

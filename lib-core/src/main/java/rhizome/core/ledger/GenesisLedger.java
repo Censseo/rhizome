@@ -24,6 +24,13 @@ public final class GenesisLedger {
         int seeded = 0;
         for (Map.Entry<PublicAddress, TransactionAmount> entry : snapshot.balances().entrySet()) {
             PublicAddress address = entry.getKey();
+            // Defense in depth (audit F3): a balance must be a non-negative signed 64-bit value.
+            // LedgerSnapshot.fromJson already rejects high-bit amounts, but a snapshot built
+            // programmatically could still carry one — a negative deposit would corrupt the
+            // ledger's checked arithmetic from the very first block.
+            if (entry.getValue().amount() < 0) {
+                throw new IllegalArgumentException("negative genesis balance for " + address);
+            }
             if (!ledger.hasWallet(address)) {
                 ledger.createWallet(address);
             }

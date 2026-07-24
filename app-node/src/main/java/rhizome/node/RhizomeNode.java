@@ -235,9 +235,14 @@ public final class RhizomeNode implements AutoCloseable {
         // (the table cap is the memory-leak fix; the per-window count is generous
         // so honest peers on a shared host are never throttled).
         RateLimiter limiter = new RateLimiter(1000, 1000, 65_536);
+        java.util.Set<String> allowedHosts = allowedHosts(config);
+        // Surface the effective DNS-rebinding allowlist at startup: it now also covers the
+        // host's LAN interface addresses (audit F9), which are otherwise invisible to the operator.
+        log.info("API allowed Host authorities (DNS-rebinding guard): {}", allowedHosts);
         httpServer = HttpServer.builder(eventloop,
-                NodeApi.servlet(eventloop, service, limiter, sseHub, allowedHosts(config)))
-            .withListenPort(config.apiPort())
+                NodeApi.servlet(eventloop, service, limiter, sseHub, allowedHosts,
+                    config.apiToken().orElse(null)))
+            .withListenAddress(new java.net.InetSocketAddress(config.bindAddress(), config.apiPort()))
             .build();
         eventloop.keepAlive(true);
         eventloopThread = new Thread(eventloop, "rhizome-http");
@@ -358,6 +363,10 @@ public final class RhizomeNode implements AutoCloseable {
                 // Transport failures are not misbehaviour; PeerDiscovery prunes the
                 // persistently unreachable. Only protocol violations earn ban score.
                 log.debug("Peer {} unavailable: {}", peerUrl, e.getMessage());
+            } catch (HttpPeerSource.PeerProtocolException e) {
+                // Malformed protocol data (junk scalars, absurd snapshot chunk counts) is a
+                // protocol violation like serving an invalid chain — penalize accordingly.
+                penalize(peerUrl, PENALTY_INVALID, "served malformed protocol data");
             } catch (RuntimeException e) {
                 log.warn("Sync from {} failed: {}", peerUrl, e.toString());
             }
@@ -416,6 +425,34 @@ public final class RhizomeNode implements AutoCloseable {
         } catch (RuntimeException ignored) {
             // malformed advertised URL: fall back to the loopback names only
         }
+        // Best-effort: the host's own non-loopback interface addresses, so the dashboard reached
+        // over the LAN (http://192.168.x.y:port/) is not 403'd by the rebinding guard under the
+        // default config (audit F9). Enumeration failures are ignored — the loopback and
+        // advertised names still apply.
+        try {
+            java.util.Enumeration<java.net.NetworkInterface> ifs = java.net.NetworkInterface.getNetworkInterfaces();
+            while (ifs != null && ifs.hasMoreElements()) {
+                java.net.NetworkInterface iface = ifs.nextElement();
+                if (!iface.isUp() || iface.isLoopback()) {
+                    continue;
+                }
+                java.util.Enumeration<java.net.InetAddress> addrs = iface.getInetAddresses();
+                while (addrs.hasMoreElements()) {
+                    java.net.InetAddress addr = addrs.nextElement();
+                    if (addr.isLoopbackAddress() || addr.isLinkLocalAddress()) {
+                        continue;
+                    }
+                    String host = addr.getHostAddress();
+                    int zone = host.indexOf('%'); // strip any IPv6 zone id (%eth0)
+                    if (zone >= 0) {
+                        host = host.substring(0, zone);
+                    }
+                    names.add(addr instanceof java.net.Inet6Address ? "[" + host + "]" : host);
+                }
+            }
+        } catch (RuntimeException | java.net.SocketException ignored) {
+            // interface enumeration unavailable: loopback + advertised names still apply
+        }
         for (String name : names) {
             hosts.add(name.toLowerCase(java.util.Locale.ROOT));
             hosts.add((name + ":" + port).toLowerCase(java.util.Locale.ROOT));
@@ -425,6 +462,21 @@ public final class RhizomeNode implements AutoCloseable {
 
     @Override
     public synchronized void close() {
+        // Stop NEW work first: close the HTTP server and drain the eventloop before touching
+        // anything else, so no request handler can be inside a native store read/write while
+        // shutdown proceeds (a late /sync read racing the column-family close aborts the JVM).
+        // The join budget covers the worst in-flight request: peer body reads are deadline-bound
+        // (BodyReadDeadline, 30 s), so a drained eventloop always dies within this window.
+        if (eventloop != null) {
+            eventloop.submit(() -> httpServer.close());
+            eventloop.keepAlive(false);
+            eventloop.execute(eventloop::breakEventloop);
+            try {
+                eventloopThread.join(35_000);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
         if (producer != null) {
             producer.stop();
         }
@@ -451,31 +503,28 @@ public final class RhizomeNode implements AutoCloseable {
         if (verifier != null) {
             verifier.shutdown();
         }
-        if (eventloop != null) {
-            eventloop.submit(() -> httpServer.close());
-            eventloop.keepAlive(false);
-            eventloop.execute(eventloop::breakEventloop);
-            try {
-                eventloopThread.join(2000);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
+        // Close the stores under the engine lock: producer/sync/eventloop are stopped above,
+        // but a straggler (late gossip task, timed-out eventloop job) could still be queued.
+        // Holding the lock guarantees no thread is inside a native write while the handles
+        // close; a late writer afterwards gets a clean "database is closed" Java exception
+        // instead of corrupting the native heap.
+        engine.runExclusive(() -> {
+            if (store != null) {
+                store.close();
             }
-        }
-        if (store != null) {
-            store.close();
-        }
-        if (contractStore != null) {
-            contractStore.close();
-        }
-        if (boxStore != null) {
-            boxStore.close();
-        }
-        if (tokenStore != null) {
-            tokenStore.close();
-        }
-        if (stateStore != null) {
-            stateStore.close();
-        }
+            if (contractStore != null) {
+                contractStore.close();
+            }
+            if (boxStore != null) {
+                boxStore.close();
+            }
+            if (tokenStore != null) {
+                tokenStore.close();
+            }
+            if (stateStore != null) {
+                stateStore.close();
+            }
+        });
     }
 
     public static void main(String[] args) throws Exception {
@@ -506,6 +555,17 @@ public final class RhizomeNode implements AutoCloseable {
         String advertise = System.getenv("RHIZOME_ADVERTISE");
         if (advertise != null && !advertise.isBlank()) {
             config = config.withAdvertisedUrl(advertise.trim());
+        }
+        // Bind address for the HTTP API (default 0.0.0.0 — preserve historical behavior);
+        // 127.0.0.1 for a wallet/dashboard-only node reached via tunnel (audit F4).
+        String bind = System.getenv("RHIZOME_BIND_ADDRESS");
+        if (bind != null && !bind.isBlank()) {
+            config = config.withBindAddress(bind.trim());
+        }
+        // Optional bearer token gating the state-changing/operator routes (audit F4).
+        String token = System.getenv("RHIZOME_API_TOKEN");
+        if (token != null && !token.isBlank()) {
+            config = config.withApiToken(token.trim());
         }
 
         RhizomeNode node = new RhizomeNode(config);

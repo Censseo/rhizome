@@ -23,6 +23,8 @@ Configured via environment variables:
 |---|---|---|
 | `RHIZOME_NETWORK` | `mainnet` | `mainnet` or `testnet` (low difficulty) |
 | `RHIZOME_PORT` | `3000` | HTTP API port |
+| `RHIZOME_BIND_ADDRESS` | `0.0.0.0` | HTTP API bind address (`127.0.0.1` for a wallet/dashboard-only node behind a tunnel) |
+| `RHIZOME_API_TOKEN` | — | when set, state-changing/operator routes (`/add_peer`, `/scan/register`, `/scan/deregister`, `/add_transaction`, `/submit`, `/call_readonly`) require `Authorization: Bearer <token>`; P2P protocol endpoints stay open. Note: with a token set, gossip peers must also present it on `/submit` and `/add_transaction` |
 | `RHIZOME_DATA` | `./data` | RocksDB data directory |
 | `RHIZOME_SNAPSHOT` | — | snapshot file seeding the genesis |
 | `RHIZOME_MINER` | — | reward address (enables block production) |

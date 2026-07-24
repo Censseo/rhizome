@@ -131,7 +131,11 @@ public final class ChainSynchronizer {
     }
 
     private boolean agrees(PeerSource peer, long h) {
-        return engine.blockAt(h).hash().equals(peer.blockHash(h));
+        // headerAt, not blockAt (audit F4): headers survive body pruning and hash identically
+        // (BlockImpl.hash() delegates to BlockHeader), so the fork probe still works on a pruned
+        // node — blockAt would throw below the prune watermark and an honest archive peer would be
+        // misjudged as PEER_INVALID instead of simply diverging below the reorg horizon.
+        return engine.headerAt(h).hash().equals(peer.blockHash(h));
     }
 
     private boolean applyRange(PeerSource peer, long from, long to) {
@@ -238,7 +242,8 @@ public final class ChainSynchronizer {
         if (branch.isEmpty()) {
             return false;
         }
-        SHA256Hash prevHash = engine.blockAt(forkHeight).hash();
+        // Header hash suffices for the anchor and survives pruning (audit F4, same as agrees()).
+        SHA256Hash prevHash = engine.headerAt(forkHeight).hash();
         long expectedId = forkHeight + 1;
         for (Block block : branch) {
             var b = (BlockImpl) block;

@@ -5,8 +5,11 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.nio.ByteBuffer;
 
+import org.json.JSONArray;
+import org.json.JSONObject;
 import org.junit.jupiter.api.Test;
 
+import rhizome.core.block.Block;
 import rhizome.core.block.BlockCodec;
 import rhizome.core.block.BlockImpl;
 import rhizome.core.block.HeaderCodec;
@@ -18,6 +21,7 @@ import rhizome.core.ledger.PublicAddress;
 import rhizome.core.merkletree.MerkleTree;
 import rhizome.core.transaction.Transaction;
 import rhizome.core.transaction.TransactionAmount;
+import rhizome.core.transaction.dto.TransactionDto;
 
 /**
  * Regression guard for the decode-time OOM (H1/H2): attacker-controlled count and
@@ -139,5 +143,104 @@ class CodecBoundsTest {
         // Sanity: the constant the bound uses is the consensus tx cap.
         assertThrows(IllegalArgumentException.class,
             () -> HeaderCodec.decode(header(Constants.MAX_TRANSACTIONS_PER_BLOCK + 1, 0, null)));
+    }
+
+    // ---- JSON-decode parity with the binary codecs (audit F5, F1) ----
+
+    /** A minimal valid JSON block, produced by the block's own toJson so every required key exists. */
+    private static JSONObject jsonBlock() {
+        var b = (BlockImpl) BlockImpl.builder().id(2).timestamp(5000).difficulty(4)
+            .lastBlockHash(SHA256Hash.empty()).build();
+        b.addTransaction(Transaction.of(PublicAddress.random(), new TransactionAmount(50)));
+        MerkleTree tree = new MerkleTree();
+        tree.setItems(b.transactions());
+        b.merkleRoot(tree.getRootHash());
+        b.nonce(SHA256Hash.empty());
+        return b.toJson();
+    }
+
+    private static JSONObject uncleJson(int difficulty) {
+        return new JSONObject()
+            .put("hash", SHA256Hash.random().toHexString())
+            .put("difficulty", difficulty)
+            .put("miner", PublicAddress.random().toHexString());
+    }
+
+    @Test
+    void boxReceiptCodecRoundTripsAndRejectsGarbage() {
+        // The persisted form of a block's box receipts (audit F7): an exact round-trip, and a
+        // corrupt count rejected before any allocation — the same guard as the box journal codec.
+        java.util.List<rhizome.core.box.BoxProcessor.BoxReceipt> receipts = java.util.List.of(
+            new rhizome.core.box.BoxProcessor.BoxReceipt(
+                rhizome.core.transaction.TransactionKind.BOX_CREATE, 5000, 0),
+            new rhizome.core.box.BoxProcessor.BoxReceipt(
+                rhizome.core.transaction.TransactionKind.BOX_COLLECT, 0, 42));
+        org.junit.jupiter.api.Assertions.assertEquals(receipts,
+            rhizome.core.box.BoxReceiptCodec.decode(rhizome.core.box.BoxReceiptCodec.encode(receipts)));
+        // count = 2 but no records follow: rejected, not new ArrayList on a bogus count.
+        assertThrows(IllegalStateException.class,
+            () -> rhizome.core.box.BoxReceiptCodec.decode(new byte[] {0, 0, 0, 2, 0}));
+    }
+
+    @Test
+    void blockFromJsonEnforcesBinaryCodecBounds() {
+        // The JSON decode path must reject exactly what BlockDto/HeaderCodec/BlockCodec reject on
+        // the wire, so a JSON-sourced block cannot carry fields a binary peer never accepts.
+        JSONObject base = jsonBlock();
+        assertDoesNotThrow(() -> Block.of(new JSONObject(base.toString())));
+
+        // difficulty in [0, MAX_DIFFICULTY], as BlockDto.readFrom enforces.
+        JSONObject badDifficulty = new JSONObject(base.toString());
+        badDifficulty.put("difficulty", Constants.MAX_DIFFICULTY + 1);
+        assertThrows(IllegalArgumentException.class, () -> Block.of(badDifficulty));
+        JSONObject negativeDifficulty = new JSONObject(base.toString());
+        negativeDifficulty.put("difficulty", -1);
+        assertThrows(IllegalArgumentException.class, () -> Block.of(negativeDifficulty));
+
+        // vote: 0 (abstain) or ±paramId only — the same canonical rule as the codecs (audit F1).
+        JSONObject badVote = new JSONObject(base.toString());
+        badVote.put("vote", 3);
+        assertThrows(IllegalArgumentException.class, () -> Block.of(badVote));
+
+        // uncle count capped, as BlockCodec/HeaderCodec cap it.
+        JSONObject tooManyUncles = new JSONObject(base.toString());
+        JSONArray uncles = new JSONArray();
+        for (int i = 0; i < Constants.MAX_UNCLES_PER_BLOCK + 1; i++) {
+            uncles.put(uncleJson(1));
+        }
+        tooManyUncles.put("uncles", uncles);
+        assertThrows(IllegalArgumentException.class, () -> Block.of(tooManyUncles));
+
+        // uncle difficulty in [0, MAX_DIFFICULTY].
+        JSONObject badUncleDifficulty = new JSONObject(base.toString());
+        badUncleDifficulty.put("uncles",
+            new JSONArray().put(uncleJson(Constants.MAX_DIFFICULTY + 1)));
+        assertThrows(IllegalArgumentException.class, () -> Block.of(badUncleDifficulty));
+
+        // A single in-range uncle still decodes.
+        JSONObject oneUncle = new JSONObject(base.toString());
+        oneUncle.put("uncles", new JSONArray().put(uncleJson(5)));
+        assertDoesNotThrow(() -> Block.of(oneUncle));
+    }
+
+    @Test
+    void transactionFromJsonEnforcesPayloadCap() {
+        // TransactionDto.readFrom caps payloads at MAX_DATA; the JSON path must match (audit F5).
+        JSONObject tx = new JSONObject()
+            .put("to", "00".repeat(25))
+            .put("amount", 1L)
+            .put("timestamp", "1")
+            .put("fee", 0L)
+            .put("from", "00".repeat(25))
+            .put("signingKey", "00".repeat(32))
+            .put("signature", "00".repeat(64))
+            .put("kind", "CALL")
+            .put("gasLimit", 1L)
+            .put("gasPrice", 1L)
+            .put("data", "00".repeat(TransactionDto.MAX_DATA + 1));
+        assertThrows(IllegalArgumentException.class, () -> Transaction.of(tx));
+        // Exactly at the cap passes the bound.
+        tx.put("data", "00".repeat(TransactionDto.MAX_DATA));
+        assertDoesNotThrow(() -> Transaction.of(tx));
     }
 }

@@ -1,11 +1,14 @@
 package rhizome;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.json.JSONObject;
 import org.junit.jupiter.api.Test;
 
+import rhizome.core.ledger.GenesisLedger;
+import rhizome.core.ledger.InMemoryLedger;
 import rhizome.core.ledger.LedgerSnapshot;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.transaction.TransactionAmount;
@@ -40,8 +43,10 @@ class LedgerSnapshotTest {
     }
 
     @Test
-    void handlesUnsignedAmountsAboveLongMax() {
-        // A uint64 value beyond Long.MAX_VALUE (as could exist from the C++ overflow bug)
+    void rejectsUnsignedAmountsWithTheHighBitSet() {
+        // audit F3: a uint64 value beyond Long.MAX_VALUE parses via parseUnsignedLong as a NEGATIVE
+        // long, and the ledger treats balances as signed 64-bit — such a snapshot entry must be
+        // rejected at decode, not seeded as a negative genesis balance.
         long unsignedValue = 0xFFFFFFFFFFFFFFFFL; // -1 signed, 18446744073709551615 unsigned
         LedgerSnapshot snapshot = new LedgerSnapshot("pandanite", 0, 1);
         snapshot.put(addr(ADDR_A), new TransactionAmount(unsignedValue));
@@ -50,8 +55,17 @@ class LedgerSnapshotTest {
         assertTrue(json.getJSONObject("balances").getString(addr(ADDR_A).toHexString())
             .equals("18446744073709551615"));
 
-        LedgerSnapshot restored = LedgerSnapshot.fromJson(json);
-        assertEquals(unsignedValue, restored.balances().get(addr(ADDR_A)).amount());
+        assertThrows(IllegalArgumentException.class, () -> LedgerSnapshot.fromJson(json));
+    }
+
+    @Test
+    void genesisLedgerRejectsNegativeSeededBalances() {
+        // audit F3: even a programmatically built snapshot (bypassing fromJson's guard) must not
+        // seed a negative balance into the ledger.
+        LedgerSnapshot snapshot = new LedgerSnapshot("pandanite", 0, 1);
+        snapshot.put(addr(ADDR_A), new TransactionAmount(-1L));
+        assertThrows(IllegalArgumentException.class,
+            () -> GenesisLedger.seed(new InMemoryLedger(), snapshot));
     }
 
     @Test

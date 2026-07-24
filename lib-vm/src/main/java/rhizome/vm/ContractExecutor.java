@@ -49,6 +49,15 @@ public final class ContractExecutor {
             return new DeployOutcome(address, 0, false, "insufficient balance for deploy gas");
         }
         chargeFee(deployer, feeRecipient, fee);
+        // Validate BEFORE storing: this path stored raw code with no checks, so malformed,
+        // oversized or non-deterministic (float/SIMD) bytecode could enter on-chain state and
+        // only be discovered on every later call (audit F8). The gas fee is still charged for
+        // the validation work, matching the processor's failed-deploy path.
+        try {
+            WasmVm.validateCode(code);
+        } catch (Throwable e) {
+            return new DeployOutcome(address, fee, false, "invalid contract code: " + e.getMessage());
+        }
         store.putCode(address, code);
         return new DeployOutcome(address, fee, true, null);
     }

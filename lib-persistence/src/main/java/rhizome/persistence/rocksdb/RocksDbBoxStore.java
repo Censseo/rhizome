@@ -34,6 +34,8 @@ import static rhizome.core.common.Utils.longToBytes;
  *       (lowest rent-clock first; a box is collectable once
  *       {@code rentPaidHeight <= height - storagePeriod})</li>
  *   <li>{@code box_journal}: {@code height(8, BE)} -> serialized undo journal</li>
+ *   <li>{@code box_receipts}: {@code height(8, BE)} -> serialized box receipts
+ *       (what {@code Executor.rollbackBlock} needs to reverse soft-reverts after a restart)</li>
  * </ul>
  */
 public final class RocksDbBoxStore implements BoxStore, AutoCloseable {
@@ -46,6 +48,7 @@ public final class RocksDbBoxStore implements BoxStore, AutoCloseable {
     private static final byte[] CF_OWNER = "box_owner".getBytes();
     private static final byte[] CF_EXPIRY = "box_expiry".getBytes();
     private static final byte[] CF_JOURNAL = "box_journal".getBytes();
+    private static final byte[] CF_RECEIPTS = "box_receipts".getBytes();
     private static final byte[] EMPTY = new byte[0];
 
     private final RocksDB db;
@@ -54,7 +57,9 @@ public final class RocksDbBoxStore implements BoxStore, AutoCloseable {
     private final ColumnFamilyHandle ownerCf;
     private final ColumnFamilyHandle expiryCf;
     private final ColumnFamilyHandle journalCf;
-    private final WriteOptions writeOptions = new WriteOptions();
+    private final ColumnFamilyHandle receiptsCf;
+    // Synced: apply/revert batches move box state across a height boundary (audit F3).
+    private final WriteOptions writeOptions = new WriteOptions().setSync(true);
 
     public RocksDbBoxStore(String path) throws IOException {
         List<ColumnFamilyDescriptor> descriptors = List.of(
@@ -62,8 +67,12 @@ public final class RocksDbBoxStore implements BoxStore, AutoCloseable {
             new ColumnFamilyDescriptor(CF_BOXES),
             new ColumnFamilyDescriptor(CF_OWNER),
             new ColumnFamilyDescriptor(CF_EXPIRY),
-            new ColumnFamilyDescriptor(CF_JOURNAL));
+            new ColumnFamilyDescriptor(CF_JOURNAL),
+            new ColumnFamilyDescriptor(CF_RECEIPTS));
         List<ColumnFamilyHandle> handles = new ArrayList<>();
+        // DBOptions is NOT closed after open: closing it while the DB is live corrupts the
+        // native heap (rocksdbjni keeps referencing it) — the audit F12 leak note is
+        // superseded; the object is reclaimed with the process/DB.
         try {
             DBOptions options = new DBOptions()
                 .setCreateIfMissing(true)
@@ -77,6 +86,7 @@ public final class RocksDbBoxStore implements BoxStore, AutoCloseable {
         this.ownerCf = handles.get(2);
         this.expiryCf = handles.get(3);
         this.journalCf = handles.get(4);
+        this.receiptsCf = handles.get(5);
     }
 
     @Override
@@ -87,6 +97,11 @@ public final class RocksDbBoxStore implements BoxStore, AutoCloseable {
 
     @Override
     public void applyBlock(long height, List<BoxMutation> mutations) {
+        // Refuse a double-apply: re-applying a block would journal its own already-mutated state
+        // as the "prior", so a later revert would restore the wrong values (audit F10).
+        if (raw(journalCf, longToBytes(height)) != null) {
+            throw new IllegalStateException("box store already has a journal at height " + height);
+        }
         try (WriteBatch batch = new WriteBatch()) {
             List<JournalEntry> journal = new ArrayList<>(mutations.size());
             for (BoxMutation m : mutations) {
@@ -135,9 +150,33 @@ public final class RocksDbBoxStore implements BoxStore, AutoCloseable {
     }
 
     @Override
+    public void putReceipts(long height, byte[] encodedReceipts) {
+        try {
+            db.put(receiptsCf, writeOptions, longToBytes(height), encodedReceipts);
+        } catch (RocksDBException e) {
+            throw new IllegalStateException("box store putReceipts failed", e);
+        }
+    }
+
+    @Override
+    public byte[] getReceipts(long height) {
+        return raw(receiptsCf, longToBytes(height));
+    }
+
+    @Override
+    public void deleteReceipts(long height) {
+        try {
+            db.delete(receiptsCf, writeOptions, longToBytes(height));
+        } catch (RocksDBException e) {
+            throw new IllegalStateException("box store deleteReceipts failed", e);
+        }
+    }
+
+    @Override
     public void pruneJournals(long minHeight) {
         try {
             db.deleteRange(journalCf, longToBytes(0), longToBytes(minHeight));
+            db.deleteRange(receiptsCf, longToBytes(0), longToBytes(minHeight));
         } catch (RocksDBException e) {
             throw new IllegalStateException("box store pruneJournals failed", e);
         }
@@ -321,6 +360,7 @@ public final class RocksDbBoxStore implements BoxStore, AutoCloseable {
         ownerCf.close();
         expiryCf.close();
         journalCf.close();
+        receiptsCf.close();
         writeOptions.close();
         db.close();
     }

@@ -30,6 +30,20 @@ class WalletTest {
     }
 
     @Test
+    void encryptedRoundTripWithExplicitPassphrase() throws Exception {
+        // Exercises the --passphrase-file plumbing (audit F3): an explicit passphrase must seal
+        // the file and unlock it again, with no env var or console involved.
+        Wallet original = Wallet.create();
+        Path keyfile = tempDir.resolve("wallet-encrypted.json");
+        original.save(keyfile, "s3cret".toCharArray());
+
+        Wallet loaded = Wallet.load(keyfile, "s3cret".toCharArray());
+        assertEquals(original.address(), loaded.address());
+        assertTrue(java.nio.file.Files.readString(keyfile).contains("rhizome-keystore"),
+            "explicit passphrase must produce an encrypted envelope");
+    }
+
+    @Test
     void addressDerivesFromPublicKey() {
         Wallet wallet = Wallet.create();
         assertEquals(PublicAddress.of(wallet.publicKey()), wallet.address());

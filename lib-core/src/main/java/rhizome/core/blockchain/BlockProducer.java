@@ -84,9 +84,16 @@ public final class BlockProducer {
     /**
      * Sets the parameter vote this miner casts on each block it produces (§ miner voting):
      * {@code 0} abstains, {@code ±1} votes on {@code storageFeeFactor}, {@code ±2} on
-     * {@code minValuePerByte}. Default abstain.
+     * {@code minValuePerByte}. Default abstain. Out-of-range values are rejected: a block
+     * carrying one is refused by every node's consensus gate (audit F1), so producing it
+     * would waste the mined work.
      */
     public void setVote(int vote) {
+        // Canonical votes are 0 or ±paramId (VoteableParams 1/2) — the same bound the codecs and
+        // ChainEngine.addBlock enforce. Long abs guards Integer.MIN_VALUE.
+        if (Math.abs((long) vote) > 2) {
+            throw new IllegalArgumentException("vote out of range: " + vote);
+        }
         this.vote = vote;
     }
 

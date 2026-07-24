@@ -40,6 +40,7 @@ public final class HeaderChain {
         TIMESTAMP_TOO_CLOSE,
         TIMESTAMP_IN_FUTURE,
         INVALID_UNCLES,
+        INVALID_VOTE,
         CHECKPOINT_MISMATCH
     }
 
@@ -102,6 +103,13 @@ public final class HeaderChain {
             }
             if (header.difficulty() != expectedDifficulty) {
                 return Result.reject(Rejection.WRONG_DIFFICULTY, h);
+            }
+            // The same canonical vote rule ChainEngine.addBlock enforces (audit F1): 0 (abstain) or
+            // ±paramId (VoteableParams 1/2). Headers arriving over the wire are already bounded by
+            // HeaderCodec, but the tally in ChainEngine.applyVotingAt trusts this gate for every
+            // ingress path, so the bound is checked here too. Long abs guards Integer.MIN_VALUE.
+            if (Math.abs((long) header.vote()) > 2) {
+                return Result.reject(Rejection.INVALID_VOTE, h);
             }
             if (!header.verifyNonce(params.powAlgorithm())) {
                 return Result.reject(Rejection.INVALID_POW, h);

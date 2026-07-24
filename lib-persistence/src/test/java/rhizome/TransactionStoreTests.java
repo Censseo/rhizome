@@ -32,18 +32,22 @@ class TransactionStoreTests {
         // Test for a mined transaction
         var t = miner.mine();
         assertFalse(txdb.hasTransaction(t));
+        // Unknown transactions report "absent", not a bogus height 0 (audit F13).
+        assertTrue(txdb.blockForTransaction(t).isEmpty());
+        assertTrue(txdb.blockForTransactionId(t.hashContents()).isEmpty());
         txdb.insertTransaction(t, 1);
         assertTrue(txdb.hasTransaction(t));
-        assertEquals(1, txdb.blockForTransaction(t));
+        assertEquals(1, txdb.blockForTransaction(t).orElseThrow());
         txdb.removeTransaction(t);
         assertFalse(txdb.hasTransaction(t));
+        assertTrue(txdb.blockForTransaction(t).isEmpty());
 
         // Test for a transaction sent to another user
         var t2 = miner.send(other, 333);
         assertFalse(txdb.hasTransaction(t2));
         txdb.insertTransaction(t2, 3);
         assertTrue(txdb.hasTransaction(t2));
-        assertEquals(3, txdb.blockForTransaction(t2));
+        assertEquals(3, txdb.blockForTransaction(t2).orElseThrow());
         txdb.removeTransaction(t2);
         assertFalse(txdb.hasTransaction(t2));
     }

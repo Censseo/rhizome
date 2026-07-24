@@ -50,15 +50,20 @@ final class TokenApi {
         java.util.List<byte[]> ids;
         if (minter != null) {
             key = rhizome.core.common.Utils.hexStringToByteArray(minter);
+            // Validate the decoded length BEFORE any store call: a short/overlong hex key must be a
+            // cheap 400, not a store lookup with a malformed key (audit F12).
+            if (key.length != PublicAddress.SIZE) {
+                return badRequest("address must be 25 bytes (50 hex chars)");
+            }
             ids = node.tokenIdsByMinter(key, null, 100);
         } else if (holder != null) {
             key = rhizome.core.common.Utils.hexStringToByteArray(holder);
+            if (key.length != PublicAddress.SIZE) {
+                return badRequest("address must be 25 bytes (50 hex chars)");
+            }
             ids = node.tokenIdsByHolder(key, null, 100);
         } else {
             return badRequest("provide minter= or holder=");
-        }
-        if (key.length != PublicAddress.SIZE) {
-            return badRequest("address must be 25 bytes (50 hex chars)");
         }
         org.json.JSONArray arr = new org.json.JSONArray();
         for (byte[] id : ids) {

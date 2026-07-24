@@ -60,6 +60,18 @@ final class SnapshotBootstrap {
      */
     private static final int MAX_SNAPSHOT_CHUNKS = 1_000_000;
 
+    /**
+     * Hard cap on the total snapshot bytes buffered in memory during bootstrap. Chunks are held
+     * whole until the root verifies (see the import comment below), and a hostile bootstrap peer
+     * may serve each chunk at the full 16 MiB its own endpoint permits — {@code MAX_SNAPSHOT_CHUNKS}
+     * such chunks would exhaust any heap long before verification (audit F7). 4 GiB is far above
+     * any plausible mainnet snapshot while keeping the buffered peak bounded.
+     */
+    private static final long MAX_SNAPSHOT_BUFFERED_BYTES = 4L * 1024 * 1024 * 1024;
+
+    /** Worst-case bytes of one served chunk (the peer-side /state/snapshot/chunk fetch cap). */
+    private static final long MAX_CHUNK_BYTES = 16L * 1024 * 1024;
+
     private SnapshotBootstrap() {}
 
     /**
@@ -132,10 +144,26 @@ final class SnapshotBootstrap {
             log.warn("Snapshot advertises an out-of-range chunk count ({}); refusing", info.chunkCount());
             return false;
         }
+        // Up-front cross-check against the buffered-bytes bound: even at the worst-case chunk
+        // size the advertised set must fit the cap, or the loop below would buffer its way to an
+        // OOM before aborting (audit F7).
+        if (info.chunkCount() * MAX_CHUNK_BYTES > MAX_SNAPSHOT_BUFFERED_BYTES) {
+            log.warn("Snapshot of {} chunks could exceed the {} byte bootstrap buffer bound; refusing",
+                info.chunkCount(), MAX_SNAPSHOT_BUFFERED_BYTES);
+            return false;
+        }
         List<SnapshotChunk> chunks = new ArrayList<>(info.chunkCount());
+        long bufferedBytes = 0;
         try {
             for (int i = 0; i < info.chunkCount(); i++) {
-                chunks.add(SnapshotChunk.decode(peer.snapshotChunk(i)));
+                byte[] raw = peer.snapshotChunk(i);
+                bufferedBytes += raw.length;
+                if (bufferedBytes > MAX_SNAPSHOT_BUFFERED_BYTES) {
+                    log.warn("Snapshot chunks exceeded the {} byte bootstrap buffer bound; aborting",
+                        MAX_SNAPSHOT_BUFFERED_BYTES);
+                    return false;
+                }
+                chunks.add(SnapshotChunk.decode(raw));
             }
         } catch (RuntimeException e) {
             log.warn("Snapshot chunk fetch/decode failed: {}", e.toString());

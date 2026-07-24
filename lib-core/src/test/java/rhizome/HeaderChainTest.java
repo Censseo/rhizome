@@ -205,6 +205,20 @@ class HeaderChainTest {
     }
 
     @Test
+    void rejectsOutOfRangeVote() {
+        // audit F1: the header gate enforces the same canonical vote rule as ChainEngine.addBlock
+        // and the codecs — an otherwise valid header carrying |vote| > 2 is rejected at its height.
+        for (int i = 0; i < 7; i++) mineOnEngine();
+        BlockHeader good = engine.headerAt(7);
+        BlockHeader tampered = new BlockHeader(good.id(), good.timestamp(), good.difficulty(),
+            good.numTransactions(), good.lastBlockHash(), good.merkleRoot(), good.nonce(),
+            good.stateRoot(), 3, good.uncles());
+        HeaderChain.Result r = HeaderChain.validate(params, engine::headerAt, 6, List.of(tampered), clock.get());
+        assertEquals(HeaderChain.Rejection.INVALID_VOTE, r.rejection());
+        assertEquals(7, r.rejectedHeight());
+    }
+
+    @Test
     void rejectsMalformedUncleReferences() {
         for (int i = 0; i < 7; i++) mineOnEngine();
         int diff = engine.headerAt(7).difficulty();

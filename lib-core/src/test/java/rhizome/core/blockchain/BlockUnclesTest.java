@@ -1,4 +1,4 @@
-package rhizome;
+package rhizome.core.blockchain;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -15,10 +15,6 @@ import rhizome.core.block.Block;
 import rhizome.core.block.BlockCodec;
 import rhizome.core.block.BlockImpl;
 import rhizome.core.block.UncleRef;
-import rhizome.core.blockchain.ChainEngine;
-import rhizome.core.blockchain.InMemoryChainStore;
-import rhizome.core.blockchain.Miner;
-import rhizome.core.blockchain.NetworkParameters;
 import rhizome.crypto.PowAlgorithm;
 import rhizome.crypto.SHA256Hash;
 import rhizome.core.ledger.InMemoryLedger;
@@ -30,7 +26,11 @@ import rhizome.core.transaction.Transaction;
 import rhizome.core.transaction.TransactionAmount;
 import rhizome.core.transaction.TransactionImpl;
 
-/** Uncle references (GHOST): block preimage/codec, full uncle validation, work weighting, rewards. */
+/**
+ * Uncle references (GHOST): block preimage/codec, full uncle validation, work
+ * weighting, rewards. Lives in the engine's own package so the tests can drive the
+ * package-private trusted-restore path ({@link ChainEngine#restoreBlock}, audit F2).
+ */
 class BlockUnclesTest {
 
     private NetworkParameters params;
@@ -62,13 +62,19 @@ class BlockUnclesTest {
 
     /** A mined next block on the current tip, carrying the given uncle references. */
     private BlockImpl mineNext(List<UncleRef> uncles) {
-        return mine(engine.height() + 1, engine.tipHash(), uncles, 7, PublicAddress.random());
+        return mineNextFor(engine, uncles);
+    }
+
+    /** A mined next block on {@code e}'s tip, carrying the given uncle references. */
+    private BlockImpl mineNextFor(ChainEngine e, List<UncleRef> uncles) {
+        return mine(e, e.height() + 1, e.tipHash(), uncles, 7, PublicAddress.random());
     }
 
     /** A mined block at an arbitrary height/parent with a distinguishing salt (for orphans). */
-    private BlockImpl mine(long height, SHA256Hash parent, List<UncleRef> uncles, int salt, PublicAddress coinbaseTo) {
+    private BlockImpl mine(ChainEngine e, long height, SHA256Hash parent, List<UncleRef> uncles,
+                           int salt, PublicAddress coinbaseTo) {
         var b = (BlockImpl) BlockImpl.builder().id((int) height)
-            .timestamp(clock.addAndGet(1000L + salt)).difficulty(engine.difficulty())
+            .timestamp(clock.addAndGet(1000L + salt)).difficulty(e.difficulty())
             .lastBlockHash(parent).uncles(new java.util.ArrayList<>(uncles)).build();
         b.addTransaction(Transaction.of(coinbaseTo, new TransactionAmount(params.miningReward(height))));
         var tree = new MerkleTree();
@@ -86,7 +92,7 @@ class BlockUnclesTest {
     private BlockImpl registerOrphanSiblingOfTip(PublicAddress orphanMiner) {
         long tipHeight = engine.height();
         SHA256Hash grandparent = engine.blockAt(tipHeight - 1).hash();
-        BlockImpl orphan = mine(tipHeight, grandparent, List.of(), 500, orphanMiner);
+        BlockImpl orphan = mine(engine, tipHeight, grandparent, List.of(), 500, orphanMiner);
         engine.registerOrphan(orphan);
         return orphan;
     }
@@ -119,6 +125,40 @@ class BlockUnclesTest {
         // pool-derived), so the restore is exact, not a work/reward-losing shortcut.
         assertTrue(balanceOf(bLedger, uncleMiner) > 0L,
             "uncle reward must be applied from the committed reference on restore");
+    }
+
+    @Test
+    void restoreBlockStillEnforcesStructuralUncleBounds() {
+        // audit F2: the trusted-restore path skips the orphan-POOL checks (audit V5) but must still
+        // enforce the pool-free STRUCTURAL bounds the committed refs carry on their own — count cap,
+        // distinctness and minDifficulty <= ref.difficulty() <= block.difficulty(). Otherwise a
+        // fabricated block fed to the trusted path could mint uncle+nephew rewards and poison
+        // totalWork beyond anything a normal addBlock would accept.
+        engine.addBlock(mineNext(List.of()));                 // height 2
+        BlockImpl orphan = registerOrphanSiblingOfTip();      // orphan sibling at height 2
+
+        InMemoryLedger bLedger = new InMemoryLedger();
+        ChainEngine b = ChainEngine.init(params, bLedger, new InMemoryChainStore(),
+            new LedgerSnapshot("t", 0, params.chainId()), null, clock::get);
+        assertEquals(ExecutionStatus.SUCCESS, b.addBlock(engine.blockAt(2))); // shared prefix
+
+        UncleRef good = ref(orphan);
+        // Inflated: a ref claiming more difficulty than the nephew block itself carries.
+        assertEquals(ExecutionStatus.INVALID_UNCLES, b.restoreBlock(mineNextFor(b,
+            List.of(new UncleRef(orphan.hash(), b.difficulty() + 1, minerOf(orphan))))));
+        // Worthless: a ref below minDifficulty (free "work").
+        assertEquals(ExecutionStatus.INVALID_UNCLES, b.restoreBlock(mineNextFor(b,
+            List.of(new UncleRef(orphan.hash(), params.minDifficulty() - 1, minerOf(orphan))))));
+        // Duplicated: the same uncle credited twice.
+        assertEquals(ExecutionStatus.INVALID_UNCLES, b.restoreBlock(mineNextFor(b, List.of(good, good))));
+        // Over the count cap (maxUnclesPerBlock = 2).
+        assertEquals(ExecutionStatus.INVALID_UNCLES, b.restoreBlock(mineNextFor(b,
+            List.of(good,
+                new UncleRef(SHA256Hash.random(), params.minDifficulty(), PublicAddress.random()),
+                new UncleRef(SHA256Hash.random(), params.minDifficulty(), PublicAddress.random())))));
+        // The honest restore still succeeds afterwards — the bounds reject only what addBlock would.
+        assertEquals(ExecutionStatus.SUCCESS, b.restoreBlock(mineNextFor(b, List.of(good))));
+        assertEquals(3, b.height());
     }
 
     @Test

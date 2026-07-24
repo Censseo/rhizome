@@ -42,12 +42,26 @@ final class WalletKeystore {
 
     private WalletKeystore() {}
 
-    /** True if {@code content} is a keystore envelope rather than a plaintext key JSON. */
+    /**
+     * True if {@code content} is a keystore envelope rather than a plaintext key JSON. Parses the
+     * JSON first and requires the marker key AND all payload fields: a substring check alone is
+     * spoofable (a plaintext file merely quoting the marker would be misrouted to the decrypt
+     * path), and an envelope missing its fields can never decrypt anyway (audit F8).
+     */
     static boolean isEncrypted(String content) {
-        return content != null && content.contains("\"" + MARKER + "\"");
+        if (content == null) {
+            return false;
+        }
+        try {
+            JSONObject o = new JSONObject(content);
+            return o.has(MARKER) && o.has("salt") && o.has("iv") && o.has("ct");
+        } catch (org.json.JSONException notJson) {
+            return false;
+        }
     }
 
-    static String encrypt(String plaintext, char[] passphrase) {
+    static String encrypt(char[] plaintext, char[] passphrase) {
+        byte[] plaintextBytes = utf8Encode(plaintext);
         try {
             byte[] salt = new byte[SALT_LEN];
             RNG.nextBytes(salt);
@@ -56,7 +70,7 @@ final class WalletKeystore {
             Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
             cipher.init(Cipher.ENCRYPT_MODE, deriveKey(passphrase, salt, ITERATIONS),
                 new GCMParameterSpec(TAG_BITS, iv));
-            byte[] ciphertext = cipher.doFinal(plaintext.getBytes(StandardCharsets.UTF_8));
+            byte[] ciphertext = cipher.doFinal(plaintextBytes);
             Base64.Encoder b64 = Base64.getEncoder();
             return new JSONObject()
                 .put(MARKER, 1)
@@ -68,10 +82,12 @@ final class WalletKeystore {
                 .toString(2);
         } catch (GeneralSecurityException e) {
             throw new IllegalStateException("wallet encryption failed", e);
+        } finally {
+            java.util.Arrays.fill(plaintextBytes, (byte) 0);
         }
     }
 
-    static String decrypt(String envelope, char[] passphrase) {
+    static char[] decrypt(String envelope, char[] passphrase) {
         try {
             JSONObject o = new JSONObject(envelope);
             int iterations = o.optInt("iter", ITERATIONS);
@@ -88,10 +104,30 @@ final class WalletKeystore {
             Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
             cipher.init(Cipher.DECRYPT_MODE, deriveKey(passphrase, salt, iterations),
                 new GCMParameterSpec(TAG_BITS, iv));
-            return new String(cipher.doFinal(ciphertext), StandardCharsets.UTF_8);
+            byte[] plaintext = cipher.doFinal(ciphertext);
+            try {
+                return utf8Decode(plaintext);
+            } finally {
+                java.util.Arrays.fill(plaintext, (byte) 0);
+            }
         } catch (GeneralSecurityException e) {
             throw new IllegalStateException("wallet decryption failed (wrong passphrase or corrupt file)", e);
         }
+    }
+
+    /** UTF-8 without a String intermediate, so plaintext stays in wipeable arrays (audit F4). */
+    private static byte[] utf8Encode(char[] chars) {
+        java.nio.ByteBuffer bb = StandardCharsets.UTF_8.encode(java.nio.CharBuffer.wrap(chars));
+        byte[] out = new byte[bb.remaining()];
+        bb.get(out);
+        return out;
+    }
+
+    private static char[] utf8Decode(byte[] bytes) {
+        java.nio.CharBuffer cb = StandardCharsets.UTF_8.decode(java.nio.ByteBuffer.wrap(bytes));
+        char[] out = new char[cb.remaining()];
+        cb.get(out);
+        return out;
     }
 
     private static SecretKey deriveKey(char[] passphrase, byte[] salt, int iterations)

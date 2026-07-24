@@ -706,7 +706,7 @@ public final class Executor {
             // has no restore path): ledger left partially reverted while store/nonces/processors/root
             // stayed applied — a planted-block state-corruption vector. Guard mirrors the forward
             // `charged > 0`, matching revertToken/revertBox/revertContract which already guard `> 0`.
-            long charged = tx.amount().amount() + fee;
+            long charged = Math.addExact(tx.amount().amount(), fee); // exact symmetry with the forward path (audit F6)
             if (charged > 0) {
                 ledger.revertSend(tx.from(), new TransactionAmount(charged));
             }
@@ -744,7 +744,7 @@ public final class Executor {
     private static void revertBox(Ledger ledger, TransactionImpl tx,
                                   BoxProcessor.BoxReceipt receipt, PublicAddress miner) {
         long fee = tx.fee().amount();
-        long debit = fee + receipt.debitFrom();
+        long debit = Math.addExact(fee, receipt.debitFrom()); // exact symmetry with applyBox (audit F6)
         if (receipt.creditFrom() > 0) {
             ledger.revertDeposit(boxCreditTarget(tx), new TransactionAmount(receipt.creditFrom()));
         }

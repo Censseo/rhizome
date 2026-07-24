@@ -239,6 +239,188 @@ class WasmAdversarialTest {
             "memory.grow must charge MEMORY_PER_PAGE per requested page (audit S-4)");
     }
 
+    // ---- call_contract callee-address per-byte gas (F1) ----
+
+    /** Builds a module whose {@code call} export invokes {@code call_contract(0, calleeLen, 0, 0, 0, 0)} once. */
+    private byte[] callContractModule(int calleeLen) {
+        // type 0: (i32 x 6) -> i32  (call_contract);  type 1: () -> ()  (call)
+        byte[] type = section(1, bytes(0x02,
+            0x60, 0x06, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x01, 0x7F,
+            0x60, 0x00, 0x00));
+        // import env.call_contract : type 0
+        ByteArrayOutputStream imp = new ByteArrayOutputStream();
+        imp.write(0x01);                                          // 1 import
+        imp.write(0x03); imp.writeBytes("env".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        imp.write(0x0D); imp.writeBytes("call_contract".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        imp.write(0x00); imp.write(0x00);                         // func import, type index 0
+        byte[] importSec = section(2, imp.toByteArray());
+        byte[] func = section(3, bytes(0x01, 0x01));              // 1 function, type 1
+        byte[] mem = section(5, bytes(0x01, 0x00, 0x01));         // 1 memory, min 1 page
+        byte[] export = section(7, bytes(0x01, 0x04, 0x63, 0x61, 0x6C, 0x6C, 0x00, 0x01)); // "call" -> func 1
+        // body: 0 locals; i32.const 0 (addr ptr); i32.const calleeLen; i32.const 0 (in ptr);
+        //       i32.const 0 (in len); i32.const 0 (out ptr); i32.const 0 (out cap); call 0; drop; end
+        ByteArrayOutputStream body = new ByteArrayOutputStream();
+        body.write(0x00);
+        body.write(0x41); sleb(body, 0);
+        body.write(0x41); sleb(body, calleeLen);
+        body.write(0x41); sleb(body, 0);
+        body.write(0x41); sleb(body, 0);
+        body.write(0x41); sleb(body, 0);
+        body.write(0x41); sleb(body, 0);
+        body.write(0x10); uleb(body, 0);                         // call func index 0 (call_contract)
+        body.write(0x1A);                                        // drop the i32 result
+        body.write(0x0B);                                        // end
+        ByteArrayOutputStream code = new ByteArrayOutputStream();
+        code.write(0x01);
+        uleb(code, body.size());
+        code.writeBytes(body.toByteArray());
+        return module(type, importSec, func, mem, export, section(10, code.toByteArray()));
+    }
+
+    @Test
+    void callContractGasScalesWithTheCalleeAddressLengthNotJustInput() {
+        // No call dispatcher is wired (calls == null), so both runs return -1 and complete OK;
+        // the only gas difference is the per-byte charge for the contract-controlled callee-address
+        // read. Before the F1 fix only inputLen was metered, so this delta was 0 and a contract
+        // could force ~64 MiB alloc+copy per call for a flat CALL_BASE. It must now scale by
+        // (bigLen - smallLen) * PER_BYTE, exactly like the transfer_value fix (audit S5).
+        // Both lengths encode to a 2-byte LEB128 i32.const operand, so the modules are byte-for-byte
+        // identical in length and the O(code) parse charge cancels out of the delta.
+        int smallLen = 1000;
+        int bigLen = 8000;
+        byte[] smallMod = callContractModule(smallLen);
+        byte[] bigMod = callContractModule(bigLen);
+        assertEquals(smallMod.length, bigMod.length,
+            "modules must be equal length so the parse charge cancels out of the gas delta");
+        WasmVm.clearModuleCacheForTest();
+        ExecResult small = vm.execute(smallMod,
+            new MapHostState(new byte[0], new byte[0], 0), new GasMeter(10_000_000));
+        ExecResult big = vm.execute(bigMod,
+            new MapHostState(new byte[0], new byte[0], 0), new GasMeter(10_000_000));
+
+        assertEquals(ExecResult.Status.OK, small.status(), "small-length call should complete");
+        assertEquals(ExecResult.Status.OK, big.status(), "big-length call should complete");
+        assertEquals((long) (bigLen - smallLen) * GasSchedule.PER_BYTE, big.gasUsed() - small.gasUsed(),
+            "call_contract must charge PER_BYTE of the callee-address length too (audit F1)");
+    }
+
+    // ---- deploy-time section caps (F2b / F7) ----
+
+    /** A type-only module declaring one function type with {@code params} i32 parameters. */
+    private byte[] paramsModule(int params) {
+        ByteArrayOutputStream type = new ByteArrayOutputStream();
+        uleb(type, 1);                                            // 1 type
+        type.write(0x60);
+        uleb(type, params);
+        for (int i = 0; i < params; i++) {
+            type.write(0x7F);                                     // i32
+        }
+        uleb(type, 0);                                            // no returns
+        return module(section(1, type.toByteArray()));
+    }
+
+    @Test
+    void rejectsAFunctionTypeDeclaringTooManyParams() {
+        // Chicory sizes each StackFrame's locals array as (params+locals) but enforces no param cap
+        // of its own: an oversized type is an unmetered per-frame allocation the tree-wide locals
+        // budget would otherwise never see (audit F2). One param over the cap must be refused.
+        byte[] mod = paramsModule(WasmVm.MAX_FUNCTION_PARAMS + 1);
+        var ex = assertThrows(IllegalArgumentException.class, () -> WasmVm.validateCode(mod));
+        assertTrue(ex.getMessage().contains("params"), ex.getMessage());
+    }
+
+    @Test
+    void acceptsAFunctionTypeAtTheParamsCap() {
+        // Exactly MAX_FUNCTION_PARAMS is allowed: the runtime test in WasmLocalsGuardTest relies on
+        // an at-cap type deploying, so the cap must be a strict greater-than rejection.
+        WasmVm.validateCode(paramsModule(WasmVm.MAX_FUNCTION_PARAMS));
+    }
+
+    /** A global-section-only module declaring {@code globals} immutable i32 globals. */
+    private byte[] globalsModule(int globals) {
+        ByteArrayOutputStream body = new ByteArrayOutputStream();
+        uleb(body, globals);
+        for (int i = 0; i < globals; i++) {
+            body.write(0x7F);                                     // i32
+            body.write(0x00);                                     // immutable
+            body.write(0x41); body.write(0x00);                   // i32.const 0
+            body.write(0x0B);                                     // end
+        }
+        return module(section(6, body.toByteArray()));
+    }
+
+    @Test
+    void rejectsAModuleDeclaringTooManyGlobals() {
+        // Each global is materialised at instantiation, before any gas is charged — an unbounded
+        // count is an unmetered, heap-dependent allocation vector (audit F7).
+        byte[] mod = globalsModule(WasmVm.MAX_GLOBALS + 1);
+        var ex = assertThrows(IllegalArgumentException.class, () -> WasmVm.validateCode(mod));
+        assertTrue(ex.getMessage().contains("globals"), ex.getMessage());
+    }
+
+    @Test
+    void rejectsAModuleDeclaringTooManyFunctions() {
+        // Every declared function forces per-entry instantiation structures; Chicory enforces no
+        // count limit at parse (audit F7). Each function here is a bare (end) body of type () -> ().
+        int functions = WasmVm.MAX_MODULE_FUNCTIONS + 1;
+        byte[] type = section(1, bytes(0x01, 0x60, 0x00, 0x00));  // 1 type: () -> ()
+        ByteArrayOutputStream func = new ByteArrayOutputStream();
+        uleb(func, functions);
+        for (int i = 0; i < functions; i++) {
+            func.write(0x00);                                     // type index 0
+        }
+        ByteArrayOutputStream code = new ByteArrayOutputStream();
+        uleb(code, functions);
+        for (int i = 0; i < functions; i++) {
+            uleb(code, 2);                                        // body size
+            code.write(0x00);                                     // 0 local groups
+            code.write(0x0B);                                     // end
+        }
+        byte[] mod = module(type, section(3, func.toByteArray()), section(10, code.toByteArray()));
+        var ex = assertThrows(IllegalArgumentException.class, () -> WasmVm.validateCode(mod));
+        assertTrue(ex.getMessage().contains("functions"), ex.getMessage());
+    }
+
+    @Test
+    void rejectsAModuleDeclaringTooManyImports() {
+        int imports = WasmVm.MAX_MODULE_IMPORTS + 1;
+        byte[] type = section(1, bytes(0x01, 0x60, 0x00, 0x00));  // 1 type: () -> ()
+        ByteArrayOutputStream imp = new ByteArrayOutputStream();
+        uleb(imp, imports);
+        for (int i = 0; i < imports; i++) {
+            imp.write(0x03); imp.writeBytes("env".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            imp.write(0x01); imp.writeBytes("f".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            imp.write(0x00); imp.write(0x00);                     // func import, type index 0
+        }
+        byte[] mod = module(type, section(2, imp.toByteArray()));
+        var ex = assertThrows(IllegalArgumentException.class, () -> WasmVm.validateCode(mod));
+        assertTrue(ex.getMessage().contains("imports"), ex.getMessage());
+    }
+
+    @Test
+    void rejectsAModuleDeclaringTooManyExports() {
+        int exports = WasmVm.MAX_MODULE_EXPORTS + 1;
+        byte[] type = section(1, bytes(0x01, 0x60, 0x00, 0x00));  // 1 type: () -> ()
+        byte[] func = section(3, bytes(0x01, 0x00));              // 1 function, type 0
+        ByteArrayOutputStream exp = new ByteArrayOutputStream();
+        uleb(exp, exports);
+        for (int i = 0; i < exports; i++) {
+            byte[] name = ("e" + i).getBytes(java.nio.charset.StandardCharsets.UTF_8); // unique
+            uleb(exp, name.length);
+            exp.writeBytes(name);
+            exp.write(0x00);                                      // func export
+            uleb(exp, 0);                                         // func index 0
+        }
+        ByteArrayOutputStream code = new ByteArrayOutputStream();
+        code.write(0x01);                                         // 1 body
+        code.write(0x02);                                         // body size
+        code.write(0x00);                                         // 0 local groups
+        code.write(0x0B);                                         // end
+        byte[] mod = module(type, func, section(7, exp.toByteArray()), section(10, code.toByteArray()));
+        var ex = assertThrows(IllegalArgumentException.class, () -> WasmVm.validateCode(mod));
+        assertTrue(ex.getMessage().contains("exports"), ex.getMessage());
+    }
+
     /** {@code memory.grow(hi); drop; memory.grow(lo); drop} — the first grow overshoots the instance cap. */
     private byte[] failedThenSucceedGrowModule(int hi, int lo) {
         byte[] type = section(1, bytes(0x01, 0x60, 0x00, 0x00));      // () -> ()

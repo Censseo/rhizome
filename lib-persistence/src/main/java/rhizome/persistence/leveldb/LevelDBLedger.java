@@ -1,6 +1,7 @@
 package rhizome.persistence.leveldb;
 
 import org.iq80.leveldb.DBException;
+import org.iq80.leveldb.WriteOptions;
 
 import rhizome.core.ledger.Ledger;
 import rhizome.core.ledger.LedgerException;
@@ -18,6 +19,14 @@ import java.io.IOException;
  * Unlike the original C++ implementation, every balance mutation is checked:
  * withdrawing or reverting more than the current balance, or overflowing a
  * deposit, raises a {@link LedgerException} instead of wrapping around.
+ *
+ * <p><b>Legacy path:</b> this store is test/light-node oriented. It commits in its own
+ * database, separate from the block store, with no cross-store journal, so it does NOT
+ * provide crash atomicity across stores (audit F7) — a crash between the ledger write and
+ * the block write can leave them disagreeing. Writes are at least fsynced
+ * ({@code sync(true)}) so a committed balance survives a process crash. The production
+ * full-node path is {@code RocksDbNodeStore}, which commits the ledger and the chain
+ * height in one atomic WriteBatch. Do not build new features on this class.
  */
 public class LevelDBLedger extends LevelDBDataStore implements Ledger {
 
@@ -89,7 +98,9 @@ public class LevelDBLedger extends LevelDBDataStore implements Ledger {
 
     private void setWalletValue(PublicAddress wallet, TransactionAmount amount) {
         try {
-            db().put(wallet.toBytes(), longToBytes(amount.amount()));
+            // fsync the balance write (audit F7); cross-store atomicity is NOT provided — see
+            // the class-level note: this legacy path remains for tests/light nodes only.
+            db().put(wallet.toBytes(), longToBytes(amount.amount()), new WriteOptions().sync(true));
         } catch (DBException e) {
             throw new LedgerException("Failed to set wallet value", e);
         }

@@ -104,6 +104,12 @@ public final class WasmContractProcessor implements ContractProcessor {
         } catch (Throwable e) {
             return ContractResult.reverted(gasUsed, "invalid contract code: " + e.getMessage());
         }
+        // Never deploy over live code: the address is derived deterministically from
+        // (deployer, nonce), so a collision would silently overwrite an existing contract
+        // (audit F6). Reads through the session, so a deploy earlier in this same block counts.
+        if (session.getCode(address) != null) {
+            return ContractResult.reverted(gasUsed, "contract address collision");
+        }
         session.putCode(address, code);
         // Record the deployer under the reserved empty storage key so get_deployer can return it and
         // a template can gate its init to the deployer (audit T1). This rides the normal contract-
@@ -269,16 +275,23 @@ public final class WasmContractProcessor implements ContractProcessor {
     public void commit(long blockHeight) {
         if (session != null) {
             List<ContractChange> changes = session.forwardChanges();
-            List<ContractUndo> journal = session.flushWithJournal();
+            List<ContractUndo> journal = session.captureJournal();
             journals.put(blockHeight, journal);
-            // Persist the journal too (durable stores only), so a reorg after a restart can be
-            // reversed exactly rather than depending on this RAM map surviving (audit M9).
-            baseStore.putJournal(blockHeight, encodeJournal(journal));
+            // Commit the block's mutations AND its serialized undo journal as ONE atomic unit
+            // where the store supports it (RocksDB: a single synced WriteBatch), so a crash
+            // mid-flush cannot leave storage half-applied with no journal to rewind it (audit
+            // store F1). The journal doubles as the durable reorg-undo after a restart (M9).
+            baseStore.applyBlock(blockHeight, session.pendingChanges(), encodeJournal(journal));
             if (!changes.isEmpty()) {
                 changesByHeight.put(blockHeight, changes);
             }
             session = null;
         }
+        // Persist the receipts too (durable stores only), alongside the journal: the executor's
+        // rollback consumes them to reverse each contract tx's gas fee, value transfer and
+        // transfer_value payouts, and RAM-only receipts made a reorg after a restart crash
+        // mid-rollback and corrupt the ledger (audit F3).
+        baseStore.putReceipts(blockHeight, encodeReceipts(currentReceipts));
         receiptsByHeight.put(blockHeight, currentReceipts);
         if (!currentLogs.isEmpty()) {
             logsByHeight.put(blockHeight, currentLogs);
@@ -298,7 +311,20 @@ public final class WasmContractProcessor implements ContractProcessor {
 
     @Override
     public List<ContractReceipt> receipts(long blockHeight) {
-        return receiptsByHeight.getOrDefault(blockHeight, List.of());
+        List<ContractReceipt> cached = receiptsByHeight.get(blockHeight);
+        if (cached != null) {
+            return cached;
+        }
+        // RAM miss (e.g. this process restarted after the block committed): fall back to the
+        // durable copy so a reorg can still reverse the block's ledger effects exactly, instead
+        // of the executor crashing mid-rollback on an empty list (audit F3).
+        byte[] persisted = baseStore.getReceipts(blockHeight);
+        if (persisted == null) {
+            return List.of();
+        }
+        List<ContractReceipt> decoded = decodeReceipts(persisted);
+        receiptsByHeight.put(blockHeight, decoded);
+        return decoded;
     }
 
     @Override
@@ -314,6 +340,7 @@ public final class WasmContractProcessor implements ContractProcessor {
     @Override
     public void revertBlock(long blockHeight) {
         receiptsByHeight.remove(blockHeight);
+        baseStore.deleteReceipts(blockHeight);
         logsByHeight.remove(blockHeight);
         changesByHeight.remove(blockHeight);
         List<ContractUndo> journal = journals.remove(blockHeight);
@@ -326,22 +353,24 @@ public final class WasmContractProcessor implements ContractProcessor {
             }
             journal = decodeJournal(persisted);
         }
-        // Apply in reverse so repeated writes to the same key restore the earliest prior.
+        // Map the journal back to restore mutations — a null prior means the key did not exist
+        // before the block, so the restore is a delete — applied in reverse so repeated writes to
+        // the same key restore the earliest prior. The restores and the journal drop commit as
+        // one atomic unit where the store supports it (audit store F1).
+        List<StorageChange> restores = new java.util.ArrayList<>(journal.size());
         for (int i = journal.size() - 1; i >= 0; i--) {
             ContractUndo u = journal.get(i);
             if (u.isCode()) {
-                if (u.prior() == null) {
-                    baseStore.deleteCode(u.contract());
-                } else {
-                    baseStore.putCode(u.contract(), u.prior());
-                }
-            } else if (u.prior() == null) {
-                baseStore.deleteStorage(u.contract(), u.key());
+                restores.add(u.prior() == null
+                    ? StorageChange.deleteCode(u.contract())
+                    : StorageChange.putCode(u.contract(), u.prior()));
             } else {
-                baseStore.putStorage(u.contract(), u.key(), u.prior());
+                restores.add(u.prior() == null
+                    ? StorageChange.deleteStorage(u.contract(), u.key())
+                    : StorageChange.putStorage(u.contract(), u.key(), u.prior()));
             }
         }
-        baseStore.deleteJournal(blockHeight);
+        baseStore.revertBlock(blockHeight, restores);
     }
 
     // ---- persistent journal codec (audit M9) ----
@@ -400,20 +429,85 @@ public final class WasmContractProcessor implements ContractProcessor {
         return out;
     }
 
-    /** Drops journals buried deeper than the retention depth (unreachable by any reorg). */
+    // ---- persistent receipt codec (audit F3) ----
+    // Fixed, compact record per receipt, in the journal codec's style:
+    // count(4) then per receipt: gasUsed(8) | success(1) | transferCount(4)
+    //                          | per transfer: from(25) | to(25) | amount(8).
+    // Transfers are included because the executor's rollback reverses transfer_value payouts
+    // from them — dropping them would unrevert a contract's native payouts on a reorg.
+
+    private static byte[] encodeReceipts(List<ContractReceipt> receipts) {
+        int size = Integer.BYTES;
+        for (ContractReceipt r : receipts) {
+            size += Long.BYTES + 1 + Integer.BYTES
+                + r.transfers().size() * (2 * rhizome.core.ledger.PublicAddress.SIZE + Long.BYTES);
+        }
+        java.nio.ByteBuffer b = java.nio.ByteBuffer.allocate(size);
+        b.putInt(receipts.size());
+        for (ContractReceipt r : receipts) {
+            b.putLong(r.gasUsed());
+            b.put((byte) (r.success() ? 1 : 0));
+            b.putInt(r.transfers().size());
+            for (NativeTransfer t : r.transfers()) {
+                b.put(t.from().toBytes());
+                b.put(t.to().toBytes());
+                b.putLong(t.amount());
+            }
+        }
+        return b.array();
+    }
+
+    private static List<ContractReceipt> decodeReceipts(byte[] bytes) {
+        java.nio.ByteBuffer b = java.nio.ByteBuffer.wrap(bytes);
+        int count = b.getInt();
+        List<ContractReceipt> receipts = new java.util.ArrayList<>(Math.max(0, count));
+        for (int i = 0; i < count; i++) {
+            long gasUsed = b.getLong();
+            boolean success = b.get() != 0;
+            int transferCount = b.getInt();
+            List<NativeTransfer> transfers = new java.util.ArrayList<>(Math.max(0, transferCount));
+            for (int t = 0; t < transferCount; t++) {
+                byte[] from = new byte[rhizome.core.ledger.PublicAddress.SIZE];
+                b.get(from);
+                byte[] to = new byte[rhizome.core.ledger.PublicAddress.SIZE];
+                b.get(to);
+                long amount = b.getLong();
+                transfers.add(new NativeTransfer(
+                    rhizome.core.ledger.PublicAddress.of(from),
+                    rhizome.core.ledger.PublicAddress.of(to), amount));
+            }
+            receipts.add(new ContractReceipt(gasUsed, success, transfers));
+        }
+        return receipts;
+    }
+
+    /**
+     * Drops journals buried deeper than the retention depth (unreachable by any reorg). Keeps
+     * EXACTLY {@code retainDepth} heights — {@code (lastCommittedHeight - retainDepth, lastCommittedHeight]}
+     * — so {@code retainDepth} remains the single source of truth for "how many blocks can be
+     * reverted"; the previous strict-less-than comparison retained one extra height (audit F10).
+     * The safe direction is keeping more, and this never drops below it: retainDepth must be at
+     * least the chain's max reorg depth (see the constructor), and exactly retainDepth are kept.
+     */
     private void pruneOldJournals() {
         long cutoff = lastCommittedHeight - retainDepth;
         if (cutoff > 0) {
             journals.keySet().removeIf(h -> {
-                if (h < cutoff) {
+                if (h <= cutoff) {
                     baseStore.deleteJournal(h); // drop the durable copy too
                     return true;
                 }
                 return false;
             });
-            receiptsByHeight.keySet().removeIf(h -> h < cutoff);
-            logsByHeight.keySet().removeIf(h -> h < cutoff);
-            changesByHeight.keySet().removeIf(h -> h < cutoff);
+            receiptsByHeight.keySet().removeIf(h -> {
+                if (h <= cutoff) {
+                    baseStore.deleteReceipts(h); // receipts prune on the journal schedule (F3)
+                    return true;
+                }
+                return false;
+            });
+            logsByHeight.keySet().removeIf(h -> h <= cutoff);
+            changesByHeight.keySet().removeIf(h -> h <= cutoff);
         }
     }
 }

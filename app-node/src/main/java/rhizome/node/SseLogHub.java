@@ -35,11 +35,16 @@ final class SseLogHub {
     /** Concurrent streams one client key (IP / IPv6 /64) may hold, so one host cannot deny the rest. */
     private static final int MAX_SUBSCRIBERS_PER_CLIENT = 4;
 
+    /** Concurrent streams one IPv6 /48 site may hold in aggregate. The per-client cap keys on the
+     *  /64, but a single site allocation hands out 2^16 /64s, so rotating /64s would still let one
+     *  site exhaust the global subscriber cap (audit F5). */
+    private static final int MAX_SUBSCRIBERS_PER_SUBNET = 16;
+
     private final Eventloop eventloop;
     private final int maxSubscribers;
     private final List<Subscriber> subscribers = new ArrayList<>();
 
-    private record Subscriber(String clientKey, ChannelBuffer<ByteBuf> buffer) {}
+    private record Subscriber(String clientKey, String subnetKey, ChannelBuffer<ByteBuf> buffer) {}
 
     SseLogHub(Eventloop eventloop, int maxSubscribers) {
         this.eventloop = eventloop;
@@ -54,20 +59,32 @@ final class SseLogHub {
      * else (audit).
      */
     ChannelSupplier<ByteBuf> subscribe(String clientKey) {
+        return subscribe(clientKey, clientKey);
+    }
+
+    /**
+     * As {@link #subscribe(String)}, additionally bounding the aggregate streams per
+     * {@code subnetKey} (the IPv6 /48 site tier — see {@link #MAX_SUBSCRIBERS_PER_SUBNET}).
+     */
+    ChannelSupplier<ByteBuf> subscribe(String clientKey, String subnetKey) {
         if (subscribers.size() >= maxSubscribers) {
             return null;
         }
         int mine = 0;
+        int subnet = 0;
         for (Subscriber s : subscribers) {
             if (s.clientKey().equals(clientKey)) {
                 mine++;
             }
+            if (s.subnetKey().equals(subnetKey)) {
+                subnet++;
+            }
         }
-        if (mine >= MAX_SUBSCRIBERS_PER_CLIENT) {
+        if (mine >= MAX_SUBSCRIBERS_PER_CLIENT || subnet >= MAX_SUBSCRIBERS_PER_SUBNET) {
             return null;
         }
         ChannelBuffer<ByteBuf> buffer = new ChannelBuffer<>(SUBSCRIBER_BUFFER);
-        subscribers.add(new Subscriber(clientKey, buffer));
+        subscribers.add(new Subscriber(clientKey, subnetKey, buffer));
         // An immediate comment so the client sees headers and first bytes at once.
         buffer.put(chunk(": connected\nretry: 2000\n\n"));
         return buffer.getSupplier();

@@ -110,6 +110,37 @@ public final class WasmVm {
     static final int MAX_FUNCTION_LOCALS = 8_192;
 
     /**
+     * Hard cap on a function type's declared parameter count. Chicory's {@code StackFrame}
+     * allocates a {@code (params+locals)}-sized array per activation, and Chicory does NOT enforce
+     * its own {@code WasmLimits.MAX_FUNCTION_PARAMS} (1000), so an uncapped param count was an
+     * unmetered per-frame allocation the tree-wide locals budget never saw — ~87k i64 params pins
+     * ~1.4 MB per frame, a heap-dependent OOM → divergent gasUsed → consensus fork (audit F2). The
+     * tree-wide reservation now counts params (see {@link DepthLimitedInterpreterMachine}); this
+     * deploy-time cap keeps that reservation small. Matches Chicory's own (unenforced) limit.
+     */
+    static final int MAX_FUNCTION_PARAMS = 1_000;
+
+    /**
+     * Hard cap on a module's declared globals. Each global is materialised as a
+     * {@code GlobalInstance} at instantiation — before any gas is charged — so an unbounded count
+     * is an unmetered, heap-dependent allocation vector (audit F7). Generous: real contracts
+     * declare a handful of globals.
+     */
+    static final int MAX_GLOBALS = 4_096;
+
+    /**
+     * Hard caps on a module's declared function, import and export counts (audit F7). Instantiation
+     * eagerly builds per-entry structures for all three (the function-type index array, the resolved
+     * {@code ImportValues}, the export map) before the gas meter runs, and Chicory enforces no count
+     * limit of its own at parse, so a &lt;{@link #MAX_CODE_SIZE} module could declare ~10^5 entries
+     * and force that allocation unmetered on every CALL. These bounds keep the instantiation
+     * footprint a small deterministic network constant, in the style of {@link #MAX_TABLES}.
+     */
+    static final int MAX_MODULE_FUNCTIONS = 16_384;
+    static final int MAX_MODULE_IMPORTS = 1_024;
+    static final int MAX_MODULE_EXPORTS = 1_024;
+
+    /**
      * Hard cap on the SUM of declared locals across every function body in one module. Chicory's
      * {@code Parser} caps each local-declaration <em>group</em> at 50 000 but does NOT bound the
      * number of groups, and it eagerly expands every group into a per-local list <em>during the
@@ -586,6 +617,42 @@ public final class WasmVm {
                 }
             }
         }
+        // Cap declared params per function type: Chicory sizes each StackFrame's locals array as
+        // (params+locals) but enforces no param cap of its own, so an oversized type was an
+        // unmetered per-frame allocation the locals budget never counted (audit F2).
+        var types = module.typeSection();
+        if (types != null) {
+            for (int i = 0; i < types.typeCount(); i++) {
+                int params = types.getType(i).params().size();
+                if (params > MAX_FUNCTION_PARAMS) {
+                    throw new IllegalArgumentException("contract function type declares too many params: "
+                        + params + " (max " + MAX_FUNCTION_PARAMS + ")");
+                }
+            }
+        }
+        // Cap the remaining section counts Chicory leaves unenforced: globals, functions, imports
+        // and exports are all materialised per-entry at instantiation — unmetered, heap-dependent
+        // allocation unless bounded here as a deterministic network constant (audit F7).
+        var globals = module.globalSection();
+        if (globals != null && globals.globalCount() > MAX_GLOBALS) {
+            throw new IllegalArgumentException("contract declares too many globals: "
+                + globals.globalCount() + " (max " + MAX_GLOBALS + ")");
+        }
+        var functions = module.functionSection();
+        if (functions != null && functions.functionCount() > MAX_MODULE_FUNCTIONS) {
+            throw new IllegalArgumentException("contract declares too many functions: "
+                + functions.functionCount() + " (max " + MAX_MODULE_FUNCTIONS + ")");
+        }
+        var imports = module.importSection();
+        if (imports != null && imports.importCount() > MAX_MODULE_IMPORTS) {
+            throw new IllegalArgumentException("contract declares too many imports: "
+                + imports.importCount() + " (max " + MAX_MODULE_IMPORTS + ")");
+        }
+        var exports = module.exportSection();
+        if (exports != null && exports.exportCount() > MAX_MODULE_EXPORTS) {
+            throw new IllegalArgumentException("contract declares too many exports: "
+                + exports.exportCount() + " (max " + MAX_MODULE_EXPORTS + ")");
+        }
     }
 
     /**
@@ -729,8 +796,12 @@ public final class WasmVm {
                 Memory mem = inst.memory();
                 int keyLen = asLen(args[1]);
                 int valLen = asLen(args[3]);
+                // Long-cast BEFORE the add: both lengths are contract-controlled ints, so the sum
+                // can overflow int before the cast and undercharge a huge write (audit F4). The
+                // written bytes become permanent on-chain state, so they pay STORAGE_WRITE_PER_BYTE,
+                // not the transient PER_BYTE rate (audit F5).
                 gas.charge(GasSchedule.STORAGE_WRITE_BASE
-                    + (long) (keyLen + valLen) * GasSchedule.PER_BYTE);
+                    + ((long) keyLen + valLen) * GasSchedule.STORAGE_WRITE_PER_BYTE);
                 if (keyLen == 0) {
                     // The empty storage key is reserved for the host-written deployer record that
                     // get_deployer reads (set once at deploy). Forbidding contracts from writing it
@@ -760,7 +831,9 @@ public final class WasmVm {
                 Memory mem = inst.memory();
                 int topicLen = asLen(args[1]);
                 int dataLen = asLen(args[3]);
-                gas.charge(GasSchedule.LOG_BASE + (long) (topicLen + dataLen) * GasSchedule.PER_BYTE);
+                // Long-cast BEFORE the add so the contract-controlled length sum cannot overflow
+                // int before the cast and undercharge a huge log (audit F4).
+                gas.charge(GasSchedule.LOG_BASE + ((long) topicLen + dataLen) * GasSchedule.PER_BYTE);
                 byte[] topic = mem.readBytes(asOffset(args[0]), topicLen);
                 byte[] data = mem.readBytes(asOffset(args[2]), dataLen);
                 host.emitLog(topic, data);
@@ -851,7 +924,13 @@ public final class WasmVm {
                 Memory mem = inst.memory();
                 int calleeLen = asLen(args[1]);
                 int inputLen = asLen(args[3]);
-                gas.charge(GasSchedule.CALL_BASE + (long) inputLen * GasSchedule.PER_BYTE);
+                // Charge per byte of BOTH contract-controlled reads — calleeLen included — before
+                // either readBytes allocation, exactly like transfer_value/storage_read (audit F1):
+                // metering only inputLen let a contract drive a `new byte[calleeLen]` alloc+copy
+                // for free. Long-cast BEFORE the add so the length sum cannot overflow int (F4).
+                // A wrong-length callee address simply resolves to nothing: the dispatcher returns
+                // null and the call reports -1, so metering (not rejection) is the fix here.
+                gas.charge(GasSchedule.CALL_BASE + ((long) calleeLen + inputLen) * GasSchedule.PER_BYTE);
                 byte[] callee = mem.readBytes(asOffset(args[0]), calleeLen);
                 byte[] input = mem.readBytes(asOffset(args[2]), inputLen);
                 byte[] output = calls == null ? null : calls.call(callee, input);

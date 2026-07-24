@@ -233,10 +233,17 @@ public sealed interface Transaction permits TransactionImpl {
                 .to(PublicAddress.of(json.getString(TO)));
 
             if (json.has(KIND)) {
+                byte[] data = rhizome.core.common.Utils.hexStringToByteArray(json.optString(DATA, ""));
+                // Canonicality parity with TransactionDto.readFrom (audit F5): the payload cap the
+                // binary codec enforces on the wire must hold on the JSON path too, so a JSON-sourced
+                // transaction cannot smuggle a payload a binary peer would have rejected.
+                if (data.length > TransactionDto.MAX_DATA) {
+                    throw new IllegalArgumentException("contract data length out of range: " + data.length);
+                }
                 builder.kind(rhizome.core.transaction.TransactionKind.valueOf(json.getString(KIND)))
                     .gasLimit(json.optLong(GAS_LIMIT, 0))
                     .gasPrice(json.optLong(GAS_PRICE, 0))
-                    .data(rhizome.core.common.Utils.hexStringToByteArray(json.optString(DATA, "")));
+                    .data(data);
             }
 
         

@@ -56,6 +56,11 @@ class VotingTest {
     }
 
     private void mine(int vote) {
+        assertEquals(ExecutionStatus.SUCCESS, mineStatus(vote));
+    }
+
+    /** Mines one block carrying {@code vote} and returns the engine's verdict on it. */
+    private ExecutionStatus mineStatus(int vote) {
         long height = engine.height() + 1;
         var b = (BlockImpl) BlockImpl.builder().id((int) height).timestamp(clock.addAndGet(1000))
             .difficulty(engine.difficulty()).lastBlockHash(engine.tipHash()).vote(vote).build();
@@ -64,7 +69,22 @@ class VotingTest {
         tree.setItems(b.transactions());
         b.merkleRoot(tree.getRootHash());
         b.nonce(Miner.mineNonce(b.hash(), b.difficulty(), params.powAlgorithm()));
-        assertEquals(ExecutionStatus.SUCCESS, engine.addBlock(b));
+        return engine.addBlock(b);
+    }
+
+    @Test
+    void consensusGateRejectsOutOfRangeVote() {
+        // audit F1: one canonical vote rule at consensus, not just in the codecs — a block carrying
+        // |vote| > 2 (however it was built: JSON, local producer bug, hand-rolled) must be rejected
+        // by addBlock exactly as BlockDto/HeaderCodec reject it on the wire.
+        assertEquals(ExecutionStatus.INVALID_VOTE, mineStatus(3));
+        assertEquals(ExecutionStatus.INVALID_VOTE, mineStatus(-3));
+        assertEquals(ExecutionStatus.INVALID_VOTE, mineStatus(Integer.MIN_VALUE));
+        assertEquals(1, engine.height(), "no out-of-range vote may be applied");
+        // The boundary values remain valid.
+        mine(2);
+        mine(-2);
+        assertEquals(3, engine.height());
     }
 
     @Test

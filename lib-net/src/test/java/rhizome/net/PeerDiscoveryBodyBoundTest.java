@@ -1,11 +1,13 @@
 package rhizome.net;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.List;
 
 import com.sun.net.httpserver.HttpServer;
@@ -67,5 +69,46 @@ class PeerDiscoveryBodyBoundTest {
             () -> discovery.fetchPeers(baseUrl));
         assertEquals(2, peers.size());
         assertTrue(peers.contains("http://10.1.2.3:3000"));
+    }
+
+    @Test
+    void slowDripPeersBodyHitsDeadline() {
+        // Headers arrive, then the body stalls: the request timeout alone only covers up to the
+        // headers, so without the whole-exchange deadline a slow-drip peer would park a PEX pool
+        // thread in InputStream.read (audit F2). With a short test deadline it must fail fast.
+        server.createContext("/peers", exchange -> {
+            exchange.sendResponseHeaders(200, 1000);
+            exchange.getResponseBody().write(new byte[]{'{'});
+            exchange.getResponseBody().flush();
+            try {
+                Thread.sleep(5_000); // the rest "never" arrives
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
+            exchange.close();
+        });
+        var discovery = new PeerDiscovery(new PeerRegistry(null, 128), null, false, Duration.ofMillis(500));
+        long t0 = System.nanoTime();
+        var ex = assertThrows(Exception.class, () -> discovery.fetchPeers(baseUrl));
+        long elapsedMs = (System.nanoTime() - t0) / 1_000_000;
+        assertTrue(elapsedMs < 4_000, "slow-drip PEX read must hit the deadline, not hang: " + elapsedMs + "ms");
+        assertTrue(String.valueOf(ex.getMessage()).contains("exceeded"),
+            "expected a deadline rejection, got: " + ex.getMessage());
+    }
+
+    @Test
+    void failureCountsArePrunedWhenPeerLeavesRegistry() {
+        // A peer that failed is failure-counted; once it leaves the registry (e.g. pruned after
+        // repeated failures), the next round must drop its stale failure entry so the map cannot
+        // leak entries for long-gone peers (audit F8).
+        var registry = new PeerRegistry(null, 128);
+        assertTrue(registry.add("http://127.0.0.1:1")); // port 1: connection refused
+        var discovery = new PeerDiscovery(registry, null);
+        discovery.round();
+        assertTrue(discovery.failures.containsKey("http://127.0.0.1:1"),
+            "a failed peer should be failure-counted");
+        registry.remove("http://127.0.0.1:1");
+        discovery.round(); // empty registry: the stale failure entry must still be pruned
+        assertFalse(discovery.failures.containsKey("http://127.0.0.1:1"));
     }
 }

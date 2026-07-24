@@ -31,6 +31,34 @@ public interface BoxStore {
     /** Drops journals for heights strictly below {@code minHeight} (unreachable by any reorg). */
     void pruneJournals(long minHeight);
 
+    // ---- per-block receipt persistence (audit F7) ----
+
+    /**
+     * Persists the encoded per-transaction box receipts committed for {@code height}
+     * (see {@code BoxReceiptCodec}). Receipts are what {@code Executor.rollbackBlock}
+     * consumes to reverse a block's box-ledger deltas; without durable receipts a
+     * restart followed by a reorg of a box-carrying block would reverse against an
+     * empty receipt list and corrupt the ledger.
+     *
+     * <p>The default is a no-op: stores without a receipt column keep the pre-F7
+     * RAM-only behaviour. Durable implementations MUST override this together with
+     * {@link #getReceipts} and {@link #deleteReceipts}, in the same atomic write as
+     * {@link #applyBlock}'s journal where possible.
+     */
+    default void putReceipts(long height, byte[] encodedReceipts) {
+        // no-op default: stores without receipt persistence keep RAM-only receipts
+    }
+
+    /** The bytes stored by {@link #putReceipts} for {@code height}, or {@code null} if none. */
+    default byte[] getReceipts(long height) {
+        return null;
+    }
+
+    /** Deletes the receipts stored for {@code height} (block reverted, or pruned past the reorg horizon). */
+    default void deleteReceipts(long height) {
+        // no-op default; see putReceipts
+    }
+
     /**
      * Ids of boxes whose {@code expiryHeight <= height} (rent-collectable), lowest
      * expiry first, at most {@code limit}. Used by the block producer to mint

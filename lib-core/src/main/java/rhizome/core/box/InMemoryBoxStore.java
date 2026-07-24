@@ -19,6 +19,7 @@ public final class InMemoryBoxStore implements BoxStore {
 
     private final Map<String, Box> boxes = new ConcurrentHashMap<>();
     private final Map<Long, List<Undo>> journals = new ConcurrentSkipListMap<>();
+    private final Map<Long, byte[]> receipts = new ConcurrentSkipListMap<>();
 
     private record Undo(byte[] id, Box prior) {}
 
@@ -63,6 +64,22 @@ public final class InMemoryBoxStore implements BoxStore {
     @Override
     public void pruneJournals(long minHeight) {
         journals.keySet().removeIf(h -> h < minHeight);
+    }
+
+    @Override
+    public void putReceipts(long height, byte[] encodedReceipts) {
+        receipts.put(height, encodedReceipts.clone());
+    }
+
+    @Override
+    public byte[] getReceipts(long height) {
+        byte[] r = receipts.get(height);
+        return r == null ? null : r.clone();
+    }
+
+    @Override
+    public void deleteReceipts(long height) {
+        receipts.remove(height);
     }
 
     @Override

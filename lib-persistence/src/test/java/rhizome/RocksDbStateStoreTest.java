@@ -3,6 +3,7 @@ package rhizome;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.file.Path;
@@ -103,6 +104,18 @@ class RocksDbStateStoreTest {
             store.pruneBelow(5);
             assertNull(store.getRoot(3));
             assertArrayEquals(key32(5), store.getRoot(5));
+        }
+    }
+
+    @Test
+    void beginBatchRefusesASecondOpenBatch(@TempDir Path dir) throws Exception {
+        try (var store = new RocksDbStateStore(dir.toString())) {
+            store.beginBatch();
+            // Opening a second batch would silently drop the first batch's staged nodes (audit F8).
+            assertThrows(IllegalStateException.class, store::beginBatch);
+            store.discardBatch();
+            store.beginBatch(); // after a discard, a new batch opens cleanly
+            store.flushBatch();
         }
     }
 }

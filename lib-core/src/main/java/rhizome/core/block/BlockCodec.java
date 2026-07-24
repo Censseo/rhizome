@@ -19,6 +19,16 @@ public final class BlockCodec {
 
     private BlockCodec() {}
 
+    /**
+     * Default aggregate decoded-bytes budget for one {@link #decodeStreamed} call. Although each
+     * block is individually size-capped and decoded one at a time, the decoded {@link Block}
+     * objects ACCUMULATE in the result list until the caller (ChainSynchronizer) has validated
+     * them — so without an aggregate cap a hostile peer could still force ~200 × 4 MiB of
+     * pre-validation allocation per {@code /sync} window (audit F4). 64 MiB bounds that while
+     * comfortably fitting any honest window.
+     */
+    public static final long DEFAULT_MAX_AGGREGATE_BYTES = 64L * 1024 * 1024;
+
     public static byte[] encode(Block block) {
         BlockDto header = block.serialize();
         List<Transaction> transactions = block.transactions();
@@ -110,12 +120,26 @@ public final class BlockCodec {
      * Streams a concatenation of blocks from {@code in}, decoding one block at a time so peak
      * transient memory is bounded to a single block (≤ {@code maxBlockBytes}) rather than the
      * whole response — the fix for the ~800 MiB single-shot {@code /sync} buffer (audit M5).
-     * Aborts if the stream yields more than {@code maxBlocks} blocks or a single block exceeds
-     * {@code maxBlockBytes}, so a hostile peer cannot force an unbounded allocation.
+     * Aborts if the stream yields more than {@code maxBlocks} blocks, a single block exceeds
+     * {@code maxBlockBytes}, or the running total of decoded bytes exceeds
+     * {@link #DEFAULT_MAX_AGGREGATE_BYTES}, so a hostile peer cannot force an unbounded allocation.
      */
     public static List<Block> decodeStreamed(java.io.InputStream in, int maxBlocks, int maxBlockBytes)
             throws java.io.IOException {
+        return decodeStreamed(in, maxBlocks, maxBlockBytes, DEFAULT_MAX_AGGREGATE_BYTES);
+    }
+
+    /**
+     * As {@link #decodeStreamed(java.io.InputStream, int, int)} but with an explicit aggregate
+     * decoded-bytes budget {@code maxAggregateBytes}: the decoded blocks are retained in the
+     * result list until the caller validates them, so the running total (approximated by the
+     * wire bytes consumed per block) is bounded to cap pre-validation memory (audit F4).
+     */
+    public static List<Block> decodeStreamed(java.io.InputStream in, int maxBlocks, int maxBlockBytes,
+                                             long maxAggregateBytes)
+            throws java.io.IOException {
         List<Block> blocks = new ArrayList<>();
+        long aggregateBytes = 0;
         final int chunk = 512 * 1024;
         // A single growable buffer with [start, end) offsets, rather than re-merging the whole carry
         // with each chunk. Only the UNCONSUMED tail is ever moved, and only when it must make room for
@@ -137,6 +161,13 @@ public final class BlockCodec {
                         throw new java.io.IOException("sync stream exceeds " + maxBlocks + " blocks");
                     }
                     blocks.add(block);
+                    // Aggregate budget: the retained blocks' sizes (approximated by the wire bytes
+                    // each consumed) accumulate until the caller validates them (audit F4).
+                    aggregateBytes += buffer.position() - mark;
+                    if (aggregateBytes > maxAggregateBytes) {
+                        throw new java.io.IOException(
+                            "sync stream exceeds " + maxAggregateBytes + " aggregate bytes");
+                    }
                 } catch (java.nio.BufferUnderflowException incomplete) {
                     buffer.position(mark); // partial trailing block: keep it, read more
                     progressed = false;

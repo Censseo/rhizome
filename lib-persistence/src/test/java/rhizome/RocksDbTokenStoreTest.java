@@ -3,6 +3,7 @@ package rhizome;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.file.Path;
@@ -95,6 +96,21 @@ class RocksDbTokenStoreTest {
             store.pruneJournals(3);
             store.revertBlock(2); // journal gone -> no-op
             assertNotNull(store.getMeta(m.id()));
+        }
+    }
+
+    @Test
+    void applyBlockRefusesADoubleApply(@TempDir Path dir) throws Exception {
+        PublicAddress minter = PublicAddress.random();
+        TokenMeta m = meta(minter, 0, 1_000);
+        try (var store = new RocksDbTokenStore(dir.toString())) {
+            store.applyBlock(2, List.of(new TokenStore.TokenOp.MetaSet(m)));
+            // A second apply at the same height would journal the already-mutated state as the
+            // "prior", corrupting any later revert — it must be refused (audit F10).
+            assertThrows(IllegalStateException.class,
+                () -> store.applyBlock(2, List.of(new TokenStore.TokenOp.MetaSet(m))));
+            // ...and the first commit is untouched.
+            assertEquals(m, store.getMeta(m.id()));
         }
     }
 }

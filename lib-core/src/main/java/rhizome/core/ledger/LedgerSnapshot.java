@@ -121,6 +121,14 @@ public final class LedgerSnapshot {
         JSONObject balancesJson = root.getJSONObject("balances");
         for (String addressHex : balancesJson.keySet()) {
             long amount = Long.parseUnsignedLong(balancesJson.getString(addressHex));
+            // The ledger treats balances as signed 64-bit (checked arithmetic, negative amounts
+            // rejected everywhere in consensus), so an unsigned value with the high bit set parses
+            // as a NEGATIVE long and would seed a negative genesis balance (audit F3). Reject it
+            // here, at the only ingress point, rather than letting it reach the ledger.
+            if (amount < 0) {
+                throw new IllegalArgumentException(
+                    "snapshot balance out of range (high bit set) for " + addressHex);
+            }
             snapshot.put(PublicAddress.of(addressHex), new TransactionAmount(amount));
         }
         return snapshot;

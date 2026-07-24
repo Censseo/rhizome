@@ -67,10 +67,12 @@ final class BoxApi {
         return json(result);
     }
 
-    /** Registered box scans: {@code GET /scan/list}. */
-    static HttpResponse scanList(NodeService node) {
+    /** Registered box scans owned by {@code clientKey}: {@code GET /scan/list}. Restricted to
+     *  the caller's own registrations — an unauthenticated listing of every predicate on the
+     *  node leaks what all apps are watching (audit F1). */
+    static HttpResponse scanList(NodeService node, String clientKey) {
         org.json.JSONArray arr = new org.json.JSONArray();
-        node.scans().forEach((id, predicate) ->
+        node.scansOf(clientKey).forEach((id, predicate) ->
             arr.put(new JSONObject().put("scanId", id).put("predicate", predicate.toJson())));
         return json(new JSONObject().put("scans", arr));
     }

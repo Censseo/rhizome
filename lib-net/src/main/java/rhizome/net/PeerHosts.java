@@ -27,9 +27,10 @@ import java.util.Map;
  * did up to three lookups; discovery pinned twice per peer). This does NOT weaken the anti-rebinding
  * guarantee: pinning's security property is "connect to a validated IP", which a short cache of
  * already-validated addresses preserves — the cached entry is the exact address set we classify and
- * pin to. Only successful resolutions are cached (never negatives, so an unresolvable host keeps
- * being retried), and the full address array is cached so the all-addresses routability check and the
- * first-address pin/subnet/ban keys stay consistent.
+ * pin to. FAILED resolutions are cached too, but with a much shorter TTL ({@link #NEGATIVE_TTL_NANOS}),
+ * so a spray of unresolvable names cannot force a blocking resolver round-trip per call while an
+ * honestly-mistyped name is retried soon after. The full address array is cached so the
+ * all-addresses routability check and the first-address pin/subnet/ban keys stay consistent.
  */
 final class PeerHosts {
 
@@ -37,6 +38,11 @@ final class PeerHosts {
 
     /** How long a successful DNS resolution is reused before re-resolving. */
     private static final long CACHE_TTL_NANOS = 60L * 1_000_000_000L;
+
+    /** How long a FAILED resolution is reused: long enough to keep repeated lookups of an
+     *  unresolvable (attacker-supplied) name off the blocking resolver, short enough that a
+     *  transient DNS failure or a newly-registered name is retried promptly (audit F3). */
+    private static final long NEGATIVE_TTL_NANOS = 30L * 1_000_000_000L;
 
     /**
      * Hard cap on distinct hostnames cached at once. The cache key is an attacker-influenced
@@ -49,6 +55,7 @@ final class PeerHosts {
      */
     private static final int MAX_ENTRIES = 4_096;
 
+    /** A cached resolution; {@code addrs == null} marks a cached FAILURE (negative entry). */
     private record CacheEntry(InetAddress[] addrs, long expiresAtNanos) {}
 
     private static final Map<String, CacheEntry> DNS_CACHE = Collections.synchronizedMap(
@@ -62,18 +69,30 @@ final class PeerHosts {
     /**
      * All addresses {@code host} resolves to, via a short-TTL cache. Mirrors
      * {@link InetAddress#getAllByName}; {@link InetAddress#getByName} returns the first of these, so
-     * callers needing a single address use {@code resolveAll(host)[0]}. Only successes are cached.
+     * callers needing a single address use {@code resolveAll(host)[0]}. Successes are cached for
+     * {@link #CACHE_TTL_NANOS}, failures (thrown here as {@link UnknownHostException}) for the
+     * shorter {@link #NEGATIVE_TTL_NANOS}.
      */
     static InetAddress[] resolveAll(String host) throws UnknownHostException {
         String key = host.toLowerCase(Locale.ROOT);
         long now = System.nanoTime();
         CacheEntry cached = DNS_CACHE.get(key);
         if (cached != null && cached.expiresAtNanos() - now > 0) {
+            if (cached.addrs() == null) {
+                throw new UnknownHostException(host); // cached negative (short TTL)
+            }
             return cached.addrs();
         }
-        InetAddress[] addrs = InetAddress.getAllByName(host); // throws (uncached) on failure
-        DNS_CACHE.put(key, new CacheEntry(addrs, now + CACHE_TTL_NANOS));
-        return addrs;
+        try {
+            InetAddress[] addrs = InetAddress.getAllByName(host);
+            DNS_CACHE.put(key, new CacheEntry(addrs, now + CACHE_TTL_NANOS));
+            return addrs;
+        } catch (UnknownHostException e) {
+            // Cache the miss briefly in the same bounded LRU: without it, every call for an
+            // unresolvable name blocks on the resolver again (audit F3).
+            DNS_CACHE.put(key, new CacheEntry(null, now + NEGATIVE_TTL_NANOS));
+            throw e;
+        }
     }
 
     /** The first resolved address for {@code host} (cached), matching {@link InetAddress#getByName}. */
@@ -84,6 +103,12 @@ final class PeerHosts {
     /** Visible for testing: number of cached DNS entries (bounded by {@link #MAX_ENTRIES}). */
     static int cachedEntryCount() {
         return DNS_CACHE.size();
+    }
+
+    /** Visible for testing: true if {@code host} currently holds a live cached NEGATIVE resolution. */
+    static boolean isCachedNegative(String host) {
+        CacheEntry cached = DNS_CACHE.get(host.toLowerCase(Locale.ROOT));
+        return cached != null && cached.addrs() == null && cached.expiresAtNanos() - System.nanoTime() > 0;
     }
 
     /** True only if every address {@code host} resolves to is globally routable unicast. */
@@ -110,7 +135,9 @@ final class PeerHosts {
     /**
      * True if {@code a} is a globally routable unicast address. Rejects loopback, any-local,
      * link-local (incl. 169.254.169.254 metadata), IPv4 private (RFC1918) and CGNAT
-     * (100.64/10), IPv6 unique-local (fc00::/7), and multicast.
+     * (100.64/10), IPv6 unique-local (fc00::/7), the IPv6 transition tunnels 6to4 (2002::/16)
+     * and Teredo (2001::/32) — both embed an inner IPv4 address that would bypass the
+     * v4-private filter (audit F10) — and multicast.
      */
     static boolean isRoutable(InetAddress a) {
         if (a.isLoopbackAddress() || a.isAnyLocalAddress() || a.isLinkLocalAddress()
@@ -120,6 +147,13 @@ final class PeerHosts {
         byte[] b = a.getAddress();
         if (b.length == 16 && (b[0] & 0xFE) == 0xFC) {
             return false; // fc00::/7 unique-local IPv6
+        }
+        if (b.length == 16 && (b[0] & 0xFF) == 0x20 && (b[1] & 0xFF) == 0x02) {
+            return false; // 2002::/16 6to4 tunnel (embeds a v4 address)
+        }
+        if (b.length == 16 && (b[0] & 0xFF) == 0x20 && (b[1] & 0xFF) == 0x01
+            && b[2] == 0 && b[3] == 0) {
+            return false; // 2001:0000::/32 Teredo tunnel (embeds a v4 address)
         }
         if (b.length == 4 && (b[0] & 0xFF) == 100 && (b[1] & 0xFF) >= 64 && (b[1] & 0xFF) <= 127) {
             return false; // 100.64.0.0/10 carrier-grade NAT

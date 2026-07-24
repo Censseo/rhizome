@@ -307,9 +307,9 @@ public final class NodeService {
 
     // ---- box scans (EIP-1) ----
 
-    /** Registers a declarative box scan; returns its node-local id. */
-    public int registerScan(rhizome.core.box.ScanPredicate predicate) {
-        return scans.register(predicate);
+    /** Registers a declarative box scan for {@code clientKey}; returns its node-local id. */
+    public int registerScan(String clientKey, rhizome.core.box.ScanPredicate predicate) {
+        return scans.register(clientKey, predicate);
     }
 
     /** Removes a registered scan; true if it existed. */
@@ -322,9 +322,10 @@ public final class NodeService {
         return scans.get(scanId);
     }
 
-    /** All registered scans, id → predicate. */
-    public java.util.Map<Integer, rhizome.core.box.ScanPredicate> scans() {
-        return scans.all();
+    /** Scans registered by {@code clientKey}, id → predicate (other clients' scans are not
+     *  disclosed — /scan/register is unauthenticated; audit F1). */
+    public java.util.Map<Integer, rhizome.core.box.ScanPredicate> scansOf(String clientKey) {
+        return scans.scansOf(clientKey);
     }
 
     /** Evaluates a predicate over committed boxes, one bounded, pollable window at a time. */

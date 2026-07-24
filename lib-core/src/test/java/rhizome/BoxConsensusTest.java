@@ -22,6 +22,7 @@ import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
 import rhizome.core.box.Box;
 import rhizome.core.box.BoxPayload;
+import rhizome.core.box.BoxProcessor;
 import rhizome.core.box.BoxRegister;
 import rhizome.core.box.DefaultBoxProcessor;
 import rhizome.core.box.InMemoryBoxStore;
@@ -184,6 +185,41 @@ class BoxConsensusTest {
         assertEquals(5L, charged.rentPaidHeight());
         long minerReward = params.miningReward(3) + params.miningReward(4) + params.miningReward(5);
         assertEquals(minerBefore + minerReward + size, ledger.getWalletValue(miner).amount());
+    }
+
+    /**
+     * Security regression (audit F7): {@code Executor.rollbackBlock} consumes exactly one box
+     * receipt per box transaction to reverse the block's ledger deltas. RAM-only receipts meant a
+     * restart followed by a reorg of a box-carrying block reversed against an empty receipt list —
+     * crashing or corrupting the ledger mid-pop. The receipts are now persisted through the box
+     * store, so a fresh processor over the same store (a stand-in for the restarted node) recovers
+     * them and the pop still reverses the ledger exactly.
+     */
+    @Test
+    void boxReceiptsSurviveAProcessorRestartAndPopStaysExact() {
+        byte[] id = Box.deriveId(sender, 0);
+        long start = ledger.getWalletValue(sender).amount();
+        assertEquals(ExecutionStatus.SUCCESS, mine(List.of(boxTx(TransactionKind.BOX_CREATE,
+            BoxPayload.encodeCreate(List.of(BoxRegister.string("v1"))), 5000, 0))));
+        long height = engine.height();
+        List<BoxProcessor.BoxReceipt> committed = boxes.receipts(height);
+        assertEquals(1, committed.size());
+        assertEquals(5000, committed.get(0).debitFrom());
+
+        // The restart: a new processor over the SAME store has an empty RAM cache but must recover
+        // the committed receipts from the durable copy.
+        DefaultBoxProcessor restarted = new DefaultBoxProcessor(boxStore, params);
+        assertEquals(committed, restarted.receipts(height));
+
+        // A pop through the restarted processor must reverse the block's ledger delta exactly —
+        // the scenario that corrupted the ledger when receipts were RAM-only.
+        LedgerSnapshot snapshot = new LedgerSnapshot("t", 0, params.chainId());
+        snapshot.put(sender, new TransactionAmount(10_000_000L));
+        ChainEngine restartedEngine = ChainEngine.init(params, ledger, store, snapshot, null,
+            clock::get, null, null, restarted);
+        restartedEngine.popBlock();
+        assertNull(restartedEngine.box(id));
+        assertEquals(start, ledger.getWalletValue(sender).amount());
     }
 
     /**

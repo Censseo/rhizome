@@ -292,8 +292,13 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
      * throwing "a full resync is required" — lets an honest node recover its own suffix without the
      * orphan pool being a remote liveness lever (audit V5). Uncle rewards come from the same committed
      * references (via the Executor), so they are applied identically with or without the pool.
+     *
+     * <p>Package-private (audit F2): only the in-package synchronizers may drive the trusted path,
+     * and even they get the pool-free STRUCTURAL bounds on the committed refs (count cap,
+     * distinctness, difficulty range — see {@link #uncleWorkFromRefs}), so a fabricated block can
+     * never mint uncle work a normal {@link #addBlock} would have rejected.
      */
-    public ExecutionStatus restoreBlock(Block block) {
+    ExecutionStatus restoreBlock(Block block) {
         return addBlock(block, true, false);
     }
 
@@ -330,6 +335,13 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             if (block.transactions().isEmpty()
                 || block.transactions().size() > params.maxTransactionsPerBlock()) {
                 return INVALID_TRANSACTION_COUNT; // must at least carry a coinbase
+            }
+            // One canonical vote rule at the consensus gate, not just in the codecs (audit F1):
+            // BlockDto/HeaderCodec already reject |vote| > 2 on the wire, but a block arriving via
+            // JSON or the local producer must meet the same bound before its vote can reach the
+            // epoch tally. Cheap and structural, so it runs with the other pre-PoW checks.
+            if (Math.abs((long) b.vote()) > 2) {
+                return INVALID_VOTE;
             }
             // Bound the block's serialized size (cheap, before any expensive work) so a
             // block laden with contract payloads cannot be a download/storage DoS.
@@ -388,9 +400,16 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             // consensus/crypto Finding: uncle-PoW-before-block-PoW).
             BigInteger uncleWork;
             if (trustedRestore) {
-                // Trust our own previously-validated block's uncle refs; the pool may have been
-                // churned since (audit V5). Work is a pure function of the committed ref difficulties.
+                // Trust our own previously-validated block's uncle refs (the pool may have been
+                // churned since, audit V5) — but still enforce the pool-free STRUCTURAL bounds the
+                // committed refs carry on their own (audit F2): count cap, distinct hashes and
+                // minDifficulty <= ref.difficulty() <= block.difficulty(). A fabricated block passed
+                // to this trusted path can then never inflate uncle work/rewards beyond what a
+                // normal addBlock would accept.
                 uncleWork = uncleWorkFromRefs(b);
+                if (uncleWork == null) {
+                    return INVALID_UNCLES;
+                }
             } else {
                 uncleWork = validateUncles(b);
                 if (uncleWork == null) {
@@ -564,6 +583,22 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         lock.lock();
         try {
             return store.height();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * Runs {@code action} while holding the engine lock: any in-flight block application
+     * has finished and no new one can start until it returns. Used at shutdown to quiesce
+     * writers before the underlying stores are closed — closing a native store handle while
+     * another thread is inside a write corrupts the native heap (observed as a JVM abort
+     * once writes became fsynced, audit F3).
+     */
+    public void runExclusive(Runnable action) {
+        lock.lock();
+        try {
+            action.run();
         } finally {
             lock.unlock();
         }
@@ -1306,13 +1341,31 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
     /**
      * The uncle work committed by {@code block}'s references, summed as {@code Σ 2^difficulty} — the
      * same total {@link #validateUncles} returns, but read straight from the (already-validated)
-     * references without consulting the orphan pool. Used only by {@link #restoreBlock}. Each
-     * committed difficulty is bounded to {@code [0, 255]} at header decode, so the power is bounded.
+     * references without consulting the orphan pool. Used only by {@link #restoreBlock}.
+     *
+     * <p>Even on the trusted path the pool-free structural bounds are enforced from the refs alone
+     * (audit F2): at most {@code maxUnclesPerBlock} references, distinct hashes, and
+     * {@code minDifficulty <= ref.difficulty() <= block.difficulty()} — the SAME range
+     * {@link #uncleEligible} and {@code HeaderChain.uncleWork} enforce (nephewDifficulty = the
+     * including block's own difficulty), so every path agrees on the bound. Returns {@code null}
+     * when a bound fails, exactly like {@link #validateUncles}.
      */
-    private static BigInteger uncleWorkFromRefs(BlockImpl block) {
+    private BigInteger uncleWorkFromRefs(BlockImpl block) {
+        List<UncleRef> uncles = block.uncles();
+        if (uncles.size() > params.maxUnclesPerBlock()) {
+            return null;
+        }
         BigInteger work = BigInteger.ZERO;
-        for (UncleRef ref : block.uncles()) {
-            work = work.add(BlockWork.of(ref.difficulty()));
+        java.util.Set<SHA256Hash> seen = new java.util.HashSet<>();
+        for (UncleRef ref : uncles) {
+            if (!seen.add(ref.hash())) {
+                return null; // duplicate uncle within one block
+            }
+            int d = ref.difficulty();
+            if (d < params.minDifficulty() || d > block.difficulty()) {
+                return null; // no free/inflated work, even from committed refs
+            }
+            work = work.add(BlockWork.of(d));
         }
         return work;
     }

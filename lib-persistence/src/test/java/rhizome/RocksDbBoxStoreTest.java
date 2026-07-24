@@ -3,6 +3,7 @@ package rhizome;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.file.Path;
@@ -124,6 +125,20 @@ class RocksDbBoxStoreTest {
             // With the journal gone, reverting block 2 is a no-op (state unchanged).
             store.revertBlock(2);
             assertEquals(a, store.get(a.id()));
+        }
+    }
+
+    @Test
+    void applyBlockRefusesADoubleApply(@TempDir Path dir) throws Exception {
+        PublicAddress owner = PublicAddress.random();
+        Box a = box(owner, 0, 1000, 5);
+        try (var store = new RocksDbBoxStore(dir.toString())) {
+            store.applyBlock(2, List.of(BoxStore.BoxMutation.write(a)));
+            // A second apply at the same height would journal the already-mutated state as the
+            // "prior", corrupting any later revert — it must be refused (audit F10).
+            assertThrows(IllegalStateException.class,
+                () -> store.applyBlock(2, List.of(BoxStore.BoxMutation.write(a))));
+            assertEquals(a, store.get(a.id())); // the first commit is untouched
         }
     }
 }

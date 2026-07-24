@@ -3,6 +3,7 @@ package rhizome.persistence.leveldb;
 import org.iq80.leveldb.DBException;
 import org.iq80.leveldb.DBIterator;
 import org.iq80.leveldb.ReadOptions;
+import org.iq80.leveldb.WriteBatch;
 import org.iq80.leveldb.WriteOptions;
 
 import io.activej.bytebuf.ByteBuf;
@@ -59,7 +60,12 @@ public class LevelDBBlockPersistence extends LevelDBDataStore implements BlockPe
     public BlockDto  getBlockHeader(int blockId) {       
         return BinarySerializable.fromBuffer((byte[])get(blockId, byte[].class), BlockDto.class);
     }
-    public ByteBuf getBlockHeadeAsByteBuf(int blockId) {       
+    /**
+     * The serialized block header as a pooled {@link ByteBuf}. Ownership: the returned buffer
+     * escapes to the CALLER, who must {@code recycle()} it when done — the store cannot recycle
+     * it, it has no way to know when the caller is finished (audit F12).
+     */
+    public ByteBuf getBlockHeadeAsByteBuf(int blockId) {
         return (ByteBuf) get(blockId, ByteBuf.class);
     }
 
@@ -90,7 +96,6 @@ public class LevelDBBlockPersistence extends LevelDBDataStore implements BlockPe
         return Block.of(block, transactions);
     }
 
-    // NOTE: seek method looks like bugged as it return everything wi
     public List<SHA256Hash> getTransactionsForWallet(PublicAddress wallet) {
         var address = wallet.toBytes();
         List<SHA256Hash> transactions = new ArrayList<>();
@@ -98,52 +103,66 @@ public class LevelDBBlockPersistence extends LevelDBDataStore implements BlockPe
         try (DBIterator iterator = db().iterator(new ReadOptions())) {
             for(iterator.seek(address); iterator.hasNext(); iterator.next()) {
                 byte[] key = iterator.peekNext().getKey();
-                byte[] addressKey = Arrays.copyOfRange(key, 0, 25);
-                if (!Arrays.equals(addressKey, address)) {
+                // Wallet-index keys sort by address prefix: once the prefix no longer matches the
+                // scan is done — continuing to end-of-DB was O(DB size) per query (audit F4).
+                if (key.length < address.length
+                        || !Arrays.equals(Arrays.copyOfRange(key, 0, address.length), address)) {
+                    break;
+                }
+                // Only a full wallet(25) ‖ txid(32) entry is emitted; anything shorter/longer is
+                // another record under the same prefix, and slicing it would fabricate a
+                // zero-padded garbage txid (audit F4).
+                if (key.length != PublicAddress.SIZE + SHA256Hash.SIZE) {
                     continue;
                 }
-                byte[] txidBytes = Arrays.copyOfRange(key, 25, 57);
+                byte[] txidBytes = Arrays.copyOfRange(key, PublicAddress.SIZE, PublicAddress.SIZE + SHA256Hash.SIZE);
                 SHA256Hash txid = SHA256Hash.of(txidBytes);
                 transactions.add(txid);
             }
         } catch (IOException e) {
             throw new LevelDBException("Failed to iterate over the database", e);
         }
-        
+
         return transactions;
     }
 
     public void removeBlockWalletTransactions(Block block) {
-        for(Transaction t : block.transactions()) {
-            SHA256Hash txid = t.hashContents();
-            
-            var w1Key = new WalletTransactionKey(t.from(), txid, false);
-            var w2Key = new WalletTransactionKey(t.to(), txid, false);
-            
-            try {
-                deleteTransaction(w1Key);
-                deleteTransaction(w2Key);
-            } catch (DBException e) {
-                throw new LevelDBException("Could not remove transaction from wallet in blockstore db: " + e.getMessage(), e);
-            }
-        }
-    }
+        // All of the block's wallet-index removals commit in ONE synced batch — a crash can no
+        // longer leave half of a block's index entries behind (audit F2).
+        try (WriteBatch batch = db().createWriteBatch()) {
+            for(Transaction t : block.transactions()) {
+                SHA256Hash txid = t.hashContents();
 
-    private void deleteTransaction(WalletTransactionKey key) throws DBException {
-        WriteOptions writeOptions = new WriteOptions().sync(true);
-        db().delete(key.toByteArray(), writeOptions);
+                var w1Key = new WalletTransactionKey(t.from(), txid, false);
+                var w2Key = new WalletTransactionKey(t.to(), txid, false);
+
+                batch.delete(w1Key.toByteArray());
+                batch.delete(w2Key.toByteArray());
+            }
+            db().write(batch, new WriteOptions().sync(true));
+        } catch (DBException | IOException e) { // IOException from WriteBatch.close()
+            throw new LevelDBException("Could not remove transaction from wallet in blockstore db: " + e.getMessage(), e);
+        }
     }
 
 
     public void addBlock(Block block) throws LevelDBException {
-        set(block.id(), block.serialize().toBuffer());
+        // The whole block — header, every transaction record and both wallet-index entries per
+        // transaction — commits in ONE synced WriteBatch: a crash can never leave a partially
+        // indexed block, and 1 + 3N individual fsyncs become one (audit F2).
+        try (WriteBatch batch = db().createWriteBatch()) {
+            batch.put(rhizome.core.common.Utils.intToBytes(block.id()), block.serialize().toBuffer());
 
-        for (int i = 0; i < block.transactions().size(); i++) {
-            var transaction = block.transactions().get(i);
-            var transactionDto = transaction.serialize();
-            set(composeKey(block.id(), i), transactionDto.toBuffer());
-            set(composeKey(PublicAddress.of(transactionDto.signingKey).toBytes(), transaction.hashContents().toBytes()), new byte[0]);
-            set(composeKey(transactionDto.to.toBytes(), transaction.hashContents().toBytes()), new byte[0]);
+            for (int i = 0; i < block.transactions().size(); i++) {
+                var transaction = block.transactions().get(i);
+                var transactionDto = transaction.serialize();
+                batch.put(composeKey(block.id(), i), transactionDto.toBuffer());
+                batch.put(composeKey(PublicAddress.of(transactionDto.signingKey).toBytes(), transaction.hashContents().toBytes()), new byte[0]);
+                batch.put(composeKey(transactionDto.to.toBytes(), transaction.hashContents().toBytes()), new byte[0]);
+            }
+            db().write(batch, new WriteOptions().sync(true));
+        } catch (DBException | IOException e) { // IOException from WriteBatch.close()
+            throw new LevelDBException("Could not add block to blockstore db: " + e.getMessage(), e);
         }
     }
 

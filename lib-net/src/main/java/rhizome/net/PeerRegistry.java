@@ -2,10 +2,13 @@ package rhizome.net;
 
 import java.net.URI;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.LongSupplier;
 
 /**
  * The node's live set of known peer base URLs. Thread-safe and bounded; never
@@ -29,16 +32,45 @@ public final class PeerRegistry {
     /** Max discovered peers per IP subnet bucket (/16 v4, /48 v6). Bounds eclipse via one subnet. */
     private static final int MAX_PER_SUBNET = 16;
 
+    /** Cap on the removal-cooldown table (bounded LRU; attacker-influenced keys, so hard-bounded). */
+    private static final int MAX_COOLDOWN_ENTRIES = 256;
+    /** How long a discovered peer removed as failed/evicted is refused re-admission. */
+    private static final long REMOVAL_COOLDOWN_MILLIS = 5 * 60_000L;
+
     private final String self;
     private final int maxPeers;
     private final PeerBanList banList;
     private final boolean blockPrivateHosts;
+    private final LongSupplier nowMillis;
 
-    private final Set<String> peers = ConcurrentHashMap.newKeySet();
+    /**
+     * Facts derived ONCE at admission, stored alongside the peer so later paths never touch DNS:
+     * the subnet bucket its table slot was counted against (decremented at removal, so a DNS
+     * flip cannot corrupt the accounting — audit F5) and, on mainnet, the routability verdict
+     * served by {@link #publicSnapshot()} (audit F3).
+     */
+    private record Entry(String subnetBucket, boolean publiclyRoutable) {}
+
+    /** Placeholder entry for seed peers (never subnet-counted, never publicly advertised). */
+    private static final Entry SEED_ENTRY = new Entry("", true);
+
+    private final Map<String, Entry> peers = new ConcurrentHashMap<>();
     /** Config/seed peers: exempt from SSRF + subnet caps and never evicted by capacity. */
     private final Set<String> seeds = ConcurrentHashMap.newKeySet();
     /** Live count of discovered (non-seed) peers per subnet bucket. */
     private final Map<String, Integer> subnetCounts = new ConcurrentHashMap<>();
+    /**
+     * Recently removed (failed / evicted) discovered peers, with the earliest re-admission
+     * time. Bounded LRU; a peer dropped for repeated failures cannot be instantly re-added via
+     * PEX to squat its bucket slot again (audit F5).
+     */
+    private final Map<String, Long> removalCooldowns = Collections.synchronizedMap(
+        new LinkedHashMap<String, Long>(64, 0.75f, false) {
+            @Override
+            protected boolean removeEldestEntry(Map.Entry<String, Long> eldest) {
+                return size() > MAX_COOLDOWN_ENTRIES;
+            }
+        });
     private final Object lock = new Object();
 
     public PeerRegistry(String selfUrl, int maxPeers) {
@@ -50,10 +82,17 @@ public final class PeerRegistry {
     }
 
     public PeerRegistry(String selfUrl, int maxPeers, PeerBanList banList, boolean blockPrivateHosts) {
+        this(selfUrl, maxPeers, banList, blockPrivateHosts, System::currentTimeMillis);
+    }
+
+    /** As above, with an injectable clock for the removal cooldown (package-private for tests). */
+    PeerRegistry(String selfUrl, int maxPeers, PeerBanList banList, boolean blockPrivateHosts,
+                 LongSupplier nowMillis) {
         this.self = normalize(selfUrl);
         this.maxPeers = maxPeers;
         this.banList = banList;
         this.blockPrivateHosts = blockPrivateHosts;
+        this.nowMillis = nowMillis;
     }
 
     static String normalize(String url) {
@@ -82,7 +121,7 @@ public final class PeerRegistry {
                 continue;
             }
             synchronized (lock) {
-                if (peers.add(u)) {
+                if (peers.putIfAbsent(u, SEED_ENTRY) == null) {
                     seeds.add(u);
                 }
             }
@@ -103,13 +142,25 @@ public final class PeerRegistry {
         if (banList != null && banList.isBanned(u)) {
             return false;
         }
+        // A peer recently removed as failed/evicted is refused re-admission for a short window,
+        // so it cannot flap straight back into its bucket slot (audit F5).
+        Long cooldownUntil = removalCooldowns.get(u);
+        if (cooldownUntil != null) {
+            if (nowMillis.getAsLong() < cooldownUntil) {
+                return false;
+            }
+            removalCooldowns.remove(u); // window expired: eligible again
+        }
         String host = hostOf(u);
-        if (blockPrivateHosts && !isPubliclyRoutable(host)) {
+        // The routability verdict is computed ONCE here, at admission; publicSnapshot serves this
+        // stored verdict and never resolves DNS on the request path (audit F3).
+        boolean routable = !blockPrivateHosts || isPubliclyRoutable(host);
+        if (blockPrivateHosts && !routable) {
             return false; // SSRF: refuse internal / metadata / private targets
         }
         String bucket = subnetKey(host);
         synchronized (lock) {
-            if (peers.contains(u)) {
+            if (peers.containsKey(u)) {
                 return false;
             }
             if (peers.size() >= maxPeers) {
@@ -118,7 +169,7 @@ public final class PeerRegistry {
             if (subnetCounts.getOrDefault(bucket, 0) >= MAX_PER_SUBNET) {
                 return false; // eclipse: one subnet cannot monopolise the table
             }
-            if (peers.add(u)) {
+            if (peers.putIfAbsent(u, new Entry(bucket, routable)) == null) {
                 subnetCounts.merge(bucket, 1, Integer::sum);
                 return true;
             }
@@ -152,18 +203,26 @@ public final class PeerRegistry {
     public void remove(String url) {
         String u = normalize(url);
         synchronized (lock) {
-            if (!peers.remove(u)) {
+            Entry entry = peers.remove(u);
+            if (entry == null) {
                 return;
             }
             if (!seeds.remove(u)) {
-                String bucket = subnetKey(hostOf(u));
-                subnetCounts.computeIfPresent(bucket, (k, v) -> v <= 1 ? null : v - 1);
+                // Decrement the bucket recorded at ADMISSION — never re-resolve DNS at removal,
+                // so a DNS flip between add and remove cannot corrupt the accounting (audit F5).
+                subnetCounts.computeIfPresent(entry.subnetBucket(), (k, v) -> v <= 1 ? null : v - 1);
+                removalCooldowns.put(u, nowMillis.getAsLong() + REMOVAL_COOLDOWN_MILLIS);
             }
         }
     }
 
     public List<String> snapshot() {
-        return List.copyOf(peers);
+        return List.copyOf(peers.keySet());
+    }
+
+    /** The configured table capacity (used by PeerDiscovery to bound its round queue). */
+    int maxPeers() {
+        return maxPeers;
     }
 
     /**
@@ -176,17 +235,17 @@ public final class PeerRegistry {
      */
     public List<String> publicSnapshot() {
         List<String> out = new ArrayList<>();
-        for (String p : peers) {
-            if (seeds.contains(p)) {
+        for (Map.Entry<String, Entry> e : peers.entrySet()) {
+            if (seeds.contains(e.getKey())) {
                 continue;
             }
-            if (blockPrivateHosts) {
-                String host = hostOf(p);
-                if (host == null || !isPubliclyRoutable(host)) {
-                    continue;
-                }
+            // Serve the verdict snapshotted at admission — never resolve DNS here: this runs on
+            // the HTTP eventloop (GET /peers) and a blocking lookup per peer per request is a
+            // stall vector (audit F3).
+            if (blockPrivateHosts && !e.getValue().publiclyRoutable()) {
+                continue;
             }
-            out.add(p);
+            out.add(e.getKey());
         }
         return out;
     }

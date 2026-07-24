@@ -8,6 +8,7 @@ import com.dylibso.chicory.runtime.MStack;
 import com.dylibso.chicory.runtime.StackFrame;
 import com.dylibso.chicory.wasm.ChicoryException;
 import com.dylibso.chicory.wasm.types.FunctionType;
+import com.dylibso.chicory.wasm.types.ValType;
 
 /**
  * A Chicory interpreter that caps WebAssembly call-stack depth deterministically.
@@ -77,34 +78,48 @@ final class DepthLimitedInterpreterMachine extends InterpreterMachine {
         if (depth[0] >= MAX_WASM_CALL_DEPTH) {
             throw new WasmCallDepthExceeded();
         }
-        // Reserve this activation's locals against the tree-wide budget before the frame allocates
-        // them, so a locals-heavy recursion is bounded to a deterministic ceiling on every node
-        // rather than OOM-ing memory-constrained validators at a host-specific depth (audit V3).
-        long frameLocals = localCount(instance, funcId);
+        // Reserve this activation's frame slots (params + locals) against the tree-wide budget
+        // before the frame allocates them, so a locals/params-heavy recursion is bounded to a
+        // deterministic ceiling on every node rather than OOM-ing memory-constrained validators at
+        // a host-specific depth (audit V3, F2).
+        long frameSlots = frameSlotCount(instance, funcId);
         long[] locals = TREE_LOCALS.get();
-        if (locals[0] + frameLocals > WasmVm.MAX_TREE_LIVE_LOCALS) {
+        if (locals[0] + frameSlots > WasmVm.MAX_TREE_LIVE_LOCALS) {
             throw new WasmLocalsBudgetExceeded();
         }
         depth[0]++;
-        locals[0] += frameLocals;
+        locals[0] += frameSlots;
         try {
             return super.call(stack, instance, callStack, funcId, args, type, popArgs);
         } finally {
             depth[0]--;
-            locals[0] -= frameLocals;
+            locals[0] -= frameSlots;
         }
     }
 
     /**
-     * Declared local count of the function {@code funcId} in {@code instance}, or 0 when it is an
-     * imported (host) function — those run as plain Java and allocate no WASM locals array, and
-     * {@code instance.function} has no body for them. Any lookup failure yields 0 (the depth cap
-     * still bounds the tree), so this can only ever add safety, never reject a legitimate call.
+     * Slots this activation's {@code StackFrame} will allocate, mirroring Chicory exactly:
+     * {@code sizeOf(params) + sizeOf(locals)}. Reserving only the body locals left the params half
+     * uncounted — a type with ~87k i64 params pins ~1.4 MB per frame, so deep recursion OOM-ed
+     * small-heap nodes (full-gas out-of-gas) where large-heap nodes reverted (partial gas):
+     * divergent gasUsed → consensus fork (audit F2). The function type comes from
+     * {@code instance.type(instance.functionType(funcId))}, the same resolution Chicory's own
+     * {@code call} performs (the {@code type} argument is null on the entry path and only carries
+     * the expected type of a {@code call_indirect}, so it cannot be relied on).
+     *
+     * <p>Imported (host) functions run as plain Java and allocate no WASM locals array —
+     * {@code instance.function} has no body for them — so they reserve 0. Any lookup failure
+     * yields 0 (the depth cap still bounds the tree), so this can only ever add safety, never
+     * reject a legitimate call.
      */
-    private static long localCount(Instance instance, int funcId) {
+    private static long frameSlotCount(Instance instance, int funcId) {
         try {
             var body = instance.function(funcId);
-            return body == null ? 0L : body.localTypes().size();
+            if (body == null) {
+                return 0L; // imported host function: no WASM frame locals
+            }
+            long params = ValType.sizeOf(instance.type(instance.functionType(funcId)).params());
+            return params + ValType.sizeOf(body.localTypes());
         } catch (RuntimeException e) {
             return 0L;
         }

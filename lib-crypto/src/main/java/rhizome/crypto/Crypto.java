@@ -3,6 +3,7 @@ package rhizome.crypto;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
+import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -22,10 +23,23 @@ public class Crypto {
     /** One shared, thread-safe CSPRNG for key generation; avoids a reseed on every {@code new SecureRandom()}. */
     private static final SecureRandom KEYGEN_RNG = new SecureRandom();
 
+    /**
+     * Signs a raw digest. RESERVED for transaction hashes (consensus): it applies no domain
+     * separation, so it must never be exposed as a general signing oracle over attacker-chosen
+     * messages — a signature over a chosen message could be replayed as a transaction signature
+     * (audit F9). Use {@link #signMessage} for anything that is not a transaction hash.
+     */
     public static byte[] signWithPrivateKey(String content, PrivateKey privateKey) {
-        return signWithPrivateKey(content.getBytes(), privateKey);
+        // Pin UTF-8: the platform default charset varies by host, so the same string could sign
+        // different bytes on different machines (audit F7).
+        return signWithPrivateKey(content.getBytes(StandardCharsets.UTF_8), privateKey);
     }
 
+    /**
+     * Signs a raw digest. RESERVED for transaction hashes (consensus); see the note on
+     * {@link #signWithPrivateKey(String, PrivateKey)}. Use {@link #signMessage} for general
+     * message signing.
+     */
     public static byte[] signWithPrivateKey(byte[] message, PrivateKey privateKey) {
         try {
             Signer signer = new Ed25519Signer();
@@ -65,9 +79,35 @@ public class Crypto {
     }
 
     /**
-     * Bounded LRU of Pufferfish2 results. The cache key is SHA-256(target ‖ nonce) where both are
-     * fully attacker-controlled on every PoW verification path (addBlock, registerOrphan, header
-     * sync, fork-choice branch validation all pass useCache=true). An unbounded map therefore grew
+     * Domain separator for general-purpose message signing. Transaction signatures deliberately
+     * stay raw (consensus), so off-chain message signing frames the message with this prefix to
+     * keep the two domains apart: a message signature can never be replayed as a transaction
+     * signature, and vice versa (audit F9).
+     */
+    private static final byte[] MESSAGE_DOMAIN = "RHIZOME_MSG\u0000".getBytes(StandardCharsets.UTF_8);
+
+    /** Signs {@code "RHIZOME_MSG\x00" ‖ message}; verify with {@link #verifyMessage}. */
+    public static byte[] signMessage(PrivateKey privateKey, byte[] message) {
+        return signWithPrivateKey(domainFramed(message), privateKey);
+    }
+
+    /** Verifies a signature produced by {@link #signMessage}. */
+    public static boolean verifyMessage(PublicKey publicKey, byte[] message, byte[] signature) {
+        return checkSignature(domainFramed(message), signature, publicKey);
+    }
+
+    private static byte[] domainFramed(byte[] message) {
+        byte[] framed = new byte[MESSAGE_DOMAIN.length + message.length];
+        System.arraycopy(MESSAGE_DOMAIN, 0, framed, 0, MESSAGE_DOMAIN.length);
+        System.arraycopy(message, 0, framed, MESSAGE_DOMAIN.length, message.length);
+        return framed;
+    }
+
+    /**
+     * Bounded LRU of Pufferfish2 results. The cache key wraps the raw 64-byte preimage
+     * (target ‖ nonce), both halves of which are fully attacker-controlled on every PoW
+     * verification path (addBlock, registerOrphan, header sync, fork-choice branch validation all
+     * pass useCache=true). An unbounded map therefore grew
      * one permanent entry per distinct block/header the node ever verified — a free remote
      * memory-exhaustion vector (feed /submit a stream of blocks with fresh nonces). Cap it like
      * OrphanPool/MemPool so it can never itself be a growth vector; the miner (useCache=false)
@@ -92,8 +132,7 @@ public class Crypto {
             }
         }
 
-        byte[] hash = new byte[PufferfishConstants.PF_HASHSPACE];
-        hash = PufferfishAlgorithm.compute(input);
+        byte[] hash = PufferfishAlgorithm.compute(input);
 
         SHA256Hash finalHash = SHA256(hash); // Assuming SHA256 is standard SHA-256 hash
 

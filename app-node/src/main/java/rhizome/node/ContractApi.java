@@ -66,7 +66,12 @@ final class ContractApi {
      * and the slow-subscriber contract). 503 when streaming is not wired or full.
      */
     static HttpResponse logStream(SseLogHub sse, String clientKey) {
-        var stream = sse == null ? null : sse.subscribe(clientKey);
+        return logStream(sse, clientKey, clientKey);
+    }
+
+    /** As {@link #logStream(SseLogHub, String)}, with the IPv6-/48 aggregate tier key (audit F5). */
+    static HttpResponse logStream(SseLogHub sse, String clientKey, String subnetKey) {
+        var stream = sse == null ? null : sse.subscribe(clientKey, subnetKey);
         if (stream == null) {
             return HttpResponse.ofCode(503)
                 .withJson(new JSONObject().put("error", "streaming unavailable").toString())

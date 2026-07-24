@@ -18,7 +18,6 @@ function el(tag, attrs, ...children) {
   if (attrs) {
     for (const [k, v] of Object.entries(attrs)) {
       if (k === 'class') node.className = v;
-      else if (k === 'html') node.innerHTML = v;
       else if (k.startsWith('on')) node.addEventListener(k.slice(2), v);
       else node.setAttribute(k, v);
     }
@@ -123,9 +122,10 @@ function every(ms, fn) { fn(); pageTimers.push(setInterval(fn, ms)); }
  * Keys live in IndexedDB (not localStorage), encrypted at rest with a passphrase via
  * WebCrypto (PBKDF2-SHA256 → AES-256-GCM) when a secure context is available (https or
  * localhost — where a wallet should be used). Over a plain-http remote node WebCrypto's
- * subtle API is unavailable; there we fall back to storing the seed unencrypted and warn
- * loudly. The decrypted seed is held only in memory after unlock and never rendered unless
- * the user explicitly reveals it.
+ * subtle API is unavailable; there the wallet refuses create/import/unlock entirely and
+ * the dashboard runs read-only — warn-and-continue would store the seed unencrypted on a
+ * page a MITM could have substituted (audit F8). The decrypted seed is held only in
+ * memory after unlock and never rendered unless the user explicitly reveals it.
  */
 
 const CRYPTO_OK = !!(self.crypto && self.crypto.subtle && self.isSecureContext);
@@ -193,9 +193,12 @@ const Vault = {
   async record() { return idbGet(VAULT_KEY); },
   async exists() { return (await this.record()) != null; },
   async isEncrypted() { const r = await this.record(); return !!(r && r.enc); },
-  /** Stores a seed, encrypting it under {@code passphrase} when a secure context allows it. */
+  /** Stores a seed, encrypting it under {@code passphrase}. */
   async store(seed, passphrase) {
-    if (CRYPTO_OK && passphrase) {
+    // Never persist a key from a non-secure context (plain-http remote): the SPA itself may
+    // have been substituted by a MITM, and there is no WebCrypto to encrypt at rest (audit F8).
+    if (!CRYPTO_OK) throw new Error('contexte non sécurisé — stockage de la clé refusé');
+    if (passphrase) {
       await idbPut(VAULT_KEY, await encryptSeed(seed, passphrase));
     } else {
       await idbPut(VAULT_KEY, { v: 1, enc: null, seed: [...seed] });
@@ -284,10 +287,13 @@ async function boot() {
   if (App.features.boxes) document.getElementById('boxes-badge').remove();
   // Migrate any legacy plaintext localStorage key into the vault, then auto-unlock an
   // unencrypted vault so a returning user isn't prompted for a passphrase they never set.
+  // Skipped entirely on a non-secure context: the wallet refuses to touch keys there (audit F8).
   try {
-    await migrateLegacyWallet();
-    if ((await Vault.exists()) && !(await Vault.isEncrypted())) {
-      WalletStore.setUnlocked(await Vault.open(null));
+    if (CRYPTO_OK) {
+      await migrateLegacyWallet();
+      if ((await Vault.exists()) && !(await Vault.isEncrypted())) {
+        WalletStore.setUnlocked(await Vault.open(null));
+      }
     }
   } catch (e) { /* vault unavailable; wallet page will surface it */ }
   setInterval(async () => {
@@ -580,6 +586,17 @@ async function renderWallet() {
   $view.append(el('h1', null, 'Wallet'),
     el('p', { class: 'sub' }, 'Les clés restent dans ce navigateur (IndexedDB, chiffrées par une passphrase) — le node ne les voit jamais. La signature Ed25519 est faite localement.'));
 
+  // Non-secure context (plain-http remote): WebCrypto is unavailable and the served SPA may
+  // have been substituted by a MITM — refuse wallet create/import/unlock entirely and leave the
+  // dashboard read-only, rather than warn-and-continue with unencrypted key storage (audit F8).
+  if (!CRYPTO_OK) {
+    $view.append(el('div', { class: 'callout warn' },
+      'Wallet désactivé : page servie en HTTP clair hors localhost (contexte non sécurisé). Le chiffrement du navigateur y est indisponible et un intercepteur pourrait avoir remplacé cette application — le dashboard fonctionne en lecture seule. Pour utiliser le wallet, ouvrez un tunnel SSH : ',
+      el('span', { class: 'mono' }, 'ssh -L 3000:localhost:3000 <hôte>'),
+      ', puis ', el('span', { class: 'mono' }, 'http://localhost:3000/'), '.'));
+    return;
+  }
+
   if (WalletStore.seed()) { renderWalletUnlocked(); return; }
 
   let exists = false;
@@ -624,7 +641,7 @@ async function renderWallet() {
   const passCreate = el('input', { type: 'password', placeholder: 'Passphrase' });
   const passImport = el('input', { type: 'password', placeholder: 'Passphrase' });
   async function persistAndUnlock(seed, passphrase) {
-    if (CRYPTO_OK && !passphrase) throw new Error('choisissez une passphrase');
+    if (!passphrase) throw new Error('choisissez une passphrase');
     await Vault.store(seed, passphrase);
     WalletStore.setUnlocked(seed);
     route();
@@ -654,9 +671,8 @@ async function renderWallet() {
             } catch (e) { toast('Clé invalide : ' + e.message, true); }
           },
         }, 'Importer'))),
-    el('div', { class: 'callout warn' }, CRYPTO_OK
-      ? 'La clé est chiffrée au repos (AES-256-GCM, passphrase via PBKDF2). Pour un trésor, préférez le wallet CLI et un fichier de clé hors-ligne.'
-      : 'Contexte non sécurisé (http distant) : le chiffrement du navigateur est indisponible et la clé serait stockée en clair. Ouvrez le dashboard via https ou http://localhost pour activer le chiffrement au repos.'));
+    el('div', { class: 'callout warn' },
+      'La clé est chiffrée au repos (AES-256-GCM, passphrase via PBKDF2). Pour un trésor, préférez le wallet CLI et un fichier de clé hors-ligne.'));
 }
 
 function renderWalletUnlocked() {

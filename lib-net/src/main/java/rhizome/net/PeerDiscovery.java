@@ -9,13 +9,16 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -49,17 +52,20 @@ public final class PeerDiscovery {
     /** Wall-clock budget for one round; tasks not finished by then are cancelled and retried next round
      *  (rotation keeps that fair), so one slow peer cannot delay the whole PEX round. */
     private static final long ROUND_BUDGET_MS = 30_000L;
+    /** Wall-clock deadline for one whole PEX exchange (send + bounded body read); mirrors the
+     *  previous 10s request timeout but also covers the body, so a slow-drip peer cannot park a
+     *  pool thread in InputStream.read (audit F2). */
+    private static final Duration FETCH_DEADLINE = Duration.ofSeconds(10);
 
     private final PeerRegistry registry;
     private final String selfUrl;
     private final boolean blockPrivateHosts;
     private final HttpClient http;
-    private final Map<String, Integer> failures = new ConcurrentHashMap<>();
-    private final ExecutorService pool = Executors.newFixedThreadPool(ROUND_CONCURRENCY, r -> {
-        Thread t = new Thread(r, "rhizome-pex");
-        t.setDaemon(true);
-        return t;
-    });
+    private final Duration fetchDeadline;
+    /** Per-peer consecutive failure counts. Package-private so a test can assert the stale-entry
+     *  pruning in {@link #round()} (audit F8). */
+    final Map<String, Integer> failures = new ConcurrentHashMap<>();
+    private final ExecutorService pool;
     /** Rotates the round's peer order so a tail cut by the budget is visited first next round. */
     private long roundCursor;
 
@@ -68,10 +74,28 @@ public final class PeerDiscovery {
     }
 
     public PeerDiscovery(PeerRegistry registry, String selfUrl, boolean blockPrivateHosts) {
+        this(registry, selfUrl, blockPrivateHosts, FETCH_DEADLINE);
+    }
+
+    /** As above, with an explicit per-exchange deadline (package-private for tests). */
+    PeerDiscovery(PeerRegistry registry, String selfUrl, boolean blockPrivateHosts, Duration fetchDeadline) {
         this.registry = registry;
         this.selfUrl = selfUrl;
         this.blockPrivateHosts = blockPrivateHosts;
+        this.fetchDeadline = fetchDeadline;
         this.http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build();
+        // Bounded queue + discard-oldest (the PeerBroadcaster pattern): a fixed pool's default
+        // unbounded LinkedBlockingQueue would let one round's tasks accumulate without limit if
+        // the workers stall (audit F2). Dropped tasks' futures never complete, so invokeAll
+        // simply cancels them at the round budget; rotation visits them first next round.
+        this.pool = new ThreadPoolExecutor(ROUND_CONCURRENCY, ROUND_CONCURRENCY, 0L, TimeUnit.MILLISECONDS,
+            new ArrayBlockingQueue<>(Math.max(1, registry.maxPeers())),
+            r -> {
+                Thread t = new Thread(r, "rhizome-pex");
+                t.setDaemon(true);
+                return t;
+            },
+            new ThreadPoolExecutor.DiscardOldestPolicy());
     }
 
     /**
@@ -81,6 +105,9 @@ public final class PeerDiscovery {
      */
     public void round() {
         List<String> peers = registry.snapshot();
+        // Drop failure bookkeeping for peers no longer in the registry, so the map cannot leak
+        // stale entries across rounds (audit F8).
+        failures.keySet().retainAll(new HashSet<>(peers));
         int n = peers.size();
         if (n == 0) {
             return;
@@ -140,17 +167,24 @@ public final class PeerDiscovery {
         // Stream + bound the body: never buffer an unbounded response into memory (audit V2). The
         // MAX_PEX_PER_PEER limit below only caps how many entries we KEEP — it cannot stop an
         // attacker's giant body, which ofString() would have fully materialised before we ever parse.
-        HttpResponse<InputStream> resp = http.send(
-            HttpRequest.newBuilder(URI.create(pinned + "/peers")).timeout(Duration.ofSeconds(10)).GET().build(),
-            HttpResponse.BodyHandlers.ofInputStream());
-        if (resp.statusCode() != 200) {
-            resp.body().close();
-            throw new IllegalStateException("/peers -> " + resp.statusCode());
-        }
-        String body;
-        try (InputStream in = resp.body()) {
-            body = new String(readBounded(in, MAX_PEERS_BODY_BYTES), StandardCharsets.UTF_8);
-        }
+        // The whole exchange (send + bounded read) runs under a wall-clock deadline (audit F2):
+        // the request timeout alone only covers up to the response headers, so a slow-drip peer
+        // could otherwise park a pool thread in InputStream.read until the round budget cut it.
+        AtomicReference<AutoCloseable> openBody = new AtomicReference<>();
+        String body = BodyReadDeadline.call(fetchDeadline, openBody, () -> {
+            HttpResponse<InputStream> resp = http.send(
+                HttpRequest.newBuilder(URI.create(pinned + "/peers")).timeout(fetchDeadline).GET().build(),
+                HttpResponse.BodyHandlers.ofInputStream());
+            if (resp.statusCode() != 200) {
+                resp.body().close();
+                throw new IllegalStateException("/peers -> " + resp.statusCode());
+            }
+            InputStream in = resp.body();
+            openBody.set(in); // publish so a deadline expiry can cancel the JDK exchange
+            try (in) {
+                return new String(readBounded(in, MAX_PEERS_BODY_BYTES), StandardCharsets.UTF_8);
+            }
+        });
         JSONArray arr = new JSONObject(body).getJSONArray("peers");
         // Bound how many addresses one peer can contribute per round, so a single malicious
         // peer cannot flood the registry with sybil URLs (PEX amplification / eclipse).

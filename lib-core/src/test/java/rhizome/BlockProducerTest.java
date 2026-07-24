@@ -2,6 +2,7 @@ package rhizome;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static rhizome.crypto.Crypto.generateKeyPair;
 
@@ -116,6 +117,18 @@ class BlockProducerTest {
         producer.stop();
         assertFalse(producer.isRunning());
         assertTrue(engine.height() >= 3, "expected the loop to mine a few blocks");
+    }
+
+    @Test
+    void setVoteRejectsOutOfRangeValues() {
+        // audit F1: the producer validates the canonical vote rule (0 or ±paramId) up front, so it
+        // can never mine a block every node's consensus gate would reject as INVALID_VOTE.
+        producer.setVote(0);
+        producer.setVote(1);
+        producer.setVote(-2);
+        assertThrows(IllegalArgumentException.class, () -> producer.setVote(3));
+        assertThrows(IllegalArgumentException.class, () -> producer.setVote(-3));
+        assertThrows(IllegalArgumentException.class, () -> producer.setVote(Integer.MIN_VALUE));
     }
 
     @Test

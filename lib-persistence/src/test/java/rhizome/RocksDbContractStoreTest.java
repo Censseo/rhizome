@@ -3,14 +3,17 @@ package rhizome;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.nio.file.Path;
+import java.util.List;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import rhizome.core.ledger.PublicAddress;
 import rhizome.persistence.rocksdb.RocksDbContractStore;
+import rhizome.vm.StorageChange;
 
 class RocksDbContractStoreTest {
 
@@ -71,6 +74,54 @@ class RocksDbContractStoreTest {
             assertArrayEquals(journal, store.getJournal(7));
             store.deleteJournal(7);
             assertNull(store.getJournal(7));
+        }
+    }
+
+    @Test
+    void applyBlockCommitsChangesAndJournalAtomicallyAndRefusesDoubleApply(@TempDir Path dir) throws Exception {
+        PublicAddress contract = PublicAddress.random();
+        byte[] key = {0};
+        byte[] fresh = {7};
+        byte[] journal = {9, 9, 9};
+        try (var store = new RocksDbContractStore(dir.toString())) {
+            store.putStorage(contract, key, new byte[] {1});
+            // One call commits every slot mutation AND the journal in a single WriteBatch (audit F1).
+            store.applyBlock(10, List.of(
+                StorageChange.putStorage(contract, key, new byte[] {2}),
+                StorageChange.putStorage(contract, fresh, new byte[] {3}),
+                StorageChange.putCode(contract, new byte[] {0x00, 0x61, 0x73, 0x6d})), journal);
+            assertArrayEquals(new byte[] {2}, store.getStorage(contract, key));
+            assertArrayEquals(new byte[] {3}, store.getStorage(contract, fresh));
+            assertArrayEquals(new byte[] {0x00, 0x61, 0x73, 0x6d}, store.getCode(contract));
+            assertArrayEquals(journal, store.getJournal(10));
+            // Re-applying the same height would journal the already-mutated state as "prior" (audit F10).
+            assertThrows(IllegalStateException.class,
+                () -> store.applyBlock(10, List.of(StorageChange.putStorage(contract, key, new byte[] {4})), journal));
+        }
+        // The commit survived the reopen — mutations and journal together.
+        try (var store = new RocksDbContractStore(dir.toString())) {
+            assertArrayEquals(new byte[] {2}, store.getStorage(contract, key));
+            assertArrayEquals(journal, store.getJournal(10));
+        }
+    }
+
+    @Test
+    void revertBlockRestoresPriorsAndDropsJournalAtomically(@TempDir Path dir) throws Exception {
+        PublicAddress contract = PublicAddress.random();
+        byte[] key = {0};
+        byte[] fresh = {7};
+        try (var store = new RocksDbContractStore(dir.toString())) {
+            store.putStorage(contract, key, new byte[] {1});
+            store.applyBlock(10, List.of(
+                StorageChange.putStorage(contract, key, new byte[] {2}),
+                StorageChange.putStorage(contract, fresh, new byte[] {3})), new byte[] {9});
+            // Restores are the undo journal in final application order; null value = delete (audit F1).
+            store.revertBlock(10, List.of(
+                StorageChange.putStorage(contract, key, new byte[] {1}),
+                StorageChange.deleteStorage(contract, fresh)));
+            assertArrayEquals(new byte[] {1}, store.getStorage(contract, key));
+            assertNull(store.getStorage(contract, fresh));
+            assertNull(store.getJournal(10));
         }
     }
 }

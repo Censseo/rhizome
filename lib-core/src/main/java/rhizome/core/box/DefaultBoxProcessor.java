@@ -17,8 +17,11 @@ import static rhizome.core.mempool.ExecutionStatus.*;
  * Reference {@link BoxProcessor}: validates box ops against a per-block session
  * overlaying a {@link BoxStore}, and flushes the session to the store atomically on
  * commit. The store persists both boxes and the undo journal, so box state is
- * restorable across a reorg (including one after a restart); receipts and events are
- * kept in memory to the reorg depth, exactly as the contract processor does.
+ * restorable across a reorg (including one after a restart). Receipts are likewise
+ * persisted through the store's receipt hooks ({@link BoxStore#putReceipts}) and
+ * served from a write-through RAM cache, so {@code Executor.rollbackBlock} — which
+ * consumes exactly one receipt per box transaction — still reverses a box-carrying
+ * block exactly after a restart (audit F7); events stay RAM-only to the reorg depth.
  */
 public final class DefaultBoxProcessor implements BoxProcessor {
 
@@ -222,7 +225,10 @@ public final class DefaultBoxProcessor implements BoxProcessor {
             session = null;
         }
         if (!currentReceipts.isEmpty()) {
+            // Write-through (audit F7): the RAM copy serves the hot reorg path; the store copy
+            // survives a restart, so a later pop/restore of this block finds its receipts.
             receiptsByHeight.put(blockHeight, currentReceipts);
+            store.putReceipts(blockHeight, BoxReceiptCodec.encode(currentReceipts));
         }
         if (!currentEvents.isEmpty()) {
             eventsByHeight.put(blockHeight, currentEvents);
@@ -245,12 +251,26 @@ public final class DefaultBoxProcessor implements BoxProcessor {
         receiptsByHeight.remove(blockHeight);
         eventsByHeight.remove(blockHeight);
         changesByHeight.remove(blockHeight);
+        store.deleteReceipts(blockHeight);
         store.revertBlock(blockHeight);
     }
 
     @Override
     public List<BoxReceipt> receipts(long blockHeight) {
-        return receiptsByHeight.getOrDefault(blockHeight, List.of());
+        List<BoxReceipt> cached = receiptsByHeight.get(blockHeight);
+        if (cached != null) {
+            return cached;
+        }
+        // Durable load-through (audit F7): after a restart the RAM cache is empty; recover the
+        // committed receipts from the store so a reorg's ledger reversal stays exact. Stores
+        // without the receipt hooks return null and the pre-F7 RAM-only behaviour remains.
+        byte[] encoded = store.getReceipts(blockHeight);
+        if (encoded == null) {
+            return List.of();
+        }
+        List<BoxReceipt> decoded = BoxReceiptCodec.decode(encoded);
+        receiptsByHeight.put(blockHeight, decoded);
+        return decoded;
     }
 
     @Override
@@ -319,6 +339,11 @@ public final class DefaultBoxProcessor implements BoxProcessor {
     private void pruneOld() {
         long cutoff = lastCommittedHeight - retainDepth;
         if (cutoff > 0) {
+            for (Long h : receiptsByHeight.keySet()) {
+                if (h < cutoff) {
+                    store.deleteReceipts(h); // receipts prune on the journal schedule (audit F7)
+                }
+            }
             receiptsByHeight.keySet().removeIf(h -> h < cutoff);
             eventsByHeight.keySet().removeIf(h -> h < cutoff);
             changesByHeight.keySet().removeIf(h -> h < cutoff);

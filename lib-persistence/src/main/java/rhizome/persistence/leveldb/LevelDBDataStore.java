@@ -5,6 +5,7 @@ import org.iq80.leveldb.DB;
 import org.iq80.leveldb.DBException;
 import org.iq80.leveldb.Options;
 import org.iq80.leveldb.ReadOptions;
+import org.iq80.leveldb.WriteBatch;
 import org.iq80.leveldb.WriteOptions;
 
 import io.activej.bytebuf.ByteBuf;
@@ -20,9 +21,12 @@ import java.io.File;
 import java.io.IOException;
 import java.math.BigInteger;
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.List;
 
 import static org.iq80.leveldb.impl.Iq80DBFactory.factory;
 import static java.nio.charset.StandardCharsets.UTF_8;
+import static rhizome.core.common.Utils.intToBytes;
 
 @Getter @Setter @Slf4j
 public class LevelDBDataStore {
@@ -67,12 +71,23 @@ public class LevelDBDataStore {
     }
 
     public void clear() {
+        // Delete by the RAW keys: a UTF-8 String round-trip corrupts any key that is not valid
+        // UTF-8 (block/wallet index keys are arbitrary binary), silently failing to delete them
+        // (audit F5). Collect first (mutating mid-iteration is unsafe), then one synced batch.
+        List<byte[]> keys = new ArrayList<>();
         try (DBIterator iterator = db.iterator()) {
             for (iterator.seekToFirst(); iterator.hasNext(); iterator.next()) {
-                String key = new String(iterator.peekNext().getKey(), UTF_8);
-                db.delete(key.getBytes(UTF_8));
+                keys.add(iterator.peekNext().getKey());
             }
         } catch (IOException e) {
+            throw new LevelDBException("Could not clear data store", e);
+        }
+        try (WriteBatch batch = db.createWriteBatch()) {
+            for (byte[] key : keys) {
+                batch.delete(key);
+            }
+            db.write(batch, new WriteOptions().sync(true));
+        } catch (IOException e) { // WriteBatch.close()
             throw new LevelDBException("Could not clear data store", e);
         }
     }
@@ -81,24 +96,29 @@ public class LevelDBDataStore {
         return this.path;
     }
 
+    /** Test hook: raw access to the underlying DB for on-disk assertions. */
+    DB rawDb() {
+        return db;
+    }
+
     protected void set(String key, String value) {
         set(key.getBytes(UTF_8), value.getBytes(UTF_8));
     }
     protected void set(String key, int value) {
-        set(key.getBytes(UTF_8), Integer.toString(value).getBytes(UTF_8));
+        // Raw 4-byte big-endian, symmetric with the Integer read path in get() below — the old
+        // ASCII Integer.toString encoding could never be read back (audit F6).
+        set(key.getBytes(UTF_8), intToBytes(value));
     }
     protected void set(String key, long value) {
-        var keyByte = ByteBufPool.allocate(Long.BYTES);
-        keyByte.writeLong(value);
-        set(key.getBytes(UTF_8), keyByte.asArray());
+        // Plain allocation for short-lived internal keys: the previous ByteBufPool buffers were
+        // never recycled, leaking pooled memory (audit F12).
+        set(key.getBytes(UTF_8), ByteBuffer.allocate(Long.BYTES).putLong(value).array());
     }
     protected void set(String key, BigInteger value) {
         set(key.getBytes(UTF_8), value.toByteArray());
     }
     protected void set(int key, byte[] value) {
-        var keyByte = ByteBufPool.allocate(Integer.BYTES);
-        keyByte.writeInt(key);
-        set(keyByte.asArray(), value);
+        set(intToBytes(key), value);
     }
     protected void set(byte[] key, byte[] value) {
         db.put(key, value, new WriteOptions().sync(true));
@@ -108,9 +128,7 @@ public class LevelDBDataStore {
         return get(key.getBytes(UTF_8), type);
     }
     protected Object get(int key, Class<?> type) {
-        var keyByte = ByteBufPool.allocate(Integer.BYTES);
-        keyByte.writeInt(key);
-        return get(keyByte.asArray(), type);
+        return get(intToBytes(key), type);
     }
     protected Object get(byte[] key, Class<?> type) {
         var value = db.get(key, new ReadOptions());
@@ -129,6 +147,8 @@ public class LevelDBDataStore {
         } else if (type == byte[].class) {
             return value;
         } else if (type == ByteBuf.class) {
+            // Ownership: the returned pooled buffer ESCAPES to the caller, who must recycle it
+            // (ByteBuf.recycle()) when done — the store cannot, it has no way to know (audit F12).
             var buff = ByteBufPool.allocate(MemSize.of(value.length));
             buff.put(value);
 
@@ -146,33 +166,30 @@ public class LevelDBDataStore {
         try {
             return db.get(key.getBytes(UTF_8), new ReadOptions()) != null;
         } catch (DBException e) {
-            log.error("Error checking key", e);
-            return false;
+            // Propagate like every other method: swallowing the error and answering "false"
+            // silently hid database corruption behind "key absent" (audit F11).
+            throw new LevelDBException("Error checking key", e);
         }
     }
 
     protected boolean hasKey(int key) {
         try {
-            var keyByte = ByteBufPool.allocate(Integer.BYTES);
-            keyByte.writeInt(key);
-            return db.get(keyByte.asArray()) != null;
+            return db.get(intToBytes(key)) != null;
         } catch (DBException e) {
-            log.error("Error checking key", e);
-            return false;
+            throw new LevelDBException("Error checking key", e);
         }
     }
 
     protected static byte[] composeKey(int key1, int key2) {
-        var key = ByteBufPool.allocate(MemSize.bytes(2l * Integer.BYTES));
-        key.writeInt(key1);
-        key.writeInt(key2);
-        return key.asArray();
+        // Plain allocation for short-lived internal keys (the pooled buffers were never
+        // recycled — audit F12); big-endian, unchanged on-disk encoding.
+        return ByteBuffer.allocate(2 * Integer.BYTES).putInt(key1).putInt(key2).array();
     }
 
     protected static byte[] composeKey(byte[] key1, byte[] key2) {
-        var compositeKey = ByteBufPool.allocate(MemSize.bytes((long)key1.length + key2.length));
-        compositeKey.put(key1);
-        compositeKey.put(key2);
-        return compositeKey.asArray();
+        byte[] compositeKey = new byte[key1.length + key2.length];
+        System.arraycopy(key1, 0, compositeKey, 0, key1.length);
+        System.arraycopy(key2, 0, compositeKey, key1.length, key2.length);
+        return compositeKey;
     }
 }

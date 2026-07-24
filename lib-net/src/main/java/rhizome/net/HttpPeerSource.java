@@ -10,6 +10,7 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 
 import rhizome.core.common.Constants;
 
@@ -45,9 +46,23 @@ public final class HttpPeerSource implements PeerSource {
     // generous ceiling that still bounds a hostile /headers response hard.
     private static final long HEADER_STREAM_CAP =
         (long) Constants.BLOCK_HEADERS_PER_FETCH * 1024 + 64 * 1024;
+    /**
+     * Wall-clock deadline for one WHOLE peer exchange (send + full response-body read).
+     * {@code HttpRequest.timeout} alone only covers up to the response headers, so a slow-drip
+     * peer could otherwise stall the single sync thread in {@code InputStream.read} forever;
+     * the deadline is enforced by {@link BodyReadDeadline} (audit F1).
+     */
+    private static final Duration REQUEST_DEADLINE = Duration.ofSeconds(30);
+    /**
+     * Hard cap on the snapshot chunk count a peer may advertise, mirroring app-node's
+     * {@code MAX_SNAPSHOT_CHUNKS}: {@code SnapshotBootstrap} loops and pre-sizes on this
+     * peer-controlled value, so an unbounded count is a CPU/memory DoS (audit F6).
+     */
+    private static final int MAX_SNAPSHOT_CHUNKS = 1_000_000;
 
     private final String baseUrl;
     private final HttpClient client;
+    private final Duration requestDeadline;
 
     public HttpPeerSource(String baseUrl) {
         this(baseUrl, false);
@@ -70,9 +85,15 @@ public final class HttpPeerSource implements PeerSource {
      * client does not weaken the anti-rebinding guarantee — it only shares the transport.
      */
     public HttpPeerSource(String baseUrl, boolean blockPrivateHosts, HttpClient client) {
+        this(baseUrl, blockPrivateHosts, client, REQUEST_DEADLINE);
+    }
+
+    /** As above, with an explicit whole-exchange deadline (package-private for tests). */
+    HttpPeerSource(String baseUrl, boolean blockPrivateHosts, HttpClient client, Duration requestDeadline) {
         String trimmed = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
         this.baseUrl = PeerHosts.pin(trimmed, blockPrivateHosts);
         this.client = client;
+        this.requestDeadline = requestDeadline;
     }
 
     /** A default JDK client with the standard connect timeout; callers that share one build it once. */
@@ -82,18 +103,32 @@ public final class HttpPeerSource implements PeerSource {
 
     @Override
     public long height() {
-        return Long.parseLong(getString("/block_count", SCALAR_CAP).trim());
+        String body = getString("/block_count", SCALAR_CAP);
+        try {
+            return Long.parseLong(body.trim());
+        } catch (NumberFormatException e) {
+            throw new PeerProtocolException("peer /block_count is not a number", e);
+        }
     }
 
     @Override
     public BigInteger totalWork() {
-        return new BigInteger(new JSONObject(getString("/total_work", SCALAR_CAP)).getString("totalWork"));
+        String body = getString("/total_work", SCALAR_CAP);
+        try {
+            return new BigInteger(new JSONObject(body).getString("totalWork"));
+        } catch (RuntimeException e) {
+            throw new PeerProtocolException("peer /total_work is malformed", e);
+        }
     }
 
     @Override
     public SHA256Hash blockHash(long height) {
-        JSONObject json = new JSONObject(getString("/block?blockId=" + height, JSON_BLOCK_CAP));
-        return Block.of(json).hash();
+        String body = getString("/block?blockId=" + height, JSON_BLOCK_CAP);
+        try {
+            return Block.of(new JSONObject(body)).hash();
+        } catch (RuntimeException e) {
+            throw new PeerProtocolException("peer /block is malformed", e);
+        }
     }
 
     @Override
@@ -102,16 +137,24 @@ public final class HttpPeerSource implements PeerSource {
         // window a hostile peer could otherwise force us to buffer (audit M5).
         String path = "/sync?start=" + start + "&end=" + end;
         HttpRequest request = HttpRequest.newBuilder(URI.create(baseUrl + path))
-            .timeout(Duration.ofSeconds(30)).GET().build();
+            .timeout(requestDeadline).GET().build();
         try {
-            HttpResponse<InputStream> response = client.send(request, HttpResponse.BodyHandlers.ofInputStream());
-            if (response.statusCode() != 200) {
-                response.body().close();
-                throw new IOException("peer " + path + " returned " + response.statusCode());
-            }
-            try (InputStream in = response.body()) {
-                return BlockCodec.decodeStreamed(in, Constants.BLOCKS_PER_FETCH, Constants.MAX_BLOCK_SIZE_BYTES);
-            }
+            // The request timeout only covers up to the response headers; bound the WHOLE
+            // exchange (send + streamed body decode) with a wall-clock deadline so a slow-drip
+            // peer cannot stall the sync thread in InputStream.read forever (audit F1).
+            AtomicReference<AutoCloseable> openBody = new AtomicReference<>();
+            return BodyReadDeadline.call(requestDeadline, openBody, () -> {
+                HttpResponse<InputStream> response = client.send(request, HttpResponse.BodyHandlers.ofInputStream());
+                if (response.statusCode() != 200) {
+                    response.body().close();
+                    throw new IOException("peer " + path + " returned " + response.statusCode());
+                }
+                InputStream in = response.body();
+                openBody.set(in); // publish so a deadline expiry can cancel the JDK exchange
+                try (in) {
+                    return BlockCodec.decodeStreamed(in, Constants.BLOCKS_PER_FETCH, Constants.MAX_BLOCK_SIZE_BYTES);
+                }
+            });
         } catch (IOException e) {
             throw new PeerUnavailableException("peer request failed: " + path, e);
         } catch (InterruptedException e) {
@@ -122,20 +165,38 @@ public final class HttpPeerSource implements PeerSource {
 
     @Override
     public long prunedBelow() {
-        JSONObject info = new JSONObject(getString("/info", SCALAR_CAP));
-        return info.optLong("prunedBelow", 0);
+        String body = getString("/info", SCALAR_CAP);
+        try {
+            return new JSONObject(body).optLong("prunedBelow", 0);
+        } catch (RuntimeException e) {
+            throw new PeerProtocolException("peer /info is malformed", e);
+        }
     }
 
     @Override
     public SnapshotInfo snapshotInfo() {
+        String body;
         try {
-            JSONObject info = new JSONObject(new String(
-                getBytes("/state/snapshot/info", SCALAR_CAP, true), StandardCharsets.UTF_8));
-            return new SnapshotInfo(info.getLong("pivotHeight"),
-                rhizome.core.common.Utils.hexStringToByteArray(info.getString("stateRoot")),
-                info.getInt("chunks"));
+            body = new String(getBytes("/state/snapshot/info", SCALAR_CAP, true), StandardCharsets.UTF_8);
         } catch (UnsupportedOperationException noSnapshot) {
             return null; // peer has no materialised snapshot (404) — not an error
+        }
+        try {
+            JSONObject info = new JSONObject(body);
+            long pivotHeight = info.getLong("pivotHeight");
+            byte[] stateRoot = rhizome.core.common.Utils.hexStringToByteArray(info.getString("stateRoot"));
+            int chunks = info.getInt("chunks");
+            // The chunk count is peer-controlled and SnapshotBootstrap loops/pre-sizes on it;
+            // reject absurd values here so the peer is penalised instead of indulged (audit F6).
+            if (chunks <= 0 || chunks > MAX_SNAPSHOT_CHUNKS) {
+                throw new PeerProtocolException(
+                    "peer advertised out-of-range snapshot chunk count: " + chunks);
+            }
+            return new SnapshotInfo(pivotHeight, stateRoot, chunks);
+        } catch (PeerProtocolException e) {
+            throw e;
+        } catch (RuntimeException e) {
+            throw new PeerProtocolException("peer /state/snapshot/info is malformed", e);
         }
     }
 
@@ -164,21 +225,28 @@ public final class HttpPeerSource implements PeerSource {
 
     private byte[] getBytes(String path, long maxBytes, boolean notFoundMeansUnsupported) {
         HttpRequest request = HttpRequest.newBuilder(URI.create(baseUrl + path))
-            .timeout(Duration.ofSeconds(30))
+            .timeout(requestDeadline)
             .GET()
             .build();
         try {
-            HttpResponse<InputStream> response = client.send(request, HttpResponse.BodyHandlers.ofInputStream());
-            if (response.statusCode() != 200) {
-                response.body().close();
-                if (notFoundMeansUnsupported && response.statusCode() == 404) {
-                    throw new UnsupportedOperationException("peer lacks " + path);
+            // Same whole-exchange deadline as blocks(): the request timeout alone would let a
+            // slow-drip peer hang the sync thread mid-body (audit F1).
+            AtomicReference<AutoCloseable> openBody = new AtomicReference<>();
+            return BodyReadDeadline.call(requestDeadline, openBody, () -> {
+                HttpResponse<InputStream> response = client.send(request, HttpResponse.BodyHandlers.ofInputStream());
+                if (response.statusCode() != 200) {
+                    response.body().close();
+                    if (notFoundMeansUnsupported && response.statusCode() == 404) {
+                        throw new UnsupportedOperationException("peer lacks " + path);
+                    }
+                    throw new IOException("peer " + path + " returned " + response.statusCode());
                 }
-                throw new IOException("peer " + path + " returned " + response.statusCode());
-            }
-            try (InputStream in = response.body()) {
-                return readBounded(in, maxBytes, path);
-            }
+                InputStream in = response.body();
+                openBody.set(in); // publish so a deadline expiry can cancel the JDK exchange
+                try (in) {
+                    return readBounded(in, maxBytes, path);
+                }
+            });
         } catch (IOException e) {
             throw new PeerUnavailableException("peer request failed: " + path, e);
         } catch (InterruptedException e) {
@@ -200,6 +268,24 @@ public final class HttpPeerSource implements PeerSource {
     /** Signals a transport-level failure talking to the peer (distinct from a bad chain). */
     public static final class PeerUnavailableException extends RuntimeException {
         public PeerUnavailableException(String message, Throwable cause) {
+            super(message, cause);
+        }
+    }
+
+    /**
+     * Signals a MALFORMED peer response: the transport worked, but the peer served junk no
+     * honest node would emit (an unparseable height/work/block, an out-of-range snapshot chunk
+     * count). Distinct from {@link PeerUnavailableException} so the sync round can penalise the
+     * peer's ban score instead of shrugging it off as an outage (audit F9). Unchecked because
+     * it must propagate through the {@link PeerSource} interface, whose methods declare no
+     * checked exceptions, up to the sync-round catch site.
+     */
+    public static final class PeerProtocolException extends RuntimeException {
+        public PeerProtocolException(String message) {
+            super(message);
+        }
+
+        public PeerProtocolException(String message, Throwable cause) {
             super(message, cause);
         }
     }

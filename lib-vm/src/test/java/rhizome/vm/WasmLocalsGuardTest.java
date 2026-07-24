@@ -155,4 +155,69 @@ class WasmLocalsGuardTest {
         assertEquals(cold.status(), warm.status());
         assertEquals(cold.gasUsed(), warm.gasUsed());
     }
+
+    /**
+     * A module whose recursive function declares {@code params} i32 PARAMETERS and no body locals:
+     * func 0 (exported {@code call}, () -> ()) calls func 1 with {@code params} zeroes; func 1
+     * (type (i32 x params) -> ()) recurses into itself the same way. Chicory sizes each
+     * {@code StackFrame} as {@code (params+locals)}, so each func-1 activation consumes
+     * {@code params} tree-wide budget slots — crossing MAX_TREE_LIVE_LOCALS (262 144) at depth
+     * ~263 for 1000 params, well before the depth cap (1024).
+     */
+    private static byte[] recursiveWithParamsModule(int params) {
+        ByteArrayOutputStream type = new ByteArrayOutputStream();
+        type.writeBytes(leb(2));                                  // 2 types
+        type.write(0x60); type.write(0x00); type.write(0x00);     // type 0: () -> ()
+        type.write(0x60); type.writeBytes(leb(params));           // type 1: (i32 x params) -> ()
+        for (int i = 0; i < params; i++) {
+            type.write(0x7F);                                     // i32
+        }
+        type.write(0x00);                                         // no returns
+
+        // Both bodies: 0 locals; params x (i32.const 0); call 1; end  (func 0 enters the recursion)
+        ByteArrayOutputStream body = new ByteArrayOutputStream();
+        body.write(0x00);                                         // 0 local groups
+        for (int i = 0; i < params; i++) {
+            body.write(0x41); body.write(0x00);                   // i32.const 0
+        }
+        body.write(0x10); body.write(0x01);                       // call func 1
+        body.write(0x0B);                                         // end
+        byte[] bodyBytes = body.toByteArray();
+
+        ByteArrayOutputStream code = new ByteArrayOutputStream();
+        code.writeBytes(leb(2));                                  // 2 function bodies
+        code.writeBytes(leb(bodyBytes.length));
+        code.writeBytes(bodyBytes);
+        code.writeBytes(leb(bodyBytes.length));
+        code.writeBytes(bodyBytes);
+
+        ByteArrayOutputStream mod = new ByteArrayOutputStream();
+        mod.writeBytes(WASM_HEADER);
+        byte[] typeBytes = type.toByteArray();
+        mod.write(0x01); mod.writeBytes(leb(typeBytes.length)); mod.writeBytes(typeBytes); // type
+        mod.write(0x03); mod.write(0x03); mod.write(0x02); mod.write(0x00); mod.write(0x01); // func: 2 funcs, types 0 and 1
+        mod.write(0x07); mod.write(0x08); mod.write(0x01); mod.write(0x04);                // export:
+        mod.write(0x63); mod.write(0x61); mod.write(0x6C); mod.write(0x6C);                //   "call"
+        mod.write(0x00); mod.write(0x00);                                                  //   -> func 0
+        byte[] codeBytes = code.toByteArray();
+        mod.write(0x0A); mod.writeBytes(leb(codeBytes.length)); mod.writeBytes(codeBytes); // code
+        return mod.toByteArray();
+    }
+
+    @Test
+    void paramsHeavyRecursionTrapsOnTheDeterministicLocalsBudget() {
+        // Audit F2: the tree-wide budget reserved only body locals, but Chicory's StackFrame
+        // allocates (params+locals) per frame — 1000 params (exactly the MAX_FUNCTION_PARAMS cap,
+        // so the module deploys) meant ~1000 uncounted slots per frame and the recursion ran to
+        // the 1024-frame depth cap with ~8 MB of frame arrays the budget never saw: a
+        // heap-dependent OOM → divergent gasUsed → consensus fork. The budget must now count
+        // params, so the deterministic locals-budget trap fires at depth ~263, BEFORE the depth cap.
+        byte[] mod = recursiveWithParamsModule(WasmVm.MAX_FUNCTION_PARAMS);
+        ExecResult r = WasmVm.onBoundedStack(() ->
+            vm.execute(mod, new MapHostState(new byte[0], new byte[0], 0),
+                new GasMeter(500_000_000)));
+        assertEquals(ExecResult.Status.REVERTED, r.status());
+        assertTrue(r.message() != null && r.message().contains("locals"),
+            "expected a locals-budget revert (params must count), got: " + r.message());
+    }
 }

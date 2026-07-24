@@ -168,30 +168,60 @@ public sealed interface Block permits BlockImpl {
         }
     
         public Block fromJson(JSONObject json) {
+            // Canonicality parity with the binary codecs (audit F5, F1): the JSON decode path must
+            // reject exactly what BlockDto/HeaderCodec/BlockCodec reject on the wire, so a
+            // JSON-sourced block cannot carry fields a binary peer would never have accepted.
+            int difficulty = json.getInt(DIFFICULTY);
+            if (difficulty < 0 || difficulty > rhizome.core.common.Constants.MAX_DIFFICULTY) {
+                throw new IllegalArgumentException("difficulty out of range: " + difficulty);
+            }
+            // Canonical votes are 0 (abstain) or ±paramId (VoteableParams 1/2) — the same bound as
+            // BlockDto/HeaderCodec and the ChainEngine.addBlock consensus gate. Long abs guards
+            // Integer.MIN_VALUE.
+            int vote = json.optInt(VOTE, 0);
+            if (Math.abs((long) vote) > 2) {
+                throw new IllegalArgumentException("vote out of range: " + vote);
+            }
+            JSONArray transactionsJson = json.getJSONArray(TRANSACTIONS);
+            if (transactionsJson.length() > rhizome.core.common.Constants.MAX_TRANSACTIONS_PER_BLOCK) {
+                throw new IllegalArgumentException(
+                    "numTransactions out of range: " + transactionsJson.length());
+            }
+            java.util.List<UncleRef> uncles = new java.util.ArrayList<>();
+            JSONArray unclesJson = json.optJSONArray(UNCLES);
+            if (unclesJson != null) {
+                if (unclesJson.length() > rhizome.core.common.Constants.MAX_UNCLES_PER_BLOCK) {
+                    throw new IllegalArgumentException("numUncles out of range: " + unclesJson.length());
+                }
+                for (int i = 0; i < unclesJson.length(); i++) {
+                    JSONObject u = unclesJson.getJSONObject(i);
+                    int uncleDifficulty = u.getInt(DIFFICULTY);
+                    // Same bound as the binary codecs: uncle difficulty feeds BigInteger.TWO.pow in
+                    // the work sums, so an unbounded JSON int must never reach it.
+                    if (uncleDifficulty < 0
+                        || uncleDifficulty > rhizome.core.common.Constants.MAX_DIFFICULTY) {
+                        throw new IllegalArgumentException(
+                            "uncleDifficulty out of range: " + uncleDifficulty);
+                    }
+                    uncles.add(new UncleRef(SHA256Hash.of(u.getString("hash")), uncleDifficulty,
+                        rhizome.core.ledger.PublicAddress.of(u.getString("miner"))));
+                }
+            }
             return BlockImpl.builder()
                 .id(json.getInt(ID))
                 .timestamp(json.getLong(TIMESTAMP))
-                .difficulty(json.getInt(DIFFICULTY))
+                .difficulty(difficulty)
                 .merkleRoot(SHA256Hash.of(json.getString(MERKLE_ROOT)))
                 .lastBlockHash(SHA256Hash.of(json.getString(LAST_BLOCK_HASH)))
                 .nonce(SHA256Hash.of(json.getString(NONCE)))
                 .stateRoot(json.has(STATE_ROOT) ? SHA256Hash.of(json.getString(STATE_ROOT)) : SHA256Hash.empty())
-                .vote(json.optInt(VOTE, 0))
+                .vote(vote)
                 .transactions(
-                    IntStream.range(0, json.getJSONArray(TRANSACTIONS).length())
-                        .mapToObj(i -> Transaction.of(json.getJSONArray(TRANSACTIONS).getJSONObject(i)))
+                    IntStream.range(0, transactionsJson.length())
+                        .mapToObj(i -> Transaction.of(transactionsJson.getJSONObject(i)))
                         .collect(Collectors.toList())
                 )
-                .uncles(
-                    !json.has(UNCLES) ? new java.util.ArrayList<UncleRef>()
-                        : IntStream.range(0, json.getJSONArray(UNCLES).length())
-                            .mapToObj(i -> {
-                                JSONObject u = json.getJSONArray(UNCLES).getJSONObject(i);
-                                return new UncleRef(SHA256Hash.of(u.getString("hash")), u.getInt(DIFFICULTY),
-                                    rhizome.core.ledger.PublicAddress.of(u.getString("miner")));
-                            })
-                            .collect(Collectors.toList())
-                )
+                .uncles(uncles)
                 .build();
         }
     }

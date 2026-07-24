@@ -54,6 +54,33 @@ final class ApiResponses {
             .build();
     }
 
+    /** Deepest bracket nesting accepted in a JSON request body. org.json parses recursively, so a
+     *  deeply nested body (tens of thousands of '[') overflows the event-loop thread's stack with a
+     *  {@link StackOverflowError} — an {@code Error} {@link #guardedResponse} does not catch, taking
+     *  down the whole HTTP loop (audit F11). */
+    private static final int MAX_JSON_DEPTH = 64;
+
+    /**
+     * Parses a JSON request body after a cheap depth pre-scan: bodies nested deeper than
+     * {@link #MAX_JSON_DEPTH} are rejected with {@link IllegalArgumentException} (→ clean 400)
+     * before the recursive parser runs. The scan counts brackets inside string literals too —
+     * a rare false positive on pathological-but-shallow input, acceptable for a safety guard.
+     */
+    static JSONObject parseJson(String body) {
+        int depth = 0;
+        for (int i = 0; i < body.length(); i++) {
+            char c = body.charAt(i);
+            if (c == '{' || c == '[') {
+                if (++depth > MAX_JSON_DEPTH) {
+                    throw new IllegalArgumentException("JSON nesting too deep (max " + MAX_JSON_DEPTH + ")");
+                }
+            } else if (c == '}' || c == ']') {
+                depth = Math.max(0, depth - 1);
+            }
+        }
+        return new JSONObject(body);
+    }
+
     static long parseLong(String value) {
         if (value == null) {
             throw new IllegalArgumentException("missing parameter");

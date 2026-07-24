@@ -37,7 +37,8 @@ public final class RocksDbStateStore implements SmtNodeStore, RootStore, AutoClo
     private final ColumnFamilyHandle defaultCf;
     private final ColumnFamilyHandle nodesCf;
     private final ColumnFamilyHandle rootsCf;
-    private final WriteOptions writeOptions = new WriteOptions();
+    // Synced: roots and flushed node batches advance the committed state height (audit F3).
+    private final WriteOptions writeOptions = new WriteOptions().setSync(true);
 
     /**
      * SMT nodes staged for the block being applied, keyed by hash hex (audit P8). Applying a block
@@ -71,6 +72,9 @@ public final class RocksDbStateStore implements SmtNodeStore, RootStore, AutoClo
             new ColumnFamilyDescriptor(CF_NODES),
             new ColumnFamilyDescriptor(CF_ROOTS));
         List<ColumnFamilyHandle> handles = new ArrayList<>();
+        // DBOptions is NOT closed after open: closing it while the DB is live corrupts the
+        // native heap (rocksdbjni keeps referencing it) — the audit F12 leak note is
+        // superseded; the object is reclaimed with the process/DB.
         try {
             DBOptions options = new DBOptions().setCreateIfMissing(true).setCreateMissingColumnFamilies(true);
             this.db = RocksDB.open(options, path, descriptors, handles);
@@ -112,14 +116,17 @@ public final class RocksDbStateStore implements SmtNodeStore, RootStore, AutoClo
 
     @Override
     public void beginBatch() {
+        if (pendingNodes != null) {
+            throw new IllegalStateException("a batch is already open"); // audit F8
+        }
         pendingNodes = new java.util.concurrent.ConcurrentHashMap<>();
     }
 
     @Override
     public void flushBatch() {
         var pending = pendingNodes;
-        pendingNodes = null;
         if (pending == null || pending.isEmpty()) {
+            pendingNodes = null;
             return;
         }
         try (org.rocksdb.WriteBatch batch = new org.rocksdb.WriteBatch()) {
@@ -130,6 +137,10 @@ public final class RocksDbStateStore implements SmtNodeStore, RootStore, AutoClo
         } catch (RocksDBException e) {
             throw new IllegalStateException("state node batch write failed", e);
         }
+        // Clear the overlay only AFTER the write succeeded: nulling it first let concurrent readers
+        // observe the nodes as missing while they were not yet durable, and on failure the caller
+        // can retry the flush with the overlay still intact (audit F8).
+        pendingNodes = null;
     }
 
     @Override

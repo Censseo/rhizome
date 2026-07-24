@@ -82,7 +82,9 @@ public final class RocksDbNodeStore implements AutoCloseable {
     private final ColumnFamilyHandle metaCf;
     private final ColumnFamilyHandle ledgerCf;
     private final ColumnFamilyHandle noncesCf;
-    private final WriteOptions writeOptions = new WriteOptions();
+    // Synced: every write that advances (or rewinds) the chain height must be fsync-durable
+    // before the node reports the block applied (audit F3).
+    private final WriteOptions writeOptions = new WriteOptions().setSync(true);
 
     /**
      * Ledger writes staged for the current block, so they commit in the SAME atomic {@link WriteBatch}
@@ -119,6 +121,9 @@ public final class RocksDbNodeStore implements AutoCloseable {
             new ColumnFamilyDescriptor(CF_LEDGER),
             new ColumnFamilyDescriptor(CF_NONCES));
         List<ColumnFamilyHandle> handles = new ArrayList<>();
+        // DBOptions is NOT closed after open: closing it while the DB is live corrupts the
+        // native heap (rocksdbjni keeps referencing it) — the audit F12 leak note is
+        // superseded; the object is reclaimed with the process/DB.
         try {
             DBOptions options = new DBOptions()
                 .setCreateIfMissing(true)
@@ -389,14 +394,21 @@ public final class RocksDbNodeStore implements AutoCloseable {
                     }
                 }
                 db.write(writeOptions, batch);
-                pendingLedger = null; // the block (ledger + height) is now durably one unit
             } catch (RocksDBException e) {
                 throw new LedgerException("Failed to append block " + expected, e);
+            } finally {
+                // Clear the staged ledger writes whether the batch landed or not: leaving them in
+                // place after a failure would silently merge them into the NEXT block's commit
+                // (audit F9).
+                pendingLedger = null;
             }
         }
 
         @Override
         public void beginBlockCommit() {
+            if (pendingLedger != null) {
+                throw new IllegalStateException("a block commit is already open"); // audit F9
+            }
             pendingLedger = new java.util.concurrent.ConcurrentHashMap<>();
         }
 
@@ -465,9 +477,10 @@ public final class RocksDbNodeStore implements AutoCloseable {
                 // the height decrement, so the pop is atomic for the ledger too (audit S3).
                 stagePendingLedgerInto(batch);
                 db.write(writeOptions, batch);
-                pendingLedger = null;
             } catch (RocksDBException e) {
                 throw new LedgerException("Failed to pop block " + height, e);
+            } finally {
+                pendingLedger = null; // same failed-commit rule as append (audit F9)
             }
         }
 

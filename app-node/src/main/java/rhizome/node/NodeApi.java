@@ -30,6 +30,7 @@ import static rhizome.node.ApiResponses.guardedResponse;
 import static rhizome.node.ApiResponses.json;
 import static rhizome.node.ApiResponses.notFound;
 import static rhizome.node.ApiResponses.ok;
+import static rhizome.node.ApiResponses.parseJson;
 import static rhizome.node.ApiResponses.statusResponse;
 import static rhizome.node.ApiResponses.text;
 
@@ -75,6 +76,12 @@ public final class NodeApi {
      */
     private static final int SUBMIT_COST = 8;
 
+    /**
+     * Rate-limit cost of serving one state-snapshot chunk (~MiB-scale, up to the 16 MiB
+     * peer-side fetch cap). Flat because the size is not request-controlled (audit F3).
+     */
+    private static final int SNAPSHOT_CHUNK_COST = 75;
+
     private NodeApi() {}
 
     /** Servlet with a default, lenient rate limiter (for tests and simple embeds). */
@@ -105,6 +112,16 @@ public final class NodeApi {
      */
     public static AsyncServlet servlet(Reactor reactor, NodeService node, RateLimiter limiter, SseLogHub sse,
                                        java.util.Set<String> allowedHosts) {
+        return servlet(reactor, node, limiter, sse, allowedHosts, null);
+    }
+
+    /**
+     * As above, with an optional bearer token ({@code RHIZOME_API_TOKEN}) gating the
+     * state-changing/operator routes. Pass {@code null} to leave every route open (the
+     * historical default for a localhost-bound node).
+     */
+    public static AsyncServlet servlet(Reactor reactor, NodeService node, RateLimiter limiter, SseLogHub sse,
+                                       java.util.Set<String> allowedHosts, String apiToken) {
         int maxBlockBody = node.params().maxBlockSizeBytes() + 1024;
         DashboardAssets dashboard = DashboardAssets.load();
 
@@ -144,7 +161,7 @@ public final class NodeApi {
             .with(GET, "/peers", req -> ok(json(new JSONObject()
                 .put("peers", new org.json.JSONArray(node.publicPeers())))))
             .with(POST, "/add_peer", req -> req.loadBody(SMALL_BODY).map(body -> guardedResponse(() -> {
-                String url = new JSONObject(body.getString(StandardCharsets.UTF_8)).getString("url");
+                String url = parseJson(body.getString(StandardCharsets.UTF_8)).getString("url");
                 node.addPeer(url);
                 return json(new JSONObject().put("status", "OK"));
             })))
@@ -152,15 +169,15 @@ public final class NodeApi {
             .with(GET, "/box", req -> guarded(() -> BoxApi.box(node, req)))
             .with(GET, "/boxes", req -> guarded(() -> BoxApi.boxes(node, req)))
             .with(POST, "/scan/register", req -> req.loadBody(SMALL_BODY).map(body -> guardedResponse(() -> {
-                int id = node.registerScan(rhizome.core.box.ScanPredicate.fromJson(
-                    new JSONObject(body.getString(StandardCharsets.UTF_8))));
+                int id = node.registerScan(clientKey(req), rhizome.core.box.ScanPredicate.fromJson(
+                    parseJson(body.getString(StandardCharsets.UTF_8))));
                 return json(new JSONObject().put("scanId", id));
             })))
             .with(POST, "/scan/deregister", req -> req.loadBody(SMALL_BODY).map(body -> guardedResponse(() -> {
-                int id = new JSONObject(body.getString(StandardCharsets.UTF_8)).getInt("scanId");
+                int id = parseJson(body.getString(StandardCharsets.UTF_8)).getInt("scanId");
                 return json(new JSONObject().put("removed", node.deregisterScan(id)));
             })))
-            .with(GET, "/scan/list", req -> guarded(() -> BoxApi.scanList(node)))
+            .with(GET, "/scan/list", req -> guarded(() -> BoxApi.scanList(node, clientKey(req))))
             .with(GET, "/scan/boxes", req -> guarded(() -> BoxApi.scanBoxes(node, req)))
             // ---- tokens ----
             .with(GET, "/token", req -> guarded(() -> TokenApi.token(node, req)))
@@ -173,14 +190,14 @@ public final class NodeApi {
             .with(GET, "/state/snapshot/chunk", req -> guarded(() -> SyncApi.snapshotChunk(node, req)))
             // ---- contract logs / dry run ----
             .with(GET, "/logs", req -> guarded(() -> ContractApi.logs(node, req)))
-            .with(GET, "/logs/stream", req -> guarded(() -> ContractApi.logStream(sse, clientKey(req))))
+            .with(GET, "/logs/stream", req -> guarded(() -> ContractApi.logStream(sse, clientKey(req), clientSubnetKey(req))))
             .with(POST, "/call_readonly", req -> req.loadBody(TX_BODY).map(body -> guardedResponse(() ->
-                ContractApi.callReadonly(node, new JSONObject(body.getString(StandardCharsets.UTF_8))))))
+                ContractApi.callReadonly(node, parseJson(body.getString(StandardCharsets.UTF_8))))))
             // ---- peer sync / gossip ingest ----
             .with(GET, "/sync", req -> guarded(() -> SyncApi.sync(node, req)))
             .with(GET, "/headers", req -> guarded(() -> SyncApi.headers(node, req)))
             .with(POST, "/add_transaction_json", req -> req.loadBody(SMALL_BODY).map(body -> guardedResponse(() -> {
-                Transaction t = Transaction.of(new JSONObject(body.getString(StandardCharsets.UTF_8)));
+                Transaction t = Transaction.of(parseJson(body.getString(StandardCharsets.UTF_8)));
                 return statusResponse(node.submitTransaction(t));
             })))
             .with(POST, "/add_transaction", req -> req.loadBody(TX_BODY).map(body -> guardedResponse(() -> {
@@ -218,6 +235,27 @@ public final class NodeApi {
                 return HttpResponse.ofCode(429)
                     .withJson(new JSONObject().put("error", "submit throttled").toString())
                     .toPromise();
+            }
+            // Optional bearer-token gate (RHIZOME_API_TOKEN) on the state-changing/operator
+            // routes. The P2P protocol endpoints stay open so peering keeps working (audit F4).
+            if (apiToken != null && isTokenProtectedRoute(request) && !bearerMatches(request, apiToken)) {
+                return HttpResponse.ofCode(401)
+                    .withJson(new JSONObject().put("error", "unauthorized").toString())
+                    .toPromise();
+            }
+            // DNS-rebinding Host check for ALL browser-reachable requests when an allowlist is
+            // configured — not just POSTs: a rebound page can otherwise READ every data endpoint
+            // (/stats, /wallet, /logs, …) through the attacker's hostname (audit F6). The P2P
+            // protocol endpoints fail open (peers send whatever Host) so peering isn't broken;
+            // a missing Host header also fails open (HTTP/1.0 / non-browser CLI clients).
+            if (allowedHosts != null && !allowedHosts.isEmpty() && !isPeerProtocolRequest(request)) {
+                String host = request.getHeader(H_HOST);
+                if (host != null && !host.isEmpty()
+                    && !allowedHosts.contains(host.toLowerCase(java.util.Locale.ROOT))) {
+                    return HttpResponse.ofCode(403)
+                        .withJson(new JSONObject().put("error", "host not allowed").toString())
+                        .toPromise();
+                }
             }
             // CSRF / DNS-rebinding guard on state-changing requests. A browser attaches an Origin
             // header on every POST, so any POST carrying an Origin is browser-originated. Such a
@@ -349,6 +387,29 @@ public final class NodeApi {
             // rate and rounds 32/20 down to 1, leaving /stats effectively unweighted).
             return DashboardApi.STATS_WINDOW;
         }
+        // /logs was left at cost 1, yet its fromHeight cursor scan walks up to LOG_SCAN_WINDOW
+        // heights × 3 event sources (contract + box + token) per call (audit F2). Weight the
+        // cursor scan by its bounded span — the /logs request carries no end parameter, so the
+        // served span is the window cap itself; a single-height lookup stays at cost 1. Not added
+        // to the aggregate read gate below: the event sources are per-height map/store reads, not
+        // full-block decodes under the consensus lock, so the readGate's rationale does not apply.
+        if ("/logs".equals(path)) {
+            try {
+                String height = request.getQueryParameter("height");
+                if (height != null && !height.isEmpty()) {
+                    return 1;
+                }
+            } catch (RuntimeException ignored) {
+                // malformed query: the handler rejects it; charge the bounded-scan cost
+            }
+            return NodeService.LOG_SCAN_WINDOW;
+        }
+        // /state/snapshot/chunk serves a ~MiB-scale binary chunk (the peer-side fetch cap is
+        // 16 MiB) at cost 1 — a cheap bandwidth amplifier. Charge a flat cost proportional to
+        // the typical chunk size (audit F3).
+        if ("/state/snapshot/chunk".equals(path)) {
+            return SNAPSHOT_CHUNK_COST;
+        }
         return 1;
     }
 
@@ -380,6 +441,65 @@ public final class NodeApi {
         } catch (RuntimeException e) {
             return false;
         }
+    }
+
+    /**
+     * The state-changing/operator routes gated by {@code RHIZOME_API_TOKEN} when configured
+     * (audit F4). The P2P protocol endpoints ({@code /sync}, {@code /headers}, {@code /blocks},
+     * {@code /peers}, {@code /block_count}, {@code /total_work}) deliberately stay open so
+     * peering keeps working. Note {@code /submit} and {@code /add_transaction} ARE gated: they
+     * are the operator's block/tx ingest routes and already carry their own anti-DoS budgets —
+     * an operator enabling the token on a gossiping node must have peers present it too.
+     */
+    private static boolean isTokenProtectedRoute(HttpRequest request) {
+        if (request.getMethod() != POST) {
+            return false;
+        }
+        String path;
+        try {
+            path = request.getPath();
+        } catch (RuntimeException e) {
+            return false;
+        }
+        return switch (path) {
+            case "/add_peer", "/scan/register", "/scan/deregister",
+                 "/add_transaction", "/add_transaction_json", "/submit", "/call_readonly" -> true;
+            default -> false;
+        };
+    }
+
+    /** Constant-time check of {@code Authorization: Bearer <token>} against the configured token. */
+    private static boolean bearerMatches(HttpRequest request, String token) {
+        String header = request.getHeader(HttpHeaders.AUTHORIZATION);
+        if (header == null || !header.startsWith("Bearer ")) {
+            return false;
+        }
+        // MessageDigest.isEqual: a naive equals() short-circuits on the first mismatch and leaks
+        // the correct prefix via timing (audit F4).
+        return java.security.MessageDigest.isEqual(
+            header.substring("Bearer ".length()).getBytes(StandardCharsets.UTF_8),
+            token.getBytes(StandardCharsets.UTF_8));
+    }
+
+    /**
+     * The P2P protocol surface: endpoints a peer's sync/PEX/gossip clients call. These fail open
+     * on the Host-allowlist check (audit F6) because peers legitimately send whatever Host (and
+     * no Origin) — gating them would break peering. Everything else (the browser-reachable data
+     * endpoints) is Host-checked when an allowlist is configured.
+     */
+    private static boolean isPeerProtocolRequest(HttpRequest request) {
+        String path;
+        try {
+            path = request.getPath();
+        } catch (RuntimeException e) {
+            return false;
+        }
+        return switch (path) {
+            case "/sync", "/headers", "/blocks", "/block", "/peers", "/block_count", "/total_work",
+                 "/info", "/state/snapshot/info", "/state/snapshot/chunk",
+                 "/add_peer", "/add_transaction", "/add_transaction_json", "/submit" -> true;
+            default -> false;
+        };
     }
 
     /**
@@ -420,6 +540,33 @@ public final class NodeApi {
                 // client table and (pre-fail-closed) evade the limiter (audit M1).
                 StringBuilder sb = new StringBuilder("v6:");
                 for (int i = 0; i < 8; i++) {
+                    sb.append(Character.forDigit((b[i] >> 4) & 0xF, 16)).append(Character.forDigit(b[i] & 0xF, 16));
+                }
+                return sb.toString();
+            }
+            return addr.getHostAddress();
+        } catch (RuntimeException e) {
+            return "local";
+        }
+    }
+
+    /**
+     * Aggregate key one tier up from {@link #clientKey}: the IPv6 /48 (first 6 bytes of the
+     * address) — the typical ISP/site allocation, which hands out 2^16 /64s. The per-client
+     * SSE cap keys on the /64, so a single /48 rotating through its /64s could still exhaust
+     * the global subscriber cap; this second tier bounds the site in aggregate (audit F5).
+     * IPv4 clients key by their full address — the per-client cap already bounds them.
+     */
+    private static String clientSubnetKey(HttpRequest request) {
+        try {
+            java.net.InetAddress addr = request.getRemoteAddress();
+            if (addr == null) {
+                return "local";
+            }
+            byte[] b = addr.getAddress();
+            if (b.length == 16) {
+                StringBuilder sb = new StringBuilder("v6net:");
+                for (int i = 0; i < 6; i++) {
                     sb.append(Character.forDigit((b[i] >> 4) & 0xF, 16)).append(Character.forDigit(b[i] & 0xF, 16));
                 }
                 return sb.toString();

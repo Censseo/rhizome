@@ -1,5 +1,7 @@
 package rhizome.net;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.net.UnknownHostException;
@@ -31,5 +33,20 @@ class PeerHostsCacheBoundTest {
         assertTrue(cached <= 4_096,
             "DNS cache grew unbounded: " + cached + " entries after " + distinct + " distinct hosts");
         assertTrue(cached < distinct, "cache should have evicted, not retained every distinct host");
+    }
+
+    @Test
+    void failedResolutionsAreCachedWithAShortTtl() {
+        // Without negative caching, every lookup of an unresolvable (attacker-supplied) name
+        // blocks on the resolver again — including on the GET /peers request path before the
+        // registry verdict caching landed (audit F3). The miss must be remembered briefly, in
+        // the same bounded LRU. ".invalid" (RFC 2606) never resolves.
+        String host = "never-registered-" + Long.toHexString(System.nanoTime()) + ".invalid";
+        assertFalse(PeerHosts.isCachedNegative(host));
+        assertThrows(UnknownHostException.class, () -> PeerHosts.resolveAll(host));
+        assertTrue(PeerHosts.isCachedNegative(host), "the miss should be cached (short TTL)");
+        // A second lookup throws again — now served from the cache, not the resolver.
+        assertThrows(UnknownHostException.class, () -> PeerHosts.resolveAll(host));
+        assertTrue(PeerHosts.cachedEntryCount() <= 4_096, "negatives share the same bounded LRU");
     }
 }

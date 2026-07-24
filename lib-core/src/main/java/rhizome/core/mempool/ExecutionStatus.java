@@ -58,5 +58,9 @@ public enum ExecutionStatus {
     /** A /submit block was dropped without verification because the global submit-PoW budget is
      *  exhausted — an anti-DoS shed, not a validity verdict (audit F1). */
     SUBMIT_THROTTLED,
+    /** A block's miner vote is outside the canonical range: 0 (abstain) or ±paramId
+     *  (VoteableParams 1/2). The codecs reject this on the wire; this status is the same
+     *  rule enforced at the consensus gate for every other ingress path (audit F1). */
+    INVALID_VOTE,
     SUCCESS
 }
