@@ -222,6 +222,24 @@ public final class RhizomeNode implements AutoCloseable {
         log.info("Rhizome node started: network={} height={} apiPort={} mining={} seedPeers={}",
             config.params().networkName(), engine.height(), config.apiPort(),
             config.miner().isPresent(), config.peers().size());
+        // Surface the exposed-default posture loudly: with no RHIZOME_API_TOKEN and a non-loopback
+        // bind, the operator routes (/add_peer, /scan/register, /call_readonly, …) are open to the
+        // whole network — fine for a pure P2P node, but a wallet/operator node should set a token
+        // or bind 127.0.0.1 (audit M4).
+        if (config.apiToken().isEmpty() && !isLoopbackBind(config.bindAddress())) {
+            log.warn("RHIZOME_API_TOKEN is not set and the API binds {} — state-changing/operator "
+                + "routes are open to the network. Set RHIZOME_API_TOKEN, or bind 127.0.0.1 behind "
+                + "a tunnel for a wallet/dashboard node.", config.bindAddress());
+        }
+    }
+
+    /** True when the configured bind address resolves to a loopback interface only. */
+    private static boolean isLoopbackBind(String bindAddress) {
+        try {
+            return java.net.InetAddress.getByName(bindAddress).isLoopbackAddress();
+        } catch (java.net.UnknownHostException e) {
+            return false; // unresolvable: startHttp will fail loudly; warn on the safe side
+        }
     }
 
     private void startHttp() throws IOException {
@@ -243,6 +261,13 @@ public final class RhizomeNode implements AutoCloseable {
                 NodeApi.servlet(eventloop, service, limiter, sseHub, allowedHosts,
                     config.apiToken().orElse(null)))
             .withListenAddress(new java.net.InetSocketAddress(config.bindAddress(), config.apiPort()))
+            // Bound how long a connection may stall a read or write: body sizes are capped, but
+            // without an inactivity deadline a client can trickle a POST body one byte at a time
+            // (slow-loris), pinning a connection slot and its buffers indefinitely — the rate
+            // limiter only sees fully-received requests (audit M2). 30 s is generous for any
+            // honest client on the bounded bodies this API serves; active SSE streams and large
+            // snapshot chunks update the connection's activity timestamp, so they are unaffected.
+            .withReadWriteTimeout(java.time.Duration.ofSeconds(30))
             .build();
         eventloop.keepAlive(true);
         eventloopThread = new Thread(eventloop, "rhizome-http");
@@ -487,8 +512,16 @@ public final class RhizomeNode implements AutoCloseable {
         if (syncScheduler != null) {
             syncScheduler.shutdownNow();
             try {
-                if (!syncScheduler.awaitTermination(5, TimeUnit.SECONDS)) {
-                    log.warn("Network scheduler did not terminate before store close");
+                // The await budget must exceed the worst in-flight syncRound: peer body reads
+                // are deadline-bound at 30 s (BodyReadDeadline), so a stuck sync always unwinds
+                // within ~45 s. Closing the native store handles while a sync thread is inside a
+                // RocksDB call is a JVM-level SIGSEGV (native use-after-free), not a catchable
+                // Java exception — so on timeout, skip the close rather than crash the process:
+                // the daemon threads die with it, and RocksDB recovers via its WAL on next open.
+                if (!syncScheduler.awaitTermination(45, TimeUnit.SECONDS)) {
+                    log.error("Network scheduler still busy after 45 s; skipping store close "
+                        + "to avoid a native RocksDB use-after-free (JVM crash)");
+                    return;
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();

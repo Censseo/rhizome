@@ -289,13 +289,18 @@ class BoxOpTest {
         long minerBefore = ledger.getWalletValue(miner).amount(); // earned the create block's coinbase
         assertEquals(ExecutionStatus.SUCCESS, execute(block(50, coinbase(50), collect(id))));
 
+        // Every FULL elapsed period is charged (audit M7): rentPaid=2, storagePeriod=10, collect
+        // at 50 → 48 elapsed → 4 periods, so rent = 4 × size — a deeply overdue box can no longer
+        // shed its debt one period per collect.
+        long periods = (50 - 2) / params.storagePeriodBlocks();
+        long rent = periods * size;
         Box box = boxes.getCommitted(id);
         assertNotNull(box); // partial charge: box survives
-        assertEquals(5000 - size, box.value());
+        assertEquals(5000 - rent, box.value());
         assertEquals(List.of(reg), box.registers()); // registers preserved
         assertEquals(50, box.rentPaidHeight());       // rent clock advanced
         // Miner received the rent on top of this block's reward.
-        assertEquals(minerBefore + params.miningReward(50) + size, ledger.getWalletValue(miner).amount());
+        assertEquals(minerBefore + params.miningReward(50) + rent, ledger.getWalletValue(miner).amount());
     }
 
     @Test
@@ -308,6 +313,87 @@ class BoxOpTest {
         assertEquals(ExecutionStatus.SUCCESS, execute(block(50, coinbase(50), collect(id))));
         assertNull(boxes.getCommitted(id)); // box destroyed
         assertEquals(minerBefore + params.miningReward(50) + 100, ledger.getWalletValue(miner).amount());
+    }
+
+    @Test
+    void updatePaysAccruedRentToTheMinerNotBackToTheOwner() {
+        // M7 regression: re-arming the rent clock via UPDATE must cost the accrued rent. Create at
+        // height 2 (rentPaid=2), update at 42 with topup 0: 40 elapsed / period 10 → 4 periods of
+        // rent come OUT of the box and go to the miner; the owner does NOT get them back, so
+        // zero-amount updates can no longer keep a box alive for free.
+        assertEquals(ExecutionStatus.SUCCESS, execute(block(2, coinbase(2), create(5000, 0))));
+        byte[] id = Box.deriveId(sender, 0);
+        long size = boxes.getCommitted(id).serializedSize();
+        long ownerBefore = ledger.getWalletValue(sender).amount();
+        long minerBefore = ledger.getWalletValue(miner).amount();
+
+        assertEquals(ExecutionStatus.SUCCESS, execute(block(42, coinbase(42), update(id, 0, 1))));
+        long rent = ((42 - 2) / params.storagePeriodBlocks()) * size; // 4 periods
+        Box box = boxes.getCommitted(id);
+        assertEquals(5000 - rent, box.value());
+        assertEquals(42, box.rentPaidHeight()); // clock re-armed — but paid for
+        assertEquals(ownerBefore, ledger.getWalletValue(sender).amount(),
+            "the rent must not return to the owner");
+        assertEquals(minerBefore + params.miningReward(42) + rent, ledger.getWalletValue(miner).amount());
+    }
+
+    @Test
+    void updateWithinOnePeriodPaysNoRent() {
+        // Control: an update before any full period elapses stays free, preserving the pre-M7
+        // behavior for active boxes inside their paid period.
+        assertEquals(ExecutionStatus.SUCCESS, execute(block(2, coinbase(2), create(5000, 0))));
+        byte[] id = Box.deriveId(sender, 0);
+        assertEquals(ExecutionStatus.SUCCESS, execute(block(11, coinbase(11), update(id, 0, 1))));
+        assertEquals(5000, boxes.getCommitted(id).value());
+        assertEquals(11, boxes.getCommitted(id).rentPaidHeight());
+    }
+
+    @Test
+    void updateThatCannotCoverAccruedRentSoftReverts() {
+        // A box too poor to pay its accrued rent and stay above the dust floor cannot re-arm its
+        // clock: the op soft-reverts (block stays valid), leaving the box collectable/spendable.
+        assertEquals(ExecutionStatus.SUCCESS, execute(block(2, coinbase(2), create(200, 0))));
+        byte[] id = Box.deriveId(sender, 0);
+        long size = boxes.getCommitted(id).serializedSize(); // 82 with 0 registers
+        // At height 202: 200 elapsed → 20 periods → rent 20*82 = 1640 >> 200.
+        assertEquals(ExecutionStatus.SUCCESS, execute(block(202, coinbase(202), update(id, 0, 1))));
+        Box box = boxes.getCommitted(id);
+        assertEquals(200, box.value());            // untouched
+        assertEquals(2, box.rentPaidHeight());     // clock NOT re-armed
+    }
+
+    @Test
+    void spendChargesAccruedRentCappedAtTheBoxValue() {
+        // M7 regression: an owner cannot dodge collectors for years and then recover the full
+        // deposit. The accrued rent (capped at what the box holds) goes to the miner; the owner
+        // gets only the remainder.
+        assertEquals(ExecutionStatus.SUCCESS, execute(block(2, coinbase(2), create(5000, 0))));
+        byte[] id = Box.deriveId(sender, 0);
+        long size = boxes.getCommitted(id).serializedSize();
+        long ownerBefore = ledger.getWalletValue(sender).amount();
+        long minerBefore = ledger.getWalletValue(miner).amount();
+
+        // Spend at 62: 60 elapsed → 6 periods → rent 6*size; still below 5000, so partial.
+        assertEquals(ExecutionStatus.SUCCESS, execute(block(62, coinbase(62), spend(id, 1))));
+        long rent = ((62 - 2) / params.storagePeriodBlocks()) * size;
+        assertNull(boxes.getCommitted(id));
+        assertEquals(ownerBefore + 5000 - rent, ledger.getWalletValue(sender).amount(),
+            "owner recovers the deposit minus the accrued rent");
+        assertEquals(minerBefore + params.miningReward(62) + rent, ledger.getWalletValue(miner).amount());
+    }
+
+    @Test
+    void spendOfADeeplyOverdrawnBoxYieldsNothingAndPaysTheWholeBoxToTheMiner() {
+        // Overdue beyond the deposit: the charge is capped at the box value — the box always
+        // remains spendable by its owner, but yields nothing; the miner takes the whole deposit.
+        assertEquals(ExecutionStatus.SUCCESS, execute(block(2, coinbase(2), create(200, 0))));
+        byte[] id = Box.deriveId(sender, 0);
+        long ownerBefore = ledger.getWalletValue(sender).amount();
+        long minerBefore = ledger.getWalletValue(miner).amount();
+        assertEquals(ExecutionStatus.SUCCESS, execute(block(202, coinbase(202), spend(id, 1))));
+        assertNull(boxes.getCommitted(id));
+        assertEquals(ownerBefore, ledger.getWalletValue(sender).amount());
+        assertEquals(minerBefore + params.miningReward(202) + 200, ledger.getWalletValue(miner).amount());
     }
 
     @Test

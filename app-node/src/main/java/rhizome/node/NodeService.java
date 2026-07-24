@@ -91,6 +91,20 @@ public final class NodeService {
     private final RateLimiter submitPowGate;
 
     /**
+     * Aggregate (all-IP) cap on mempool transaction admissions per second, bounding the Ed25519
+     * verifications {@code /add_transaction} can trigger on the event-loop thread. {@code /submit}
+     * has submitPowGate, but {@code /add_transaction} had no equivalent: each admission runs one
+     * ~100 µs signature verify inline (MemPool.addTransaction), INVALID signatures are never cached
+     * (only valid ones are remembered), so re-playing the same corrupt-signature tx re-pays the
+     * crypto every time — and the per-IP limiter has no aggregate bound (audit M1). This single
+     * global bucket caps total admissions/s well below loop capacity; an over-budget tx is shed at
+     * the HTTP boundary (429) before the body is decoded. Sized generously for honest gossip
+     * (a few tx/s network-wide) while making a distributed signature-flood uneconomic.
+     */
+    static final int MEMPOOL_SIG_MAX_PER_SEC = 100;
+    private final RateLimiter mempoolSigGate = new RateLimiter(MEMPOOL_SIG_MAX_PER_SEC, 1000, 1);
+
+    /**
      * Aggregate compute budget for {@code /call_readonly} dry-runs, in gas units per second, summed
      * across every source IP. A dry-run runs the VM interpreter for up to {@code MAX_READONLY_GAS}
      * (50M) instructions synchronously on the single event-loop thread; the per-IP HTTP rate limiter
@@ -554,6 +568,16 @@ public final class NodeService {
      */
     public boolean trySubmitBudget() {
         return submitPowGate.allow("submit");
+    }
+
+    /**
+     * The aggregate (all-IP) anti-DoS gate for {@code /add_transaction(JSON)}, consumed at the HTTP
+     * boundary <em>before</em> the body is decoded — symmetric to {@link #trySubmitBudget} for
+     * {@code /submit} (audit M1). Internal/direct callers of {@link #submitTransaction} (block
+     * production, tests) legitimately bypass this network-boundary shed.
+     */
+    public boolean tryMempoolSigBudget() {
+        return mempoolSigGate.allow("tx");
     }
 
     /** Accepts a mined block; on success the mempool is purged of its transactions. */

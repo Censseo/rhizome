@@ -436,6 +436,7 @@ public final class WasmVm {
         // inside parse, before rejectOversizedAllocations could reject it (audit V1).
         preScanLocals(wasmCode);
         WasmModule module = Parser.parse(wasmCode);
+        rejectWasmGc(module);
         rejectNonDeterministic(module);
         rejectOversizedAllocations(module);
         synchronized (MODULE_CACHE) {
@@ -556,6 +557,81 @@ public final class WasmVm {
                         + " is not allowed (float/SIMD)");
                 }
             }
+        }
+    }
+
+    /**
+     * Rejects the WASM GC feature family entirely (audit C1). Chicory 1.7.5 implements the GC
+     * opcodes — STRUCT_*, ARRAY_*, REF_TEST/CAST_TEST, BR_ON_CAST*, REF_I31/I31_GET, ANY/EXTERN
+     * conversions — and they allocate on the JVM <em>heap</em>, outside linear memory:
+     * {@code array.new_default} materialises a {@code new long[len]} with {@code len} a runtime
+     * operand up to 2^31-1 (~16 GiB in ONE instruction for 1 gas), and Chicory's GcRefStore never
+     * sweeps during execution, so every allocation in a loop is retained until the call returns.
+     * None of the deterministic budgets ({@link #TREE_MAX_PAGES}, {@link #MAX_TREE_LIVE_LOCALS},
+     * the table caps) see this memory: whether it OOMs depends on each node's {@code -Xmx}, so a
+     * large-heap node succeeds with a tiny {@code gasUsed} while a small-heap validator OOMs
+     * (normalized to full-gas out-of-gas) — divergent {@code gasUsed} → divergent state root →
+     * consensus fork — and an uncaught OOM can kill any node thread. The bulk GC ops
+     * ({@code array.copy/fill/new_data/new_elem}) also do O(n) memcpy for a flat 1 gas (audit H1),
+     * and const expressions in global/element initializers evaluate {@code array.new} at
+     * INSTANTIATION, before any metering. Contracts are integer + linear-memory only by
+     * construction, so the whole family is refused: GC comp types in the type section, and GC
+     * opcodes in function bodies, global init expressions and element initializers/offsets.
+     */
+    private static void rejectWasmGc(WasmModule module) {
+        var types = module.typeSection();
+        if (types != null) {
+            for (int i = 0; i < types.subTypeCount(); i++) {
+                var comp = types.getSubType(i).compType();
+                if (comp != null && (comp.structType() != null || comp.arrayType() != null)) {
+                    throw new IllegalArgumentException(
+                        "WASM GC types (struct/array) are not allowed in contracts");
+                }
+            }
+        }
+        var code = module.codeSection();
+        if (code != null) {
+            for (int i = 0; i < code.functionBodyCount(); i++) {
+                for (var instruction : code.getFunctionBody(i).instructions()) {
+                    rejectIfGc(instruction);
+                }
+            }
+        }
+        var globals = module.globalSection();
+        if (globals != null) {
+            for (int i = 0; i < globals.globalCount(); i++) {
+                for (var instruction : globals.getGlobal(i).initInstructions()) {
+                    rejectIfGc(instruction);
+                }
+            }
+        }
+        var elements = module.elementSection();
+        if (elements != null) {
+            for (int i = 0; i < elements.elementCount(); i++) {
+                var element = elements.getElement(i);
+                for (var init : element.initializers()) {
+                    for (var instruction : init) {
+                        rejectIfGc(instruction);
+                    }
+                }
+                if (element instanceof com.dylibso.chicory.wasm.types.ActiveElement active) {
+                    for (var instruction : active.offset()) {
+                        rejectIfGc(instruction);
+                    }
+                }
+            }
+        }
+    }
+
+    private static void rejectIfGc(Instruction instruction) {
+        String op = instruction.opcode().name();
+        if (op.startsWith("STRUCT_") || op.startsWith("ARRAY_")
+                || op.startsWith("REF_TEST") || op.startsWith("CAST_TEST")
+                || op.startsWith("BR_ON_CAST") || op.startsWith("I31_GET")
+                || op.equals("REF_I31") || op.equals("ANY_CONVERT_EXTERN")
+                || op.equals("EXTERN_CONVERT_ANY")) {
+            throw new IllegalArgumentException(
+                "WASM GC opcode " + op + " is not allowed in contracts");
         }
     }
 

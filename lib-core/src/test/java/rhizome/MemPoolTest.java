@@ -258,6 +258,51 @@ class MemPoolTest {
     }
 
     @Test
+    void selectionPrioritizesHigherFeeOverAddressOrder() {
+        // M9 regression: block assembly must take the best-paying executable transaction first,
+        // not iterate senders in raw address order — otherwise grinding a low-prefix address let
+        // zero-fee spam crowd out fee-paying traffic in every block for free.
+        MemPool pool = new MemPool(params, verifier, accounts, 100);
+        PublicAddress[] a = new PublicAddress[1];
+        PublicAddress[] b = new PublicAddress[1];
+        // Two funded senders: one paying 0 fee, one paying 100. Retry until the zero-fee sender
+        // sorts BEFORE the fee-payer in unsigned-address order, so the old address-order
+        // iteration would have picked it first (the exact attack shape).
+        Transaction freeTx;
+        Transaction paidTx;
+        do {
+            freeTx = fromFreshSender(a, 0, 0);
+            paidTx = fromFreshSender(b, 100, 0);
+        } while (java.util.Arrays.compareUnsigned(a[0].toBytes(), b[0].toBytes()) >= 0);
+        assertEquals(ExecutionStatus.SUCCESS, pool.addTransaction(freeTx));
+        assertEquals(ExecutionStatus.SUCCESS, pool.addTransaction(paidTx));
+
+        List<Transaction> selected = pool.getTransactionsForBlock(10);
+        assertEquals(2, selected.size());
+        assertEquals(b[0], ((TransactionImpl) selected.get(0)).from(),
+            "the fee-paying transaction must be selected before the zero-fee one (audit M9)");
+        // And with room for only one transaction, the free one is crowded out entirely.
+        List<Transaction> one = pool.getTransactionsForBlock(1);
+        assertEquals(1, one.size());
+        assertEquals(b[0], ((TransactionImpl) one.get(0)).from());
+    }
+
+    @Test
+    void selectionStillRespectsPerSenderNonceOrder() {
+        // Within one sender the contiguous nonce run must stay in order even when a LATER nonce
+        // pays more: nonce 1 (fee 100) can only follow nonce 0 (fee 0), never leapfrog it.
+        MemPool pool = new MemPool(params, verifier, accounts, 100);
+        Transaction first = send(1, 0, 0);
+        Transaction second = send(1, 100, 1);
+        assertEquals(ExecutionStatus.SUCCESS, pool.addTransaction(second));
+        assertEquals(ExecutionStatus.SUCCESS, pool.addTransaction(first));
+        List<Transaction> selected = pool.getTransactionsForBlock(10);
+        assertEquals(2, selected.size());
+        assertEquals(0, ((TransactionImpl) selected.get(0)).nonce());
+        assertEquals(1, ((TransactionImpl) selected.get(1)).nonce());
+    }
+
+    @Test
     void readyTransactionDisplacesParkedDeadWeightWhenPoolIsFull() {
         // Audit 5th-pass (nonce-gap parking censorship): the pool must not be permanently fillable with
         // individually-valid but never-minable gap transactions. Here `sender` parks 3 txs above an

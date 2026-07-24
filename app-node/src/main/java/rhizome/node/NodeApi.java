@@ -77,6 +77,14 @@ public final class NodeApi {
     private static final int SUBMIT_COST = 8;
 
     /**
+     * Rate-limit cost of an /add_transaction(JSON). Every admission runs one Ed25519 verification
+     * inline on the event-loop thread (~100 µs), and invalid signatures are never cached, so a
+     * replayed corrupt-signature tx re-pays the crypto each time — far dearer than a flat read
+     * (audit M1). Paired with the aggregate {@code tryMempoolSigBudget} gate below.
+     */
+    private static final int TX_SUBMIT_COST = 4;
+
+    /**
      * Rate-limit cost of serving one state-snapshot chunk (~MiB-scale, up to the 16 MiB
      * peer-side fetch cap). Flat because the size is not request-controlled (audit F3).
      */
@@ -236,6 +244,16 @@ public final class NodeApi {
                     .withJson(new JSONObject().put("error", "submit throttled").toString())
                     .toPromise();
             }
+            // Aggregate mempool-admission gate, consumed BEFORE the tx body is decoded — symmetric
+            // to the /submit gate above. /add_transaction runs one Ed25519 verify per admission on
+            // the event-loop thread and never caches invalid signatures, so without an aggregate cap
+            // a distributed corrupt-signature flood sums past the per-IP limiter and pins the loop
+            // (audit M1).
+            if (isAddTransactionPost(request) && !node.tryMempoolSigBudget()) {
+                return HttpResponse.ofCode(429)
+                    .withJson(new JSONObject().put("error", "transaction throttled").toString())
+                    .toPromise();
+            }
             // Optional bearer-token gate (RHIZOME_API_TOKEN) on the state-changing/operator
             // routes. The P2P protocol endpoints stay open so peering keeps working (audit F4).
             if (apiToken != null && isTokenProtectedRoute(request) && !bearerMatches(request, apiToken)) {
@@ -362,6 +380,9 @@ public final class NodeApi {
         if ("/submit".equals(path)) {
             return SUBMIT_COST;
         }
+        if ("/add_transaction".equals(path) || "/add_transaction_json".equals(path)) {
+            return TX_SUBMIT_COST;
+        }
         // /sync and /headers were left at cost 1 by the M2 fix, yet they are the heaviest read
         // endpoints: /sync reads and buffers up to BLOCKS_PER_FETCH full blocks (each up to
         // MAX_BLOCK_SIZE) and /headers does up to BLOCK_HEADERS_PER_FETCH block reads. Weight both
@@ -438,6 +459,19 @@ public final class NodeApi {
         }
         try {
             return "/submit".equals(request.getPath());
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
+    /** True for a POST /add_transaction(JSON) — the tx-ingest routes gated like /submit (audit M1). */
+    private static boolean isAddTransactionPost(HttpRequest request) {
+        if (request.getMethod() != POST) {
+            return false;
+        }
+        try {
+            String path = request.getPath();
+            return "/add_transaction".equals(path) || "/add_transaction_json".equals(path);
         } catch (RuntimeException e) {
             return false;
         }

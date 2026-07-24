@@ -94,7 +94,7 @@ public final class WalletCli {
         warnIfInsecureNodeUrl(args[1]);
         WalletClient client = new WalletClient(args[1]);
         Wallet wallet = Wallet.load(Path.of(args[2]), passphraseFromFlag(args));
-        PublicAddress to = PublicAddress.of(args[3]);
+        PublicAddress to = checkedRecipient(args[3], args);
         TransactionAmount amount = new TransactionAmount(pdnBaseUnits(args[4]));
         TransactionAmount fee = args.length >= 6 && !args[5].startsWith("--")
             ? new TransactionAmount(pdnBaseUnits(args[5])) : new TransactionAmount(0);
@@ -167,7 +167,7 @@ public final class WalletCli {
         long value = pdnBaseUnits(args[3]);
         long fee = flagPdn(args, "--fee");
         PublicAddress owner = flag(args, "--owner") != null
-            ? PublicAddress.of(flag(args, "--owner")) : wallet.address();
+            ? checkedRecipient(flag(args, "--owner"), args) : wallet.address();
         byte[] data = rhizome.core.box.BoxPayload.encodeCreate(parseRegisters(args));
         echoPdn("value", value);
         echoPdn("fee", fee);
@@ -275,7 +275,7 @@ public final class WalletCli {
 
     private static void tokenTransfer(String[] args) throws Exception {
         require(args, 6, "token-transfer <nodeUrl> <keyfile> <tokenId> <to> <amount> [--fee <fee>] [--expect-chain-id <n>] [--passphrase-file <path>]");
-        submitTokenAmount(args, TransactionKind.TOKEN_TRANSFER, PublicAddress.of(args[4]),
+        submitTokenAmount(args, TransactionKind.TOKEN_TRANSFER, checkedRecipient(args[4], args),
             args[3], Long.parseLong(args[5]));
     }
 
@@ -360,6 +360,31 @@ public final class WalletCli {
             }
         }
         return null;
+    }
+
+    /** True when {@code name} appears anywhere in {@code args} (a boolean flag). */
+    private static boolean hasFlag(String[] args, String name) {
+        for (String a : args) {
+            if (name.equals(a)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Parses a recipient <em>wallet</em> address and enforces its 4-byte checksum: a mistyped but
+     * well-formed address has no corresponding key, so value sent to it is unspendable forever
+     * (audit M10). Contract/box/token addresses are hash-derived and carry no checksum, so the
+     * check applies only to version-0 (key-derived) addresses; {@code --force} sends anyway.
+     */
+    private static PublicAddress checkedRecipient(String hex, String[] args) {
+        PublicAddress addr = PublicAddress.of(hex);
+        if (addr.toBytes()[0] == 0 && !addr.isValidChecksum() && !hasFlag(args, "--force")) {
+            throw new IllegalArgumentException("recipient address has an invalid checksum "
+                + "(likely a typo — funds would be unspendable); pass --force to send anyway");
+        }
+        return addr;
     }
 
     /** A PDN-denominated flag value in base units, or 0 if absent. */

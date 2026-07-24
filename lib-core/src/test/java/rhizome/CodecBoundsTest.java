@@ -172,9 +172,9 @@ class CodecBoundsTest {
         // corrupt count rejected before any allocation — the same guard as the box journal codec.
         java.util.List<rhizome.core.box.BoxProcessor.BoxReceipt> receipts = java.util.List.of(
             new rhizome.core.box.BoxProcessor.BoxReceipt(
-                rhizome.core.transaction.TransactionKind.BOX_CREATE, 5000, 0),
+                rhizome.core.transaction.TransactionKind.BOX_CREATE, 5000, 0, 0),
             new rhizome.core.box.BoxProcessor.BoxReceipt(
-                rhizome.core.transaction.TransactionKind.BOX_COLLECT, 0, 42));
+                rhizome.core.transaction.TransactionKind.BOX_COLLECT, 0, 42, 7));
         org.junit.jupiter.api.Assertions.assertEquals(receipts,
             rhizome.core.box.BoxReceiptCodec.decode(rhizome.core.box.BoxReceiptCodec.encode(receipts)));
         // count = 2 but no records follow: rejected, not new ArrayList on a bogus count.

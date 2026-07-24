@@ -203,15 +203,26 @@ public final class NetworkParameters {
     /** Adjustment step and bounds for the votable {@code storageFeeFactor}. */
     @lombok.Builder.Default
     private final long storageFeeFactorStep = 1;
+    /**
+     * Lower bound the miner vote can push {@code storageFeeFactor} to. Must stay {@code >= 1}
+     * (audit M8): at 0 the box storage rent is nil, so a majority of hashrate voting -1 for one
+     * epoch (~513 blocks) makes permanent on-chain storage free — unbounded state bloat paid by
+     * every full node at zero cost to the voters, who do not internalize storage costs.
+     */
     @lombok.Builder.Default
-    private final long storageFeeFactorMin = 0;
+    private final long storageFeeFactorMin = 1;
     @lombok.Builder.Default
     private final long storageFeeFactorMax = 1_000;
     /** Adjustment step and bounds for the votable {@code minValuePerByte}. */
     @lombok.Builder.Default
     private final long minValuePerByteStep = 1;
+    /**
+     * Lower bound the miner vote can push {@code minValuePerByte} to. Must stay {@code >= 1}
+     * (audit M8): at 0 the anti-dust floor {@code value >= size × minValuePerByte} collapses, so
+     * boxes of any size can be created with zero locked value — free, permanent state growth.
+     */
     @lombok.Builder.Default
-    private final long minValuePerByteMin = 0;
+    private final long minValuePerByteMin = 1;
     @lombok.Builder.Default
     private final long minValuePerByteMax = 1_000;
 
@@ -301,6 +312,13 @@ public final class NetworkParameters {
             .maxBlockGas(250_000_000L)
             .maxUnclesPerBlock(2)
             .uncleMaxDepth(7)
+            // Mempool admission floor (policy, not consensus): every relayed transaction must
+            // promise the miner at least this much revenue — 0.001 PDN for a transfer/box/token
+            // op, or an equivalent declared gas budget for a contract call. At the default 0 the
+            // pool accepts unlimited zero-fee transactions, and with fee-blind block selection an
+            // attacker could fill every block with free spam, censoring honest traffic at zero
+            // marginal cost (audit M9). Testnet keeps 0 so local devnets need no funded fees.
+            .minFee(10L)
             // ~10 minutes of wall-clock finality at 5 s/block.
             .maxReorgDepth(120)
             .decimalScaleFactor(scale)
@@ -341,6 +359,9 @@ public final class NetworkParameters {
             .minBlockTimeSec(0)
             .difficultyLookback(100)
             .maxFutureBlockTimeSec(120)
+            // No mempool fee floor on testnet (see cleanMainnet's minFee): local devnets and
+            // tests transact with unfunded fees; the anti-spam floor is a mainnet property.
+            .minFee(0)
             .build();
     }
 }

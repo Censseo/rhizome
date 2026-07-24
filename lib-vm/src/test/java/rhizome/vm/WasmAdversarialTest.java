@@ -106,6 +106,85 @@ class WasmAdversarialTest {
             || ex.getMessage().toLowerCase().contains("float"), ex.getMessage());
     }
 
+    // ---- WASM GC rejection (C1) ----
+
+    @Test
+    void rejectsAGcArrayTypeInTheTypeSection() {
+        // One array type: (array (mut i64)) — 0x5E, storage type i64 (0x7E), immutable (0x00).
+        // GC comp types are refused outright: the GC opcodes allocate on the JVM heap, outside every
+        // deterministic budget (TREE_MAX_PAGES, locals, tables), so whether they OOM is node-local →
+        // divergent gasUsed → consensus fork (audit C1).
+        byte[] type = section(1, bytes(0x01, 0x5E, 0x7E, 0x00));
+        byte[] mod = module(type);
+        var ex = assertThrows(IllegalArgumentException.class, () -> WasmVm.validateCode(mod));
+        assertTrue(ex.getMessage().contains("GC"), ex.getMessage());
+    }
+
+    @Test
+    void rejectsArrayNewDefaultInAFunctionBody() {
+        // type 0: () -> ();  type 1: (array i64 immutable). Body: i32.const 4; array.new_default 1;
+        // drop; end. array.new_default would materialise a new long[len] with a runtime operand up to
+        // 2^31-1 (~16 GiB in ONE instruction for 1 gas), retained until the call returns (audit C1).
+        byte[] type = section(1, bytes(0x02,
+            0x60, 0x00, 0x00,
+            0x5E, 0x7E, 0x00));
+        byte[] func = section(3, bytes(0x01, 0x00));                // 1 function, type 0
+        byte[] body = bytes(0x00, 0x41, 0x04, 0xFB, 0x07, 0x01, 0x1A, 0x0B);
+        ByteArrayOutputStream code = new ByteArrayOutputStream();
+        code.write(0x01);
+        uleb(code, body.length);
+        code.writeBytes(body);
+        byte[] mod = module(type, func, section(10, code.toByteArray()));
+        var ex = assertThrows(IllegalArgumentException.class, () -> WasmVm.validateCode(mod));
+        assertTrue(ex.getMessage().contains("GC"), ex.getMessage());
+    }
+
+    @Test
+    void rejectsArrayNewDefaultInAGlobalInitExpression() {
+        // Global init const-expressions are evaluated at INSTANTIATION — before any metering — and
+        // Chicory's validator accepts array.new there (audit C1, instantiation vector). One array
+        // type (idx 0); one immutable arrayref (0x6A) global initialised by array.new_default 0.
+        byte[] type = section(1, bytes(0x01, 0x5E, 0x7E, 0x00));
+        byte[] global = section(6, bytes(0x01, 0x6A, 0x00, 0x41, 0x01, 0xFB, 0x07, 0x00, 0x0B));
+        byte[] mod = module(type, global);
+        var ex = assertThrows(IllegalArgumentException.class, () -> WasmVm.validateCode(mod));
+        assertTrue(ex.getMessage().contains("GC"), ex.getMessage());
+    }
+
+    // ---- intrinsic CALL gas (H2) ----
+
+    @Test
+    void aCallToAnUnknownContractStillPaysTheIntrinsicGas() {
+        // A CALL that fails before metering anything (no contract at the address) still costs the
+        // node a fixed-stack execution thread, a code-store lookup, the enclosing transaction's
+        // signature check and block space — so it must pay the intrinsic CALL_BASE, not gasUsed=0
+        // (audit H2: such calls were entirely free at any gasPrice, even 0).
+        InMemoryContractStore contracts = new InMemoryContractStore();
+        WasmContractProcessor proc = new WasmContractProcessor(new WasmVm(), contracts);
+        proc.begin();
+        var r = proc.run(rhizome.core.ledger.PublicAddress.random(),
+            rhizome.core.transaction.TransactionKind.CALL,
+            rhizome.core.ledger.PublicAddress.random(), new byte[0], 0, 10_000_000L, 0);
+        assertTrue(!r.success(), "call to an unknown contract must revert");
+        assertEquals(GasSchedule.CALL_BASE, r.gasUsed(),
+            "an early-failing CALL must still pay the intrinsic gas (audit H2)");
+    }
+
+    @Test
+    void aCallBelowTheIntrinsicGasLimitPaysItsWholeLimit() {
+        // gasLimit < CALL_BASE: the intrinsic charge exhausts the meter (saturating at the limit),
+        // so the caller still pays every gas unit it declared — a gasLimit=0 free call is impossible.
+        InMemoryContractStore contracts = new InMemoryContractStore();
+        WasmContractProcessor proc = new WasmContractProcessor(new WasmVm(), contracts);
+        proc.begin();
+        var r = proc.run(rhizome.core.ledger.PublicAddress.random(),
+            rhizome.core.transaction.TransactionKind.CALL,
+            rhizome.core.ledger.PublicAddress.random(), new byte[0], 0, GasSchedule.CALL_BASE - 1, 0);
+        assertTrue(!r.success());
+        assertEquals(GasSchedule.CALL_BASE - 1, r.gasUsed(),
+            "a too-small gasLimit must be consumed in full by the intrinsic charge (audit H2)");
+    }
+
     // ---- table growth ceiling (S2) ----
 
     @Test

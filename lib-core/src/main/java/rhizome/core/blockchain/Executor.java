@@ -523,6 +523,12 @@ public final class Executor {
         if (fee > 0) {
             deposit(ledger, applied, miner, new TransactionAmount(fee));
         }
+        // Accrued storage rent charged out of the box's locked value (audit M7): it leaves the
+        // box state in the processor and is paid to the block miner — never back to the owner,
+        // so re-arming the rent clock always has a real cost.
+        if (result.rentToMiner() > 0) {
+            deposit(ledger, applied, miner, new TransactionAmount(result.rentToMiner()));
+        }
         // Released value goes to the box owner on a SPEND (the signer, tx.from), or to the
         // collector named in a permissionless BOX_COLLECT (tx.to, whose from is empty).
         if (result.creditFrom() > 0) {
@@ -747,6 +753,9 @@ public final class Executor {
         long debit = Math.addExact(fee, receipt.debitFrom()); // exact symmetry with applyBox (audit F6)
         if (receipt.creditFrom() > 0) {
             ledger.revertDeposit(boxCreditTarget(tx), new TransactionAmount(receipt.creditFrom()));
+        }
+        if (receipt.rentToMiner() > 0) {
+            ledger.revertDeposit(miner, new TransactionAmount(receipt.rentToMiner()));
         }
         if (fee > 0) {
             ledger.revertDeposit(miner, new TransactionAmount(fee));

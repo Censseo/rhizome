@@ -89,20 +89,22 @@ public interface BoxProcessor {
     /**
      * Outcome of one box op. {@code debitFrom} is withdrawn from the sender (into the
      * box) on top of the fee; {@code creditFrom} is deposited to the sender (out of the
-     * box). {@code boxId} identifies the affected box.
+     * box); {@code rentToMiner} is the accrued storage rent deducted from the box's locked
+     * value and paid to the block miner (audit M7). {@code boxId} identifies the affected box.
      */
-    record BoxResult(ExecutionStatus status, long debitFrom, long creditFrom, byte[] boxId) {
+    record BoxResult(ExecutionStatus status, long debitFrom, long creditFrom, long rentToMiner,
+                     byte[] boxId) {
         public boolean success() {
             return status == ExecutionStatus.SUCCESS;
         }
 
         public static BoxResult fail(ExecutionStatus status) {
-            return new BoxResult(status, 0, 0, null);
+            return new BoxResult(status, 0, 0, 0, null);
         }
     }
 
     /** Ledger deltas of one applied box op, kept for exact reorg reversal. */
-    record BoxReceipt(TransactionKind kind, long debitFrom, long creditFrom) {}
+    record BoxReceipt(TransactionKind kind, long debitFrom, long creditFrom, long rentToMiner) {}
 
     /** A box lifecycle event: the box's owner, an event type, and the box id. */
     record BoxEvent(PublicAddress owner, String type, byte[] boxId) {}

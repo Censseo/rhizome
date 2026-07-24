@@ -126,6 +126,18 @@ public final class WasmContractProcessor implements ContractProcessor {
     private ContractResult call(PublicAddress caller, PublicAddress contract, byte[] input,
                                 long value, long gasLimit) {
         GasMeter meter = new GasMeter(gasLimit);
+        // Intrinsic CALL cost, charged whatever the outcome: a call that fails before metering
+        // anything (unknown contract, or a gasLimit too small to cover even the module-parse
+        // charge) still costs the node real work — a fixed-stack execution thread, a code-store
+        // lookup, the enclosing transaction's signature check and block space. Without this a
+        // gasLimit=0 / missing-contract call returned gasUsed=0 and paid NO fee at all (audit
+        // H2), letting a miner fill blocks with zero-cost executions. DEPLOY already charges its
+        // base even on failure; this is the symmetric CALL charge.
+        try {
+            meter.charge(GasSchedule.CALL_BASE);
+        } catch (OutOfGasException e) {
+            return ContractResult.reverted(meter.used(), "out of gas for call");
+        }
         // Native transfers a contract makes (transfer_value) accumulate here across the call tree;
         // a reverted frame truncates its own entries (see runCall), so only surviving transfers
         // remain. The executor applies them from the contracts' balances on success.
@@ -148,6 +160,13 @@ public final class WasmContractProcessor implements ContractProcessor {
         // its frame into this local session on success; we never flush the local session
         // to the base store, so nothing persists and the block session is untouched.
         GasMeter meter = new GasMeter(gasLimit);
+        // Same intrinsic charge as call() so a dry-run's gasUsed reflects the real cost of the
+        // execution it reports (and the /call_readonly gas budget accounts for it).
+        try {
+            meter.charge(GasSchedule.CALL_BASE);
+        } catch (OutOfGasException e) {
+            return ContractResult.reverted(meter.used(), "out of gas for call");
+        }
         SessionContractStore scratch = new SessionContractStore(baseStore);
         // dryRun is read-only: transfers are collected for bounds-checking but never applied.
         List<ContractProcessor.NativeTransfer> transfers = new java.util.ArrayList<>();

@@ -92,9 +92,36 @@ public final class DefaultBoxProcessor implements BoxProcessor {
         // per box transaction in reverse; a receipt only on success would misalign that walk and
         // corrupt a reorg (audit: mempool-poisoning halt / C2-class rollback aliasing).
         currentReceipts.add(result.success()
-            ? new BoxReceipt(kind, result.debitFrom(), result.creditFrom())
-            : new BoxReceipt(kind, 0, 0));
+            ? new BoxReceipt(kind, result.debitFrom(), result.creditFrom(), result.rentToMiner())
+            : new BoxReceipt(kind, 0, 0, 0));
         return result;
+    }
+
+    /**
+     * The storage rent accrued by {@code box} up to {@code height}: one {@code storageFeeFactor ×
+     * serializedSize} per FULL elapsed storage period since {@code rentPaidHeight}. Saturates to
+     * {@code Long.MAX_VALUE} on overflow (the box's value can never cover that, so the charge
+     * degrades to taking the whole box — the same outcome as a BOX_COLLECT of an overdrawn box).
+     *
+     * <p>Charged on every op that touches the box (audit M7): before this, an UPDATE with
+     * {@code amount=0} reset the rent clock for free, so an active owner could dodge rent forever
+     * with one zero-cost transaction per period and store state permanently for nothing.
+     */
+    private long accruedRent(Box box, long height) {
+        long period = params.storagePeriodBlocks();
+        if (period <= 0) {
+            return 0;
+        }
+        long elapsed = height - box.rentPaidHeight();
+        if (elapsed <= 0) {
+            return 0;
+        }
+        try {
+            return Math.multiplyExact(Math.multiplyExact(elapsed / period, voteable.storageFeeFactor()),
+                box.serializedSize());
+        } catch (ArithmeticException e) {
+            return Long.MAX_VALUE;
+        }
     }
 
     private BoxResult create(PublicAddress from, PublicAddress owner, long amount, long nonce,
@@ -110,7 +137,7 @@ public final class DefaultBoxProcessor implements BoxProcessor {
         }
         sessionPut(box);
         event(box.owner(), "box.created", id);
-        return new BoxResult(SUCCESS, amount, 0, id);
+        return new BoxResult(SUCCESS, amount, 0, 0, id);
     }
 
     private BoxResult update(PublicAddress from, long amount, BoxPayload payload, long height) {
@@ -127,14 +154,22 @@ public final class DefaultBoxProcessor implements BoxProcessor {
         } catch (ArithmeticException e) {
             return BoxResult.fail(INVALID_TRANSACTION_AMOUNT);
         }
-        Box updated = box.updated(newValue, payload.registers(), height);
-        BoxResult sizeCheck = checkSizeAndValue(updated, newValue);
+        // Re-arming the rent clock costs the rent accrued since rentPaidHeight (audit M7): the
+        // charge comes out of the box's locked value and goes to the block miner — it is NOT
+        // returned to the owner, so cycling zero-amount updates can no longer keep a box alive
+        // for free. The box must stay above the dust floor after the charge; an owner whose box
+        // cannot cover the accrued rent can still SPEND it (paying what it holds) or abandon it
+        // to collectors.
+        long rent = accruedRent(box, height);
+        long chargedValue = newValue - rent; // cannot underflow: checked against the floor below
+        Box updated = box.updated(chargedValue, payload.registers(), height);
+        BoxResult sizeCheck = checkSizeAndValue(updated, chargedValue);
         if (sizeCheck != null) {
             return sizeCheck;
         }
         sessionPut(updated);
         event(updated.owner(), "box.updated", updated.id());
-        return new BoxResult(SUCCESS, amount, 0, updated.id());
+        return new BoxResult(SUCCESS, amount, 0, rent, updated.id());
     }
 
     private BoxResult spend(PublicAddress from, BoxPayload payload, long height) {
@@ -145,9 +180,15 @@ public final class DefaultBoxProcessor implements BoxProcessor {
         if (!box.owner().equals(from)) {
             return BoxResult.fail(BOX_NOT_OWNER);
         }
+        // Charge the accrued rent before releasing the locked value (audit M7): without this an
+        // owner could let a box sit for years, dodging collectors, then spend it and recover the
+        // full value. The charge is capped at what the box holds, so a deeply overdrawn box is
+        // simply surrendered to the miner — it always remains spendable by its owner.
+        long rent = Math.min(accruedRent(box, height), box.value());
+        long released = box.value() - rent;
         sessionDelete(box.id());
         event(box.owner(), "box.spent", box.id());
-        return new BoxResult(SUCCESS, 0, box.value(), box.id());
+        return new BoxResult(SUCCESS, 0, released, rent, box.id());
     }
 
     private BoxResult collect(BoxPayload payload, long height) {
@@ -159,19 +200,21 @@ public final class DefaultBoxProcessor implements BoxProcessor {
             return BoxResult.fail(BOX_NOT_EXPIRED);
         }
         long size = box.serializedSize();
-        long rent = voteable.storageFeeFactor() * size;
+        // Charge EVERY elapsed period's rent, not just one (audit M7 residual): charging a single
+        // period per collect let a deeply overdue box shed its debt one period at a time.
+        long rent = accruedRent(box, height);
         long floor = size * voteable.minValuePerByte();
         if (box.value() - rent < floor) {
             // Cannot pay the rent and stay above the dust floor: collect the whole box.
             long collected = box.value();
             sessionDelete(box.id());
             event(box.owner(), "box.collected", box.id());
-            return new BoxResult(SUCCESS, 0, collected, box.id());
+            return new BoxResult(SUCCESS, 0, collected, 0, box.id());
         }
         Box charged = box.afterRent(box.value() - rent, height);
         sessionPut(charged);
         event(box.owner(), "box.collected", box.id());
-        return new BoxResult(SUCCESS, 0, rent, box.id());
+        return new BoxResult(SUCCESS, 0, rent, 0, box.id());
     }
 
     /** Enforces the box-size cap and the min-value (anti-dust) floor. Null when valid. */

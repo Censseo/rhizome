@@ -54,12 +54,11 @@ public final class MemPool {
     private final int maxSize;
     private final int maxPerSender;
 
-    /** Senders in unsigned-address order, so a block's transactions are selected deterministically. */
+    /** Senders in unsigned-address order, the deterministic tie-break of block selection. */
     private static final java.util.Comparator<PublicAddress> ADDRESS_ORDER =
         (a, b) -> java.util.Arrays.compareUnsigned(a.toBytes(), b.toBytes());
-    // A sorted map, so getTransactionsForBlock iterates senders in address order without re-sorting
-    // all keys on every block build (audit P11). The selection order is byte-identical to the old
-    // explicit sort, so produced blocks (and their merkle roots) are unchanged.
+    // A sorted map, so eviction scans and selection seeding iterate senders in a stable order
+    // without re-sorting all keys on every block build (audit P11).
     private final NavigableMap<PublicAddress, NavigableMap<Long, Transaction>> bySender =
         new TreeMap<>(ADDRESS_ORDER);
     private final Set<SHA256Hash> contentHashes = new HashSet<>();
@@ -117,9 +116,13 @@ public final class MemPool {
         if (tx.amount().amount() < 0 || tx.fee().amount() < 0) {
             return INVALID_TRANSACTION_AMOUNT; // negative would mint money / force negative balances
         }
-        // Optional minimum-fee floor (0 = disabled, the default), so an operator can refuse free
-        // transactions at admission rather than have the pool fill with zero-fee spam (audit L5).
-        if (params.minFee() > 0 && tx.fee().amount() < params.minFee() && !tx.isTransactionFee()) {
+        // Optional minimum-fee floor (0 = disabled, the default on testnet), so an operator can
+        // refuse free transactions at admission rather than have the pool fill with zero-fee spam
+        // (audit L5). Contract calls pay through gas, not the fee field, so their declared gas
+        // budget counts toward the floor — its full value is already locked by the cumulative
+        // balance check below, and their realized revenue is bounded below by the intrinsic CALL
+        // gas charge, so a zero-fee, zero-gasPrice call can never sneak past a positive floor.
+        if (params.minFee() > 0 && minerRevenue(tx) < params.minFee()) {
             return TRANSACTION_FEE_TOO_LOW;
         }
         if (tx.kind().isContract() && (tx.gasLimit() < 0 || tx.gasPrice() < 0)) {
@@ -229,38 +232,86 @@ public final class MemPool {
     }
 
     /**
-     * Selects up to {@code maxTransactions} transactions for a new block:
-     * per sender, the contiguous nonce run starting at the confirmed next nonce,
-     * within the confirmed balance. Senders are visited in address order for
-     * determinism.
+     * The revenue a miner can earn from {@code tx}: the plain fee for value/box/token ops; for a
+     * contract call the fee plus its declared gas budget ({@code gasLimit × gasPrice}, saturating)
+     * — an upper bound on the realized {@code gasUsed × gasPrice}, deterministic at assembly time
+     * when gasUsed is still unknown. Used for fee-prioritized selection and the minFee floor
+     * (audit M9).
+     */
+    private static long minerRevenue(TransactionImpl tx) {
+        if (!tx.kind().isContract()) {
+            return tx.fee().amount();
+        }
+        try {
+            return Math.addExact(tx.fee().amount(), Math.multiplyExact(tx.gasLimit(), tx.gasPrice()));
+        } catch (ArithmeticException overflow) {
+            return Long.MAX_VALUE;
+        }
+    }
+
+    /**
+     * Selects up to {@code maxTransactions} transactions for a new block: per sender, the
+     * contiguous nonce run starting at the confirmed next nonce, within the confirmed balance.
+     *
+     * <p>Selection is greedy by miner revenue (audit M9): at each step the highest-revenue
+     * <em>currently selectable</em> transaction — the front of some sender's contiguous run — is
+     * taken, then that sender's run advances. Ties break by address then nonce, so the result is
+     * still a deterministic pure function of pool + chain state. The previous raw-address-order
+     * iteration let an attacker grind low-prefix addresses and fill every block with zero-fee
+     * transactions, permanently crowding out fee-paying traffic for free; miners now always take
+     * the best-paying executable work first.
      */
     public List<Transaction> getTransactionsForBlock(int maxTransactions) {
         lock.lock();
         try {
-            List<Transaction> selected = new ArrayList<>(Math.min(maxTransactions, size));
-            // bySender is already ordered by ADDRESS_ORDER, so its keySet yields senders in the
-            // deterministic address order the block needs — no per-build re-sort (audit P11).
-            for (PublicAddress sender : bySender.keySet()) {
-                if (selected.size() >= maxTransactions) {
-                    break;
-                }
-                if (!accounts.senderExists(sender)) {
+            // Per-sender selection cursor: the next nonce of its contiguous run and the balance
+            // still available to that run. Only the cursor's front tx is a selection candidate.
+            record Cursor(long nextNonce, long budget) {}
+            Map<PublicAddress, Cursor> cursors = new HashMap<>();
+            // The candidate frontier: one entry per sender, ordered by revenue (desc), then
+            // address, then nonce — a total order, so the greedy pick is deterministic.
+            java.util.PriorityQueue<Map.Entry<PublicAddress, Transaction>> frontier =
+                new java.util.PriorityQueue<>(Map.Entry.<PublicAddress, Transaction>comparingByValue(
+                    (a, b) -> {
+                        var ta = (TransactionImpl) a;
+                        var tb = (TransactionImpl) b;
+                        int byRevenue = Long.compare(minerRevenue(tb), minerRevenue(ta));
+                        if (byRevenue != 0) {
+                            return byRevenue;
+                        }
+                        int byNonce = Long.compare(ta.nonce(), tb.nonce());
+                        return byNonce != 0 ? byNonce : java.util.Arrays.compareUnsigned(
+                            ta.from().toBytes(), tb.from().toBytes());
+                    }).thenComparing(Map.Entry.comparingByKey(ADDRESS_ORDER)));
+            for (Map.Entry<PublicAddress, NavigableMap<Long, Transaction>> e : bySender.entrySet()) {
+                if (!accounts.senderExists(e.getKey())) {
                     continue; // never select an unexecutable sender (see addTransaction)
                 }
-                NavigableMap<Long, Transaction> pending = bySender.get(sender);
-                long nonce = accounts.confirmedNextNonce(sender);
-                long budget = accounts.confirmedBalance(sender);
-                Transaction next;
-                while ((next = pending.get(nonce)) != null && selected.size() < maxTransactions) {
-                    var tx = (TransactionImpl) next;
-                    long spend = maxSpend(tx);
-                    if (spend > budget) {
-                        break;
-                    }
-                    selected.add(next);
-                    budget -= spend;
-                    nonce++;
+                long nonce = accounts.confirmedNextNonce(e.getKey());
+                Transaction front = e.getValue().get(nonce);
+                if (front != null) {
+                    cursors.put(e.getKey(), new Cursor(nonce, accounts.confirmedBalance(e.getKey())));
+                    frontier.add(Map.entry(e.getKey(), front));
                 }
+            }
+            List<Transaction> selected = new ArrayList<>(Math.min(maxTransactions, size));
+            while (selected.size() < maxTransactions && !frontier.isEmpty()) {
+                var best = frontier.poll();
+                PublicAddress sender = best.getKey();
+                Cursor cursor = cursors.get(sender);
+                var tx = (TransactionImpl) best.getValue();
+                long spend = maxSpend(tx);
+                if (spend <= cursor.budget()) {
+                    selected.add(tx);
+                    NavigableMap<Long, Transaction> pending = bySender.get(sender);
+                    Transaction next = pending.get(cursor.nextNonce() + 1);
+                    cursors.put(sender, new Cursor(cursor.nextNonce() + 1, cursor.budget() - spend));
+                    if (next != null) {
+                        frontier.add(Map.entry(sender, next));
+                    }
+                }
+                // Over-budget: the sender's run stalls here (its later nonces cannot be selected
+                // either), so nothing is re-offered for it.
             }
             return selected;
         } finally {
