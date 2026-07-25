@@ -6,6 +6,7 @@ import org.json.JSONObject;
 
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.transaction.Transaction;
+import rhizome.crypto.SHA256Hash;
 
 import static rhizome.node.ApiResponses.badRequest;
 import static rhizome.node.ApiResponses.gone;
@@ -89,14 +90,27 @@ final class ExplorerApi {
     }
 
     /**
-     * Looks a transaction up by content hash (txid) with a bounded tip-backward
-     * scan — the node keeps no txid index, so this trades depth for memory like
-     * the /logs cursor does. {@code ?depth=} widens the scan up to the cap.
+     * Looks a transaction up by content hash (txid): the O(1) txid index first (a single store
+     * read, replacing the old tip-backward full-block decode of up to {@code depth} blocks —
+     * audit perf), with the bounded scan kept as a fallback for entries the index does not
+     * carry (coinbase txs are not indexed) or an index-less store. {@code ?depth=} widens the
+     * fallback scan up to the cap.
      */
     static HttpResponse findTransaction(NodeService node, HttpRequest req) {
         String txid = req.getQueryParameter("txid");
         if (txid == null || txid.length() != 64) {
             return badRequest("txid must be 64 hex chars");
+        }
+        SHA256Hash contentHash = SHA256Hash.of(rhizome.core.common.Utils.hexStringToByteArray(txid));
+        Long indexed = node.transactionHeight(contentHash);
+        if (indexed != null && indexed >= Math.max(1, node.prunedBelow())) {
+            for (Transaction t : node.block(indexed).transactions()) {
+                if (t.hashContents().equals(contentHash)) {
+                    return json(new JSONObject()
+                        .put("height", (long) indexed)
+                        .put("transaction", t.toJson()));
+                }
+            }
         }
         long depth = scanDepth(req);
         long tip = node.blockCount();
@@ -104,7 +118,7 @@ final class ExplorerApi {
         long floor = Math.max(Math.max(1, tip - depth + 1), node.prunedBelow());
         for (long h = tip; h >= floor; h--) {
             for (Transaction t : node.block(h).transactions()) {
-                if (t.hashContents().toHexString().equalsIgnoreCase(txid)) {
+                if (t.hashContents().equals(contentHash)) {
                     return json(new JSONObject()
                         .put("height", h)
                         .put("transaction", t.toJson()));

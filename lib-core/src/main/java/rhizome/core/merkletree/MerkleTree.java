@@ -63,8 +63,9 @@ public class MerkleTree {
 
         List<HashTree> level = new ArrayList<>(items.size());
         for (Transaction item : items) {
-            HashTree leaf = new HashTree(leafHash(item.hash()));
-            fringeNodes.put(item.hash(), leaf);
+            SHA256Hash txHash = item.hash(); // memoized in TransactionImpl — hash once per leaf
+            HashTree leaf = new HashTree(leafHash(txHash));
+            fringeNodes.put(txHash, leaf);
             level.add(leaf);
         }
 

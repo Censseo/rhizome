@@ -1,8 +1,6 @@
 package rhizome.core.block;
 
 import java.nio.ByteBuffer;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.List;
 
 import rhizome.crypto.PowAlgorithm;
@@ -73,41 +71,41 @@ public record BlockHeader(
      * followed by all uncle difficulties).
      */
     public SHA256Hash hash() {
-        try {
-            MessageDigest sha256 = MessageDigest.getInstance("SHA-256");
-
-            sha256.update(merkleRoot.toBytes());
-            sha256.update(lastBlockHash.toBytes());
-
-            ByteBuffer buffer = ByteBuffer.allocate(3 * Integer.BYTES + Long.BYTES);
-            buffer.putInt(id);
-            buffer.putInt(difficulty);
-            buffer.putInt(numTransactions);
-            buffer.putLong(timestamp);
-            sha256.update(buffer.array());
-
-            if (stateRoot != null && !stateRoot.equals(SHA256Hash.empty())) {
-                sha256.update(stateRoot.toBytes());
-            }
-
-            if (vote != 0) {
-                sha256.update(ByteBuffer.allocate(Integer.BYTES).putInt(vote).array());
-            }
-
-            if (uncles != null && !uncles.isEmpty()) {
-                ByteBuffer uncleBuf = ByteBuffer.allocate(uncles.size() * Integer.BYTES);
-                for (UncleRef uncle : uncles) {
-                    sha256.update(uncle.hash().toBytes());
-                    uncleBuf.putInt(uncle.difficulty());
-                    sha256.update(uncle.miner().toBytes());
-                }
-                sha256.update(uncleBuf.array());
-            }
-
-            return SHA256Hash.of(sha256.digest());
-        } catch (NoSuchAlgorithmException e) {
-            throw new BlockException("SHA-256 algorithm not found", e);
+        // Single contiguous preimage buffer + one digest call: the previous incremental form
+        // paid a MessageDigest.getInstance plus several ByteBuffer allocations per hash, and a
+        // header is hashed at every sync/checkpoint step (audit perf). The byte layout is
+        // identical to the incremental preimage — consensus-critical, do not reorder.
+        boolean withStateRoot = stateRoot != null && !stateRoot.equals(SHA256Hash.empty());
+        boolean withVote = vote != 0;
+        boolean withUncles = uncles != null && !uncles.isEmpty();
+        int size = 2 * SHA256Hash.SIZE + 3 * Integer.BYTES + Long.BYTES
+            + (withStateRoot ? SHA256Hash.SIZE : 0)
+            + (withVote ? Integer.BYTES : 0)
+            + (withUncles ? uncles.size() * (SHA256Hash.SIZE + rhizome.core.ledger.PublicAddress.SIZE)
+                + uncles.size() * Integer.BYTES : 0);
+        ByteBuffer buffer = ByteBuffer.allocate(size);
+        buffer.put(merkleRoot.toBytes());
+        buffer.put(lastBlockHash.toBytes());
+        buffer.putInt(id);
+        buffer.putInt(difficulty);
+        buffer.putInt(numTransactions);
+        buffer.putLong(timestamp);
+        if (withStateRoot) {
+            buffer.put(stateRoot.toBytes());
         }
+        if (withVote) {
+            buffer.putInt(vote);
+        }
+        if (withUncles) {
+            ByteBuffer uncleBuf = ByteBuffer.allocate(uncles.size() * Integer.BYTES);
+            for (UncleRef uncle : uncles) {
+                buffer.put(uncle.hash().toBytes());
+                uncleBuf.putInt(uncle.difficulty());
+                buffer.put(uncle.miner().toBytes());
+            }
+            buffer.put(uncleBuf.array());
+        }
+        return rhizome.crypto.Crypto.SHA256(buffer.array());
     }
 
     /**

@@ -544,6 +544,11 @@ public final class NodeService {
         return engine.blockAt(height);
     }
 
+    /** Height of the applied block containing {@code contentHash}, or {@code null} (txid index). */
+    public Long transactionHeight(rhizome.crypto.SHA256Hash contentHash) {
+        return engine.transactionHeight(contentHash);
+    }
+
     /** Logical header at the given height — served without the body for headers-first sync. */
     public rhizome.core.block.BlockHeader header(long height) {
         return engine.headerAt(height);

@@ -196,10 +196,13 @@ class WasmContractProcessorPersistenceTest {
     void pruningKeepsExactlyRetainDepthHeights() {
         // retainDepth 3, commits at heights 1..6: exactly the last 3 heights' journals and
         // receipts survive (the old strict-less-than cutoff retained one extra — audit F10).
+        // Each height carries a deploy so it actually HAS receipts to prune.
         DurableTestStore store = new DurableTestStore();
         WasmContractProcessor processor = new WasmContractProcessor(new WasmVm(), store, 3);
         for (long h = 1; h <= 6; h++) {
             processor.begin();
+            processor.run(PublicAddress.random(), TransactionKind.DEPLOY,
+                PublicAddress.empty(), COUNTER, 0, GAS_LIMIT, 0);
             processor.commit(h);
         }
         assertEquals(Set.of(4L, 5L, 6L), store.journals.keySet(),
@@ -207,6 +210,21 @@ class WasmContractProcessorPersistenceTest {
         assertEquals(Set.of(4L, 5L, 6L), store.receipts.keySet(),
             "receipts prune on the journal schedule (F3)");
         assertEquals(List.of(), processor.receipts(3), "a pruned height serves no receipts");
+    }
+
+    @Test
+    void aReceiptFreeBlockPersistsNoReceiptBlob() {
+        // Empty blocks skip the receipts write entirely: a 4-byte empty blob per block would
+        // otherwise ride every synced batch for nothing (audit review). A RAM-miss read of such
+        // a height still serves an empty list.
+        DurableTestStore store = new DurableTestStore();
+        WasmContractProcessor processor = new WasmContractProcessor(new WasmVm(), store);
+        processor.begin();
+        processor.commit(1);
+        assertNull(store.getReceipts(1), "no blob is written for a receipt-free block");
+
+        WasmContractProcessor restarted = new WasmContractProcessor(new WasmVm(), store);
+        assertEquals(List.of(), restarted.receipts(1), "a missing blob reads back as no receipts");
     }
 
     @Test

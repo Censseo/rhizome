@@ -109,6 +109,18 @@ public final class RocksDbNodeStore implements AutoCloseable {
      */
     private volatile java.util.concurrent.ConcurrentHashMap<rhizome.core.ledger.PublicAddress, Long> pendingLedger;
 
+    /**
+     * Account-nonce writes staged for the current block, flushed in the SAME batch as the block
+     * and height — same pattern and rationale as {@link #pendingLedger} above. Without staging,
+     * {@code commitAccountNonces} paid one synced {@code db.put} PER SENDER after the append
+     * (a 200-sender block = ~200 extra fsyncs, audit perf), and a crash between the append and
+     * those puts left the nonce store a block behind (healed by the boot re-sync, but torn).
+     * A staged value {@code <= 0} flushes as a delete (the {@code set(_, 0)} clear convention).
+     * {@link #pendingNonceHeight} stages the {@code markSyncedThrough} watermark the same way.
+     */
+    private volatile java.util.concurrent.ConcurrentHashMap<rhizome.core.ledger.PublicAddress, Long> pendingNonces;
+    private volatile Long pendingNonceHeight;
+
     public RocksDbNodeStore(String path) throws IOException {
         this(path, 0);
     }
@@ -156,6 +168,14 @@ public final class RocksDbNodeStore implements AutoCloseable {
     }
 
     /**
+     * In-memory chain height, authoritative with the HEIGHT_KEY meta row: updated by the only
+     * three writers of that row (append, pop, header bootstrap) after their batch lands, and
+     * seeded at open. {@code height()} was previously a {@code db.get} per call — several times
+     * per added block and per API scalar, all under the engine lock (audit perf).
+     */
+    private final java.util.concurrent.atomic.AtomicLong heightCache = new java.util.concurrent.atomic.AtomicLong();
+
+    /**
      * Boot catch-up: if this node runs pruned but holds bodies older than the retention
      * window (e.g. pruning was just enabled on an archive, or {@code keepBlocks} shrank),
      * discard them in one pass so the on-disk state matches the configured retention.
@@ -186,6 +206,7 @@ public final class RocksDbNodeStore implements AutoCloseable {
         } catch (RocksDBException e) {
             throw new IOException("Failed to read chain height during header backfill", e);
         }
+        heightCache.set(height); // seed the in-memory height (see heightCache)
         if (height == 0) {
             return; // fresh database: nothing to migrate
         }
@@ -256,6 +277,7 @@ public final class RocksDbNodeStore implements AutoCloseable {
             batch.put(metaCf, HEIGHT_KEY, heightKey(tip));
             batch.put(metaCf, PRUNED_BELOW_KEY, heightKey(tip + 1));
             db.write(writeOptions, batch);
+            heightCache.set(tip);
         } catch (RocksDBException e) {
             throw new LedgerException("Failed to bootstrap headers", e);
         }
@@ -273,6 +295,24 @@ public final class RocksDbNodeStore implements AutoCloseable {
                 batch.put(ledgerCf, e.getKey().toBytes(),
                     ByteBuffer.allocate(8).putLong(e.getValue()).array());
             }
+        }
+    }
+
+    /** Adds the block commit's staged nonce writes and watermark (if any) to {@code batch}. */
+    private void stagePendingNoncesInto(WriteBatch batch) throws RocksDBException {
+        var pending = pendingNonces;
+        if (pending != null) {
+            for (var e : pending.entrySet()) {
+                if (e.getValue() <= 0) {
+                    batch.delete(noncesCf, e.getKey().toBytes());
+                } else {
+                    batch.put(noncesCf, e.getKey().toBytes(), longToBytes(e.getValue()));
+                }
+            }
+        }
+        Long nonceHeight = pendingNonceHeight;
+        if (nonceHeight != null) {
+            batch.put(metaCf, NONCE_HEIGHT_KEY, longToBytes(nonceHeight));
         }
     }
 
@@ -337,12 +377,7 @@ public final class RocksDbNodeStore implements AutoCloseable {
 
         @Override
         public long height() {
-            try {
-                byte[] value = db.get(metaCf, HEIGHT_KEY);
-                return value == null ? 0 : bytesToLong(value);
-            } catch (RocksDBException e) {
-                throw new LedgerException("Failed to read chain height", e);
-            }
+            return heightCache.get();
         }
 
         @Override
@@ -397,6 +432,8 @@ public final class RocksDbNodeStore implements AutoCloseable {
                 // This block's ledger writes ride the SAME batch as the height, so the ledger can
                 // never be a block ahead of (or behind) the chain height after a crash (audit S3).
                 stagePendingLedgerInto(batch);
+                // Same atomicity for the account nonces (audit perf: per-sender fsync).
+                stagePendingNoncesInto(batch);
                 // Incremental pruning (amortised O(1)): the body that just fell out of the
                 // retention window is discarded in the same batch. Genesis is never pruned.
                 if (keepBlocks > 0) {
@@ -407,6 +444,7 @@ public final class RocksDbNodeStore implements AutoCloseable {
                     }
                 }
                 db.write(writeOptions, batch);
+                heightCache.set(expected);
             } catch (RocksDBException e) {
                 throw new LedgerException("Failed to append block " + expected, e);
             } finally {
@@ -414,6 +452,8 @@ public final class RocksDbNodeStore implements AutoCloseable {
                 // place after a failure would silently merge them into the NEXT block's commit
                 // (audit F9).
                 pendingLedger = null;
+                pendingNonces = null;
+                pendingNonceHeight = null;
             }
         }
 
@@ -423,11 +463,15 @@ public final class RocksDbNodeStore implements AutoCloseable {
                 throw new IllegalStateException("a block commit is already open"); // audit F9
             }
             pendingLedger = new java.util.concurrent.ConcurrentHashMap<>();
+            pendingNonces = new java.util.concurrent.ConcurrentHashMap<>();
+            pendingNonceHeight = null;
         }
 
         @Override
         public void discardBlockCommit() {
             pendingLedger = null;
+            pendingNonces = null;
+            pendingNonceHeight = null;
         }
 
         @Override
@@ -489,11 +533,15 @@ public final class RocksDbNodeStore implements AutoCloseable {
                 // The block's ledger reversals (staged during rollbackBlock) ride the same batch as
                 // the height decrement, so the pop is atomic for the ledger too (audit S3).
                 stagePendingLedgerInto(batch);
+                stagePendingNoncesInto(batch);
                 db.write(writeOptions, batch);
+                heightCache.set(height - 1);
             } catch (RocksDBException e) {
                 throw new LedgerException("Failed to pop block " + height, e);
             } finally {
                 pendingLedger = null; // same failed-commit rule as append (audit F9)
+                pendingNonces = null;
+                pendingNonceHeight = null;
             }
         }
 
@@ -524,6 +572,16 @@ public final class RocksDbNodeStore implements AutoCloseable {
                 throw new LedgerException("Failed to read tx index", e);
             }
         }
+
+        @Override
+        public Long transactionHeight(SHA256Hash contentHash) {
+            try {
+                byte[] value = db.get(txIndexCf, contentHash.toBytes());
+                return value == null ? null : bytesToLong(value);
+            } catch (RocksDBException e) {
+                throw new LedgerException("Failed to read tx index", e);
+            }
+        }
     }
 
     // ---- Ledger view (checked arithmetic, same semantics as LevelDBLedger) ----
@@ -550,6 +608,13 @@ public final class RocksDbNodeStore implements AutoCloseable {
                 throw new LedgerException("Tried fetching wallet value for non-existent wallet");
             }
             return new TransactionAmount(bytesToLong(value));
+        }
+
+        @Override
+        public long balanceOrZero(PublicAddress wallet) {
+            // Single point-get instead of the probe+get pair of the default (audit perf).
+            byte[] value = rawValue(wallet);
+            return value == null ? 0L : bytesToLong(value);
         }
 
         @Override
@@ -639,6 +704,15 @@ public final class RocksDbNodeStore implements AutoCloseable {
 
         @Override
         public long next(PublicAddress sender) {
+            // Read-your-writes: nonces committed earlier in this open block commit are read from
+            // the staging overlay, not the not-yet-flushed column family (same rule as the ledger).
+            var pending = pendingNonces;
+            if (pending != null) {
+                Long staged = pending.get(sender);
+                if (staged != null) {
+                    return Math.max(0L, staged);
+                }
+            }
             try {
                 byte[] value = db.get(noncesCf, sender.toBytes());
                 return value == null ? 0L : bytesToLong(value);
@@ -649,6 +723,13 @@ public final class RocksDbNodeStore implements AutoCloseable {
 
         @Override
         public void set(PublicAddress sender, long next) {
+            // Inside a block commit, buffer the write so it flushes atomically with the height in
+            // append/pop (audit perf: per-sender fsync); otherwise write straight through.
+            var pending = pendingNonces;
+            if (pending != null) {
+                pending.put(sender, next);
+                return;
+            }
             try {
                 if (next <= 0) {
                     db.delete(noncesCf, writeOptions, sender.toBytes());
@@ -672,6 +753,12 @@ public final class RocksDbNodeStore implements AutoCloseable {
 
         @Override
         public void markSyncedThrough(long height) {
+            // Staged with the open block commit so the watermark flushes atomically with the
+            // nonce writes it describes; straight through otherwise (boot re-sync path).
+            if (pendingNonces != null) {
+                pendingNonceHeight = height;
+                return;
+            }
             try {
                 db.put(metaCf, writeOptions, NONCE_HEIGHT_KEY, longToBytes(height));
             } catch (RocksDBException e) {

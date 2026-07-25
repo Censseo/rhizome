@@ -23,12 +23,14 @@ import rhizome.core.ledger.PublicAddress;
  *                       private IPs discovered via PEX (local dev / devnets). Off by default —
  *                       secure-by-default (audit F4); the env var RHIZOME_ALLOW_PRIVATE_PEERS=true
  *                       also forces it. Configured seed peers bypass the filter regardless.
- * @param bindAddress    HTTP API bind address (env RHIZOME_BIND_ADDRESS). Default 0.0.0.0 —
- *                       the historical behavior — so peering keeps working out of the box; set
- *                       127.0.0.1 for a wallet/dashboard-only node behind a tunnel (audit F4).
+ * @param bindAddress    HTTP API bind address (env RHIZOME_BIND_ADDRESS). Default 127.0.0.1 —
+ *                       secure-by-default (audit H-2): peering still works for outbound sync, and a
+ *                       public-facing node must opt in explicitly (bind 0.0.0.0 AND set
+ *                       RHIZOME_API_TOKEN, or RHIZOME_ALLOW_OPEN_API=true for a pure relay).
  * @param apiToken       optional bearer token (env RHIZOME_API_TOKEN): when present, the
  *                       state-changing/operator routes require
- *                       {@code Authorization: Bearer <token>} (audit F4). Empty = open API.
+ *                       {@code Authorization: Bearer <token>} (audit F4). Empty = open API
+ *                       (loopback binds only — see {@code bindAddress}).
  */
 public record NodeConfig(
     NetworkParameters params,
@@ -48,7 +50,7 @@ public record NodeConfig(
     public static NodeConfig defaults(NetworkParameters params, String dataDir, int apiPort) {
         return new NodeConfig(params, dataDir, apiPort, Optional.empty(), Optional.empty(),
             List.of(), Optional.empty(), 10_000L, params.desiredBlockTimeSec() * 1000L, 100_000, false,
-            "0.0.0.0", Optional.empty());
+            "127.0.0.1", Optional.empty());
     }
 
     /** The URL peers use to reach this node. */

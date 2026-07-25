@@ -344,7 +344,7 @@ public final class Executor {
                 // fork. Treating an absent wallet as balance 0 makes both nodes agree (audit 5th-pass,
                 // consensus Finding 1). charged>0 still requires balance>=charged>0, i.e. a real wallet,
                 // so the withdraw below never touches a non-existent one.
-                long available = ledger.hasWallet(tx.from()) ? ledger.getWalletValue(tx.from()).amount() : 0L;
+                long available = ledger.balanceOrZero(tx.from()); // one store read (audit perf)
                 if (available < charged) {
                     return abort(processor, boxProcessor, tokenProcessor, ledger, applied, BALANCE_TOO_LOW);
                 }
@@ -623,7 +623,7 @@ public final class Executor {
         // Finding 1): a phantom 0-balance sender must not make a required==0 call (value 0, gasLimit or
         // gasPrice 0) valid on one node and SENDER_DOES_NOT_EXIST on another. required>0 still implies a
         // real, sufficiently funded wallet, so every withdraw below hits an existing wallet.
-        long available = ledger.hasWallet(tx.from()) ? ledger.getWalletValue(tx.from()).amount() : 0L;
+        long available = ledger.balanceOrZero(tx.from()); // one store read (audit perf)
         if (available < required) {
             return BALANCE_TOO_LOW;
         }

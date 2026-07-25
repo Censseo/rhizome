@@ -40,8 +40,8 @@ class UserTests {
 
         assertTrue(t2.signatureValid());
 
-        // Recreate miner from JSON
-        String serialized = miner.toJson().toString();
+        // Recreate miner from JSON (explicit private-key form — the default toJson is public-only)
+        String serialized = User.serializer().toJsonWithPrivateKey(miner).toString();
         JSONObject parsed = new JSONObject(serialized);
 
         User minerCopy = User.of(parsed);

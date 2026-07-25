@@ -103,7 +103,9 @@ public record PublicAddress(byte[] address) implements SimpleHashType {
     }
 
     public byte[] toBytes() {
-        return address;
+        // Defensive copy: exposing the internal array let any caller mutate it, silently
+        // corrupting equals/hashCode of every map keyed on this address (audit B-3).
+        return address.clone();
     }
 
     @Override

@@ -95,4 +95,12 @@ public interface ChainStore {
 
     /** True if a transaction with this content hash is in an applied block. */
     boolean hasTransaction(SHA256Hash contentHash);
+
+    /**
+     * The height of the applied block containing this content hash, or {@code null} when
+     * unknown — the O(1) txid lookup behind {@code /transaction}, so an explorer query need
+     * not decode a window of full blocks (audit perf). Default: unknown (stores without an
+     * index fall back to scanning).
+     */
+    default Long transactionHeight(SHA256Hash contentHash) { return null; }
 }

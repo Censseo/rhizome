@@ -121,6 +121,20 @@ public interface ContractStore {
     }
 
     /**
+     * As {@link #applyBlock(long, java.util.List, byte[])}, additionally committing the block's
+     * encoded receipts in the SAME atomic unit where the store supports it (RocksDB: they join
+     * the single synced WriteBatch — previously a second fsync per block, audit perf). The
+     * default falls back to the separate {@link #putReceipts} write, correct but not atomic.
+     */
+    default void applyBlock(long height, java.util.List<StorageChange> changes, byte[] journal,
+                            byte[] encodedReceipts) {
+        applyBlock(height, changes, journal);
+        if (encodedReceipts != null) {
+            putReceipts(height, encodedReceipts);
+        }
+    }
+
+    /**
      * Reverts one block: applies {@code restores} (the block's undo journal turned back into
      * mutations — each entry's <em>prior</em> value, or a delete where the key did not exist
      * before the block) and drops the persisted journal at {@code height}, as a single atomic

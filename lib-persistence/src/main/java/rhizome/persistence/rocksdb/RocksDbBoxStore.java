@@ -97,6 +97,11 @@ public final class RocksDbBoxStore implements BoxStore, AutoCloseable {
 
     @Override
     public void applyBlock(long height, List<BoxMutation> mutations) {
+        applyBlock(height, mutations, null);
+    }
+
+    @Override
+    public void applyBlock(long height, List<BoxMutation> mutations, byte[] encodedReceipts) {
         // Refuse a double-apply: re-applying a block would journal its own already-mutated state
         // as the "prior", so a later revert would restore the wrong values (audit F10).
         if (raw(journalCf, longToBytes(height)) != null) {
@@ -117,6 +122,10 @@ public final class RocksDbBoxStore implements BoxStore, AutoCloseable {
                 }
             }
             batch.put(journalCf, longToBytes(height), encodeJournal(journal));
+            // Receipts ride the same synced batch (previously a second fsync per block, audit perf).
+            if (encodedReceipts != null) {
+                batch.put(receiptsCf, longToBytes(height), encodedReceipts);
+            }
             db.write(writeOptions, batch);
         } catch (RocksDBException e) {
             throw new IllegalStateException("box store applyBlock failed", e);

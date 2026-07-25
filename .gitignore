@@ -13,3 +13,7 @@ bin
 hs_err_pid*.log
 replay_pid*.log
 app-node/data/
+
+# GraalVM native-image output (./gradlew :app-node:nativeImage)
+/rhizome-node
+/data/

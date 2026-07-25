@@ -252,6 +252,7 @@ public final class DefaultBoxProcessor implements BoxProcessor {
 
     @Override
     public void commit(long blockHeight) {
+        byte[] encodedReceipts = currentReceipts.isEmpty() ? null : BoxReceiptCodec.encode(currentReceipts);
         if (session != null) {
             List<BoxStore.BoxMutation> mutations = new ArrayList<>(session.size());
             for (Map.Entry<String, Box> e : session.entrySet()) {
@@ -261,17 +262,22 @@ public final class DefaultBoxProcessor implements BoxProcessor {
                     mutations.add(BoxStore.BoxMutation.write(e.getValue()));
                 }
             }
-            store.applyBlock(blockHeight, mutations);
+            // Mutations + journal + receipts as ONE atomic batch where the store supports it
+            // (RocksDB: no second fsync for the receipts, audit perf).
+            store.applyBlock(blockHeight, mutations, encodedReceipts);
+            encodedReceipts = null; // already persisted with the batch
             if (!mutations.isEmpty()) {
                 changesByHeight.put(blockHeight, mutations);
             }
             session = null;
         }
+        if (encodedReceipts != null) {
+            store.putReceipts(blockHeight, encodedReceipts);
+        }
         if (!currentReceipts.isEmpty()) {
             // Write-through (audit F7): the RAM copy serves the hot reorg path; the store copy
             // survives a restart, so a later pop/restore of this block finds its receipts.
             receiptsByHeight.put(blockHeight, currentReceipts);
-            store.putReceipts(blockHeight, BoxReceiptCodec.encode(currentReceipts));
         }
         if (!currentEvents.isEmpty()) {
             eventsByHeight.put(blockHeight, currentEvents);

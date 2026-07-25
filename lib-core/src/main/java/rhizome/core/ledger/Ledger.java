@@ -14,6 +14,16 @@ public interface Ledger {
 
     TransactionAmount getWalletValue(PublicAddress wallet);
 
+    /**
+     * The wallet's balance, or {@code 0} when absent — ONE store read where the implementation
+     * supports it (the default reads twice: probe + get). Block validity is a pure function of
+     * balance, never of key-presence (audit consensus Finding 1), and the executor reads this
+     * per transfer — halving the point-gets on the hot path (audit perf).
+     */
+    default long balanceOrZero(PublicAddress wallet) {
+        return hasWallet(wallet) ? getWalletValue(wallet).amount() : 0L;
+    }
+
     void withdraw(PublicAddress wallet, TransactionAmount amt);
 
     void revertSend(PublicAddress wallet, TransactionAmount amt);

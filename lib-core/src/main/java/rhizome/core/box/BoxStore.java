@@ -25,6 +25,19 @@ public interface BoxStore {
      */
     void applyBlock(long height, List<BoxMutation> mutations);
 
+    /**
+     * As {@link #applyBlock(long, List)}, additionally committing the block's encoded receipts in
+     * the SAME atomic batch where the store supports it (RocksDB: previously a second synced
+     * write per block, audit perf). The default falls back to the separate {@link #putReceipts}
+     * write — correct, just not atomic with the mutations.
+     */
+    default void applyBlock(long height, List<BoxMutation> mutations, byte[] encodedReceipts) {
+        applyBlock(height, mutations);
+        if (encodedReceipts != null) {
+            putReceipts(height, encodedReceipts);
+        }
+    }
+
     /** Reverts the box changes committed for {@code height} using the persisted journal. */
     void revertBlock(long height);
 

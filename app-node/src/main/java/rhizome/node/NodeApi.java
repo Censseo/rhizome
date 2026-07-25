@@ -10,6 +10,8 @@ import io.activej.http.HttpHeaders;
 import io.activej.http.HttpRequest;
 import io.activej.http.HttpResponse;
 import io.activej.http.RoutingServlet;
+import io.activej.promise.Promise;
+import io.activej.promise.SettablePromise;
 import io.activej.reactor.Reactor;
 import org.json.JSONObject;
 import org.slf4j.Logger;
@@ -137,6 +139,22 @@ public final class NodeApi {
      */
     public static AsyncServlet servlet(Reactor reactor, NodeService node, RateLimiter limiter, SseLogHub sse,
                                        java.util.Set<String> allowedHosts, String apiToken) {
+        return servlet(reactor, node, limiter, sse, allowedHosts, apiToken, null);
+    }
+
+    /**
+     * As above, additionally running the consensus-heavy handlers (block/tx ingest, VM dry-run,
+     * lock-guarded explorer reads) on a bounded {@code blocking} worker pool instead of the
+     * event-loop thread. Without it every PoW check, Ed25519 verify, VM execution and RocksDB
+     * fsync runs on the single HTTP loop: one valid-but-heavy block, or one max-gas dry-run,
+     * freezes every route (including SSE and peer heartbeats) for its whole duration (audit:
+     * eventloop blocked by consensus work). Pass {@code null} to run inline (tests). The
+     * streaming sync endpoints stay on the loop: they are bounded to one block/header in
+     * flight and already aggregate-gated, so offloading them cannot pin the loop for long.
+     */
+    public static AsyncServlet servlet(Reactor reactor, NodeService node, RateLimiter limiter, SseLogHub sse,
+                                       java.util.Set<String> allowedHosts, String apiToken,
+                                       java.util.concurrent.Executor blocking) {
         int maxBlockBody = node.params().maxBlockSizeBytes() + 1024;
         DashboardAssets dashboard = DashboardAssets.load();
 
@@ -149,14 +167,14 @@ public final class NodeApi {
                 return a == null ? notFound("no such asset") : DashboardApi.asset(a);
             }))
             // ---- dashboard/explorer API ----
-            .with(GET, "/stats", req -> guarded(() -> DashboardApi.stats(node)))
+            .with(GET, "/stats", req -> offload(blocking, () -> DashboardApi.stats(node)))
             .with(GET, "/features", req -> guarded(() -> DashboardApi.features(node, sse)))
-            .with(GET, "/blocks", req -> guarded(() -> ExplorerApi.blocks(node, req)))
-            .with(GET, "/block", req -> guarded(() -> ExplorerApi.block(node, req)))
-            .with(GET, "/transaction", req -> guarded(() -> ExplorerApi.findTransaction(node, req)))
-            .with(GET, "/address_txs", req -> guarded(() -> ExplorerApi.addressTransactions(node, req)))
-            .with(GET, "/contract", req -> guarded(() -> ExplorerApi.contractInfo(node, req)))
-            .with(GET, "/wallet", req -> guarded(() -> ExplorerApi.wallet(node, req)))
+            .with(GET, "/blocks", req -> offload(blocking, () -> ExplorerApi.blocks(node, req)))
+            .with(GET, "/block", req -> offload(blocking, () -> ExplorerApi.block(node, req)))
+            .with(GET, "/transaction", req -> offload(blocking, () -> ExplorerApi.findTransaction(node, req)))
+            .with(GET, "/address_txs", req -> offload(blocking, () -> ExplorerApi.addressTransactions(node, req)))
+            .with(GET, "/contract", req -> offload(blocking, () -> ExplorerApi.contractInfo(node, req)))
+            .with(GET, "/wallet", req -> offload(blocking, () -> ExplorerApi.wallet(node, req)))
             // ---- chain scalars ----
             .with(GET, "/block_count", req -> ok(text(String.valueOf(node.blockCount()))))
             .with(GET, "/total_work", req -> ok(json(new JSONObject().put("totalWork", node.totalWork().toString()))))
@@ -181,8 +199,8 @@ public final class NodeApi {
                 return json(new JSONObject().put("status", "OK"));
             })))
             // ---- boxes / scans ----
-            .with(GET, "/box", req -> guarded(() -> BoxApi.box(node, req)))
-            .with(GET, "/boxes", req -> guarded(() -> BoxApi.boxes(node, req)))
+            .with(GET, "/box", req -> offload(blocking, () -> BoxApi.box(node, req)))
+            .with(GET, "/boxes", req -> offload(blocking, () -> BoxApi.boxes(node, req)))
             .with(POST, "/scan/register", req -> req.loadBody(SMALL_BODY).map(body -> guardedResponse(() -> {
                 int id = node.registerScan(clientKey(req), rhizome.core.box.ScanPredicate.fromJson(
                     parseJson(body.getString(StandardCharsets.UTF_8))));
@@ -192,35 +210,35 @@ public final class NodeApi {
                 int id = parseJson(body.getString(StandardCharsets.UTF_8)).getInt("scanId");
                 return json(new JSONObject().put("removed", node.deregisterScan(clientKey(req), id)));
             })))
-            .with(GET, "/scan/list", req -> guarded(() -> BoxApi.scanList(node, clientKey(req))))
-            .with(GET, "/scan/boxes", req -> guarded(() -> BoxApi.scanBoxes(node, req)))
+            .with(GET, "/scan/list", req -> offload(blocking, () -> BoxApi.scanList(node, clientKey(req))))
+            .with(GET, "/scan/boxes", req -> offload(blocking, () -> BoxApi.scanBoxes(node, req)))
             // ---- tokens ----
-            .with(GET, "/token", req -> guarded(() -> TokenApi.token(node, req)))
-            .with(GET, "/token_balance", req -> guarded(() -> TokenApi.tokenBalance(node, req)))
-            .with(GET, "/tokens", req -> guarded(() -> TokenApi.tokens(node, req)))
+            .with(GET, "/token", req -> offload(blocking, () -> TokenApi.token(node, req)))
+            .with(GET, "/token_balance", req -> offload(blocking, () -> TokenApi.tokenBalance(node, req)))
+            .with(GET, "/tokens", req -> offload(blocking, () -> TokenApi.tokens(node, req)))
             // ---- authenticated state ----
-            .with(GET, "/state", req -> guarded(() -> StateApi.state(node)))
-            .with(GET, "/state/proof", req -> guarded(() -> StateApi.stateProof(node, req)))
+            .with(GET, "/state", req -> offload(blocking, () -> StateApi.state(node)))
+            .with(GET, "/state/proof", req -> offload(blocking, () -> StateApi.stateProof(node, req)))
             .with(GET, "/state/snapshot/info", req -> guarded(() -> SyncApi.snapshotInfo(node)))
             .with(GET, "/state/snapshot/chunk", req -> guarded(() -> SyncApi.snapshotChunk(node, req)))
             // ---- contract logs / dry run ----
-            .with(GET, "/logs", req -> guarded(() -> ContractApi.logs(node, req)))
+            .with(GET, "/logs", req -> offload(blocking, () -> ContractApi.logs(node, req)))
             .with(GET, "/logs/stream", req -> guarded(() -> ContractApi.logStream(sse, clientKey(req), clientSubnetKey(req))))
-            .with(POST, "/call_readonly", req -> req.loadBody(TX_BODY).map(body -> guardedResponse(() ->
+            .with(POST, "/call_readonly", req -> req.loadBody(TX_BODY).then(body -> offload(blocking, () ->
                 ContractApi.callReadonly(node, parseJson(body.getString(StandardCharsets.UTF_8))))))
             // ---- peer sync / gossip ingest ----
             .with(GET, "/sync", req -> guarded(() -> SyncApi.sync(node, req)))
             .with(GET, "/headers", req -> guarded(() -> SyncApi.headers(node, req)))
-            .with(GET, "/orphan", req -> guarded(() -> SyncApi.orphan(node, req)))
-            .with(POST, "/add_transaction_json", req -> req.loadBody(SMALL_BODY).map(body -> guardedResponse(() -> {
+            .with(GET, "/orphan", req -> offload(blocking, () -> SyncApi.orphan(node, req)))
+            .with(POST, "/add_transaction_json", req -> req.loadBody(SMALL_BODY).then(body -> offload(blocking, () -> {
                 Transaction t = Transaction.of(parseJson(body.getString(StandardCharsets.UTF_8)));
                 return statusResponse(node.submitTransaction(t, clientKey(req)));
             })))
-            .with(POST, "/add_transaction", req -> req.loadBody(TX_BODY).map(body -> guardedResponse(() -> {
+            .with(POST, "/add_transaction", req -> req.loadBody(TX_BODY).then(body -> offload(blocking, () -> {
                 Transaction t = Transaction.of(BinarySerializable.fromBuffer(body.getArray(), TransactionDto.class));
                 return statusResponse(node.submitTransaction(t, clientKey(req)));
             })))
-            .with(POST, "/submit", req -> req.loadBody(maxBlockBody).map(body -> guardedResponse(() -> {
+            .with(POST, "/submit", req -> req.loadBody(maxBlockBody).then(body -> offload(blocking, () -> {
                 Block block = BlockCodec.decode(body.getArray());
                 return statusResponse(node.submitBlock(block, clientKey(req)));
             })))
@@ -319,6 +337,46 @@ public final class NodeApi {
     }
 
     // ---- middleware: cost model, budgets and the browser guard ----
+
+    /**
+     * Runs a consensus-heavy handler on the bounded worker pool (when wired) instead of the
+     * event-loop thread, mapping failures to the same generic 400 as {@code guarded}. A full
+     * worker queue sheds the request with 429 rather than queueing unbounded latency.
+     */
+    private static Promise<HttpResponse> offload(java.util.concurrent.Executor blocking,
+                                                 java.util.concurrent.Callable<HttpResponse> job) {
+        if (blocking == null) {
+            return guarded(job);
+        }
+        // Submit explicitly rather than via Promise.ofBlocking: ofBlocking catches
+        // RejectedExecutionException itself and completes the promise exceptionally (→ 500),
+        // so a try/catch around it would be dead code and a saturated pool could never yield
+        // the intended 429 (audit review). The completion below mirrors ofBlocking's protocol
+        // exactly: the promise is completed ON the reactor (never from the worker thread) and
+        // the external-task counter keeps the eventloop alive while the job runs.
+        SettablePromise<HttpResponse> result = new SettablePromise<>();
+        Reactor reactor = Reactor.getCurrentReactor();
+        reactor.startExternalTask();
+        try {
+            blocking.execute(() -> {
+                try {
+                    HttpResponse response = guardedResponse(job);
+                    reactor.execute(() -> result.set(response));
+                } catch (Throwable t) {
+                    reactor.execute(() ->
+                        result.setException(t instanceof Exception e ? e : new RuntimeException(t)));
+                } finally {
+                    reactor.completeExternalTask();
+                }
+            });
+        } catch (java.util.concurrent.RejectedExecutionException e) {
+            reactor.completeExternalTask();
+            return HttpResponse.ofCode(429)
+                .withJson(new JSONObject().put("error", "server busy").toString())
+                .toPromise();
+        }
+        return result;
+    }
 
     /**
      * True when a browser-originated POST must be refused. A request carrying an {@code Origin} is
@@ -453,6 +511,13 @@ public final class NodeApi {
         }
         if ("/orphan".equals(path)) {
             return ORPHAN_COST;
+        }
+        // /scan/boxes examines up to BOX_SCAN_WINDOW boxes per call (bounded store reads, no
+        // consensus lock but real disk I/O) — leaving it at cost 1 let a client drive ~512k
+        // reads/s inside its 1000 req/s budget (audit: scan cost under-weighted). Weight it like
+        // the /logs cursor scan (~1 unit per 4 reads), so the same budget admits ~7 scans/s.
+        if ("/scan/boxes".equals(path)) {
+            return NodeService.BOX_SCAN_WINDOW / 4;
         }
         return 1;
     }

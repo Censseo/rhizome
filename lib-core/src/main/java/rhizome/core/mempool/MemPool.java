@@ -70,6 +70,9 @@ public final class MemPool {
      */
     static final long RBF_MIN_BUMP_PERCENT = 10;
 
+    /** How far past the local clock a pooled transaction's timestamp may lie (audit B-4). */
+    static final long MAX_TX_FUTURE_DRIFT_MS = 2 * 60 * 60 * 1000L;
+
     private final NetworkParameters params;
     private final SignatureVerifier verifier;
     private final AccountView accounts;
@@ -85,6 +88,10 @@ public final class MemPool {
     private final NavigableMap<PublicAddress, NavigableMap<Long, Transaction>> bySender =
         new TreeMap<>(ADDRESS_ORDER);
     private final Set<SHA256Hash> contentHashes = new HashSet<>();
+    /** Where a pooled transaction lives, so eviction is O(log n) instead of scanning the
+     *  sender's whole queue (audit perf: O(queue) removal per block transaction). */
+    private record Slot(PublicAddress sender, long nonce) {}
+    private final Map<SHA256Hash, Slot> slotByHash = new HashMap<>();
     /** Admission time (ms, {@link #clock}) per pooled transaction — the parked-TTL reference. */
     private final Map<SHA256Hash, Long> admittedAt = new HashMap<>();
     private final ReentrantLock lock = new ReentrantLock();
@@ -192,6 +199,14 @@ public final class MemPool {
         if (!PublicAddress.of(tx.signingKey()).equals(tx.from())) {
             return WALLET_SIGNATURE_MISMATCH;
         }
+        // Timestamp sanity window: the field is signed but otherwise unconstrained, so a tx
+        // stamped far in the future could sit in the pool as permanently "fresh" junk with no
+        // consensus rule ever catching it (the signed field was inert — audit B-4). A generous
+        // 2-hour future drift absorbs honest clock skew; negative timestamps are malformed.
+        long txTimestamp = tx.timestamp();
+        if (txTimestamp < 0 || txTimestamp > clock.getAsLong() + MAX_TX_FUTURE_DRIFT_MS) {
+            return INVALID_TRANSACTION_TIMESTAMP;
+        }
 
         lock.lock();
         try {
@@ -279,11 +294,13 @@ public final class MemPool {
 
             if (replaced != null) {
                 contentHashes.remove(replaced.hashContents());
+                slotByHash.remove(replaced.hashContents());
                 admittedAt.remove(replaced.hashContents());
                 size--;
             }
             bySender.computeIfAbsent(from, a -> new TreeMap<>()).put(tx.nonce(), transaction);
             contentHashes.add(id);
+            slotByHash.put(id, new Slot(from, tx.nonce()));
             admittedAt.put(id, clock.getAsLong());
             size++;
             return SUCCESS;
@@ -334,7 +351,7 @@ public final class MemPool {
             for (Transaction t : new ArrayList<>(pending.values())) {
                 Long since = admittedAt.get(t.hashContents());
                 if (since != null && now - since >= PARKED_TTL_MILLIS) {
-                    remove(sender, t.hashContents());
+                    remove(t.hashContents());
                 }
             }
         }
@@ -454,7 +471,7 @@ public final class MemPool {
         try {
             for (Transaction t : block.transactions()) {
                 if (!((TransactionImpl) t).isTransactionFee()) {
-                    remove(((TransactionImpl) t).from(), t.hashContents());
+                    remove(t.hashContents());
                 }
             }
             pruneStale();
@@ -477,7 +494,6 @@ public final class MemPool {
      * evicted, so legitimate saturation still yields {@code QUEUE_FULL}.
      */
     private boolean makeRoomForParkedSlot(PublicAddress from, TransactionImpl incoming) {
-        PublicAddress victimSender = null;
         Transaction victim = null;
         long victimFee = Long.MAX_VALUE;
         for (Map.Entry<PublicAddress, NavigableMap<Long, Transaction>> e : bySender.entrySet()) {
@@ -490,7 +506,6 @@ public final class MemPool {
             Transaction deepest = pending.lastEntry().getValue();
             long fee = ((TransactionImpl) deepest).fee().amount();
             if (victim == null || fee < victimFee) {
-                victimSender = e.getKey();
                 victim = deepest;
                 victimFee = fee;
             }
@@ -505,7 +520,7 @@ public final class MemPool {
         if (!incomingReady && incoming.fee().amount() <= victimFee) {
             return false;
         }
-        remove(victimSender, victim.hashContents());
+        remove(victim.hashContents());
         return true;
     }
 
@@ -516,6 +531,7 @@ public final class MemPool {
             var stale = pending.headMap(confirmed, false);
             for (Transaction t : new ArrayList<>(stale.values())) {
                 contentHashes.remove(t.hashContents());
+                slotByHash.remove(t.hashContents());
                 admittedAt.remove(t.hashContents());
                 size--;
             }
@@ -526,23 +542,21 @@ public final class MemPool {
         }
     }
 
-    private void remove(PublicAddress sender, SHA256Hash contentHash) {
-        NavigableMap<Long, Transaction> pending = bySender.get(sender);
-        if (pending == null) {
-            return;
+    private void remove(SHA256Hash contentHash) {
+        Slot slot = slotByHash.remove(contentHash);
+        if (slot == null) {
+            return; // unknown (or already evicted) — nothing indexed for this hash
         }
-        pending.values().removeIf(t -> {
-            boolean match = t.hashContents().equals(contentHash);
-            if (match) {
-                contentHashes.remove(contentHash);
-                admittedAt.remove(contentHash);
-                size--;
+        NavigableMap<Long, Transaction> pending = bySender.get(slot.sender());
+        if (pending != null) {
+            pending.remove(slot.nonce());
+            if (pending.isEmpty()) {
+                bySender.remove(slot.sender());
             }
-            return match;
-        });
-        if (pending.isEmpty()) {
-            bySender.remove(sender);
         }
+        contentHashes.remove(contentHash);
+        admittedAt.remove(contentHash);
+        size--;
     }
 
     public int size() {

@@ -91,8 +91,20 @@ public final class TransactionImpl implements Transaction, Comparable<Transactio
     @Builder.Default
     private transient SHA256Hash cachedContentHash = null;
 
+    /**
+     * Memoized full hash (content + signature). {@link #hash()} is recomputed several times per
+     * transaction on the block path (merkle leaves call it twice each, checkpoint, gossip dedup)
+     * — memoized exactly like {@link #cachedContentHash} (audit perf). Invalidated with the
+     * content hash on any content setter, and by {@link #signature(TransactionSignature)}.
+     */
+    @lombok.Getter(lombok.AccessLevel.NONE)
+    @lombok.Setter(lombok.AccessLevel.NONE)
+    @Builder.Default
+    private transient SHA256Hash cachedFullHash = null;
+
     private void invalidateContentHash() {
         this.cachedContentHash = null;
+        this.cachedFullHash = null;
     }
 
     // Content-field setters override the Lombok-generated ones solely to invalidate the memoized
@@ -109,6 +121,7 @@ public final class TransactionImpl implements Transaction, Comparable<Transactio
     public TransactionImpl gasLimit(long gasLimit) { this.gasLimit = gasLimit; invalidateContentHash(); return this; }
     public TransactionImpl gasPrice(long gasPrice) { this.gasPrice = gasPrice; invalidateContentHash(); return this; }
     public TransactionImpl data(byte[] data) { this.data = data; invalidateContentHash(); return this; }
+    public TransactionImpl signature(TransactionSignature signature) { this.signature = signature; this.cachedFullHash = null; return this; }
 
     /**
      * Serialization
@@ -145,6 +158,10 @@ public final class TransactionImpl implements Transaction, Comparable<Transactio
     }
 
     public SHA256Hash hash() {
+        SHA256Hash cached = this.cachedFullHash;
+        if (cached != null) {
+            return cached;
+        }
         var digest = new SHA256Digest();
         var sha256Hash = new byte[SHA256Hash.SIZE];
 
@@ -155,7 +172,9 @@ public final class TransactionImpl implements Transaction, Comparable<Transactio
             digest.update(sig, 0, sig.length);
         }
         digest.doFinal(sha256Hash, 0);
-        return SHA256Hash.of(sha256Hash);
+        SHA256Hash result = SHA256Hash.of(sha256Hash);
+        this.cachedFullHash = result;
+        return result;
     }
 
     /**
@@ -204,6 +223,7 @@ public final class TransactionImpl implements Transaction, Comparable<Transactio
 
     public Transaction sign(PrivateKey signingKey) {
         this.signature = TransactionSignature.of(signWithPrivateKey(hashContents().toBytes(), signingKey));
+        this.cachedFullHash = null; // the full hash folds the signature in
         return this;
     }
 

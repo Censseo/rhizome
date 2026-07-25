@@ -314,25 +314,33 @@ public final class WasmContractProcessor implements ContractProcessor {
 
     @Override
     public void commit(long blockHeight) {
+        // Persist the receipts too (durable stores only), alongside the journal: the executor's
+        // rollback consumes them to reverse each contract tx's gas fee, value transfer and
+        // transfer_value payouts, and RAM-only receipts made a reorg after a restart crash
+        // mid-rollback and corrupt the ledger (audit F3). Empty blocks persist NOTHING: the
+        // 4-byte encoding of an empty receipt list would otherwise cost every contract-free
+        // block a receipts write in the synced batch (audit review; receipts() maps a missing
+        // blob back to List.of()).
+        byte[] encodedReceipts = currentReceipts.isEmpty() ? null : encodeReceipts(currentReceipts);
         if (session != null) {
             List<ContractChange> changes = session.forwardChanges();
             List<ContractUndo> journal = session.captureJournal();
             journals.put(blockHeight, journal);
-            // Commit the block's mutations AND its serialized undo journal as ONE atomic unit
-            // where the store supports it (RocksDB: a single synced WriteBatch), so a crash
-            // mid-flush cannot leave storage half-applied with no journal to rewind it (audit
-            // store F1). The journal doubles as the durable reorg-undo after a restart (M9).
-            baseStore.applyBlock(blockHeight, session.pendingChanges(), encodeJournal(journal));
+            // Commit the block's mutations AND its serialized undo journal AND its receipts as ONE
+            // atomic unit where the store supports it (RocksDB: a single synced WriteBatch), so a
+            // crash mid-flush cannot leave storage half-applied with no journal to rewind it (audit
+            // store F1) and the receipts cost no second fsync (audit perf). The journal doubles as
+            // the durable reorg-undo after a restart (M9).
+            baseStore.applyBlock(blockHeight, session.pendingChanges(), encodeJournal(journal), encodedReceipts);
             if (!changes.isEmpty()) {
                 changesByHeight.put(blockHeight, changes);
             }
             session = null;
+        } else if (encodedReceipts != null) {
+            // No contract writes this block, but receipts may exist (e.g. a reverting CALL):
+            // persist them standalone (the separate-put fallback of the receipts overload).
+            baseStore.putReceipts(blockHeight, encodedReceipts);
         }
-        // Persist the receipts too (durable stores only), alongside the journal: the executor's
-        // rollback consumes them to reverse each contract tx's gas fee, value transfer and
-        // transfer_value payouts, and RAM-only receipts made a reorg after a restart crash
-        // mid-rollback and corrupt the ledger (audit F3).
-        baseStore.putReceipts(blockHeight, encodeReceipts(currentReceipts));
         receiptsByHeight.put(blockHeight, currentReceipts);
         if (!currentLogs.isEmpty()) {
             retainLogs(blockHeight, currentLogs);

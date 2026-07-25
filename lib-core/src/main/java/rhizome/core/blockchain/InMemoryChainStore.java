@@ -76,4 +76,9 @@ public final class InMemoryChainStore implements ChainStore {
     public boolean hasTransaction(SHA256Hash contentHash) {
         return txIndex.containsKey(contentHash);
     }
+
+    @Override
+    public Long transactionHeight(SHA256Hash contentHash) {
+        return txIndex.get(contentHash);
+    }
 }

@@ -98,16 +98,24 @@ public final class PeerBroadcaster implements AutoCloseable {
         if (!firstSeen("b:" + block.hash().toHexString())) {
             return;
         }
-        byte[] body = BlockCodec.encode(block);
-        post("/submit", body);
+        // Encode on the caller, BEFORE anything is queued. Two reasons (audit review):
+        //  - the bytes gossiped must be exactly those of the accepted block: BlockImpl is
+        //    mutable, so deferring the encode to a pooled task would only be correct by the
+        //    convention that no caller mutates afterwards;
+        //  - the pool's DiscardOldestPolicy may drop a queued task: if the encode+fan-out were
+        //    one pooled task, dropping it would lose the block's propagation to EVERY peer,
+        //    and with the dedup id already recorded above it would never be re-gossiped within
+        //    the window. With the encode done here, a discard only ever costs ONE peer send.
+        post("/submit", BlockCodec.encode(block));
     }
 
     public void broadcastTransaction(Transaction transaction) {
         if (!firstSeen("t:" + transaction.hashContents().toHexString())) {
             return;
         }
-        byte[] body = transaction.serialize().toBuffer();
-        post("/add_transaction", body);
+        // Same reasoning as broadcastBlock: encode on the caller so a discarded task only ever
+        // costs one peer send, never the whole fan-out.
+        post("/add_transaction", transaction.serialize().toBuffer());
     }
 
     /** True the first time an item id is seen within the dedup window (adds it as a side effect). */

@@ -165,19 +165,27 @@ public class Crypto {
         return SHA256(hash, false, false);
     }
 
+    /**
+     * Per-thread SHA-256 digest: {@code MessageDigest.getInstance} walks the provider list and
+     * allocates on every call, which dominated the plain-SHA256 hot paths (merkle leaves/nodes,
+     * tx ids) on blocks with thousands of hashes (audit perf). MessageDigest is not thread-safe,
+     * hence one instance per thread; {@code digest(byte[])} resets it implicitly.
+     */
+    private static final ThreadLocal<MessageDigest> SHA256_DIGEST = ThreadLocal.withInitial(() -> {
+        try {
+            return MessageDigest.getInstance("SHA-256");
+        } catch (NoSuchAlgorithmException e) {
+            throw new RuntimeException("Unable to find SHA-256 algorithm", e);
+        }
+    });
+
     public static SHA256Hash SHA256(byte[] data, boolean usePufferFish, boolean useCache) {
         if (usePufferFish) {
             return PUFFERFISH(data, useCache);
         }
-        
+
         // Standard SHA-256 Hashing
-        try {
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            byte[] hash = digest.digest(data);
-            return SHA256Hash.of(hash);
-        } catch (NoSuchAlgorithmException e) {
-            throw new RuntimeException("Unable to find SHA-256 algorithm", e);
-        }
+        return SHA256Hash.of(SHA256_DIGEST.get().digest(data));
     }
 
     public static boolean verifyHash(SHA256Hash target, SHA256Hash nonce, int challengeSize, boolean usePufferFish, boolean useCache) {

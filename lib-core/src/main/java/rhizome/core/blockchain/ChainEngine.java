@@ -471,7 +471,14 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
                     return INVALID_STATE_ROOT;
                 }
 
-                store.append(block); // flushes the staged ledger writes + block + height in one batch
+                // Nonce updates are derived purely from the block, so stage them BEFORE the
+                // append: they flush in the SAME atomic batch as the block/height/ledger instead
+                // of one synced put per sender after it (audit perf: per-sender fsync). On a
+                // failed append the staged values are discarded, exactly as they were previously
+                // never written.
+                commitAccountNonces(block);
+                nonceStore.markSyncedThrough(b.id()); // nonces now reflect this new tip
+                store.append(block); // flushes the staged ledger + nonce writes + block + height in one batch
                 appended = true;
                 // Persist the bodies of the uncles this block references, BEFORE the bounded
                 // orphan pool's LRU can evict them (audit: uncle-sync blocker). A block carries
@@ -493,8 +500,6 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
                 if (mtpWindow.size() > params.medianTimeWindow()) {
                     mtpWindow.removeFirst();
                 }
-                commitAccountNonces(block);
-                nonceStore.markSyncedThrough(b.id()); // nonces now reflect this new tip
                 totalWork = totalWork.add(BlockWork.of(b.difficulty())).add(uncleWork);
                 baseWork = baseWork.add(BlockWork.of(b.difficulty()));
                 uncleWorkByHeight.put((long) b.id(), uncleWork);
@@ -558,7 +563,13 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
                 if (stateAccumulator != null) {
                     stateAccumulator.revertBlock(height); // move the state root back one block
                 }
-                store.pop(); // flushes the staged ledger reversals + height decrement in one batch
+                // Stage the nonce reversals BEFORE the pop so they flush in the same atomic batch
+                // as the height decrement (audit perf: per-sender fsync) — derived purely from the
+                // popped tip, so on a failed pop they are discarded, as they were previously never
+                // written.
+                revertAccountNonces(tip);
+                nonceStore.markSyncedThrough(height - 1); // nonces now reflect the tip after the pop
+                store.pop(); // flushes the staged ledger + nonce reversals + height decrement in one batch
                 popped = true;
             } finally {
                 if (!popped) {
@@ -575,8 +586,6 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             // (hence a boundary's timestamps) may be rewritten by the reorg, so those cached values are
             // no longer trusted and are recomputed on demand. Buried boundaries below stay valid (P1).
             difficultyByBoundary.tailMap(height, true).clear();
-            revertAccountNonces(tip);
-            nonceStore.markSyncedThrough(height - 1); // nonces now reflect the tip after the pop
             // Drop the vote tally established at this height (if it was an epoch boundary),
             // restoring the previous epoch's params — reorg-safe without a reversible tally.
             if (voteParamsByBoundary.remove(height) != null) {
@@ -731,6 +740,20 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         lock.lock();
         try {
             return ledger.hasWallet(sender);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * The height of the applied block containing {@code contentHash}, or {@code null} — the
+     * O(1) txid index lookup used by {@code /transaction} to avoid decoding a window of full
+     * blocks on the read path (audit perf).
+     */
+    public Long transactionHeight(rhizome.crypto.SHA256Hash contentHash) {
+        lock.lock();
+        try {
+            return store.transactionHeight(contentHash);
         } finally {
             lock.unlock();
         }

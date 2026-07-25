@@ -155,8 +155,14 @@ public final class RocksDbContractStore implements ContractStore, AutoCloseable 
 
     @Override
     public void applyBlock(long height, List<StorageChange> changes, byte[] journal) {
-        // All slot mutations AND the undo journal land in ONE synced WriteBatch: a crash mid-flush
-        // can no longer leave storage half-applied with no journal to rewind it (audit F1).
+        applyBlock(height, changes, journal, null);
+    }
+
+    @Override
+    public void applyBlock(long height, List<StorageChange> changes, byte[] journal, byte[] encodedReceipts) {
+        // All slot mutations AND the undo journal AND the receipts land in ONE synced WriteBatch:
+        // a crash mid-flush can no longer leave storage half-applied with no journal to rewind it
+        // (audit F1), and the receipts no longer cost a second fsync per block (audit perf).
         if (get(journalCf, heightKey(height)) != null) {
             // A double-apply would capture the already-mutated state as the journal's "prior" (audit F10).
             throw new IllegalStateException("contract store already has a journal at height " + height);
@@ -167,6 +173,9 @@ public final class RocksDbContractStore implements ContractStore, AutoCloseable 
             }
             if (journal != null) {
                 batch.put(journalCf, heightKey(height), journal);
+            }
+            if (encodedReceipts != null) {
+                batch.put(receiptsCf, heightKey(height), encodedReceipts);
             }
             db.write(writeOptions, batch);
         } catch (RocksDBException e) {

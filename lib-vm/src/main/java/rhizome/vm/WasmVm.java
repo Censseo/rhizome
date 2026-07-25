@@ -352,45 +352,59 @@ public final class WasmVm {
     }
 
     /**
-     * Runs {@code task} on a dedicated thread with a fixed, generous stack ({@link #EXEC_STACK_BYTES}).
-     * A contract's whole call tree (including nested {@code call_contract} frames) executes on this
-     * one thread, so the JVM stack size is a fixed network constant rather than the host's {@code -Xss}
-     * — the missing half of the deterministic-recursion guarantee: the fixed stack is always large
+     * Small pool of reusable workers, each with a fixed, generous stack ({@link
+     * #EXEC_STACK_BYTES}), that every contract execution runs on. A contract's whole call tree
+     * (including nested {@code call_contract} frames) executes on one of these threads, so the
+     * JVM stack size is a fixed network constant rather than the host's {@code -Xss} — the
+     * missing half of the deterministic-recursion guarantee: the fixed stack is always large
      * enough to hold {@link DepthLimitedInterpreterMachine#MAX_WASM_CALL_DEPTH} frames, so the
      * deterministic depth trap always fires before any real {@code StackOverflowError}.
+     *
+     * <p>Reused across calls: the previous per-call {@code new Thread(…, 64MB)} paid thread
+     * creation plus a 64 Mio stack mapping per CALL, per dry-run and twice per produced block
+     * (stamp + apply) on the consensus path (audit perf). More than one worker (not a single
+     * thread): a long dry-run ({@code /call_readonly}, up to the 25M-gas budget) must not queue
+     * block validation behind it now that the API handlers are offloaded to a worker pool —
+     * the two fixes would otherwise work against each other (audit review). The executor
+     * recreates a thread if it dies (e.g. a fatal {@link OutOfMemoryError}), and the tree-page
+     * budget above is finally-balanced per frame, so no ThreadLocal state leaks between
+     * executions. Concurrent executions are independent (the page budget is a ThreadLocal).
      */
-    public static <T> T onBoundedStack(java.util.function.Supplier<T> task) {
-        java.util.concurrent.atomic.AtomicReference<T> result = new java.util.concurrent.atomic.AtomicReference<>();
-        java.util.concurrent.atomic.AtomicReference<Throwable> error = new java.util.concurrent.atomic.AtomicReference<>();
-        Thread t = new Thread(null, () -> {
-            try {
-                result.set(task.get());
-            } catch (Throwable e) {
-                error.set(e);
+    private static final int VM_WORKER_THREADS = 2;
+
+    private static final java.util.concurrent.ExecutorService BOUNDED_STACK_WORKER =
+        java.util.concurrent.Executors.newFixedThreadPool(VM_WORKER_THREADS, new java.util.concurrent.ThreadFactory() {
+            private final java.util.concurrent.atomic.AtomicInteger seq = new java.util.concurrent.atomic.AtomicInteger();
+            @Override
+            public Thread newThread(Runnable r) {
+                Thread t = new Thread(null, r, "rhizome-wasm-" + seq.incrementAndGet(), EXEC_STACK_BYTES);
+                t.setDaemon(true);
+                return t;
             }
-        }, "rhizome-wasm", EXEC_STACK_BYTES);
-        t.start();
+        });
+
+    public static <T> T onBoundedStack(java.util.function.Supplier<T> task) {
+        java.util.concurrent.Future<T> future = BOUNDED_STACK_WORKER.submit(task::get);
         try {
-            t.join();
+            return future.get();
         } catch (InterruptedException e) {
             // Interrupt the worker too: otherwise it keeps running a 50M-gas execution detached
-            // from the interrupted caller, an orphan thread burning CPU and holding its whole
-            // call-tree memory until the gas budget runs out.
-            t.interrupt();
+            // from the interrupted caller. If the interpreter never observes the interrupt the
+            // gas budget still bounds the run; subsequent calls queue behind it (as they would
+            // behind any in-flight execution).
+            future.cancel(true);
             Thread.currentThread().interrupt();
             throw new IllegalStateException("contract execution interrupted", e);
-        }
-        Throwable e = error.get();
-        if (e != null) {
-            if (e instanceof RuntimeException re) {
+        } catch (java.util.concurrent.ExecutionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof RuntimeException re) {
                 throw re;
             }
-            if (e instanceof Error er) {
+            if (cause instanceof Error er) {
                 throw er;
             }
-            throw new IllegalStateException("contract execution failed", e);
+            throw new IllegalStateException("contract execution failed", cause);
         }
-        return result.get();
     }
 
     private static boolean isDepthExceeded(Throwable e) {

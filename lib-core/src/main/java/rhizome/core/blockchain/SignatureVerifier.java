@@ -1,8 +1,9 @@
 package rhizome.core.blockchain;
 
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ForkJoinPool;
 import java.util.stream.IntStream;
@@ -34,7 +35,12 @@ public final class SignatureVerifier {
 
     private final ForkJoinPool pool;
     private final int cacheCapacity;
-    private final Map<CacheKey, Boolean> verified = new ConcurrentHashMap<>();
+    // Access-order LRU with eldest-entry eviction: a ConcurrentHashMap's partial eviction walks
+    // bucket order, so the same hash-bucket region is evicted at every saturation — entries
+    // landing there are re-verified on each resubmission while cold entries elsewhere survive
+    // forever (audit review). Evicted entries are re-verifiable, so eviction only ever costs a
+    // recompute, never correctness.
+    private final Map<CacheKey, Boolean> verified;
 
     /**
      * Cache identity: content hash + signature bytes + the signing public key. Including the
@@ -65,6 +71,12 @@ public final class SignatureVerifier {
     public SignatureVerifier(int parallelism, int cacheCapacity) {
         this.pool = new ForkJoinPool(parallelism);
         this.cacheCapacity = cacheCapacity;
+        this.verified = Collections.synchronizedMap(new LinkedHashMap<>(16, 0.75f, true) {
+            @Override
+            protected boolean removeEldestEntry(Map.Entry<CacheKey, Boolean> eldest) {
+                return size() > cacheCapacity;
+            }
+        });
     }
 
     private static CacheKey key(Transaction t) {
@@ -132,12 +144,7 @@ public final class SignatureVerifier {
     }
 
     private void remember(CacheKey key) {
-        if (verified.size() >= cacheCapacity) {
-            // Coarse bound: drop a chunk when full. Verified transactions are
-            // re-verifiable, so eviction only costs a recompute, never correctness.
-            verified.clear();
-        }
-        verified.put(key, Boolean.TRUE);
+        verified.put(key, Boolean.TRUE); // eldest-entry eviction keeps the map bounded
     }
 
     /**

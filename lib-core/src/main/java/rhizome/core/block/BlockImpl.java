@@ -80,6 +80,36 @@ public final class BlockImpl implements Block {
     }
 
     /**
+     * Memoized header hash. {@link #hash()} used to rebuild the {@link BlockHeader} and re-hash
+     * the full preimage on every call — 5-10× per block on the consensus path (checkpoint,
+     * chaining, PoW, uncle eligibility, gossip dedup) with several {@code ByteBuffer.allocate}
+     * per call (audit perf). Every field setter (and {@link #addTransaction}) invalidates the
+     * cache, so a mutated block always re-hashes. Volatile: the gossip fan-out reads it off the
+     * accepting thread.
+     */
+    @lombok.Getter(lombok.AccessLevel.NONE)
+    @lombok.Setter(lombok.AccessLevel.NONE)
+    @Builder.Default
+    private volatile transient SHA256Hash cachedHash = null;
+
+    private void invalidateHash() {
+        this.cachedHash = null;
+    }
+
+    // Field setters override the Lombok-generated (fluent) ones solely to invalidate the
+    // memoized hash; they otherwise behave identically.
+    public BlockImpl id(int id) { this.id = id; invalidateHash(); return this; }
+    public BlockImpl timestamp(long timestamp) { this.timestamp = timestamp; invalidateHash(); return this; }
+    public BlockImpl difficulty(int difficulty) { this.difficulty = difficulty; invalidateHash(); return this; }
+    public BlockImpl transactions(List<Transaction> transactions) { this.transactions = transactions; invalidateHash(); return this; }
+    public BlockImpl merkleRoot(SHA256Hash merkleRoot) { this.merkleRoot = merkleRoot; invalidateHash(); return this; }
+    public BlockImpl lastBlockHash(SHA256Hash lastBlockHash) { this.lastBlockHash = lastBlockHash; invalidateHash(); return this; }
+    public BlockImpl nonce(SHA256Hash nonce) { this.nonce = nonce; invalidateHash(); return this; }
+    public BlockImpl stateRoot(SHA256Hash stateRoot) { this.stateRoot = stateRoot; invalidateHash(); return this; }
+    public BlockImpl vote(int vote) { this.vote = vote; invalidateHash(); return this; }
+    public BlockImpl uncles(List<UncleRef> uncles) { this.uncles = uncles; invalidateHash(); return this; }
+
+    /**
      * Block header hash.
      *
      * <p>Delegates to {@link BlockHeader}, the single canonical preimage
@@ -92,7 +122,13 @@ public final class BlockImpl implements Block {
      * the PoW itself did not commit to; the clean chain closes that hole.
      */
     public SHA256Hash hash() {
-        return BlockHeader.of(this).hash();
+        SHA256Hash cached = cachedHash;
+        if (cached != null) {
+            return cached;
+        }
+        SHA256Hash computed = BlockHeader.of(this).hash();
+        cachedHash = computed;
+        return computed;
     }
 
     /**
@@ -117,6 +153,7 @@ public final class BlockImpl implements Block {
      */
     public void addTransaction(Transaction t) {
         transactions.add(t);
+        invalidateHash(); // numTransactions and the merkle root commit to the body
     }
     
     @Override

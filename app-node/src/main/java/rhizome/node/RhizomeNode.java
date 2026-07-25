@@ -68,6 +68,7 @@ public final class RhizomeNode implements AutoCloseable {
     private SseLogHub sseHub;
     private Thread eventloopThread;
     private HttpServer httpServer;
+    private java.util.concurrent.ExecutorService apiWorkers;
 
     private BlockProducer producer;
     private ScheduledExecutorService syncScheduler;
@@ -141,12 +142,24 @@ public final class RhizomeNode implements AutoCloseable {
     }
 
     public synchronized void start() throws IOException {
+        // Secure-by-default exposure gate (audit H-2): binding a non-loopback address without
+        // an API token leaves /add_peer, /scan/register, /submit, /add_transaction and
+        // /call_readonly open to the whole network. Refuse to start in that posture unless the
+        // operator explicitly opts in with RHIZOME_ALLOW_OPEN_API=true (pure P2P relay nodes).
+        if (config.apiToken().isEmpty() && !isLoopbackBind(config.bindAddress())
+            && !"true".equalsIgnoreCase(System.getenv("RHIZOME_ALLOW_OPEN_API"))) {
+            throw new IllegalStateException("refusing to start: the API binds " + config.bindAddress()
+                + " without RHIZOME_API_TOKEN, leaving state-changing/operator routes open to the "
+                + "network. Set RHIZOME_API_TOKEN, bind 127.0.0.1, or set RHIZOME_ALLOW_OPEN_API=true "
+                + "for a pure P2P relay.");
+        }
         // Block SSRF-prone (loopback / private / metadata) peer hosts by DEFAULT on every node.
         // The previous heuristic keyed this off whether the *advertised* self URL was loopback, but
-        // the node always binds 0.0.0.0 and /add_peer is unauthenticated, so an exposed testnet or
-        // custom-net node left at the default (loopback) advertise URL ran with the SSRF filter and
-        // DNS-pin rejection OFF — any network-reachable party could add a 169.254.169.254 / RFC1918
-        // peer that syncRound then fetches (audit F4). Secure-by-default instead: only an explicit
+        // a node may bind a public address while /add_peer stays unauthenticated, so an exposed
+        // testnet or custom-net node left at the default (loopback) advertise URL ran with the
+        // SSRF filter and DNS-pin rejection OFF — any network-reachable party could add a
+        // 169.254.169.254 / RFC1918 peer that syncRound then fetches (audit F4). Secure-by-default
+        // instead: only an explicit
         // RHIZOME_ALLOW_PRIVATE_PEERS=true opts out (for local dev/devnets peering over 127.0.0.1 or
         // private IPs via pure PEX — configured RHIZOME_PEERS seeds already bypass the filter).
         boolean allowPrivate = config.allowPrivatePeers()
@@ -253,14 +266,12 @@ public final class RhizomeNode implements AutoCloseable {
         log.info("Rhizome node started: network={} height={} apiPort={} mining={} seedPeers={}",
             config.params().networkName(), engine.height(), config.apiPort(),
             config.miner().isPresent(), config.peers().size());
-        // Surface the exposed-default posture loudly: with no RHIZOME_API_TOKEN and a non-loopback
-        // bind, the operator routes (/add_peer, /scan/register, /call_readonly, …) are open to the
-        // whole network — fine for a pure P2P node, but a wallet/operator node should set a token
-        // or bind 127.0.0.1 (audit M4).
+        // The open-bind posture is only reachable through the RHIZOME_ALLOW_OPEN_API override
+        // (start() refuses it otherwise) — surface it loudly (audit H-2).
         if (config.apiToken().isEmpty() && !isLoopbackBind(config.bindAddress())) {
-            log.warn("RHIZOME_API_TOKEN is not set and the API binds {} — state-changing/operator "
-                + "routes are open to the network. Set RHIZOME_API_TOKEN, or bind 127.0.0.1 behind "
-                + "a tunnel for a wallet/dashboard node.", config.bindAddress());
+            log.warn("RHIZOME_ALLOW_OPEN_API override active: the API binds {} without "
+                + "RHIZOME_API_TOKEN — state-changing/operator routes are open to the network.",
+                config.bindAddress());
         }
     }
 
@@ -289,6 +300,22 @@ public final class RhizomeNode implements AutoCloseable {
 
     private void startHttp() throws IOException {
         eventloop = Eventloop.create();
+        // Consensus-heavy request handlers (block/tx ingest, VM dry-run, lock-guarded explorer
+        // reads) run on this bounded pool, NOT on the event-loop thread: a single valid-but-heavy
+        // block or one max-gas dry-run would otherwise freeze every route the loop serves —
+        // /peers, SSE, heartbeats — for its whole duration (audit: eventloop blocked by consensus
+        // work). Bounded queue + AbortPolicy: a saturated pool sheds with 429 at the servlet
+        // boundary instead of queueing unbounded latency. Daemon threads; drained in close()
+        // before the stores close.
+        int workerCount = Math.max(2, Runtime.getRuntime().availableProcessors() / 2);
+        apiWorkers = new java.util.concurrent.ThreadPoolExecutor(workerCount, workerCount,
+            60L, TimeUnit.SECONDS, new java.util.concurrent.ArrayBlockingQueue<>(256),
+            r -> {
+                Thread t = new Thread(r, "rhizome-api-worker");
+                t.setDaemon(true);
+                return t;
+            },
+            new java.util.concurrent.ThreadPoolExecutor.AbortPolicy());
         // Stream every applied block's logs (plus a heartbeat) to SSE subscribers,
         // whatever path the block arrived by: API submit, gossip, sync or the local
         // producer. The engine listener only enqueues onto the event loop.
@@ -304,7 +331,7 @@ public final class RhizomeNode implements AutoCloseable {
         log.info("API allowed Host authorities (DNS-rebinding guard): {}", allowedHosts);
         httpServer = HttpServer.builder(eventloop,
                 NodeApi.servlet(eventloop, service, limiter, sseHub, allowedHosts,
-                    config.apiToken().orElse(null)))
+                    config.apiToken().orElse(null), apiWorkers))
             .withListenAddress(new java.net.InetSocketAddress(config.bindAddress(), config.apiPort()))
             // Bound how long a connection may stall a read or write: body sizes are capped, but
             // without an inactivity deadline a client can trickle a POST body one byte at a time
@@ -570,6 +597,23 @@ public final class RhizomeNode implements AutoCloseable {
         if (producer != null) {
             producer.stop();
         }
+        // Drain in-flight API workers (offloaded block/tx ingest, dry-runs, explorer reads)
+        // before the stores close: a worker mid-validation may hold the engine lock or sit
+        // inside a native RocksDB call, so an undrained pool makes the store close below unsafe
+        // in exactly the two ways the syncScheduler branch describes — skip it the same way.
+        boolean workersStuck = false;
+        if (apiWorkers != null) {
+            apiWorkers.shutdownNow();
+            try {
+                if (!apiWorkers.awaitTermination(30, TimeUnit.SECONDS)) {
+                    workersStuck = true;
+                    log.error("API worker pool still busy after 30 s; the store close will be "
+                        + "skipped (native use-after-free / lock-hang risk)");
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
         // Stop and DRAIN the network loops before touching the store: a syncRound()
         // in flight is mid-append into RocksDB, and closing column-family handles
         // under a live native call crashes the JVM. shutdownNow() only signals —
@@ -619,7 +663,7 @@ public final class RhizomeNode implements AutoCloseable {
             // when the sync scheduler never drained: the stuck thread may be inside a native
             // call (close = SIGSEGV) or holding this very lock (close = shutdown hang) — see
             // the scheduler branch above.
-            if (engine != null && !syncStuck) {
+            if (engine != null && !syncStuck && !workersStuck) {
                 engine.runExclusive(() -> {
                     if (store != null) {
                         store.close();
@@ -670,8 +714,9 @@ public final class RhizomeNode implements AutoCloseable {
         if (advertise != null && !advertise.isBlank()) {
             config = config.withAdvertisedUrl(advertise.trim());
         }
-        // Bind address for the HTTP API (default 0.0.0.0 — preserve historical behavior);
-        // 127.0.0.1 for a wallet/dashboard-only node reached via tunnel (audit F4).
+        // Bind address for the HTTP API (default 127.0.0.1 — secure by default, audit H-2);
+        // a public-facing node binds 0.0.0.0 explicitly and must then also set
+        // RHIZOME_API_TOKEN (or RHIZOME_ALLOW_OPEN_API=true for a pure relay).
         String bind = System.getenv("RHIZOME_BIND_ADDRESS");
         if (bind != null && !bind.isBlank()) {
             config = config.withBindAddress(bind.trim());

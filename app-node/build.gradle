@@ -29,3 +29,39 @@ tasks.named('test') {
     // Use JUnit Platform for unit tests.
     useJUnitPlatform()
 }
+
+// GraalVM native-image build of the node. Reachability metadata (RocksDB JNI
+// resource, logback configurators, dashboard assets) ships inside the jar under
+// META-INF/native-image/rhizome/rhizome-node/ and is picked up automatically.
+// Gradle 8.5 itself must run on JDK 21 (e.g. JAVA_HOME=~/.sdkman/candidates/java/21.0.7-tem);
+// native-image is resolved from PATH, so use a GraalVM as the sdkman/current JDK.
+def nativeImageOut = layout.buildDirectory.dir('native')
+
+tasks.register('nativeImage', Exec) {
+    group = 'build'
+    description = 'Builds the GraalVM native binary of the node into build/native/rhizome-node.'
+    dependsOn tasks.named('installDist')
+
+    def installLib = layout.buildDirectory.dir("install/${project.name}/lib")
+    inputs.dir(installLib)
+    outputs.file(nativeImageOut.map { it.file('rhizome-node') })
+
+    doFirst {
+        def nativeImageBin = System.getenv('PATH').split(File.pathSeparator)
+                .collect { new File(it, 'native-image') }
+                .find { it.isFile() && it.canExecute() }
+        if (nativeImageBin == null) {
+            throw new GradleException('native-image not found on PATH. Use a GraalVM JDK as the ' +
+                    'current SDK (e.g. "sdk use java 25.0.2-graal") while keeping Gradle on JDK 21 ' +
+                    '(JAVA_HOME=~/.sdkman/candidates/java/21.0.7-tem ./gradlew :app-node:nativeImage).')
+        }
+        def classpath = installLib.get().asFile
+                .listFiles({ f -> f.name.endsWith('.jar') } as FileFilter)*.absolutePath
+                .sort().join(File.pathSeparator)
+        commandLine nativeImageBin.absolutePath, '--no-fallback', '-O2',
+                '-cp', classpath,
+                "-H:Path=${nativeImageOut.get().asFile}",
+                '-H:Name=rhizome-node',
+                'rhizome.node.RhizomeNode'
+    }
+}

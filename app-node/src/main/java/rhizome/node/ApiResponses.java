@@ -83,14 +83,28 @@ final class ApiResponses {
     /**
      * Parses a JSON request body after a cheap depth pre-scan: bodies nested deeper than
      * {@link #MAX_JSON_DEPTH} are rejected with {@link IllegalArgumentException} (→ clean 400)
-     * before the recursive parser runs. The scan counts brackets inside string literals too —
-     * a rare false positive on pathological-but-shallow input, acceptable for a safety guard.
+     * before the recursive parser runs. The scan skips string literals (brackets inside a
+     * string don't nest) so a deep-looking payload inside a value is not a false positive.
      */
     static JSONObject parseJson(String body) {
         int depth = 0;
+        boolean inString = false;
+        boolean escaped = false;
         for (int i = 0; i < body.length(); i++) {
             char c = body.charAt(i);
-            if (c == '{' || c == '[') {
+            if (inString) {
+                if (escaped) {
+                    escaped = false;
+                } else if (c == '\\') {
+                    escaped = true;
+                } else if (c == '"') {
+                    inString = false;
+                }
+                continue;
+            }
+            if (c == '"') {
+                inString = true;
+            } else if (c == '{' || c == '[') {
                 if (++depth > MAX_JSON_DEPTH) {
                     throw new IllegalArgumentException("JSON nesting too deep (max " + MAX_JSON_DEPTH + ")");
                 }
