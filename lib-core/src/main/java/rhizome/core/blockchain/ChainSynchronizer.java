@@ -2,10 +2,13 @@ package rhizome.core.blockchain;
 
 import java.math.BigInteger;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import rhizome.core.block.Block;
 import rhizome.core.block.BlockImpl;
+import rhizome.core.block.UncleRef;
 import rhizome.core.common.Constants;
 import rhizome.crypto.SHA256Hash;
 import rhizome.core.mempool.ExecutionStatus;
@@ -142,12 +145,77 @@ public final class ChainSynchronizer {
         for (long start = from; start <= to; start += Constants.BLOCKS_PER_FETCH) {
             long end = Math.min(to, start + Constants.BLOCKS_PER_FETCH - 1);
             for (Block block : peer.blocks(start, end)) {
-                if (engine.addBlock(block) != ExecutionStatus.SUCCESS) {
+                if (applyWithUncleFetch(engine, peer, block, engine::addBlock) != ExecutionStatus.SUCCESS) {
                     return false;
                 }
             }
         }
         return true;
+    }
+
+    /**
+     * Applies {@code block} through {@code apply}, with a single uncle-fetch retry on
+     * {@link ExecutionStatus#INVALID_UNCLES} (audit: uncle-sync blocker). A block carries only
+     * {@link UncleRef}s — never the orphan bodies — so a node syncing an uncle-bearing chain
+     * (fresh node, empty orphan pool) cannot pass {@code validateUncles} on its own. On that
+     * failure each missing body is fetched from the serving peer and pooled —
+     * {@link ChainEngine#registerOrphan} re-checks the structural eligibility AND the
+     * memory-hard PoW, so a peer cannot smuggle in a fake orphan — then the apply is retried
+     * exactly once. A peer that predates the orphan endpoint, serves nothing, or serves junk
+     * leaves the failure standing and the caller treats the peer as invalid, exactly as before.
+     *
+     * <p>Caller contract: the fetch is network I/O, so this must run OUTSIDE the consensus
+     * lock (each engine call inside is individually locked). The reorg path, which applies
+     * under {@code withConsistentView}, prefetches via {@link #prefetchUncles} instead.
+     */
+    static ExecutionStatus applyWithUncleFetch(ChainEngine engine, PeerSource peer, Block block,
+                                               java.util.function.Function<Block, ExecutionStatus> apply) {
+        ExecutionStatus status = apply.apply(block);
+        if (status != ExecutionStatus.INVALID_UNCLES) {
+            return status;
+        }
+        for (UncleRef ref : block.uncles()) {
+            if (engine.orphanBlock(ref.hash()) != null) {
+                continue; // already resolvable from the pool or the persisted uncles
+            }
+            Block orphan = fetchOrphan(peer, ref.hash());
+            if (orphan != null) {
+                engine.registerOrphan(orphan);
+            }
+        }
+        return apply.apply(block);
+    }
+
+    /**
+     * Fetches the uncle bodies {@code blocks} reference that we do not already hold (orphan
+     * pool or persisted store), keyed by hash. Runs BEFORE the reorg's lock-held apply so no
+     * network I/O happens under the consensus lock; the in-lock apply pools the prefetched
+     * bodies on an {@code INVALID_UNCLES} failure and retries once (see the reorg path).
+     */
+    static Map<SHA256Hash, Block> prefetchUncles(ChainEngine engine, PeerSource peer, List<Block> blocks) {
+        Map<SHA256Hash, Block> fetched = new HashMap<>();
+        for (Block block : blocks) {
+            for (UncleRef ref : block.uncles()) {
+                SHA256Hash hash = ref.hash();
+                if (fetched.containsKey(hash) || engine.orphanBlock(hash) != null) {
+                    continue;
+                }
+                Block orphan = fetchOrphan(peer, hash);
+                if (orphan != null) {
+                    fetched.put(hash, orphan);
+                }
+            }
+        }
+        return fetched;
+    }
+
+    /** One orphan body from the peer, or {@code null} (not served / endpoint unsupported / transport error). */
+    static Block fetchOrphan(PeerSource peer, SHA256Hash hash) {
+        try {
+            return peer.orphan(hash);
+        } catch (RuntimeException e) { // UnsupportedOperationException included: no orphan endpoint
+            return null;
+        }
     }
 
     private Result reorg(PeerSource peer, long forkHeight) {
@@ -180,6 +248,9 @@ public final class ChainSynchronizer {
         // sequence restores the single-writer guarantee (WHITEPAPER §3.5/§4.9); the branch is already
         // prefetched, so no network I/O happens under the lock (audit: reorg atomicity). The reentrant
         // lock lets the inner pop/add/restore calls re-acquire it freely.
+        // Prefetch the uncle bodies the branch references (fresh nodes hold none), OUTSIDE the
+        // lock so the lock-held apply below does no network I/O (audit: uncle-sync blocker).
+        Map<SHA256Hash, Block> branchUncles = prefetchUncles(engine, peer, branch);
         Result outcome = engine.withConsistentView(() -> {
             // Uncle-inclusive chain weight before we touch anything — the authoritative GHOST metric (§3.7).
             BigInteger localTotal = engine.totalWork();
@@ -192,7 +263,19 @@ public final class ChainSynchronizer {
             }
 
             for (Block block : branch) {
-                if (engine.addBlock(block) != ExecutionStatus.SUCCESS) {
+                ExecutionStatus status = engine.addBlock(block);
+                if (status == ExecutionStatus.INVALID_UNCLES && !block.uncles().isEmpty()) {
+                    // Pool the prefetched orphan bodies (registerOrphan re-checks PoW) and retry
+                    // once — the fetch itself happened before the lock was taken.
+                    for (UncleRef ref : block.uncles()) {
+                        Block orphan = branchUncles.get(ref.hash());
+                        if (orphan != null) {
+                            engine.registerOrphan(orphan);
+                        }
+                    }
+                    status = engine.addBlock(block);
+                }
+                if (status != ExecutionStatus.SUCCESS) {
                     restore(forkHeight, localBranch);
                     return Result.PEER_INVALID;
                 }
@@ -248,7 +331,7 @@ public final class ChainSynchronizer {
         for (Block block : branch) {
             var b = (BlockImpl) block;
             if (b.id() != expectedId || !b.lastBlockHash().equals(prevHash)
-                || !block.verifyNonce(engine.params().powAlgorithm())) {
+                || !block.verifyNonce(engine.params().powAlgorithm(), engine.params().powCostsAt(b.id()))) {
                 return false;
             }
             prevHash = block.hash();

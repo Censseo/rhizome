@@ -90,6 +90,13 @@ public final class NodeApi {
      */
     private static final int SNAPSHOT_CHUNK_COST = 75;
 
+    /**
+     * Rate-limit cost of an /orphan fetch: a lock-guarded orphan-pool / uncle-store read plus
+     * a full-block binary egress, for an unauthenticated P2P caller — weighted like the other
+     * block-serving reads (~1 unit per block) with a small surcharge for the hash-keyed lookup.
+     */
+    private static final int ORPHAN_COST = 2;
+
     private NodeApi() {}
 
     /** Servlet with a default, lenient rate limiter (for tests and simple embeds). */
@@ -204,17 +211,18 @@ public final class NodeApi {
             // ---- peer sync / gossip ingest ----
             .with(GET, "/sync", req -> guarded(() -> SyncApi.sync(node, req)))
             .with(GET, "/headers", req -> guarded(() -> SyncApi.headers(node, req)))
+            .with(GET, "/orphan", req -> guarded(() -> SyncApi.orphan(node, req)))
             .with(POST, "/add_transaction_json", req -> req.loadBody(SMALL_BODY).map(body -> guardedResponse(() -> {
                 Transaction t = Transaction.of(parseJson(body.getString(StandardCharsets.UTF_8)));
-                return statusResponse(node.submitTransaction(t));
+                return statusResponse(node.submitTransaction(t, clientKey(req)));
             })))
             .with(POST, "/add_transaction", req -> req.loadBody(TX_BODY).map(body -> guardedResponse(() -> {
                 Transaction t = Transaction.of(BinarySerializable.fromBuffer(body.getArray(), TransactionDto.class));
-                return statusResponse(node.submitTransaction(t));
+                return statusResponse(node.submitTransaction(t, clientKey(req)));
             })))
             .with(POST, "/submit", req -> req.loadBody(maxBlockBody).map(body -> guardedResponse(() -> {
                 Block block = BlockCodec.decode(body.getArray());
-                return statusResponse(node.submitBlock(block));
+                return statusResponse(node.submitBlock(block, clientKey(req)));
             })))
             .build();
 
@@ -223,6 +231,25 @@ public final class NodeApi {
             if (!limiter.allow(clientKey(request), cost)) {
                 return HttpResponse.ofCode(429)
                     .withJson(new JSONObject().put("error", "rate limited").toString())
+                    .toPromise();
+            }
+            // Early shed of push-abusers (audit: gossip push ban-score): a client that kept
+            // feeding invalid blocks / corrupt-signature transactions is refused BEFORE the
+            // token check and the body decode, for the strike window. A per-client-key shed
+            // like the limiter above — never an aggregate gate, so honest peers are unaffected.
+            if ((isSubmitPost(request) || isAddTransactionPost(request)) && node.isPushShed(clientKey(request))) {
+                return HttpResponse.ofCode(429)
+                    .withJson(new JSONObject().put("error", "push temporarily refused").toString())
+                    .toPromise();
+            }
+            // Optional bearer-token gate (RHIZOME_API_TOKEN) on the state-changing/operator
+            // routes, checked BEFORE the aggregate gates below are consumed: an unauthenticated
+            // flood must not burn the shared submit/mempool budgets that gated (authenticated)
+            // peers depend on — a 401 is cheap, a global budget is not (audit: auth after
+            // budgets). The P2P protocol endpoints stay open so peering keeps working (audit F4).
+            if (apiToken != null && isTokenProtectedRoute(request) && !bearerMatches(request, apiToken)) {
+                return HttpResponse.ofCode(401)
+                    .withJson(new JSONObject().put("error", "unauthorized").toString())
                     .toPromise();
             }
             // Aggregate (all-IP) budget for the explorer reads that decode blocks under the consensus
@@ -252,13 +279,6 @@ public final class NodeApi {
             if (isAddTransactionPost(request) && !node.tryMempoolSigBudget()) {
                 return HttpResponse.ofCode(429)
                     .withJson(new JSONObject().put("error", "transaction throttled").toString())
-                    .toPromise();
-            }
-            // Optional bearer-token gate (RHIZOME_API_TOKEN) on the state-changing/operator
-            // routes. The P2P protocol endpoints stay open so peering keeps working (audit F4).
-            if (apiToken != null && isTokenProtectedRoute(request) && !bearerMatches(request, apiToken)) {
-                return HttpResponse.ofCode(401)
-                    .withJson(new JSONObject().put("error", "unauthorized").toString())
                     .toPromise();
             }
             // DNS-rebinding Host check for ALL browser-reachable requests when an allowlist is
@@ -292,7 +312,7 @@ public final class NodeApi {
             // response; the detail is logged server-side only, never reflected to the client
             // (audit L3 — reflected exception text leaks internal detail for reconnaissance).
             return routing.serve(request).map(r -> r, e -> {
-                log.debug("request handling failed: {}", e.toString());
+                log.debug("request handling failed: {}", ApiResponses.sanitizeForLog(e.toString()));
                 return badRequest("bad request");
             });
         };
@@ -431,15 +451,28 @@ public final class NodeApi {
         if ("/state/snapshot/chunk".equals(path)) {
             return SNAPSHOT_CHUNK_COST;
         }
+        if ("/orphan".equals(path)) {
+            return ORPHAN_COST;
+        }
         return 1;
     }
 
     /**
-     * The browser-facing explorer reads that fully decode blocks from RocksDB under the consensus lock
-     * (ChainEngine.blockAt). These are additionally charged to the process-wide aggregate read budget
-     * (NodeService.tryReadBudget) so a distributed flood can't sum past the per-IP limiter and pin the
-     * event loop / contend the lock (audit 5th-pass, net Finding 2). The peer-sync paths /sync and
-     * /headers are deliberately excluded — throttling them would slow honest chain sync.
+     * The reads charged to the process-wide aggregate read budget (NodeService.tryReadBudget) so
+     * a distributed flood can't sum past the per-IP limiter and pin the event loop / contend the
+     * consensus lock (audit 5th-pass, net Finding 2). Two families:
+     * <ul>
+     *   <li>the browser-facing explorer reads ({@code /stats}, {@code /blocks}, {@code /block},
+     *       {@code /transaction}, {@code /address_txs}), which fully decode blocks from RocksDB
+     *       under the consensus lock;</li>
+     *   <li>the peer-serving heavyweights {@code /sync}, {@code /headers} and
+     *       {@code /state/snapshot/chunk}: /sync and /headers run the same lock-guarded store
+     *       reads per block served, and all three amplify egress by up to hundreds of blocks (or
+     *       ~16 MiB) per request, so leaving them ungated let a flood of "peers" drive unbounded
+     *       lock-holding reads and outbound bandwidth at cost ~1 (audit: aggregate bound on the
+     *       sync/snapshot serving paths). Honest sync still fits the aggregate budget — it is
+     *       sized far above any plausible convergence traffic.</li>
+     * </ul>
      */
     private static boolean isConsensusLockRead(HttpRequest request) {
         String path;
@@ -449,7 +482,9 @@ public final class NodeApi {
             return false;
         }
         return "/stats".equals(path) || "/blocks".equals(path) || "/block".equals(path)
-            || "/transaction".equals(path) || "/address_txs".equals(path);
+            || "/transaction".equals(path) || "/address_txs".equals(path)
+            || "/sync".equals(path) || "/headers".equals(path) || "/state/snapshot/chunk".equals(path)
+            || "/orphan".equals(path);
     }
 
     /** True for a POST /submit — the block-ingest route whose body decode must be gated (audit S6). */
@@ -530,7 +565,7 @@ public final class NodeApi {
         }
         return switch (path) {
             case "/sync", "/headers", "/blocks", "/block", "/peers", "/block_count", "/total_work",
-                 "/info", "/state/snapshot/info", "/state/snapshot/chunk",
+                 "/info", "/state/snapshot/info", "/state/snapshot/chunk", "/orphan",
                  "/add_peer", "/add_transaction", "/add_transaction_json", "/submit" -> true;
             default -> false;
         };
@@ -586,10 +621,11 @@ public final class NodeApi {
 
     /**
      * Aggregate key one tier up from {@link #clientKey}: the IPv6 /48 (first 6 bytes of the
-     * address) — the typical ISP/site allocation, which hands out 2^16 /64s. The per-client
-     * SSE cap keys on the /64, so a single /48 rotating through its /64s could still exhaust
-     * the global subscriber cap; this second tier bounds the site in aggregate (audit F5).
-     * IPv4 clients key by their full address — the per-client cap already bounds them.
+     * address) — the typical ISP/site allocation, which hands out 2^16 /64s — or the IPv4 /24.
+     * The per-client SSE cap keys on the /64 (or the full v4 address), so rotating inside the
+     * site allocation could still exhaust the global subscriber cap: ~64 IPv4 addresses suffice
+     * at 4 streams each against a 256-slot hub, and a /48 trivially so. This second tier bounds
+     * the site in aggregate on both families (audit F5; v4 gap closed in the SSE-cap pass).
      */
     private static String clientSubnetKey(HttpRequest request) {
         try {
@@ -605,7 +641,7 @@ public final class NodeApi {
                 }
                 return sb.toString();
             }
-            return addr.getHostAddress();
+            return "v4net:" + (b[0] & 0xFF) + "." + (b[1] & 0xFF) + "." + (b[2] & 0xFF);
         } catch (RuntimeException e) {
             return "local";
         }

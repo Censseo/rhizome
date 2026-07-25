@@ -385,7 +385,7 @@ class WasmAdversarialTest {
 
     // ---- deploy-time section caps (F2b / F7) ----
 
-    /** A type-only module declaring one function type with {@code params} i32 parameters. */
+    /** A module declaring one function type with {@code params} i32 parameters and exporting {@code call}. */
     private byte[] paramsModule(int params) {
         ByteArrayOutputStream type = new ByteArrayOutputStream();
         uleb(type, 1);                                            // 1 type
@@ -395,7 +395,10 @@ class WasmAdversarialTest {
             type.write(0x7F);                                     // i32
         }
         uleb(type, 0);                                            // no returns
-        return module(section(1, type.toByteArray()));
+        byte[] func = section(3, bytes(0x01, 0x00));              // 1 function, type 0
+        byte[] export = section(7, bytes(0x01, 0x04, 0x63, 0x61, 0x6C, 0x6C, 0x00, 0x00)); // "call" -> func 0
+        byte[] code = section(10, bytes(0x01, 0x02, 0x00, 0x0B)); // 1 body: 0 locals, end
+        return module(section(1, type.toByteArray()), func, export, code);
     }
 
     @Test
@@ -536,5 +539,245 @@ class WasmAdversarialTest {
             new MapHostState(new byte[0], new byte[0], 0), new GasMeter(10_000_000));
         assertEquals(ExecResult.Status.OK, r.status(),
             "a grow that fails at the instance cap must not consume the tree-page budget");
+    }
+
+    // ---- float init-expressions in globals (audit: floats in init-expressions) ----
+
+    @Test
+    void rejectsAnF32ConstInAGlobalInitExpression() {
+        // Global init expressions are evaluated at INSTANTIATION, before any metering, and the
+        // float/SIMD scan previously covered only the code section — an f32.const here reached the
+        // runtime unscanned. One immutable f32 (0x7D) global initialised by f32.const (0x43) 0.0.
+        byte[] global = section(6, bytes(0x01, 0x7D, 0x00, 0x43, 0x00, 0x00, 0x00, 0x00, 0x0B));
+        byte[] mod = module(global);
+        var ex = assertThrows(IllegalArgumentException.class, () -> WasmVm.validateCode(mod));
+        assertTrue(ex.getMessage().toLowerCase().contains("non-deterministic")
+            || ex.getMessage().toLowerCase().contains("float"), ex.getMessage());
+    }
+
+    @Test
+    void rejectsAnF64ConstInAGlobalInitExpression() {
+        // Same vector with f64 (0x7C) and f64.const (0x44) — the NaN-payload fork class the scan
+        // exists to close, this time outside any function body.
+        byte[] global = section(6, bytes(0x01, 0x7C, 0x00, 0x44,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0B));
+        byte[] mod = module(global);
+        var ex = assertThrows(IllegalArgumentException.class, () -> WasmVm.validateCode(mod));
+        assertTrue(ex.getMessage().toLowerCase().contains("non-deterministic")
+            || ex.getMessage().toLowerCase().contains("float"), ex.getMessage());
+    }
+
+    // ---- deploy-time ABI controls: memory cap, import whitelist, call export (FIX 3) ----
+
+    @Test
+    void rejectsMemoryDeclaringTooManyInitialPages() {
+        // The runtime boundedMemory cap was enforced only at instantiation; validateCode must reject
+        // the same module at deploy (shared check, so the caps cannot drift). 1025 pages = LEB128
+        // 81 08, one over MAX_CONTRACT_PAGES.
+        byte[] type = section(1, bytes(0x01, 0x60, 0x00, 0x00));
+        byte[] func = section(3, bytes(0x01, 0x00));
+        byte[] mem = section(5, bytes(0x01, 0x00, 0x81, 0x08)); // 1 memory, min-only, min 1025
+        byte[] export = section(7, bytes(0x01, 0x04, 0x63, 0x61, 0x6C, 0x6C, 0x00, 0x00));
+        byte[] code = section(10, bytes(0x01, 0x02, 0x00, 0x0B));
+        byte[] mod = module(type, func, mem, export, code);
+        var ex = assertThrows(IllegalArgumentException.class, () -> WasmVm.validateCode(mod));
+        assertTrue(ex.getMessage().contains("memory"), ex.getMessage());
+    }
+
+    @Test
+    void rejectsAnImportOutsideTheHostWhitelist() {
+        // env.evil is not a host function: instantiation would fail it per call, but deploy must
+        // refuse it up front so non-ABI modules never enter on-chain state.
+        byte[] type = section(1, bytes(0x01, 0x60, 0x00, 0x00));
+        ByteArrayOutputStream imp = new ByteArrayOutputStream();
+        imp.write(0x01);
+        imp.write(0x03); imp.writeBytes("env".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        imp.write(0x04); imp.writeBytes("evil".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        imp.write(0x00); imp.write(0x00);                         // func import, type 0
+        byte[] mod = module(type, section(2, imp.toByteArray()));
+        var ex = assertThrows(IllegalArgumentException.class, () -> WasmVm.validateCode(mod));
+        assertTrue(ex.getMessage().contains("non-whitelisted"), ex.getMessage());
+    }
+
+    @Test
+    void rejectsANonFunctionImportEvenWithAWhitelistedName() {
+        // A MEMORY import named env.storage_read: the name is whitelisted but the sandbox only
+        // provides host FUNCTIONS — letting a contract import its own memory/table/global would
+        // bypass the bounded memory factory and its tree-wide page budget.
+        byte[] type = section(1, bytes(0x01, 0x60, 0x00, 0x00));
+        ByteArrayOutputStream imp = new ByteArrayOutputStream();
+        imp.write(0x01);
+        imp.write(0x03); imp.writeBytes("env".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        imp.write(0x0C); imp.writeBytes("storage_read".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        imp.write(0x02); imp.write(0x00); imp.write(0x01);        // memory import, min 1 page
+        byte[] mod = module(type, section(2, imp.toByteArray()));
+        var ex = assertThrows(IllegalArgumentException.class, () -> WasmVm.validateCode(mod));
+        assertTrue(ex.getMessage().contains("non-whitelisted"), ex.getMessage());
+    }
+
+    @Test
+    void rejectsAModuleWithoutACallExport() {
+        // The executor invokes the "call" entry point; a module exporting only "main" deploys
+        // dead code that can only ever revert per call — refuse it at deploy.
+        byte[] type = section(1, bytes(0x01, 0x60, 0x00, 0x00));
+        byte[] func = section(3, bytes(0x01, 0x00));
+        byte[] export = section(7, bytes(0x01, 0x04, 0x6D, 0x61, 0x69, 0x6E, 0x00, 0x00)); // "main" -> func 0
+        byte[] code = section(10, bytes(0x01, 0x02, 0x00, 0x0B));
+        byte[] mod = module(type, func, export, code);
+        var ex = assertThrows(IllegalArgumentException.class, () -> WasmVm.validateCode(mod));
+        assertTrue(ex.getMessage().contains("call"), ex.getMessage());
+    }
+
+    @Test
+    void acceptsAModuleUsingOnlyTheWhitelistedAbi() {
+        // transfer_value module: imports env.transfer_value, exports "call", 1-page memory — the
+        // exact shape every deployed template has, so the ABI controls must not reject it.
+        WasmVm.validateCode(transferValueModule(1000));
+    }
+
+    // ---- host buffer cap (audit: host allocations proportional to gas) ----
+
+    /** {@code transfer_value(0, toLen, 0)} with a {@code memPages}-page memory, so CAP-sized reads fit. */
+    private byte[] transferValueModule(int toLen, int memPages) {
+        byte[] type = section(1, bytes(0x02,
+            0x60, 0x03, 0x7F, 0x7F, 0x7E, 0x01, 0x7F,
+            0x60, 0x00, 0x00));
+        ByteArrayOutputStream imp = new ByteArrayOutputStream();
+        imp.write(0x01);
+        imp.write(0x03); imp.writeBytes("env".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        imp.write(0x0E); imp.writeBytes("transfer_value".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        imp.write(0x00); imp.write(0x00);
+        byte[] importSec = section(2, imp.toByteArray());
+        byte[] func = section(3, bytes(0x01, 0x01));
+        ByteArrayOutputStream mem = new ByteArrayOutputStream();
+        mem.write(0x01); mem.write(0x00); uleb(mem, memPages);    // 1 memory, min-only
+        byte[] export = section(7, bytes(0x01, 0x04, 0x63, 0x61, 0x6C, 0x6C, 0x00, 0x01));
+        ByteArrayOutputStream body = new ByteArrayOutputStream();
+        body.write(0x00);
+        body.write(0x41); sleb(body, 0);
+        body.write(0x41); sleb(body, toLen);
+        body.write(0x42); sleb(body, 0);
+        body.write(0x10); uleb(body, 0);
+        body.write(0x1A);
+        body.write(0x0B);
+        ByteArrayOutputStream code = new ByteArrayOutputStream();
+        code.write(0x01);
+        uleb(code, body.size());
+        code.writeBytes(body.toByteArray());
+        return module(type, importSec, func, section(5, mem.toByteArray()), export,
+            section(10, code.toByteArray()));
+    }
+
+    @Test
+    void aHostBufferAtTheCapIsAllowed() {
+        // 17 pages = 1,114,112 bytes >= HOST_BUFFER_CAP, so the capped read fits guest memory.
+        WasmVm.clearModuleCacheForTest();
+        ExecResult r = vm.execute(transferValueModule(WasmVm.HOST_BUFFER_CAP, 17),
+            new MapHostState(new byte[0], new byte[0], 0), new GasMeter(10_000_000));
+        assertEquals(ExecResult.Status.OK, r.status(),
+            "a host buffer at exactly HOST_BUFFER_CAP must be allowed");
+    }
+
+    @Test
+    void aHostBufferAboveTheCapIsFullGasOutOfGas() {
+        // The per-byte charge on the length lands first, then the cap turns the rest of the budget
+        // into a deterministic full-gas out-of-gas BEFORE the multi-MB allocation — identical on a
+        // small-heap and a large-heap node (the consensus property the cap exists for).
+        long limit = 10_000_000;
+        WasmVm.clearModuleCacheForTest();
+        ExecResult r = vm.execute(transferValueModule(WasmVm.HOST_BUFFER_CAP + 1, 17),
+            new MapHostState(new byte[0], new byte[0], 0), new GasMeter(limit));
+        assertEquals(ExecResult.Status.OUT_OF_GAS, r.status(),
+            "a host buffer above HOST_BUFFER_CAP must be rejected before allocation");
+        assertEquals(limit, r.gasUsed(),
+            "the cap rejection consumes the full budget, never a heap-dependent amount");
+    }
+
+    @Test
+    void theCapPathIsDeterministicRegardlessOfHeapPressure() {
+        // Drive the cap decision directly: the outcome and the resulting meter state are a pure
+        // function of (length, limit) — no allocation is attempted, so local memory pressure can
+        // never change gasUsed between validators.
+        GasMeter atCap = new GasMeter(10_000_000);
+        WasmVm.capHostBuffer(WasmVm.HOST_BUFFER_CAP, atCap);
+        assertEquals(0, atCap.used(), "a length at the cap is a no-op");
+        GasMeter overCap = new GasMeter(10_000_000);
+        assertThrows(OutOfGasException.class,
+            () -> WasmVm.capHostBuffer(WasmVm.HOST_BUFFER_CAP + 1, overCap));
+        assertEquals(overCap.limit(), overCap.used(),
+            "over the cap the meter saturates to the limit, deterministically");
+    }
+
+    // ---- box_read charges before serializing (FIX 4) ----
+
+    /** {@code box_read(0, 64, 512); drop} — reads the 32-byte id at 0, copies out at 64. */
+    private byte[] boxReadModule() {
+        byte[] type = section(1, bytes(0x02,
+            0x60, 0x03, 0x7F, 0x7F, 0x7F, 0x01, 0x7F,
+            0x60, 0x00, 0x00));
+        ByteArrayOutputStream imp = new ByteArrayOutputStream();
+        imp.write(0x01);
+        imp.write(0x03); imp.writeBytes("env".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        imp.write(0x08); imp.writeBytes("box_read".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        imp.write(0x00); imp.write(0x00);
+        byte[] importSec = section(2, imp.toByteArray());
+        byte[] func = section(3, bytes(0x01, 0x01));
+        byte[] mem = section(5, bytes(0x01, 0x00, 0x01));
+        byte[] export = section(7, bytes(0x01, 0x04, 0x63, 0x61, 0x6C, 0x6C, 0x00, 0x01));
+        ByteArrayOutputStream body = new ByteArrayOutputStream();
+        body.write(0x00);
+        body.write(0x41); sleb(body, 0);                          // id ptr
+        body.write(0x41); sleb(body, 64);                         // out ptr
+        body.write(0x41); sleb(body, 512);                        // out cap
+        body.write(0x10); uleb(body, 0);                          // call box_read
+        body.write(0x1A);
+        body.write(0x0B);
+        ByteArrayOutputStream code = new ByteArrayOutputStream();
+        code.write(0x01);
+        uleb(code, body.size());
+        code.writeBytes(body.toByteArray());
+        return module(type, importSec, func, mem, export, section(10, code.toByteArray()));
+    }
+
+    /** A host state whose box_read returns {@code box} (or null when {@code box} is null). */
+    private static HostState hostWithBox(rhizome.core.box.Box box) {
+        MapHostState base = new MapHostState(new byte[0], new byte[0], 0);
+        return new HostState() {
+            @Override public byte[] storageRead(byte[] key) { return base.storageRead(key); }
+            @Override public void storageWrite(byte[] key, byte[] value) { base.storageWrite(key, value); }
+            @Override public byte[] caller() { return base.caller(); }
+            @Override public byte[] input() { return base.input(); }
+            @Override public long value() { return base.value(); }
+            @Override public void setOutput(byte[] output) { base.setOutput(output); }
+            @Override public byte[] output() { return base.output(); }
+            @Override public void emitLog(byte[] topic, byte[] data) { base.emitLog(topic, data); }
+            @Override public java.util.List<LogEntry> logs() { return base.logs(); }
+            @Override public rhizome.core.box.Box boxRead(byte[] id) { return box; }
+        };
+    }
+
+    @Test
+    void boxReadChargesTheFullSerializedSizeBeforeSerializing() {
+        // The per-byte charge on the KNOWN serialized size must land before serialize() runs:
+        // diffing a present-box run against a missing-box run isolates exactly size * PER_BYTE,
+        // and a budget one gas short must fail out-of-gas (before any output allocation) rather
+        // than completing with the serialization done for free.
+        rhizome.core.ledger.PublicAddress owner = rhizome.core.ledger.PublicAddress.random();
+        rhizome.core.box.Box box = new rhizome.core.box.Box(rhizome.core.box.Box.deriveId(owner, 1),
+            owner, 4242, 1, 1, java.util.List.of(rhizome.core.box.BoxRegister.string("data-input")));
+        byte[] mod = boxReadModule();
+        WasmVm.clearModuleCacheForTest();
+        ExecResult present = vm.execute(mod, hostWithBox(box), new GasMeter(10_000_000));
+        ExecResult missing = vm.execute(mod, hostWithBox(null), new GasMeter(10_000_000));
+        assertEquals(ExecResult.Status.OK, present.status(), "box_read with a box should complete");
+        assertEquals(ExecResult.Status.OK, missing.status(), "box_read without a box should complete");
+        assertEquals((long) box.serializedSize() * GasSchedule.PER_BYTE,
+            present.gasUsed() - missing.gasUsed(),
+            "the full serialized size is charged up front, not after serialize()");
+
+        ExecResult shortGas = vm.execute(mod, hostWithBox(box), new GasMeter(present.gasUsed() - 1));
+        assertEquals(ExecResult.Status.OUT_OF_GAS, shortGas.status(),
+            "one gas short must fail before serialize()/the output copy, not after");
+        assertEquals(present.gasUsed() - 1, shortGas.gasUsed());
     }
 }

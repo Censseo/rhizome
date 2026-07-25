@@ -95,15 +95,13 @@ public final class PeerRegistry {
         this.nowMillis = nowMillis;
     }
 
+    /**
+     * Canonical form used for dedup, the self-pairing refusal and the removal-cooldown key:
+     * case/trailing-dot/default-port/trailing-slash variants of one URL coalesce into a single
+     * entry (see {@link PeerUrls#canonicalize}; audit: /add_peer coalescing & self-pairing).
+     */
     static String normalize(String url) {
-        if (url == null) {
-            return null;
-        }
-        String u = url.trim();
-        while (u.endsWith("/")) {
-            u = u.substring(0, u.length() - 1);
-        }
-        return u;
+        return PeerUrls.canonicalize(url);
     }
 
     /**

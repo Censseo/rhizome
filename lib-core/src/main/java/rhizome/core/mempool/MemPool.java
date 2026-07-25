@@ -48,11 +48,34 @@ public final class MemPool {
     /** Default per-sender ceiling: no honest account queues this many pending nonces. */
     private static final int DEFAULT_MAX_PER_SENDER = 1024;
 
+    /**
+     * How long a fully parked transaction (its sender's confirmed next nonce is absent, so a
+     * nonce gap makes NONE of its queued transactions minable) may occupy the pool before it
+     * expires (audit: parked-TTL DoS). Without an expiry, gap transactions — cheap to sign,
+     * never executable — could occupy their slots forever, and the capacity eviction
+     * ({@code makeRoomForParkedSlot}) only helps when the pool is full. 2 hours is far above
+     * any honest nonce-gap resolution time (a missing predecessor is one block away) and far
+     * below any practical pool-lifetime goal. Purged lazily on {@code addTransaction} and
+     * {@code getTransactionsForBlock}, so expiry costs nothing when the pool is idle. Live
+     * (contiguous-nonce) transactions never expire this way.
+     */
+    static final long PARKED_TTL_MILLIS = 2 * 60 * 60 * 1000L;
+
+    /**
+     * Minimum fee increase, in percent, for replace-by-fee: a pooled transaction may be replaced
+     * by another from the same sender at the same nonce only if the new fee is at least
+     * {@code old + max(1, old / RBF_MIN_BUMP_PERCENT)} — strictly greater, so a replacement always
+     * pays the miner more, and large enough that repeated replacement cannot churn the pool for
+     * free (each bump compounds). A 0-fee transaction thus needs at least fee 1 to be replaced.
+     */
+    static final long RBF_MIN_BUMP_PERCENT = 10;
+
     private final NetworkParameters params;
     private final SignatureVerifier verifier;
     private final AccountView accounts;
     private final int maxSize;
     private final int maxPerSender;
+    private final java.util.function.LongSupplier clock;
 
     /** Senders in unsigned-address order, the deterministic tie-break of block selection. */
     private static final java.util.Comparator<PublicAddress> ADDRESS_ORDER =
@@ -62,6 +85,8 @@ public final class MemPool {
     private final NavigableMap<PublicAddress, NavigableMap<Long, Transaction>> bySender =
         new TreeMap<>(ADDRESS_ORDER);
     private final Set<SHA256Hash> contentHashes = new HashSet<>();
+    /** Admission time (ms, {@link #clock}) per pooled transaction — the parked-TTL reference. */
+    private final Map<SHA256Hash, Long> admittedAt = new HashMap<>();
     private final ReentrantLock lock = new ReentrantLock();
     private int size;
 
@@ -77,11 +102,18 @@ public final class MemPool {
      */
     public MemPool(NetworkParameters params, SignatureVerifier verifier, AccountView accounts,
                    int maxSize, int maxPerSender) {
+        this(params, verifier, accounts, maxSize, maxPerSender, System::currentTimeMillis);
+    }
+
+    /** As above, with an explicit clock (tests) driving the parked-TTL expiry. */
+    public MemPool(NetworkParameters params, SignatureVerifier verifier, AccountView accounts,
+                   int maxSize, int maxPerSender, java.util.function.LongSupplier clock) {
         this.params = params;
         this.verifier = verifier;
         this.accounts = accounts;
         this.maxSize = maxSize;
         this.maxPerSender = maxPerSender;
+        this.clock = clock;
     }
 
     /**
@@ -163,6 +195,7 @@ public final class MemPool {
 
         lock.lock();
         try {
+            purgeExpiredParked(); // lazy TTL: gap-parked transactions eventually die (PARKED_TTL_MILLIS)
             SHA256Hash id = transaction.hashContents();
             if (contentHashes.contains(id)) {
                 return ALREADY_IN_QUEUE;
@@ -182,19 +215,41 @@ public final class MemPool {
             }
 
             NavigableMap<Long, Transaction> pending = bySender.get(from);
-            if (pending != null && pending.containsKey(tx.nonce())) {
-                return INVALID_TRANSACTION_NONCE; // duplicate nonce (no replace-by-fee yet)
+            Transaction replaced = null;
+            if (pending != null && (replaced = pending.get(tx.nonce())) != null) {
+                // Replace-by-fee (RBF_MIN_BUMP_PERCENT): a LIVE pooled transaction (in the sender's
+                // contiguous, currently-minable nonce run) may be replaced by one paying strictly
+                // more TO THE MINER — compared on minerRevenue (fee + declared gas budget for
+                // calls), the same metric as the admission floor, so a CALL cannot be "replaced"
+                // by a tx with a higher plain fee but lower actual revenue (audit follow-up).
+                // Without a bump rule a sender whose fee became uncompetitive could never raise
+                // it (its only resubmit was rejected as a duplicate), and a free replacement
+                // would let anyone churn slots. A PARKED transaction is never replaced here —
+                // it expires by TTL or yields to the capacity eviction instead.
+                long oldRevenue = minerRevenue((TransactionImpl) replaced);
+                long required;
+                try {
+                    required = Math.addExact(oldRevenue, Math.max(1, oldRevenue / RBF_MIN_BUMP_PERCENT));
+                } catch (ArithmeticException overflow) {
+                    return TRANSACTION_FEE_TOO_LOW; // an astronomical old revenue cannot be bumped
+                }
+                if (minerRevenue(tx) < required || !isLive(pending, confirmedNonce, tx.nonce())) {
+                    return INVALID_TRANSACTION_NONCE; // duplicate nonce without a sufficient bump
+                }
             }
-            if (pending != null && pending.size() >= maxPerSender) {
+            if (pending != null && pending.size() >= maxPerSender && replaced == null) {
                 return QUEUE_FULL; // one sender cannot monopolise the pool
             }
 
             // Cumulative spend across this sender's pending set + candidate. A contract
-            // transaction can spend its attached value plus the whole gas budget.
+            // transaction can spend its attached value plus the whole gas budget. A replaced
+            // transaction's spend is excluded — it leaves the pool in the same insert below.
             long spend = maxSpend(tx);
             if (pending != null) {
                 for (Transaction p : pending.values()) {
-                    spend += maxSpend((TransactionImpl) p);
+                    if (p != replaced) {
+                        spend += maxSpend((TransactionImpl) p);
+                    }
                 }
             }
             if (spend < 0 || spend > accounts.confirmedBalance(from)) {
@@ -218,16 +273,70 @@ public final class MemPool {
             // never be crowded out permanently by parked gap-txs (audit 5th-pass, mempool censorship).
             // If the pool is full of live txs instead, this is legitimate saturation and we still shed
             // the newcomer.
-            if (size >= maxSize && !makeRoomForParkedSlot(from, tx)) {
+            if (size >= maxSize && replaced == null && !makeRoomForParkedSlot(from, tx)) {
                 return QUEUE_FULL;
             }
 
+            if (replaced != null) {
+                contentHashes.remove(replaced.hashContents());
+                admittedAt.remove(replaced.hashContents());
+                size--;
+            }
             bySender.computeIfAbsent(from, a -> new TreeMap<>()).put(tx.nonce(), transaction);
             contentHashes.add(id);
+            admittedAt.put(id, clock.getAsLong());
             size++;
             return SUCCESS;
         } finally {
             lock.unlock();
+        }
+    }
+
+    /**
+     * Whether the pooled transaction at {@code nonce} is LIVE: part of the sender's contiguous
+     * nonce run starting at the confirmed next nonce, so it is currently minable. Only live
+     * transactions are replaceable by fee bump (see {@code addTransaction}).
+     */
+    private static boolean isLive(NavigableMap<Long, Transaction> pending, long confirmedNonce, long nonce) {
+        if (nonce < confirmedNonce) {
+            return false;
+        }
+        return pending.subMap(confirmedNonce, true, nonce, true).size() == nonce - confirmedNonce + 1;
+    }
+
+    /**
+     * Lazy parked-TTL expiry (PARKED_TTL_MILLIS): drops every transaction whose sender is FULLY
+     * parked — its confirmed next nonce absent, so a nonce gap makes none of its queue minable —
+     * and that has sat in the pool past the TTL. Live queues are never touched. Runs on
+     * {@code addTransaction} and {@code getTransactionsForBlock}, so an idle pool costs nothing.
+     *
+     * <p>Throttled to at most one full scan per {@link #PURGE_INTERVAL_MS}: each sender check
+     * calls {@code confirmedNextNonce}, which takes the consensus lock and reads the nonce store,
+     * so an unthrottled per-add scan let a cheap multi-sender flood turn every admission into
+     * O(senders) consensus-lock acquisitions (audit follow-up: anti-DoS fix turned amplifier).
+     * The TTL is hours; a minute of extra lag changes nothing.
+     */
+    private static final long PURGE_INTERVAL_MS = 60_000L;
+    // Seeded far in the past so the very first call always scans (tests and boot both rely on it).
+    private long lastPurgeAt = Long.MIN_VALUE / 2;
+
+    private void purgeExpiredParked() {
+        long now = clock.getAsLong();
+        if (now - lastPurgeAt < PURGE_INTERVAL_MS) {
+            return;
+        }
+        lastPurgeAt = now;
+        for (PublicAddress sender : new ArrayList<>(bySender.keySet())) {
+            NavigableMap<Long, Transaction> pending = bySender.get(sender);
+            if (pending.containsKey(accounts.confirmedNextNonce(sender))) {
+                continue; // live queue — the TTL only expires never-minable dead weight
+            }
+            for (Transaction t : new ArrayList<>(pending.values())) {
+                Long since = admittedAt.get(t.hashContents());
+                if (since != null && now - since >= PARKED_TTL_MILLIS) {
+                    remove(sender, t.hashContents());
+                }
+            }
         }
     }
 
@@ -264,6 +373,7 @@ public final class MemPool {
     public List<Transaction> getTransactionsForBlock(int maxTransactions) {
         lock.lock();
         try {
+            purgeExpiredParked(); // lazy TTL: never select expired gap-parked dead weight
             // Per-sender selection cursor: the next nonce of its contiguous run and the balance
             // still available to that run. Only the cursor's front tx is a selection candidate.
             record Cursor(long nextNonce, long budget) {}
@@ -390,6 +500,7 @@ public final class MemPool {
             var stale = pending.headMap(confirmed, false);
             for (Transaction t : new ArrayList<>(stale.values())) {
                 contentHashes.remove(t.hashContents());
+                admittedAt.remove(t.hashContents());
                 size--;
             }
             stale.clear();
@@ -408,6 +519,7 @@ public final class MemPool {
             boolean match = t.hashContents().equals(contentHash);
             if (match) {
                 contentHashes.remove(contentHash);
+                admittedAt.remove(contentHash);
                 size--;
             }
             return match;

@@ -114,4 +114,33 @@ class PeerRegistrySecurityTest {
         assertFalse(reg.add("ftp://8.8.8.8"));
         assertFalse(reg.add("not a url"));
     }
+
+    @Test
+    void urlVariantsCoalesceIntoOneEntry() {
+        // Case / trailing-dot / default-port / trailing-slash variants of ONE peer URL must
+        // dedup to a single registry slot, or a peer squats several (audit: /add_peer
+        // coalescing bypass).
+        var reg = new PeerRegistry("http://self:3000", 100, null, false);
+        assertTrue(reg.add("http://93.184.216.34:3000"));
+        assertFalse(reg.add("http://93.184.216.34:3000/"));
+        assertEquals(1, reg.size());
+        var named = new PeerRegistry("http://self:3000", 100, null, false);
+        assertTrue(named.add("http://peer.example.com:80"));
+        assertFalse(named.add("HTTP://PEER.EXAMPLE.COM./"));
+        assertEquals(1, named.size());
+    }
+
+    @Test
+    void selfUrlIsRecognizedInAllItsForms() {
+        // The self-pairing refusal must see through the same variants, or PEX hands us back
+        // our own advertised URL and we peer with ourselves (audit: self-pairing bypass).
+        var reg = new PeerRegistry("http://93.184.216.34:3000/", 100, null, false);
+        assertFalse(reg.add("http://93.184.216.34:3000"));
+        assertFalse(reg.add("http://93.184.216.34:3000/"));
+        assertEquals(0, reg.size());
+        var named = new PeerRegistry("HTTP://Peer.Example.COM.:80", 100, null, false);
+        assertFalse(named.add("http://peer.example.com"));
+        assertFalse(named.add("http://peer.example.com:80/"));
+        assertEquals(0, named.size());
+    }
 }

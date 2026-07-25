@@ -62,7 +62,8 @@ public final class BlockProducer {
         // Commit the authenticated state root this block produces (no-op if the accumulator
         // is off) before solving the PoW, so the header hash binds it.
         engine.stampStateRoot(block);
-        block.nonce(Miner.mineNonce(block.hash(), block.difficulty(), engine.params().powAlgorithm()));
+        block.nonce(Miner.mineNonce(block.hash(), block.difficulty(), engine.params().powAlgorithm(),
+            engine.params().powCostsAt(engine.height() + 1)));
 
         ExecutionStatus status = engine.addBlock(block);
         if (status != ExecutionStatus.SUCCESS) {

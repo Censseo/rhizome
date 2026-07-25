@@ -62,6 +62,9 @@ public final class PeerDiscovery {
     private final boolean blockPrivateHosts;
     private final HttpClient http;
     private final Duration fetchDeadline;
+    /** Decides whether the RHIZOME_PEER_TOKEN secret may be presented to a given peer
+     *  (configured + https only); never logged (audit: peer token exfiltration via gossip). */
+    private final PeerTokenPolicy tokenPolicy;
     /** Per-peer consecutive failure counts. Package-private so a test can assert the stale-entry
      *  pruning in {@link #round()} (audit F8). */
     final Map<String, Integer> failures = new ConcurrentHashMap<>();
@@ -74,15 +77,41 @@ public final class PeerDiscovery {
     }
 
     public PeerDiscovery(PeerRegistry registry, String selfUrl, boolean blockPrivateHosts) {
-        this(registry, selfUrl, blockPrivateHosts, FETCH_DEADLINE);
+        this(registry, selfUrl, blockPrivateHosts, FETCH_DEADLINE, PeerTokenPolicy.trustAll(null));
+    }
+
+    /**
+     * As above, presenting {@code peerToken} (nullable) as a bearer token on outbound requests.
+     *
+     * @deprecated presents the token to EVERY registry peer, over any scheme — the registry is
+     *     fed by unauthenticated /add_peer + PEX, so any gossip-learned (often http://) peer
+     *     receives the shared secret in cleartext. Use the {@link PeerTokenPolicy} constructor
+     *     so the token only goes to explicitly configured peers over https.
+     */
+    @Deprecated
+    public PeerDiscovery(PeerRegistry registry, String selfUrl, boolean blockPrivateHosts, String peerToken) {
+        this(registry, selfUrl, blockPrivateHosts, PeerTokenPolicy.trustAll(peerToken));
+    }
+
+    /** As above, presenting the token only to peers {@code tokenPolicy} trusts. */
+    public PeerDiscovery(PeerRegistry registry, String selfUrl, boolean blockPrivateHosts,
+                         PeerTokenPolicy tokenPolicy) {
+        this(registry, selfUrl, blockPrivateHosts, FETCH_DEADLINE, tokenPolicy);
     }
 
     /** As above, with an explicit per-exchange deadline (package-private for tests). */
     PeerDiscovery(PeerRegistry registry, String selfUrl, boolean blockPrivateHosts, Duration fetchDeadline) {
+        this(registry, selfUrl, blockPrivateHosts, fetchDeadline, PeerTokenPolicy.trustAll(null));
+    }
+
+    /** As above, with an explicit per-exchange deadline and a token policy. */
+    PeerDiscovery(PeerRegistry registry, String selfUrl, boolean blockPrivateHosts, Duration fetchDeadline,
+                  PeerTokenPolicy tokenPolicy) {
         this.registry = registry;
         this.selfUrl = selfUrl;
         this.blockPrivateHosts = blockPrivateHosts;
         this.fetchDeadline = fetchDeadline;
+        this.tokenPolicy = tokenPolicy;
         this.http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build();
         // Bounded queue + discard-oldest (the PeerBroadcaster pattern): a fixed pool's default
         // unbounded LinkedBlockingQueue would let one round's tasks accumulate without limit if
@@ -134,8 +163,8 @@ public final class PeerDiscovery {
             // Pin once and reuse for both the /peers fetch and the /add_peer announce, instead of
             // resolving the host twice per peer per round.
             String pinned = PeerHosts.pin(peer, blockPrivateHosts);
-            registry.addAll(fetchPeersPinned(pinned));
-            announceToPinned(pinned);
+            registry.addAll(fetchPeersPinned(pinned, peer));
+            announceToPinned(pinned, peer);
             failures.remove(peer);
         } catch (InterruptedException e) {
             // Cut by the round deadline (invokeAll cancelled the task) — not the peer's fault, so it is
@@ -160,10 +189,10 @@ public final class PeerDiscovery {
     List<String> fetchPeers(String peer) throws Exception {
         // Pin the peer to its resolved IP (and refuse non-routable hosts on mainnet) so a DNS
         // rebind cannot point this fetch at an internal service (SSRF).
-        return fetchPeersPinned(PeerHosts.pin(peer, blockPrivateHosts));
+        return fetchPeersPinned(PeerHosts.pin(peer, blockPrivateHosts), peer);
     }
 
-    private List<String> fetchPeersPinned(String pinned) throws Exception {
+    private List<String> fetchPeersPinned(String pinned, String originalPeer) throws Exception {
         // Stream + bound the body: never buffer an unbounded response into memory (audit V2). The
         // MAX_PEX_PER_PEER limit below only caps how many entries we KEEP — it cannot stop an
         // attacker's giant body, which ofString() would have fully materialised before we ever parse.
@@ -173,7 +202,9 @@ public final class PeerDiscovery {
         AtomicReference<AutoCloseable> openBody = new AtomicReference<>();
         String body = BodyReadDeadline.call(fetchDeadline, openBody, () -> {
             HttpResponse<InputStream> resp = http.send(
-                HttpRequest.newBuilder(URI.create(pinned + "/peers")).timeout(fetchDeadline).GET().build(),
+                PeerAuth.withToken(HttpRequest.newBuilder(URI.create(pinned + "/peers")),
+                        tokenPolicy.tokenFor(originalPeer))
+                    .timeout(fetchDeadline).GET().build(),
                 HttpResponse.BodyHandlers.ofInputStream());
             if (resp.statusCode() != 200) {
                 resp.body().close();
@@ -201,16 +232,31 @@ public final class PeerDiscovery {
         return data;
     }
 
-    private void announceToPinned(String pinned) throws Exception {
+    private void announceToPinned(String pinned, String originalPeer) throws Exception {
         if (selfUrl == null || selfUrl.isEmpty()) {
             return;
         }
         String body = new JSONObject().put("url", selfUrl).toString();
-        http.send(
-            HttpRequest.newBuilder(URI.create(pinned + "/add_peer"))
-                .timeout(Duration.ofSeconds(10))
-                .header("Content-Type", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofString(body)).build(),
-            HttpResponse.BodyHandlers.discarding());
+        // Same whole-exchange deadline as the PEX fetch above (audit F2/F6): the announce POST's
+        // response body is discarded, but HttpRequest.timeout alone only covers up to the response
+        // headers — a slow-drip peer answering /add_peer could otherwise park a pool thread inside
+        // the body read until the round budget cut it. The body is also bounded: the endpoint's
+        // reply is a tiny JSON status, so anything large is a hostile drip, not a peer to keep.
+        AtomicReference<AutoCloseable> openBody = new AtomicReference<>();
+        BodyReadDeadline.call(fetchDeadline, openBody, () -> {
+            HttpResponse<InputStream> resp = http.send(
+                PeerAuth.withToken(HttpRequest.newBuilder(URI.create(pinned + "/add_peer")),
+                        tokenPolicy.tokenFor(originalPeer))
+                    .timeout(fetchDeadline)
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString(body)).build(),
+                HttpResponse.BodyHandlers.ofInputStream());
+            InputStream in = resp.body();
+            openBody.set(in); // publish so a deadline expiry can cancel the JDK exchange
+            try (in) {
+                readBounded(in, MAX_PEERS_BODY_BYTES);
+            }
+            return null;
+        });
     }
 }

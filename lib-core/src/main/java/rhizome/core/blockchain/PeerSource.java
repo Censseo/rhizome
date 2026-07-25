@@ -45,6 +45,19 @@ public interface PeerSource {
     }
 
     /**
+     * The orphan block body behind an uncle reference's hash, or {@code null} when the peer
+     * no longer holds it (its orphan pool is a bounded LRU). A block carries only the
+     * {@link rhizome.core.block.UncleRef} (hash + difficulty + miner), never the body, so a
+     * node syncing a chain with uncle-bearing blocks cannot pass {@code validateUncles}
+     * without fetching the referenced orphans on demand (audit: uncle-sync blocker — a fresh
+     * node's empty pool made every honest chain past the first uncle unsynchronisable).
+     * A peer that predates this endpoint throws {@link UnsupportedOperationException}.
+     */
+    default Block orphan(SHA256Hash hash) {
+        throw new UnsupportedOperationException("peer does not serve orphans");
+    }
+
+    /**
      * The peer's materialised state snapshot: the height it was taken at, the state root it
      * must rebuild to (which the importer checks against our PoW-validated header at that
      * height), and how many chunks to fetch. {@code null} when the peer has none.

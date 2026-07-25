@@ -285,12 +285,15 @@ class DashboardApiTest {
         assertFalse(missing.getBoolean("exists"));
 
         // The dashboard reads via /call_readonly: a dry run against a throwaway overlay
-        // sees counter=1 -> outputs 2, and repeating it returns the same value.
+        // sees counter=1 -> outputs 2, and repeating it returns the same value. The calls
+        // declare a modest gasLimit so repeated reads fit the 25M gas/s aggregate budget
+        // (the 10M default would exhaust it on the third call — the budget's purpose).
         for (int i = 0; i < 2; i++) {
             HttpResponse q = call(HttpRequest.post("http://x/call_readonly")
                 .withBody(new JSONObject()
                     .put("to", contract.toHexString())
-                    .put("input", "").toString().getBytes(java.nio.charset.StandardCharsets.UTF_8))
+                    .put("input", "")
+                    .put("gasLimit", 5_000_000L).toString().getBytes(java.nio.charset.StandardCharsets.UTF_8))
                 .build());
             assertEquals(200, q.getCode());
             JSONObject res = new JSONObject(body(q));
@@ -303,7 +306,8 @@ class DashboardApiTest {
         HttpResponse bad = call(HttpRequest.post("http://x/call_readonly")
             .withBody(new JSONObject()
                 .put("to", PublicAddress.random().toHexString())
-                .put("input", "").toString().getBytes(java.nio.charset.StandardCharsets.UTF_8))
+                .put("input", "")
+                .put("gasLimit", 5_000_000L).toString().getBytes(java.nio.charset.StandardCharsets.UTF_8))
             .build());
         assertEquals(200, bad.getCode());
         assertFalse(new JSONObject(body(bad)).getBoolean("success"));

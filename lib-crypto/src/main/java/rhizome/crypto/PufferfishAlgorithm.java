@@ -17,7 +17,13 @@ public final class PufferfishAlgorithm {
 
     private PufferfishAlgorithm() {}
 
+    /** Computes Pufferfish2 under the genesis costs ({@link PowCosts#DEFAULT}). */
     public static byte[] compute(byte[] input) {
-        return Pufferfish2.newHash(input, COST_T, COST_M);
+        return compute(input, PowCosts.DEFAULT);
+    }
+
+    /** Computes Pufferfish2 under the given consensus cost parameters. */
+    public static byte[] compute(byte[] input, PowCosts costs) {
+        return Pufferfish2.newHash(input, costs.costT(), costs.costM());
     }
 }

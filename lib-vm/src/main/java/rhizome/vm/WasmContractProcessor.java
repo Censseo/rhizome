@@ -39,6 +39,22 @@ public final class WasmContractProcessor implements ContractProcessor {
     private final Map<Long, List<ContractChange>> changesByHeight = new ConcurrentHashMap<>();
     private long lastCommittedHeight = -1;
 
+    /**
+     * Bounds on the RAM {@link #logsByHeight} retains. Event logs are a best-effort query
+     * service, NOT consensus: they never feed the state root, so dropping old ones changes no
+     * validation outcome. Before these caps, a block could emit gasPrice-0 spam logs and the
+     * processor retained 600 heights of them unbounded (~hundreds of MB) — a memory-growth DoS
+     * (audit: log retention). We cap both the entries kept per height and the total bytes kept
+     * across heights; past the byte budget the OLDEST heights are dropped first (LRU by height).
+     */
+    static final int MAX_LOGS_PER_HEIGHT = 4_096;
+    static final long MAX_RETAINED_LOG_BYTES = 64L * 1024 * 1024;
+    private long retainedLogBytes;
+    /** Serializes every {@link #retainedLogBytes} mutation (retain/revert/prune) so the counter
+     *  never drifts from the map contents when these run on different threads. Reads stay
+     *  lock-free on the concurrent map. */
+    private final Object logRetentionLock = new Object();
+
     /** Uses a default retention depth; fine when reorgs are shallow. */
     public WasmContractProcessor(WasmVm vm, ContractStore baseStore) {
         this(vm, baseStore, 600);
@@ -313,7 +329,7 @@ public final class WasmContractProcessor implements ContractProcessor {
         baseStore.putReceipts(blockHeight, encodeReceipts(currentReceipts));
         receiptsByHeight.put(blockHeight, currentReceipts);
         if (!currentLogs.isEmpty()) {
-            logsByHeight.put(blockHeight, currentLogs);
+            retainLogs(blockHeight, currentLogs);
         }
         currentReceipts = new java.util.ArrayList<>();
         currentLogs = new java.util.ArrayList<>();
@@ -351,6 +367,41 @@ public final class WasmContractProcessor implements ContractProcessor {
         return logsByHeight.getOrDefault(blockHeight, List.of());
     }
 
+    /**
+     * Retains one height's logs under the {@link #MAX_LOGS_PER_HEIGHT} / {@link
+     * #MAX_RETAINED_LOG_BYTES} budget, evicting the oldest heights (LRU by height) once the byte
+     * budget is exceeded. Logs are a best-effort service, not consensus, so truncation and
+     * eviction never affect validation. Package-private so tests can drive the retention path
+     * without executing 64 MiB of real logs.
+     */
+    void retainLogs(long blockHeight, List<ContractLog> logs) {
+        List<ContractLog> kept = logs.size() > MAX_LOGS_PER_HEIGHT
+            ? List.copyOf(logs.subList(0, MAX_LOGS_PER_HEIGHT))
+            : logs;
+        synchronized (logRetentionLock) {
+            // Replacing an existing height must net out the previous entry's bytes, or the
+            // counter double-counts and the byte budget drifts (audit follow-up).
+            List<ContractLog> previous = logsByHeight.put(blockHeight, kept);
+            if (previous != null) {
+                retainedLogBytes -= retainedBytes(previous);
+            }
+            retainedLogBytes += retainedBytes(kept);
+            while (retainedLogBytes > MAX_RETAINED_LOG_BYTES && !logsByHeight.isEmpty()) {
+                long oldest = java.util.Collections.min(logsByHeight.keySet());
+                retainedLogBytes -= retainedBytes(logsByHeight.remove(oldest));
+            }
+        }
+    }
+
+    /** Approximate retained size of one height's logs: address + topic + data per entry. */
+    private static long retainedBytes(List<ContractLog> logs) {
+        long bytes = 0;
+        for (ContractLog log : logs) {
+            bytes += PublicAddress.SIZE + log.topic().length + log.data().length;
+        }
+        return bytes;
+    }
+
     @Override
     public List<ContractChange> changes(long blockHeight) {
         return changesByHeight.getOrDefault(blockHeight, List.of());
@@ -360,7 +411,13 @@ public final class WasmContractProcessor implements ContractProcessor {
     public void revertBlock(long blockHeight) {
         receiptsByHeight.remove(blockHeight);
         baseStore.deleteReceipts(blockHeight);
-        logsByHeight.remove(blockHeight);
+        List<ContractLog> removedLogs;
+        synchronized (logRetentionLock) {
+            removedLogs = logsByHeight.remove(blockHeight);
+            if (removedLogs != null) {
+                retainedLogBytes -= retainedBytes(removedLogs);
+            }
+        }
         changesByHeight.remove(blockHeight);
         List<ContractUndo> journal = journals.remove(blockHeight);
         if (journal == null) {
@@ -396,6 +453,17 @@ public final class WasmContractProcessor implements ContractProcessor {
     // Layout: count(4) then per entry: isCode(1) | contract(25) | keyLen(4,-1=null) | key
     //         | priorLen(4,-1=null) | prior.
 
+    /** Smallest possible serialized journal entry: isCode(1) + address(25) + keyLen(4) + priorLen(4). */
+    private static final int MIN_JOURNAL_RECORD_BYTES = 1 + rhizome.core.ledger.PublicAddress.SIZE
+        + Integer.BYTES + Integer.BYTES;
+
+    /** Smallest possible serialized receipt: gasUsed(8) + success(1) + transferCount(4). */
+    private static final int MIN_RECEIPT_RECORD_BYTES = Long.BYTES + 1 + Integer.BYTES;
+
+    /** Smallest possible serialized transfer: from(25) + to(25) + amount(8). */
+    private static final int MIN_TRANSFER_RECORD_BYTES =
+        2 * rhizome.core.ledger.PublicAddress.SIZE + Long.BYTES;
+
     private static byte[] encodeJournal(List<ContractUndo> journal) {
         int size = Integer.BYTES;
         for (ContractUndo u : journal) {
@@ -414,10 +482,17 @@ public final class WasmContractProcessor implements ContractProcessor {
         return b.array();
     }
 
-    private static List<ContractUndo> decodeJournal(byte[] bytes) {
+    static List<ContractUndo> decodeJournal(byte[] bytes) {
         java.nio.ByteBuffer b = java.nio.ByteBuffer.wrap(bytes);
         int count = b.getInt();
-        List<ContractUndo> journal = new java.util.ArrayList<>(Math.max(0, count));
+        // Bound count by the bytes actually present BEFORE pre-dimensioning: count is read from
+        // the store, and a corrupt/truncated buffer must fail cleanly, not pre-allocate a
+        // multi-GB list (audit: unbounded decode allocations).
+        if (count < 0 || count > b.remaining() / MIN_JOURNAL_RECORD_BYTES) {
+            throw new IllegalArgumentException("corrupt journal: count " + count
+                + " exceeds buffer (" + b.remaining() + " bytes)");
+        }
+        List<ContractUndo> journal = new java.util.ArrayList<>(count);
         for (int i = 0; i < count; i++) {
             boolean isCode = b.get() != 0;
             byte[] addr = new byte[rhizome.core.ledger.PublicAddress.SIZE];
@@ -442,6 +517,12 @@ public final class WasmContractProcessor implements ContractProcessor {
         int len = b.getInt();
         if (len < 0) {
             return null;
+        }
+        // Never allocate past what the buffer actually holds: len comes from the store, so a
+        // corrupt record must fail cleanly instead of allocating gigabytes (audit F5-class).
+        if (len > b.remaining()) {
+            throw new IllegalArgumentException("corrupt buffer: length " + len
+                + " exceeds remaining " + b.remaining());
         }
         byte[] out = new byte[len];
         b.get(out);
@@ -476,15 +557,25 @@ public final class WasmContractProcessor implements ContractProcessor {
         return b.array();
     }
 
-    private static List<ContractReceipt> decodeReceipts(byte[] bytes) {
+    static List<ContractReceipt> decodeReceipts(byte[] bytes) {
         java.nio.ByteBuffer b = java.nio.ByteBuffer.wrap(bytes);
         int count = b.getInt();
-        List<ContractReceipt> receipts = new java.util.ArrayList<>(Math.max(0, count));
+        // Same store-read bound as decodeJournal: a corrupt count must fail cleanly, never
+        // pre-dimension a giant list (audit: unbounded decode allocations).
+        if (count < 0 || count > b.remaining() / MIN_RECEIPT_RECORD_BYTES) {
+            throw new IllegalArgumentException("corrupt receipts: count " + count
+                + " exceeds buffer (" + b.remaining() + " bytes)");
+        }
+        List<ContractReceipt> receipts = new java.util.ArrayList<>(count);
         for (int i = 0; i < count; i++) {
             long gasUsed = b.getLong();
             boolean success = b.get() != 0;
             int transferCount = b.getInt();
-            List<NativeTransfer> transfers = new java.util.ArrayList<>(Math.max(0, transferCount));
+            if (transferCount < 0 || transferCount > b.remaining() / MIN_TRANSFER_RECORD_BYTES) {
+                throw new IllegalArgumentException("corrupt receipts: transfer count "
+                    + transferCount + " exceeds buffer (" + b.remaining() + " bytes)");
+            }
+            List<NativeTransfer> transfers = new java.util.ArrayList<>(transferCount);
             for (int t = 0; t < transferCount; t++) {
                 byte[] from = new byte[rhizome.core.ledger.PublicAddress.SIZE];
                 b.get(from);
@@ -525,7 +616,15 @@ public final class WasmContractProcessor implements ContractProcessor {
                 }
                 return false;
             });
-            logsByHeight.keySet().removeIf(h -> h <= cutoff);
+            synchronized (logRetentionLock) {
+                logsByHeight.entrySet().removeIf(e -> {
+                    if (e.getKey() <= cutoff) {
+                        retainedLogBytes -= retainedBytes(e.getValue());
+                        return true;
+                    }
+                    return false;
+                });
+            }
             changesByHeight.keySet().removeIf(h -> h <= cutoff);
         }
     }

@@ -113,8 +113,14 @@ final class SyncApi {
     /** One binary snapshot chunk by index (bounds-checked against the current materialisation). */
     static HttpResponse snapshotChunk(NodeService node, HttpRequest req) {
         var snap = node.materializedSnapshot();
-        int index = (int) parseLong(req.getQueryParameter("index"));
-        if (snap == null || index < 0 || index >= snap.chunks().size()) {
+        // Bounds-check BEFORE the long→int cast: an out-of-int-range index would silently wrap
+        // to a valid-looking negative/positive int (audit: unchecked index cast).
+        long rawIndex = parseLong(req.getQueryParameter("index"));
+        if (rawIndex < 0 || rawIndex > Integer.MAX_VALUE) {
+            return badRequest("index out of range");
+        }
+        int index = (int) rawIndex;
+        if (snap == null || index >= snap.chunks().size()) {
             return HttpResponse.ofCode(404)
                 .withJson(new JSONObject().put("error", "no such snapshot chunk").toString())
                 .build();
@@ -122,6 +128,29 @@ final class SyncApi {
         return HttpResponse.ok200()
             .withHeader(HttpHeaders.CONTENT_TYPE, "application/octet-stream")
             .withBody(snap.chunks().get(index))
+            .build();
+    }
+
+    /**
+     * The orphan (uncle candidate) body behind a hash: {@code GET /orphan?hash=<hex64>}, binary
+     * ({@link BlockCodec}), 404 when unknown. A syncing peer whose chain references an uncle its
+     * own orphan pool cannot supply fetches the body here (audit: uncle-sync blocker). Binary
+     * like /sync, never JSON — the block may be up to maxBlockSizeBytes.
+     */
+    static HttpResponse orphan(NodeService node, HttpRequest req) {
+        byte[] hash = rhizome.core.common.Utils.hexStringToByteArray(req.getQueryParameter("hash"));
+        if (hash.length != 32) {
+            return badRequest("hash must be 32 bytes (64 hex chars)");
+        }
+        var block = node.orphanBlock(rhizome.crypto.SHA256Hash.of(hash));
+        if (block == null) {
+            return HttpResponse.ofCode(404)
+                .withJson(new JSONObject().put("error", "no such orphan").toString())
+                .build();
+        }
+        return HttpResponse.ok200()
+            .withHeader(HttpHeaders.CONTENT_TYPE, "application/octet-stream")
+            .withBody(BlockCodec.encode(block))
             .build();
     }
 }

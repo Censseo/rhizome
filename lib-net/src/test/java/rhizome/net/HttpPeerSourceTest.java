@@ -127,4 +127,60 @@ class HttpPeerSourceTest {
         assertEquals(3, info.chunkCount());
         assertEquals(10L, info.pivotHeight());
     }
+
+    @Test
+    void orphanRoundTripsABlockBody() {
+        // The /orphan endpoint serves one binary block (BlockCodec) by hash — the uncle body a
+        // syncing peer needs for validateUncles (audit: uncle-sync blocker).
+        var block = rhizome.core.block.BlockImpl.builder()
+            .id(7).timestamp(123456789L).difficulty(4)
+            .merkleRoot(rhizome.crypto.SHA256Hash.random())
+            .lastBlockHash(rhizome.crypto.SHA256Hash.random())
+            .nonce(rhizome.crypto.SHA256Hash.random())
+            .build();
+        respond("/orphan", rhizome.core.block.BlockCodec.encode(block));
+        var source = new HttpPeerSource(baseUrl);
+        var fetched = source.orphan(block.hash());
+        org.junit.jupiter.api.Assertions.assertNotNull(fetched);
+        assertEquals(block.hash(), fetched.hash(), "decoded orphan must be the served block");
+    }
+
+    @Test
+    void orphan404MeansAbsentNotMisbehaviour() {
+        // No context registered -> the server answers 404. That is "the peer does not hold this
+        // orphan" (a legacy peer without the route answers 404 the same way), surfaced as null —
+        // never as a ban-score-earning protocol violation.
+        var source = new HttpPeerSource(baseUrl);
+        org.junit.jupiter.api.Assertions.assertNull(source.orphan(rhizome.crypto.SHA256Hash.random()));
+    }
+
+    @Test
+    void orphanJunkBodyEarnsProtocolException() {
+        // A 200 with a body that is not a decodable block is junk no honest node would serve
+        // (audit F9): misbehaviour, not "absent".
+        respond("/orphan", new byte[]{1, 2, 3, 4, 5});
+        var source = new HttpPeerSource(baseUrl);
+        assertThrows(HttpPeerSource.PeerProtocolException.class,
+            () -> source.orphan(rhizome.crypto.SHA256Hash.random()));
+    }
+
+    @Test
+    void configuredPeerTokenIsAttachedAsBearer() {
+        // RHIZOME_PEER_TOKEN: outbound requests carry Authorization: Bearer <token> so a
+        // token-gated peer accepts them (audit: token-gated node breaks gossip).
+        var seen = new java.util.concurrent.atomic.AtomicReference<String>();
+        server.createContext("/block_count", exchange -> {
+            seen.set(exchange.getRequestHeaders().getFirst("Authorization"));
+            byte[] body = "42".getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, body.length);
+            exchange.getResponseBody().write(body);
+            exchange.close();
+        });
+        assertEquals(42L, new HttpPeerSource(baseUrl, false, HttpPeerSource.newClient(), "s3cret").height());
+        assertEquals("Bearer s3cret", seen.get());
+        // A tokenless source sends no Authorization header at all.
+        seen.set(null);
+        assertEquals(42L, new HttpPeerSource(baseUrl).height());
+        org.junit.jupiter.api.Assertions.assertNull(seen.get());
+    }
 }

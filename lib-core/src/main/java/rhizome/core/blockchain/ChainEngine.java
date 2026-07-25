@@ -386,7 +386,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             // HeaderChain.validate PoW-verified carries the same memory-hard proof, so re-hashing it is
             // pure waste (audit P4). trustedPow is reachable only via addValidatedBody, whose contract
             // pins that hash-equality guarantee.
-            if (!trustedPow && !block.verifyNonce(params.powAlgorithm())) {
+            if (!trustedPow && !block.verifyNonce(params.powAlgorithm(), params.powCostsAt(b.id()))) {
                 return INVALID_NONCE;
             }
 
@@ -473,6 +473,21 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
 
                 store.append(block); // flushes the staged ledger writes + block + height in one batch
                 appended = true;
+                // Persist the bodies of the uncles this block references, BEFORE the bounded
+                // orphan pool's LRU can evict them (audit: uncle-sync blocker). A block carries
+                // only UncleRefs, so peers syncing past this height later fetch the bodies from
+                // us (PeerSource.orphan → orphanBlock) — without persistence the pool churn would
+                // make the uncle unserveable and the chain unsynchronisable for fresh nodes. On
+                // the trusted-restore path the uncle may already be gone from the pool; the
+                // entry written on first acceptance is simply kept.
+                if (!trustedRestore) {
+                    for (UncleRef ref : block.uncles()) {
+                        Block uncle = orphans.get(ref.hash());
+                        if (uncle != null) {
+                            store.putUncle(ref.hash(), uncle);
+                        }
+                    }
+                }
                 // Slide the median-time window forward: the new tip enters, the oldest leaves (P6).
                 mtpWindow.addLast(b.timestamp());
                 if (mtpWindow.size() > params.medianTimeWindow()) {
@@ -1185,14 +1200,49 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             long measureStart = Math.max(windowStart, GenesisBlock.GENESIS_ID + 1);
             long intervals = boundary - measureStart;
             if (intervals > 0) { // else not enough real blocks in this window yet (difficulty unchanged)
-                long observedMs = store.headerAt(boundary).timestamp()
-                    - store.headerAt(measureStart).timestamp();
+                long observedMs = boundaryTimestamp(boundary) - boundaryTimestamp(measureStart);
                 difficulty = DifficultyAdjustment.nextDifficulty(
                     params, difficulty, intervals, observedMs / 1000);
             }
             difficultyByBoundary.put(boundary, difficulty); // cache every boundary so floorEntry advances
         }
         return difficulty;
+    }
+
+    /**
+     * The timestamp a retarget closing at boundary height {@code h} reads at bound {@code h}:
+     * the median-of-3 ({@link #medianBoundaryTimestamp}) when {@code params.consensusV2(h)},
+     * the raw boundary timestamp (legacy rule) below the activation height. The decision height
+     * is the BOUNDARY the retarget closes at — the identical predicate HeaderChain.boundaryTimestamp
+     * applies, so a chain validated header-first and one folded by the engine retarget the same
+     * way on both sides of the activation.
+     */
+    private long boundaryTimestamp(long h) {
+        if (params.consensusV2(h)) {
+            return medianBoundaryTimestamp(h);
+        }
+        return store.headerAt(h).timestamp();
+    }
+
+    /**
+     * The retarget-bound timestamp at height {@code h}: the median of the (up to) 3 header
+     * timestamps ending at {@code h} inclusive, clamped at genesis (audit: timewarp; applies
+     * only from {@code consensusV2Height} on, see {@link #boundaryTimestamp}). Measuring a
+     * window from two raw timestamps let a miner inflate ONE boundary timestamp and stretch the
+     * observed duration — dragging difficulty down at ~no hash cost. A median-of-3 bound moves by
+     * at most the gap to the neighbouring timestamp under a single-point manipulation. MUST match
+     * {@code HeaderChain.medianTimestamp} exactly — header-sync validation and the engine compute
+     * the same retarget, or every synced chain is rejected at the first boundary.
+     */
+    private long medianBoundaryTimestamp(long h) {
+        long lo = Math.max(GenesisBlock.GENESIS_ID, h - 2);
+        int size = (int) (h - lo + 1);
+        long[] timestamps = new long[size];
+        for (int i = 0; i < size; i++) {
+            timestamps[i] = store.headerAt(h - i).timestamp();
+        }
+        java.util.Arrays.sort(timestamps);
+        return timestamps[size / 2];
     }
 
     private long medianTimePast() {
@@ -1321,9 +1371,25 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             }
             // Only now the memory-hard proof-of-work check, on a block that is at least a
             // structurally-plausible recent sibling.
-            if (block.verifyNonce(params.powAlgorithm())) {
+            if (block.verifyNonce(params.powAlgorithm(), params.powCostsAt(uid))) {
                 orphans.put(block);
             }
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * The full body of a known orphan by hash: the live pool first, then the store's
+     * persisted uncle bodies (surviving a restart or an LRU eviction — audit:
+     * uncle-sync blocker). Served to syncing peers via {@link PeerSource#orphan}
+     * and used by the synchronizers' on-demand uncle fetch. {@code null} when unknown.
+     */
+    public Block orphanBlock(SHA256Hash hash) {
+        lock.lock();
+        try {
+            Block orphan = orphans.get(hash);
+            return orphan != null ? orphan : store.uncleAt(hash);
         } finally {
             lock.unlock();
         }
@@ -1481,7 +1547,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
      */
     private boolean uncleEligible(Block uncle, int h, int depth, long tipHeight, UncleContext ctx,
                                   int nephewDifficulty) {
-        if (!uncle.verifyNonce(params.powAlgorithm())) {
+        if (!uncle.verifyNonce(params.powAlgorithm(), params.powCostsAt(uncle.id()))) {
             return false; // bad PoW
         }
         int ud = ((BlockImpl) uncle).difficulty();

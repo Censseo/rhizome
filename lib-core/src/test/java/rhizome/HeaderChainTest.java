@@ -83,6 +83,65 @@ class HeaderChainTest {
         return out;
     }
 
+    /** Mines the next block on {@code e} with an explicit timestamp (adversarial pacing cases). */
+    private static void mineOnEngineAt(ChainEngine e, NetworkParameters p, PublicAddress miner, long ts) {
+        long h = e.height() + 1;
+        var b = (BlockImpl) BlockImpl.builder().id((int) h).timestamp(ts)
+            .difficulty(e.difficulty()).lastBlockHash(e.tipHash()).build();
+        b.addTransaction(Transaction.of(miner, new TransactionAmount(p.miningReward(h))));
+        var tree = new MerkleTree();
+        tree.setItems(b.transactions());
+        b.merkleRoot(tree.getRootHash());
+        b.nonce(Miner.mineNonce(b.hash(), b.difficulty(), p.powAlgorithm()));
+        assertEquals(ExecutionStatus.SUCCESS, e.addBlock(b));
+    }
+
+    @Test
+    void inflatedBoundaryTimestampNoLongerDragsDifficultyDown() {
+        // Timewarp fix (audit: retarget on 2 raw timestamps). Lookback 10 on a 1 s target: the
+        // first window measures ts(boundary 10) - ts(height 2) over 8 intervals (desired 8 s).
+        // Under the old rule, inflating ONLY the boundary block's timestamp by +15 s/block
+        // (9 × 15 s = 135 s) stretched the observed duration to 143 s and crashed the difficulty
+        // by the full MAX_STEP_BITS (10 → 6) at no hash cost. The median-of-3 bound takes the
+        // middle of the last 3 timestamps, so the single inflated point is ignored: the window
+        // measures 7 s and the difficulty holds at 10 — exactly the uninflated control's outcome.
+        NetworkParameters p = params.toBuilder()
+            .difficultyLookback(10).genesisDifficulty(10).minDifficulty(4).build();
+        AtomicLong c = new AtomicLong(1_000_000L);
+        ChainEngine attacked = ChainEngine.init(p, new InMemoryLedger(), new InMemoryChainStore(),
+            new LedgerSnapshot("t", 0, p.chainId()), null, c::get);
+        ChainEngine control = ChainEngine.init(p, new InMemoryLedger(), new InMemoryChainStore(),
+            new LedgerSnapshot("t", 0, p.chainId()), null, c::get);
+        long base = 1_000L;
+        for (int h = 2; h <= 10; h++) {
+            long onTarget = base + h * 1000L;
+            // Boundary block of the attacked chain: timestamp inflated +15 s per block of window.
+            mineOnEngineAt(attacked, p, miner, h == 10 ? onTarget + 9 * 15_000L : onTarget);
+            mineOnEngineAt(control, p, miner, onTarget);
+        }
+        assertEquals(10, control.difficulty(), "sanity: on-target window keeps the difficulty");
+        assertEquals(10, attacked.difficulty(),
+            "median-of-3 bound absorbs the single inflated boundary timestamp "
+                + "(raw-timestamp rule would have dropped 10 → 6)");
+    }
+
+    @Test
+    void sustainedSlowWindowStillRetargetsDown() {
+        // The median bound must not make the retarget blind: a window that is GENUINELY slow
+        // (every block +16 s on a 1 s target, so the median itself reflects the slowdown) still
+        // steps the difficulty down — only single-point manipulation is absorbed.
+        NetworkParameters p = params.toBuilder()
+            .difficultyLookback(10).genesisDifficulty(10).minDifficulty(4).build();
+        AtomicLong c = new AtomicLong(1_000_000L);
+        ChainEngine e = ChainEngine.init(p, new InMemoryLedger(), new InMemoryChainStore(),
+            new LedgerSnapshot("t", 0, p.chainId()), null, c::get);
+        for (int h = 2; h <= 10; h++) {
+            mineOnEngineAt(e, p, miner, 1_000L + h * 16_000L);
+        }
+        assertTrue(e.difficulty() < 10,
+            "a genuinely slow window still retargets down, was " + e.difficulty());
+    }
+
     @Test
     void validBranchValidatesAndReportsCumulativeWork() {
         for (int i = 0; i < 11; i++) {

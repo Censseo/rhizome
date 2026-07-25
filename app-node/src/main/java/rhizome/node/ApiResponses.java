@@ -38,9 +38,29 @@ final class ApiResponses {
             return action.call();
         } catch (Exception e) {
             // Generic client message; detail is logged server-side only (audit L3).
-            log.debug("request rejected: {}", e.toString());
+            log.debug("request rejected: {}", sanitizeForLog(e.toString()));
             return badRequest("bad request");
         }
+    }
+
+    /**
+     * Exception detail made safe for a log line: CR/LF and other control characters are
+     * replaced, and the text is capped. Exception messages can embed attacker-controlled
+     * input (a malformed query parameter, a peer-supplied value), so logging them raw lets a
+     * remote party forge log entries or smuggle terminal escape sequences into an operator's
+     * console (audit: log injection via exception messages).
+     */
+    static String sanitizeForLog(String detail) {
+        if (detail == null) {
+            return "null";
+        }
+        int cap = Math.min(detail.length(), 512);
+        StringBuilder sb = new StringBuilder(cap);
+        for (int i = 0; i < cap; i++) {
+            char c = detail.charAt(i);
+            sb.append(c < 0x20 || c == 0x7F ? '_' : c);
+        }
+        return sb.toString();
     }
 
     static HttpResponse statusResponse(ExecutionStatus status) {

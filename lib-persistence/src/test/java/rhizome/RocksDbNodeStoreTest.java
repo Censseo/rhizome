@@ -120,6 +120,34 @@ class RocksDbNodeStoreTest {
     }
 
     @Test
+    void uncleBodiesRoundTripThroughTheStore() throws IOException {
+        // ChainStore.putUncle/uncleAt (audit: uncle-sync blocker): an uncle body referenced by a
+        // canonical block must survive the engine's bounded in-memory orphan pool — including
+        // across a restart — so this node can always serve it to syncing peers.
+        NetworkParameters params = fastParams();
+        String path = tempDir.resolve("db").toString();
+        AtomicLong clock = new AtomicLong(0);
+        PublicAddress miner = PublicAddress.random();
+        Block uncle;
+        try (RocksDbNodeStore store = new RocksDbNodeStore(path)) {
+            ChainEngine engine = ChainEngine.init(params, store.ledger(), store.chainStore(),
+                new LedgerSnapshot("test", 0, params.chainId()), null, clock::get);
+            uncle = mine(engine, params, miner, List.of(), clock);
+            store.chainStore().putUncle(uncle.hash(), uncle);
+            Block back = store.chainStore().uncleAt(uncle.hash());
+            assertEquals(uncle.hash(), back.hash(), "stored uncle must decode to the same block");
+            assertArrayEquals(BlockCodec.encode(uncle), BlockCodec.encode(back));
+            org.junit.jupiter.api.Assertions.assertNull(
+                store.chainStore().uncleAt(rhizome.crypto.SHA256Hash.random()),
+                "an unknown hash has no uncle body");
+        }
+        // Persisted, not just a memory overlay: a reopened store still serves the body.
+        try (RocksDbNodeStore store = new RocksDbNodeStore(path)) {
+            assertEquals(uncle.hash(), store.chainStore().uncleAt(uncle.hash()).hash());
+        }
+    }
+
+    @Test
     void statePersistsAcrossReopen() throws IOException {
         NetworkParameters params = fastParams();
         String path = tempDir.resolve("db").toString();
@@ -437,7 +465,8 @@ class RocksDbNodeStoreTest {
             new org.rocksdb.ColumnFamilyDescriptor("txindex".getBytes()),
             new org.rocksdb.ColumnFamilyDescriptor("meta".getBytes()),
             new org.rocksdb.ColumnFamilyDescriptor("ledger".getBytes()),
-            new org.rocksdb.ColumnFamilyDescriptor("nonces".getBytes()));
+            new org.rocksdb.ColumnFamilyDescriptor("nonces".getBytes()),
+            new org.rocksdb.ColumnFamilyDescriptor("uncles".getBytes()));
     }
 
     /** Reads one key from a column family of an existing modern database, opened directly. */

@@ -25,9 +25,18 @@ public final class NodeHttpClient {
 
     private final String baseUrl;
     private final HttpClient http;
+    /** Optional bearer token attached to every request (e.g. RHIZOME_PEER_TOKEN for a
+     *  token-gated peer node); never logged (audit: token-gated node breaks gossip). */
+    private final String bearerToken;
 
     public NodeHttpClient(String baseUrl) {
+        this(baseUrl, null);
+    }
+
+    /** As above, presenting {@code bearerToken} (nullable) on every request. */
+    public NodeHttpClient(String baseUrl, String bearerToken) {
         this.baseUrl = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
+        this.bearerToken = bearerToken;
         this.http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
     }
 
@@ -37,13 +46,13 @@ public final class NodeHttpClient {
 
     /** GET returning the response body (any status) as UTF-8 text. */
     public String get(String path) {
-        return send(HttpRequest.newBuilder(URI.create(baseUrl + path))
+        return send(PeerAuth.withToken(HttpRequest.newBuilder(URI.create(baseUrl + path)), bearerToken)
             .timeout(Duration.ofSeconds(15)).GET().build());
     }
 
     /** POST of a JSON body returning the response body (any status) as UTF-8 text. */
     public String postJson(String path, String jsonBody) {
-        return send(HttpRequest.newBuilder(URI.create(baseUrl + path))
+        return send(PeerAuth.withToken(HttpRequest.newBuilder(URI.create(baseUrl + path)), bearerToken)
             .timeout(Duration.ofSeconds(30))
             .header("Content-Type", "application/json")
             .POST(HttpRequest.BodyPublishers.ofString(jsonBody))
@@ -52,7 +61,7 @@ public final class NodeHttpClient {
 
     /** POST of a binary body returning the response body (any status) as UTF-8 text. */
     public String postBinary(String path, byte[] body) {
-        return send(HttpRequest.newBuilder(URI.create(baseUrl + path))
+        return send(PeerAuth.withToken(HttpRequest.newBuilder(URI.create(baseUrl + path)), bearerToken)
             .timeout(Duration.ofSeconds(30))
             .header("Content-Type", "application/octet-stream")
             .POST(HttpRequest.BodyPublishers.ofByteArray(body))

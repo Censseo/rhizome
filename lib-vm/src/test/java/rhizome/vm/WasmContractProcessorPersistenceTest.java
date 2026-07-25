@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
@@ -223,5 +224,96 @@ class WasmContractProcessorPersistenceTest {
             PublicAddress.empty(), COUNTER, 0, GAS_LIMIT, 0);
         assertFalse(second.success());
         assertTrue(second.error().contains("collision"), second.error());
+    }
+
+    // ---- bounded event-log retention (audit: RAM retention of logs) ----
+
+    @Test
+    void logsPerHeightAreCapped() {
+        // A log-spamming block must not retain unbounded entries: logs are a best-effort query
+        // service, not consensus, so the excess is truncated to MAX_LOGS_PER_HEIGHT.
+        WasmContractProcessor processor = new WasmContractProcessor(new WasmVm(), new DurableTestStore());
+        List<ContractProcessor.ContractLog> spam = new java.util.ArrayList<>();
+        for (int i = 0; i < WasmContractProcessor.MAX_LOGS_PER_HEIGHT + 1_000; i++) {
+            spam.add(new ContractProcessor.ContractLog(PublicAddress.random(),
+                new byte[] {1}, new byte[] {2}));
+        }
+        processor.retainLogs(1, spam);
+        assertEquals(WasmContractProcessor.MAX_LOGS_PER_HEIGHT, processor.logs(1).size(),
+            "per-height log retention is capped");
+    }
+
+    @Test
+    void retainedLogBytesEvictTheOldestHeightsFirst() {
+        // Past MAX_RETAINED_LOG_BYTES the oldest heights are dropped (LRU by height): retention
+        // stays a fixed network constant no matter how much log spam the retained window holds.
+        WasmContractProcessor processor = new WasmContractProcessor(new WasmVm(), new DurableTestStore());
+        byte[] payload = new byte[1024 * 1024];
+        long perHeight = PublicAddress.SIZE + 1L + payload.length;
+        int expectedKept = (int) (WasmContractProcessor.MAX_RETAINED_LOG_BYTES / perHeight);
+        long heights = expectedKept + 3;
+        for (long h = 1; h <= heights; h++) {
+            processor.retainLogs(h, List.of(new ContractProcessor.ContractLog(
+                PublicAddress.random(), new byte[] {1}, payload)));
+        }
+        int retained = 0;
+        for (long h = 1; h <= heights; h++) {
+            if (!processor.logs(h).isEmpty()) {
+                retained++;
+            }
+        }
+        assertEquals(expectedKept, retained, "retention is bounded by the byte budget");
+        assertTrue(processor.logs(1).isEmpty(), "the oldest height is evicted first");
+        assertTrue(processor.logs(2).isEmpty(), "eviction proceeds in height order");
+        assertFalse(processor.logs(heights).isEmpty(), "the most recent height is always kept");
+    }
+
+    // ---- bounded journal/receipt decoding (audit: unbounded decode allocations) ----
+
+    @Test
+    void aCorruptJournalCountFailsCleanlyWithoutAGiantAllocation() {
+        // count = Integer.MAX_VALUE in a 4-byte buffer: the old code pre-dimensioned a 2-billion-
+        // entry ArrayList before touching any record. The count must be bounded by the bytes
+        // present and rejected with a clean exception.
+        byte[] corrupt = java.nio.ByteBuffer.allocate(4).putInt(Integer.MAX_VALUE).array();
+        assertThrows(IllegalArgumentException.class, () -> WasmContractProcessor.decodeJournal(corrupt));
+    }
+
+    @Test
+    void aCorruptJournalEntryLengthFailsCleanly() {
+        // A plausible single-record header followed by a huge key length: the length must be
+        // bounded by the remaining bytes, not allocated verbatim.
+        java.nio.ByteBuffer b = java.nio.ByteBuffer.allocate(64);
+        b.putInt(1);                 // count
+        b.put((byte) 1);             // isCode
+        b.put(new byte[25]);         // contract address
+        b.putInt(Integer.MAX_VALUE); // keyLen — absurd
+        assertThrows(IllegalArgumentException.class,
+            () -> WasmContractProcessor.decodeJournal(b.array()));
+    }
+
+    @Test
+    void aCorruptReceiptCountFailsCleanlyWithoutAGiantAllocation() {
+        byte[] corrupt = java.nio.ByteBuffer.allocate(4).putInt(Integer.MAX_VALUE).array();
+        assertThrows(IllegalArgumentException.class, () -> WasmContractProcessor.decodeReceipts(corrupt));
+    }
+
+    @Test
+    void aCorruptReceiptTransferCountFailsCleanly() {
+        java.nio.ByteBuffer b = java.nio.ByteBuffer.allocate(32);
+        b.putInt(1);                 // one receipt
+        b.putLong(0);                // gasUsed
+        b.put((byte) 1);             // success
+        b.putInt(Integer.MAX_VALUE); // transferCount — absurd
+        assertThrows(IllegalArgumentException.class,
+            () -> WasmContractProcessor.decodeReceipts(b.array()));
+    }
+
+    @Test
+    void aTruncatedJournalFailsCleanly() {
+        // Fewer bytes than even the count field: must surface as a clean exception, never a
+        // giant allocation or a silent half-decode.
+        assertThrows(RuntimeException.class, () -> WasmContractProcessor.decodeJournal(new byte[2]));
+        assertThrows(RuntimeException.class, () -> WasmContractProcessor.decodeReceipts(new byte[2]));
     }
 }

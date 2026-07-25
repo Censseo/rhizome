@@ -35,9 +35,11 @@ final class SseLogHub {
     /** Concurrent streams one client key (IP / IPv6 /64) may hold, so one host cannot deny the rest. */
     private static final int MAX_SUBSCRIBERS_PER_CLIENT = 4;
 
-    /** Concurrent streams one IPv6 /48 site may hold in aggregate. The per-client cap keys on the
-     *  /64, but a single site allocation hands out 2^16 /64s, so rotating /64s would still let one
-     *  site exhaust the global subscriber cap (audit F5). */
+    /** Concurrent streams one site may hold in aggregate, keyed by IPv6 /48 or IPv4 /24. The
+     *  per-client cap keys on the /64 (or the full v4 address), but a single site hands out
+     *  2^16 /64s — and ~64 IPv4 addresses at 4 streams each already suffice to exhaust the
+     *  global subscriber cap — so rotation inside the site allocation would still deny the
+     *  feed to everyone else (audit F5; the v4 /24 tier closes the remaining gap). */
     private static final int MAX_SUBSCRIBERS_PER_SUBNET = 16;
 
     private final Eventloop eventloop;
@@ -64,7 +66,7 @@ final class SseLogHub {
 
     /**
      * As {@link #subscribe(String)}, additionally bounding the aggregate streams per
-     * {@code subnetKey} (the IPv6 /48 site tier — see {@link #MAX_SUBSCRIBERS_PER_SUBNET}).
+     * {@code subnetKey} (the IPv6-/48 / IPv4-/24 site tier — see {@link #MAX_SUBSCRIBERS_PER_SUBNET}).
      */
     ChannelSupplier<ByteBuf> subscribe(String clientKey, String subnetKey) {
         if (subscribers.size() >= maxSubscribers) {

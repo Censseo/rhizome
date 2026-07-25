@@ -56,6 +56,15 @@ public final class RocksDbNodeStore implements AutoCloseable {
     private static final byte[] CF_META = "meta".getBytes();
     private static final byte[] CF_LEDGER = "ledger".getBytes();
     private static final byte[] CF_NONCES = "nonces".getBytes();
+    /**
+     * Bodies of uncles referenced by canonical blocks, keyed by block hash. The engine's orphan
+     * pool is a bounded in-memory LRU, so without persistence a restart (or pool churn) would
+     * leave this node — and any peer syncing an uncle-bearing chain from it — unable to serve a
+     * referenced orphan body (audit: uncle-sync blocker). Only uncles a canonical block cites are
+     * written (the engine calls {@code putUncle} at accept time), so growth is bounded by the
+     * chain's own uncle rate, never by the unauthenticated orphan-ingest path.
+     */
+    private static final byte[] CF_UNCLES = "uncles".getBytes();
     private static final byte[] HEIGHT_KEY = "height".getBytes();
     private static final byte[] PRUNED_BELOW_KEY = "prunedBelow".getBytes();
     private static final byte[] NONCE_HEIGHT_KEY = "nonceHeight".getBytes();
@@ -82,6 +91,7 @@ public final class RocksDbNodeStore implements AutoCloseable {
     private final ColumnFamilyHandle metaCf;
     private final ColumnFamilyHandle ledgerCf;
     private final ColumnFamilyHandle noncesCf;
+    private final ColumnFamilyHandle unclesCf;
     // Synced: every write that advances (or rewinds) the chain height must be fsync-durable
     // before the node reports the block applied (audit F3).
     private final WriteOptions writeOptions = new WriteOptions().setSync(true);
@@ -119,7 +129,8 @@ public final class RocksDbNodeStore implements AutoCloseable {
             new ColumnFamilyDescriptor(CF_TXINDEX),
             new ColumnFamilyDescriptor(CF_META),
             new ColumnFamilyDescriptor(CF_LEDGER),
-            new ColumnFamilyDescriptor(CF_NONCES));
+            new ColumnFamilyDescriptor(CF_NONCES),
+            new ColumnFamilyDescriptor(CF_UNCLES));
         List<ColumnFamilyHandle> handles = new ArrayList<>();
         // DBOptions is NOT closed after open: closing it while the DB is live corrupts the
         // native heap (rocksdbjni keeps referencing it) — the audit F12 leak note is
@@ -139,6 +150,7 @@ public final class RocksDbNodeStore implements AutoCloseable {
         this.metaCf = handles.get(4);
         this.ledgerCf = handles.get(5);
         this.noncesCf = handles.get(6);
+        this.unclesCf = handles.get(7);
         backfillHeaders();
         catchUpPruning();
     }
@@ -310,6 +322,7 @@ public final class RocksDbNodeStore implements AutoCloseable {
         metaCf.close();
         ledgerCf.close();
         noncesCf.close();
+        unclesCf.close();
         writeOptions.close();
         db.close();
     }
@@ -481,6 +494,25 @@ public final class RocksDbNodeStore implements AutoCloseable {
                 throw new LedgerException("Failed to pop block " + height, e);
             } finally {
                 pendingLedger = null; // same failed-commit rule as append (audit F9)
+            }
+        }
+
+        @Override
+        public void putUncle(SHA256Hash hash, Block uncle) {
+            try {
+                db.put(unclesCf, writeOptions, hash.toBytes(), BlockCodec.encode(uncle));
+            } catch (RocksDBException e) {
+                throw new LedgerException("Failed to store uncle " + hash.toHexString(), e);
+            }
+        }
+
+        @Override
+        public Block uncleAt(SHA256Hash hash) {
+            try {
+                byte[] value = db.get(unclesCf, hash.toBytes());
+                return value == null ? null : BlockCodec.decode(value);
+            } catch (RocksDBException e) {
+                throw new LedgerException("Failed to read uncle " + hash.toHexString(), e);
             }
         }
 

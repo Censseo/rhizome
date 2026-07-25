@@ -44,4 +44,20 @@ class CryptoTest {
         byte[] fromUtf8Bytes = Crypto.signWithPrivateKey("héllo — ☃".getBytes(StandardCharsets.UTF_8), privateKey);
         assertArrayEquals(fromUtf8Bytes, fromString);
     }
+
+    @Test
+    void nonAsciiStringSignsAndVerifiesThroughTheStringOverloads() {
+        // sign(String) and checkSignature(String) must agree on the SAME pinned charset (UTF-8):
+        // with the platform default on the verify side, a non-ASCII message signed under UTF-8
+        // would fail to verify on any host whose default charset differs (e.g. windows-1252).
+        var pair = Crypto.generateKeyPair();
+        PrivateKey privateKey = PrivateKey.of(pair.getPrivate());
+        PublicKey publicKey = PublicKey.of(pair.getPublic());
+
+        String message = "héllo — ☃ 中文";
+        byte[] signature = Crypto.signWithPrivateKey(message, privateKey);
+        assertTrue(Crypto.checkSignature(message, signature, publicKey));
+        assertTrue(Crypto.checkSignature(message.getBytes(StandardCharsets.UTF_8), signature, publicKey));
+        assertFalse(Crypto.checkSignature(message + "!", signature, publicKey));
+    }
 }

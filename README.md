@@ -6,7 +6,7 @@ A Java proof-of-work blockchain with **WebAssembly smart contracts** (via the pu
 with corrected consensus rules and Pufferfish2 proof of work — built for cheap token
 launches and autonomous agents. See [`WHITEPAPER.md`](WHITEPAPER.md) for the design.
 
-Status: functional, tested node with a smart-contract VM (446 tests). Requires JDK 21.
+Status: functional, tested node with a smart-contract VM (531 tests). Requires JDK 21.
 
 ## Build & test
 
@@ -24,7 +24,8 @@ Configured via environment variables:
 | `RHIZOME_NETWORK` | `mainnet` | `mainnet` or `testnet` (low difficulty) |
 | `RHIZOME_PORT` | `3000` | HTTP API port |
 | `RHIZOME_BIND_ADDRESS` | `0.0.0.0` | HTTP API bind address (`127.0.0.1` for a wallet/dashboard-only node behind a tunnel) |
-| `RHIZOME_API_TOKEN` | — | when set, state-changing/operator routes (`/add_peer`, `/scan/register`, `/scan/deregister`, `/add_transaction`, `/submit`, `/call_readonly`) require `Authorization: Bearer <token>`; P2P protocol endpoints stay open. Note: with a token set, gossip peers must also present it on `/submit` and `/add_transaction` |
+| `RHIZOME_API_TOKEN` | — | when set, state-changing/operator routes (`/add_peer`, `/scan/register`, `/scan/deregister`, `/add_transaction`, `/submit`, `/call_readonly`) require `Authorization: Bearer <token>`; P2P protocol endpoints stay open. Note: with a token set, gossip peers must also present it on `/submit` and `/add_transaction` — set `RHIZOME_PEER_TOKEN` on every node of the deployment so outbound peer traffic authenticates |
+| `RHIZOME_PEER_TOKEN` | — | bearer token for *outbound* peer-to-peer requests (gossip `/submit` & `/add_transaction`, PEX fetch/announce, sync GETs), sent **only to the peers of `RHIZOME_PEERS` and only over `https://`** — the peer registry is fed by unauthenticated `/add_peer`/PEX, so gossip-learned or cleartext-http peers never receive the secret. Required when your nodes gate ingest with `RHIZOME_API_TOKEN` (configure those peers with `https://` URLs), otherwise cross-node pushes are refused (401) and gossip stops converging. Never logged |
 | `RHIZOME_DATA` | `./data` | RocksDB data directory |
 | `RHIZOME_SNAPSHOT` | — | snapshot file seeding the genesis |
 | `RHIZOME_MINER` | — | reward address (enables block production) |

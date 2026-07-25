@@ -285,15 +285,14 @@ async function boot() {
   document.getElementById('brand-net').textContent =
     App.stats.network + ' · chain ' + App.stats.chainId;
   if (App.features.boxes) document.getElementById('boxes-badge').remove();
-  // Migrate any legacy plaintext localStorage key into the vault, then auto-unlock an
-  // unencrypted vault so a returning user isn't prompted for a passphrase they never set.
+  // Migrate any legacy plaintext localStorage key into the vault. An UNENCRYPTED vault is
+  // deliberately NOT auto-unlocked here: a seed sitting in cleartext in IndexedDB must require
+  // an explicit user gesture (the wallet page offers unlock + encryption migration) rather than
+  // being loaded into memory on every dashboard visit (audit: cleartext vault auto-unlock).
   // Skipped entirely on a non-secure context: the wallet refuses to touch keys there (audit F8).
   try {
     if (CRYPTO_OK) {
       await migrateLegacyWallet();
-      if ((await Vault.exists()) && !(await Vault.isEncrypted())) {
-        WalletStore.setUnlocked(await Vault.open(null));
-      }
     }
   } catch (e) { /* vault unavailable; wallet page will surface it */ }
   setInterval(async () => {
@@ -625,6 +624,48 @@ async function renderWallet() {
     $view.append(el('div', { class: 'card' }, el('h3', null, 'Déverrouiller le wallet'),
       el('label', { class: 'f' }, 'Passphrase'), pass,
       el('button', { onclick: unlock }, 'Déverrouiller'), out,
+      el('details', null, el('summary', null, 'Oublier ce wallet'),
+        el('button', {
+          class: 'danger', onclick: async () => {
+            if (confirm('Oublier la clé de ce navigateur ? Sans sauvegarde, les fonds sont perdus.')) {
+              await Vault.forget(); WalletStore.lock(); route();
+            }
+          },
+        }, 'Oublier la clé'))));
+    return;
+  }
+
+  // Legacy UNENCRYPTED vault (created before passphrase encryption became mandatory, or
+  // migrated from a plaintext localStorage key): never auto-unlocked — require an explicit
+  // gesture, and push the user to encrypt it with a passphrase in the same step (audit:
+  // cleartext vault auto-unlock). The seed stays on disk in cleartext until they choose.
+  if (exists && !encrypted) {
+    const pass = el('input', { type: 'password', placeholder: 'Nouvelle passphrase' });
+    const out = el('div');
+    const unlockWith = async (encrypt) => {
+      try {
+        const seed = await Vault.open(null);
+        if (encrypt) {
+          if (!pass.value) {
+            out.replaceChildren(el('div', { class: 'result-box err' }, 'Choisissez une passphrase pour chiffrer la clé.'));
+            return;
+          }
+          await Vault.store(seed, pass.value); // migration: cleartext → AES-256-GCM
+        }
+        WalletStore.setUnlocked(seed);
+        route();
+      } catch (e) {
+        out.replaceChildren(el('div', { class: 'result-box err' }, 'Impossible d\'ouvrir le wallet : ' + e.message));
+      }
+    };
+    pass.addEventListener('keydown', e => { if (e.key === 'Enter') unlockWith(true); });
+    $view.append(el('div', { class: 'card' }, el('h3', null, 'Wallet non chiffré détecté'),
+      el('p', { class: 'muted' },
+        'Ce navigateur détient une clé enregistrée EN CLAIR (wallet ancien ou migré). Elle n\'est jamais chargée automatiquement : déverrouillez-la explicitement, et chiffrez-la avec une passphrase pour la protéger au repos.'),
+      el('label', { class: 'f' }, 'Passphrase (chiffre la clé au repos)'), pass,
+      el('button', { onclick: () => unlockWith(true) }, 'Déverrouiller et chiffrer'),
+      el('button', { class: 'secondary', onclick: () => unlockWith(false) }, 'Déverrouiller sans chiffrer'),
+      out,
       el('details', null, el('summary', null, 'Oublier ce wallet'),
         el('button', {
           class: 'danger', onclick: async () => {

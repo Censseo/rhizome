@@ -137,7 +137,11 @@ final class PeerHosts {
      * link-local (incl. 169.254.169.254 metadata), IPv4 private (RFC1918) and CGNAT
      * (100.64/10), IPv6 unique-local (fc00::/7), the IPv6 transition tunnels 6to4 (2002::/16)
      * and Teredo (2001::/32) — both embed an inner IPv4 address that would bypass the
-     * v4-private filter (audit F10) — and multicast.
+     * v4-private filter (audit F10) — and multicast. Also rejected (audit: SSRF range gaps):
+     * the NAT64 well-known prefix 64:ff9b::/96 and the deprecated v4-compatible ::/96 (both
+     * embed an inner v4 address), the IETF-protocol block 192.0.0.0/24, the benchmark range
+     * 198.18.0.0/15 and the reserved 240.0.0.0/4. An IPv4-mapped IPv6 address (::ffff:a.b.c.d)
+     * is classified by its embedded v4 address, so the v4 rules cannot be dodged by encoding.
      */
     static boolean isRoutable(InetAddress a) {
         if (a.isLoopbackAddress() || a.isAnyLocalAddress() || a.isLinkLocalAddress()
@@ -145,18 +149,73 @@ final class PeerHosts {
             return false;
         }
         byte[] b = a.getAddress();
-        if (b.length == 16 && (b[0] & 0xFE) == 0xFC) {
+        if (b.length == 4) {
+            return isRoutableV4(b, 0);
+        }
+        if ((b[0] & 0xFE) == 0xFC) {
             return false; // fc00::/7 unique-local IPv6
         }
-        if (b.length == 16 && (b[0] & 0xFF) == 0x20 && (b[1] & 0xFF) == 0x02) {
+        if ((b[0] & 0xFF) == 0x20 && (b[1] & 0xFF) == 0x02) {
             return false; // 2002::/16 6to4 tunnel (embeds a v4 address)
         }
-        if (b.length == 16 && (b[0] & 0xFF) == 0x20 && (b[1] & 0xFF) == 0x01
+        if ((b[0] & 0xFF) == 0x20 && (b[1] & 0xFF) == 0x01
             && b[2] == 0 && b[3] == 0) {
             return false; // 2001:0000::/32 Teredo tunnel (embeds a v4 address)
         }
-        if (b.length == 4 && (b[0] & 0xFF) == 100 && (b[1] & 0xFF) >= 64 && (b[1] & 0xFF) <= 127) {
+        if ((b[0] & 0xFF) == 0x00 && (b[1] & 0xFF) == 0x64
+            && (b[2] & 0xFF) == 0xFF && (b[3] & 0xFF) == 0x9B
+            && isZero(b, 4, 12)) {
+            return false; // 64:ff9b::/96 NAT64 well-known prefix (embeds a v4 address)
+        }
+        if (isZero(b, 0, 10) && (b[10] & 0xFF) == 0xFF && (b[11] & 0xFF) == 0xFF) {
+            // ::ffff:a.b.c.d v4-mapped: classify the embedded v4 address — a mapped loopback,
+            // private, CGNAT or reserved target must be refused exactly like its v4 form
+            // (the JDK usually hands these back as Inet4Address, but a raw 16-byte
+            // Inet6Address — e.g. built with getByAddress — bypasses the v4 checks without this).
+            return isRoutableV4(b, 12);
+        }
+        if (isZero(b, 0, 12)) {
+            return false; // ::/96 deprecated v4-compatible (loopback/any-local already refused above)
+        }
+        return true;
+    }
+
+    /** v4 blocked ranges: loopback, any-local, link-local, RFC1918, CGNAT, IETF 192.0.0.0/24,
+     *  benchmark 198.18.0.0/15, multicast and reserved 240/4. {@code q[offset..offset+3]} is the
+     *  address — either a whole Inet4Address or the tail of a v4-mapped IPv6 one. */
+    private static boolean isRoutableV4(byte[] q, int offset) {
+        int b0 = q[offset] & 0xFF;
+        int b1 = q[offset + 1] & 0xFF;
+        int b2 = q[offset + 2] & 0xFF;
+        if (b0 == 127 || b0 == 0) {
+            return false; // 127/8 loopback, 0/8 "this host on this network"
+        }
+        if (b0 == 10 || (b0 == 172 && b1 >= 16 && b1 <= 31) || (b0 == 192 && b1 == 168)) {
+            return false; // RFC1918 private
+        }
+        if (b0 == 169 && b1 == 254) {
+            return false; // link-local (incl. 169.254.169.254 cloud metadata)
+        }
+        if (b0 == 100 && b1 >= 64 && b1 <= 127) {
             return false; // 100.64.0.0/10 carrier-grade NAT
+        }
+        if (b0 == 192 && b1 == 0 && b2 == 0) {
+            return false; // 192.0.0.0/24 IETF protocol assignments
+        }
+        if (b0 == 198 && (b1 & 0xFE) == 18) {
+            return false; // 198.18.0.0/15 benchmarking (RFC 2544)
+        }
+        if (b0 >= 224) {
+            return false; // 224/4 multicast, 240/4 reserved (incl. 255.255.255.255 broadcast)
+        }
+        return true;
+    }
+
+    private static boolean isZero(byte[] b, int from, int toExclusive) {
+        for (int i = from; i < toExclusive; i++) {
+            if (b[i] != 0) {
+                return false;
+            }
         }
         return true;
     }

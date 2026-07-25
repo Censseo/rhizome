@@ -59,10 +59,22 @@ public final class HttpPeerSource implements PeerSource {
      * peer-controlled value, so an unbounded count is a CPU/memory DoS (audit F6).
      */
     private static final int MAX_SNAPSHOT_CHUNKS = 1_000_000;
+    /**
+     * Hard cap on one /orphan body: a full block, with the same headroom the node's own
+     * /submit body cap allows. Bounds a hostile peer's reply before the codec parses it.
+     */
+    private static final long ORPHAN_CAP = Constants.MAX_BLOCK_SIZE_BYTES + 1024L;
 
     private final String baseUrl;
+    /** The ORIGINAL (pre-DNS-pin) base URL, used for the {@link PeerTokenPolicy} trust check:
+     *  pinning rewrites the host to an IP literal, which would never match a hostname-configured
+     *  trusted peer. */
+    private final String originalUrl;
     private final HttpClient client;
     private final Duration requestDeadline;
+    /** Decides whether the RHIZOME_PEER_TOKEN secret may be presented to this peer (configured
+     *  + https only); never logged (audit: peer token exfiltration via gossip). */
+    private final PeerTokenPolicy tokenPolicy;
 
     public HttpPeerSource(String baseUrl) {
         this(baseUrl, false);
@@ -88,12 +100,40 @@ public final class HttpPeerSource implements PeerSource {
         this(baseUrl, blockPrivateHosts, client, REQUEST_DEADLINE);
     }
 
+    /**
+     * As above, presenting {@code peerToken} (nullable) as a bearer token on outbound requests.
+     *
+     * @deprecated presents the token to WHATEVER peer URL this source is pointed at, over any
+     *     scheme — on a registry fed by unauthenticated /add_peer + PEX, any gossip-learned
+     *     (often http://) peer receives the shared secret in cleartext. Use the
+     *     {@link PeerTokenPolicy} constructor so the token only goes to explicitly configured
+     *     peers over https.
+     */
+    @Deprecated
+    public HttpPeerSource(String baseUrl, boolean blockPrivateHosts, HttpClient client, String peerToken) {
+        this(baseUrl, blockPrivateHosts, client, PeerTokenPolicy.trustAll(peerToken));
+    }
+
+    /** As above, presenting the token only where {@code tokenPolicy} allows it. */
+    public HttpPeerSource(String baseUrl, boolean blockPrivateHosts, HttpClient client,
+                          PeerTokenPolicy tokenPolicy) {
+        this(baseUrl, blockPrivateHosts, client, REQUEST_DEADLINE, tokenPolicy);
+    }
+
     /** As above, with an explicit whole-exchange deadline (package-private for tests). */
     HttpPeerSource(String baseUrl, boolean blockPrivateHosts, HttpClient client, Duration requestDeadline) {
+        this(baseUrl, blockPrivateHosts, client, requestDeadline, PeerTokenPolicy.trustAll(null));
+    }
+
+    /** As above, with an explicit whole-exchange deadline and a token policy. */
+    HttpPeerSource(String baseUrl, boolean blockPrivateHosts, HttpClient client, Duration requestDeadline,
+                   PeerTokenPolicy tokenPolicy) {
         String trimmed = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
+        this.originalUrl = trimmed;
         this.baseUrl = PeerHosts.pin(trimmed, blockPrivateHosts);
         this.client = client;
         this.requestDeadline = requestDeadline;
+        this.tokenPolicy = tokenPolicy;
     }
 
     /** A default JDK client with the standard connect timeout; callers that share one build it once. */
@@ -136,7 +176,8 @@ public final class HttpPeerSource implements PeerSource {
         // Stream-decode block-by-block so peak memory is ~one block, not the whole ~800 MiB
         // window a hostile peer could otherwise force us to buffer (audit M5).
         String path = "/sync?start=" + start + "&end=" + end;
-        HttpRequest request = HttpRequest.newBuilder(URI.create(baseUrl + path))
+        HttpRequest request = PeerAuth.withToken(HttpRequest.newBuilder(URI.create(baseUrl + path)),
+                tokenPolicy.tokenFor(originalUrl))
             .timeout(requestDeadline).GET().build();
         try {
             // The request timeout only covers up to the response headers; bound the WHOLE
@@ -215,6 +256,24 @@ public final class HttpPeerSource implements PeerSource {
         return HeaderCodec.decodeAll(body);
     }
 
+    @Override
+    public Block orphan(SHA256Hash hash) {
+        // A 404 means the peer does not hold this orphan; a legacy peer predating the /orphan
+        // route answers 404 on the route itself, indistinguishable from "orphan absent" — so
+        // 404 maps to null (the synchronizer then keeps the block unverifiable and retries
+        // elsewhere) rather than to a ban-score-earning protocol violation.
+        byte[] body = getBytesOrNullOn404("/orphan?hash=" + hash.toHexString(), ORPHAN_CAP);
+        if (body == null) {
+            return null;
+        }
+        try {
+            return BlockCodec.decode(body);
+        } catch (RuntimeException e) {
+            // Junk no honest node would serve — misbehaviour, ban-score eligible (audit F9).
+            throw new PeerProtocolException("peer /orphan body is malformed", e);
+        }
+    }
+
     private String getString(String path, long maxBytes) {
         return new String(getBytes(path, maxBytes), StandardCharsets.UTF_8);
     }
@@ -224,7 +283,21 @@ public final class HttpPeerSource implements PeerSource {
     }
 
     private byte[] getBytes(String path, long maxBytes, boolean notFoundMeansUnsupported) {
-        HttpRequest request = HttpRequest.newBuilder(URI.create(baseUrl + path))
+        return fetch(path, maxBytes, notFoundMeansUnsupported ? NotFound.UNSUPPORTED : NotFound.ERROR);
+    }
+
+    /** 404 → {@code null} ("absent"); any other non-200 is a transport failure. */
+    private byte[] getBytesOrNullOn404(String path, long maxBytes) {
+        return fetch(path, maxBytes, NotFound.NULL);
+    }
+
+    /** How a 404 is surfaced: transport error, endpoint-unsupported, or plain "absent". */
+    private enum NotFound { ERROR, UNSUPPORTED, NULL }
+
+    /** Fetches {@code path}, applying the {@link NotFound} mode on a 404; throws on other errors. */
+    private byte[] fetch(String path, long maxBytes, NotFound notFound) {
+        HttpRequest request = PeerAuth.withToken(HttpRequest.newBuilder(URI.create(baseUrl + path)),
+                tokenPolicy.tokenFor(originalUrl))
             .timeout(requestDeadline)
             .GET()
             .build();
@@ -236,8 +309,11 @@ public final class HttpPeerSource implements PeerSource {
                 HttpResponse<InputStream> response = client.send(request, HttpResponse.BodyHandlers.ofInputStream());
                 if (response.statusCode() != 200) {
                     response.body().close();
-                    if (notFoundMeansUnsupported && response.statusCode() == 404) {
+                    if (response.statusCode() == 404 && notFound == NotFound.UNSUPPORTED) {
                         throw new UnsupportedOperationException("peer lacks " + path);
+                    }
+                    if (response.statusCode() == 404 && notFound == NotFound.NULL) {
+                        return null;
                     }
                     throw new IOException("peer " + path + " returned " + response.statusCode());
                 }

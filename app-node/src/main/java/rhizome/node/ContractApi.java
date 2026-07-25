@@ -18,8 +18,19 @@ import static rhizome.node.ApiResponses.parseLong;
  */
 final class ContractApi {
 
-    /** Server-side ceiling on a read-only dry-run's gas: bounds free, unauthenticated VM compute. */
-    private static final long MAX_READONLY_GAS = 50_000_000L;
+    /** Server-side ceiling on a read-only dry-run's gas: bounds free, unauthenticated VM compute.
+     *  Kept equal to the aggregate per-second budget (NodeService.READONLY_GAS_MAX_PER_SEC) so a
+     *  clamped max-gas request is always admissible — a higher clamp would be shed with 429 every
+     *  time it declared more than the budget, making the documented clamp unreachable. */
+    private static final long MAX_READONLY_GAS = 25_000_000L;
+
+    /**
+     * Server-side ceiling on a dry-run's declared {@code value}: no consensus constant bounds
+     * it (a dry-run never moves funds), so the bound is the representational safe range
+     * 2^62 — keeping {@code value * price}-style arithmetic inside the VM far from long
+     * overflow — and negative values are rejected outright (audit: readonly input validation).
+     */
+    private static final long MAX_READONLY_VALUE = 1L << 62;
 
     private ContractApi() {}
 
@@ -69,7 +80,8 @@ final class ContractApi {
         return logStream(sse, clientKey, clientKey);
     }
 
-    /** As {@link #logStream(SseLogHub, String)}, with the IPv6-/48 aggregate tier key (audit F5). */
+    /** As {@link #logStream(SseLogHub, String)}, with the site-aggregate tier key (IPv6 /48 or
+     *  IPv4 /24 — audit F5 and the SSE v4 gap). */
     static HttpResponse logStream(SseLogHub sse, String clientKey, String subnetKey) {
         var stream = sse == null ? null : sse.subscribe(clientKey, subnetKey);
         if (stream == null) {
@@ -91,6 +103,16 @@ final class ContractApi {
      * contract state without submitting a transaction. 503 if contracts are not wired.
      */
     static HttpResponse callReadonly(NodeService node, JSONObject body) {
+        // Validate inputs BEFORE touching availability, budgets or the VM (audit: readonly
+        // input validation): a malformed call must be a cheap 400, never VM work.
+        long value = body.optLong("value", 0);
+        if (value < 0 || value > MAX_READONLY_VALUE) {
+            return badRequest("value out of range");
+        }
+        if (body.has("from") && !body.getString("from").isEmpty()
+            && !isHexAddress(body.getString("from"))) {
+            return badRequest("from must be a 25-byte address (50 hex chars)");
+        }
         if (!node.dryRunAvailable()) {
             return HttpResponse.ofCode(503)
                 .withJson(new JSONObject().put("error", "contracts unavailable").toString()).build();
@@ -100,7 +122,6 @@ final class ContractApi {
             ? PublicAddress.of(body.getString("from")) : PublicAddress.empty();
         byte[] input = body.has("input") && !body.getString("input").isEmpty()
             ? rhizome.core.common.Utils.hexStringToByteArray(body.getString("input")) : new byte[0];
-        long value = body.optLong("value", 0);
         // Clamp the caller-supplied gas: a dry-run is free and unauthenticated, so an
         // unbounded gasLimit would let anyone burn arbitrary node CPU. Bound it server-side.
         long gasLimit = Math.min(Math.max(1L, body.optLong("gasLimit", 10_000_000L)), MAX_READONLY_GAS);
@@ -131,5 +152,20 @@ final class ContractApi {
             .put("contract", log.contract().toHexString())
             .put("topic", hex(log.topic()))
             .put("data", hex(log.data()));
+    }
+
+    /** Strict hex-address shape check (50 hex chars) — the parser alone maps some non-hex
+     *  input without failing. */
+    private static boolean isHexAddress(String s) {
+        if (s.length() != PublicAddress.SIZE * 2) {
+            return false;
+        }
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) {
+                return false;
+            }
+        }
+        return true;
     }
 }

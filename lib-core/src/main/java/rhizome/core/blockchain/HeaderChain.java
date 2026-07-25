@@ -53,6 +53,18 @@ public final class HeaderChain {
         }
     }
 
+    /**
+     * One memoised retarget boundary: the difficulty in force AFTER that boundary sealed, plus
+     * the hash of the boundary header it was folded from. The hash makes the memo self-invalidating:
+     * a reorg that rewrote the boundary's window changes the header at that height, so a stale
+     * entry is detected and dropped on next use — no explicit invalidation hook is needed, and a
+     * memo shared across sync rounds (even across peers) can never feed back a wrong-chain value
+     * (audit: O(height) difficulty-fold DoS). Header-only validation is monotone within one
+     * {@code validate} call (the combined view trusted-chain-then-candidates is fixed for the
+     * call), so folding forward from the highest still-matching boundary is exact.
+     */
+    public record DifficultyCheckpoint(int difficulty, SHA256Hash boundaryHash) {}
+
     private HeaderChain() {}
 
     /**
@@ -68,6 +80,19 @@ public final class HeaderChain {
      */
     public static Result validate(NetworkParameters params, LongFunction<BlockHeader> trustedHeaderAt,
                                   long forkHeight, List<BlockHeader> candidates, long nowMillis) {
+        return validate(params, trustedHeaderAt, forkHeight, candidates, nowMillis, null);
+    }
+
+    /**
+     * As {@link #validate(NetworkParameters, LongFunction, long, List, long)}, with a retarget
+     * memo keyed by boundary height (see {@link DifficultyCheckpoint}) so the difficulty fold
+     * resumes from the highest still-valid boundary instead of refolding from genesis on every
+     * call — amortised O(new boundaries) instead of O(forkHeight) before the first PoW check
+     * (audit: O(height) fold DoS). The map is not thread-safe; callers must serialise its use.
+     */
+    public static Result validate(NetworkParameters params, LongFunction<BlockHeader> trustedHeaderAt,
+                                  long forkHeight, List<BlockHeader> candidates, long nowMillis,
+                                  java.util.NavigableMap<Long, DifficultyCheckpoint> difficultyMemo) {
         if (candidates.isEmpty()) {
             return Result.reject(Rejection.DISCONTINUOUS_ID, forkHeight + 1);
         }
@@ -78,7 +103,7 @@ public final class HeaderChain {
         int lookback = params.difficultyLookback();
         // Difficulty the first candidate (height forkHeight+1) must carry, from the boundaries
         // already sealed at or below the fork — then stepped forward as we cross new boundaries.
-        int expectedDifficulty = difficultyForNext(params, at, forkHeight);
+        int expectedDifficulty = difficultyForNext(params, at, forkHeight, difficultyMemo);
 
         SHA256Hash prevHash = trustedHeaderAt.apply(forkHeight).hash();
         long expectedId = forkHeight + 1;
@@ -111,7 +136,7 @@ public final class HeaderChain {
             if (Math.abs((long) header.vote()) > 2) {
                 return Result.reject(Rejection.INVALID_VOTE, h);
             }
-            if (!header.verifyNonce(params.powAlgorithm())) {
+            if (!header.verifyNonce(params.powAlgorithm(), params.powCostsAt(header.id()))) {
                 return Result.reject(Rejection.INVALID_POW, h);
             }
             if (header.timestamp() <= medianTimePast(params, at, h - 1)) {
@@ -141,17 +166,25 @@ public final class HeaderChain {
             expectedId++;
             // A completed retarget window seals the difficulty for the next block. This MUST
             // match ChainEngine.computeDifficultyFromChain exactly, including excluding the
-            // genesis interval from the first window (audit L2) — otherwise header-sync
-            // validation and the engine's own mining disagree and every synced chain is
-            // rejected as PEER_INVALID at the first retarget.
+            // genesis interval from the first window (audit L2) and choosing each bound's
+            // measurement rule by the SAME activation predicate (boundary height vs
+            // consensusV2Height, audit: timewarp) — otherwise header-sync validation and the
+            // engine's own mining disagree and every synced chain is rejected as PEER_INVALID at
+            // the first retarget.
             if (h % lookback == 0) {
                 long windowStart = h - lookback + 1;
                 long measureStart = Math.max(windowStart, GenesisBlock.GENESIS_ID + 1);
                 long intervals = h - measureStart;
                 if (intervals > 0) {
-                    long observedMs = at.apply(h).timestamp() - at.apply(measureStart).timestamp();
+                    long observedMs = boundaryTimestamp(params, at, h) - boundaryTimestamp(params, at, measureStart);
                     expectedDifficulty = DifficultyAdjustment.nextDifficulty(
                         params, expectedDifficulty, intervals, observedMs / 1000);
+                }
+                if (difficultyMemo != null) {
+                    // Cache the boundary sealed by this candidate too: if the branch is adopted the
+                    // recorded hash matches the new canonical header and the entry stays valid; if
+                    // not, the hash check drops it on next use (see DifficultyCheckpoint).
+                    difficultyMemo.put(h, new DifficultyCheckpoint(expectedDifficulty, header.hash()));
                 }
             }
         }
@@ -159,21 +192,78 @@ public final class HeaderChain {
     }
 
     /** Difficulty a block at {@code tip+1} must carry: genesis difficulty stepped through every sealed window ≤ tip. */
-    private static int difficultyForNext(NetworkParameters params, LongFunction<BlockHeader> at, long tip) {
+    private static int difficultyForNext(NetworkParameters params, LongFunction<BlockHeader> at, long tip,
+                                         java.util.NavigableMap<Long, DifficultyCheckpoint> memo) {
         int lookback = params.difficultyLookback();
+        long boundary = lookback;
         int difficulty = params.genesisDifficulty();
-        for (long boundary = lookback; boundary <= tip; boundary += lookback) {
+        if (memo != null) {
+            // Resume the fold from the highest cached boundary whose recorded header hash still
+            // matches the chain under validation; stale entries (a reorg rewrote their window)
+            // are dropped so a lower, still-valid boundary takes over (see DifficultyCheckpoint).
+            var floor = memo.floorEntry(tip);
+            while (floor != null
+                    && !floor.getValue().boundaryHash().equals(at.apply(floor.getKey()).hash())) {
+                memo.remove(floor.getKey());
+                floor = memo.floorEntry(tip);
+            }
+            if (floor != null) {
+                boundary = floor.getKey() + lookback;
+                difficulty = floor.getValue().difficulty();
+            }
+        }
+        for (; boundary <= tip; boundary += lookback) {
             long windowStart = boundary - lookback + 1;
             // Mirror ChainEngine.computeDifficultyFromChain: exclude the genesis interval (audit L2).
             long measureStart = Math.max(windowStart, GenesisBlock.GENESIS_ID + 1);
             long intervals = boundary - measureStart;
-            if (intervals <= 0) {
-                continue;
+            if (intervals > 0) {
+                long observedMs = boundaryTimestamp(params, at, boundary) - boundaryTimestamp(params, at, measureStart);
+                difficulty = DifficultyAdjustment.nextDifficulty(params, difficulty, intervals, observedMs / 1000);
             }
-            long observedMs = at.apply(boundary).timestamp() - at.apply(measureStart).timestamp();
-            difficulty = DifficultyAdjustment.nextDifficulty(params, difficulty, intervals, observedMs / 1000);
+            if (memo != null) {
+                memo.put(boundary, new DifficultyCheckpoint(difficulty, at.apply(boundary).hash()));
+            }
         }
         return difficulty;
+    }
+
+    /**
+     * The timestamp a retarget closing at boundary height {@code h} reads at bound {@code h}:
+     * the median-of-3 ({@link #medianTimestamp}) when {@code params.consensusV2(h)} — i.e. the
+     * retarget itself is at or past the activation height — and the raw boundary timestamp
+     * (the legacy, timewarp-vulnerable rule) below it. The decision height is the BOUNDARY the
+     * retarget closes at, and both bounds of one window use the same rule; ChainEngine uses the
+     * identical predicate, so header sync and the engine never disagree across the activation.
+     */
+    private static long boundaryTimestamp(NetworkParameters params, LongFunction<BlockHeader> at, long h) {
+        if (params.consensusV2(h)) {
+            return medianTimestamp(at, h);
+        }
+        return at.apply(h).timestamp();
+    }
+
+    /**
+     * The retarget-bound timestamp at height {@code h}: the median of the (up to) 3 header
+     * timestamps ending at {@code h} inclusive, clamped at genesis (audit: timewarp; applies
+     * only from {@code consensusV2Height} on, see {@link #boundaryTimestamp}). Measuring
+     * a window from two raw timestamps let a miner inflate ONE boundary timestamp and stretch the
+     * observed duration — dragging difficulty down at ~no hash cost. With a median-of-3 bound,
+     * one manipulated timestamp moves the bound by at most the gap to its neighbour, so steering
+     * the retarget needs a sustained multi-block manipulation instead of a single point. The
+     * upper-median convention (index {@code size/2}, as {@code medianTimePast}) also keeps the
+     * artificial genesis timestamp out of the first window's start bound. MUST match
+     * {@code ChainEngine.medianBoundaryTimestamp} exactly — both sides compute the same retarget.
+     */
+    private static long medianTimestamp(LongFunction<BlockHeader> at, long h) {
+        long lo = Math.max(GenesisBlock.GENESIS_ID, h - 2);
+        int size = (int) (h - lo + 1);
+        long[] timestamps = new long[size];
+        for (int i = 0; i < size; i++) {
+            timestamps[i] = at.apply(h - i).timestamp();
+        }
+        java.util.Arrays.sort(timestamps);
+        return timestamps[size / 2];
     }
 
     /** Median timestamp of the last {@code medianTimeWindow} headers up to {@code tip} (inclusive). */

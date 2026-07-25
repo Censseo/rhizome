@@ -74,6 +74,25 @@ public final class WasmVm {
     static final int MAX_CODE_SIZE = 256 * 1024;
 
     /**
+     * Hard cap on any single host-side buffer a contract can make the node allocate (bytes).
+     * Host functions read contract-controlled lengths (storage keys/values, log data, the
+     * transfer_value address, call_contract callee+input, copied-out sources) and materialise
+     * them as {@code new byte[len]}. Before this cap, {@code len} was bounded only by the gas
+     * remaining — tens of MB with a large gas budget — so whether the allocation succeeded or
+     * threw {@link OutOfMemoryError} depended on each node's {@code -Xmx}: a large-heap node
+     * returned OK, a small-heap node hit the OOM path, and normalizing that OOM to out-of-gas
+     * made {@code gasUsed} heap-dependent — a state-root fork between validators (audit: host
+     * allocations proportional to gas). The per-byte gas charge on the length is levied FIRST
+     * (so a huge length is always expensive), then {@link #capHostBuffer} turns any length above
+     * this fixed network constant into a deterministic full-gas out-of-gas BEFORE the allocation
+     * — identical on every node regardless of local heap pressure. 1 MiB is comfortably above
+     * anything a legitimate host call needs (storage values, log payloads, call I/O) and small
+     * enough that 8 nested frames' worth of concurrent buffers is a few MB worst case, in the
+     * style of {@link #TREE_MAX_PAGES} for linear memory.
+     */
+    static final int HOST_BUFFER_CAP = 1024 * 1024;
+
+    /**
      * Hard cap on a module's declared table size (entries). A table's {@code initial} count forces
      * Chicory to eagerly allocate a reference array of that many entries at INSTANTIATION — before
      * the gas listener runs, so it is completely unmetered. Chicory's own limit is 10,000,000
@@ -272,11 +291,19 @@ public final class WasmVm {
             ExportFunction call = instance.export(ENTRY);
             call.apply();
             return ExecResult.ok(host.output(), host.logs(), gas.used());
-        } catch (StackOverflowError | OutOfMemoryError e) {
-            // Runaway allocation, or (defence in depth) recursion that somehow outran the
-            // deterministic depth cap. The exact heap/stack at which a given JVM trips is
-            // host-specific, so letting this surface as a node-local outcome would FORK
-            // consensus. Normalize it to a deterministic full-gas out-of-gas.
+        } catch (OutOfMemoryError e) {
+            // Fatal, never normalized to out-of-gas. After the host-buffer cap (HOST_BUFFER_CAP)
+            // and the tree-wide memory/locals/table budgets, every contract-driven allocation is
+            // bounded by a fixed network constant reserved BEFORE allocation, so an OOM here means
+            // the NODE itself is out of heap — not that the contract exceeded a budgeted constant.
+            // Converting it to out-of-gas would make gasUsed depend on the local -Xmx (a large-heap
+            // node completes with partial gas, a small-heap one reports full gas) and FORK consensus;
+            // a crash is preferable to a fork (audit: heap-dependent gasUsed).
+            throw new IllegalStateException("host out of memory during contract execution", e);
+        } catch (StackOverflowError e) {
+            // Defence in depth: recursion that somehow outran the deterministic depth cap. The exact
+            // stack at which a given JVM trips is host-specific, so normalize to a deterministic
+            // full-gas out-of-gas rather than a node-local outcome.
             return ExecResult.outOfGas(gas.limit());
         } catch (Throwable e) {
             if (isDepthExceeded(e)) {
@@ -346,6 +373,10 @@ public final class WasmVm {
         try {
             t.join();
         } catch (InterruptedException e) {
+            // Interrupt the worker too: otherwise it keeps running a 50M-gas execution detached
+            // from the interrupted caller, an orphan thread burning CPU and holding its whole
+            // call-tree memory until the gas budget runs out.
+            t.interrupt();
             Thread.currentThread().interrupt();
             throw new IllegalStateException("contract execution interrupted", e);
         }
@@ -439,6 +470,7 @@ public final class WasmVm {
         rejectWasmGc(module);
         rejectNonDeterministic(module);
         rejectOversizedAllocations(module);
+        rejectNonWhitelistedAbi(module);
         synchronized (MODULE_CACHE) {
             MODULE_CACHE.put(key, module);
         }
@@ -463,16 +495,27 @@ public final class WasmVm {
      */
     private static Memory boundedMemory(MemoryLimits requested, GasMeter gas, long[] frameAdded) {
         int initial = requested.initialPages();
-        if (initial > MAX_CONTRACT_PAGES) {
-            throw new IllegalArgumentException("contract declares too much initial memory: "
-                + initial + " pages (max " + MAX_CONTRACT_PAGES + ")");
-        }
+        checkDeclaredInitialPages(initial);
         // Tree-wide reservation first: a fixed numeric cap, so a nested chain of contracts cannot
         // sum past TREE_MAX_PAGES no matter the host heap (the fork/OOM vector this closes).
         reserveTreePages(initial, frameAdded);
         gas.charge((long) initial * GasSchedule.MEMORY_PER_PAGE);
         int max = Math.min(Math.max(requested.maximumPages(), initial), MAX_CONTRACT_PAGES);
         return new ByteBufferMemory(new MemoryLimits(initial, max));
+    }
+
+    /**
+     * Rejects an initial-memory declaration above {@link #MAX_CONTRACT_PAGES}. Shared by {@link
+     * #boundedMemory} (runtime instantiation, where it reverts the call rather than allocating
+     * gigabytes before the gas meter runs) and {@link #rejectOversizedAllocations} (deploy-time
+     * validation, where the same module is refused before it ever reaches the store) so both
+     * enforce exactly the same cap.
+     */
+    private static void checkDeclaredInitialPages(int initial) {
+        if (initial > MAX_CONTRACT_PAGES) {
+            throw new IllegalArgumentException("contract declares too much initial memory: "
+                + initial + " pages (max " + MAX_CONTRACT_PAGES + ")");
+        }
     }
 
     /**
@@ -535,28 +578,60 @@ public final class WasmVm {
      * opcodes such as {@code F32x4_ADD} slipped through — this uses an uppercased match against the
      * float and lane-shape families so the whole class is refused rather than relying on the
      * runtime happening to leave SIMD unimplemented. Contracts are integer-only by construction.
+     * The scan covers every place an opcode can appear: function bodies, global init expressions
+     * and element initializers/offsets (the latter two evaluate at instantiation, unmetered).
      */
     private static void rejectNonDeterministic(WasmModule module) {
         var code = module.codeSection();
-        if (code == null) {
-            return;
-        }
-        for (int i = 0; i < code.functionBodyCount(); i++) {
-            for (var instruction : code.getFunctionBody(i).instructions()) {
-                String op = instruction.opcode().name().toUpperCase(java.util.Locale.ROOT);
-                // Match the float families anywhere in the name, not just as a prefix: the
-                // integer<->float conversions (I32_TRUNC_F32_S, I64_REINTERPRET_F64, …) carry the
-                // float type in the MIDDLE of the mnemonic and slipped a startsWith("F..") filter,
-                // leaving a float value reachable on the stack (audit V6j). All WASM opcodes whose
-                // name contains F32/F64 are float ops; contracts are integer-only by construction.
-                if (op.contains("F32") || op.contains("F64") || op.startsWith("V128")
-                        || op.contains("X16_") || op.contains("X8_")
-                        || op.contains("X4_") || op.contains("X2_")) {
-                    throw new IllegalArgumentException(
-                        "non-deterministic opcode " + instruction.opcode().name()
-                        + " is not allowed (float/SIMD)");
+        if (code != null) {
+            for (int i = 0; i < code.functionBodyCount(); i++) {
+                for (var instruction : code.getFunctionBody(i).instructions()) {
+                    rejectIfNonDeterministic(instruction);
                 }
             }
+        }
+        // Init expressions are evaluated at INSTANTIATION — before any gas is charged — so a
+        // float const-expression in a global or element initializer would reach the runtime
+        // without ever passing through the code-section scan (audit: floats in init-expressions).
+        var globals = module.globalSection();
+        if (globals != null) {
+            for (int i = 0; i < globals.globalCount(); i++) {
+                for (var instruction : globals.getGlobal(i).initInstructions()) {
+                    rejectIfNonDeterministic(instruction);
+                }
+            }
+        }
+        var elements = module.elementSection();
+        if (elements != null) {
+            for (int i = 0; i < elements.elementCount(); i++) {
+                var element = elements.getElement(i);
+                for (var init : element.initializers()) {
+                    for (var instruction : init) {
+                        rejectIfNonDeterministic(instruction);
+                    }
+                }
+                if (element instanceof com.dylibso.chicory.wasm.types.ActiveElement active) {
+                    for (var instruction : active.offset()) {
+                        rejectIfNonDeterministic(instruction);
+                    }
+                }
+            }
+        }
+    }
+
+    private static void rejectIfNonDeterministic(Instruction instruction) {
+        String op = instruction.opcode().name().toUpperCase(java.util.Locale.ROOT);
+        // Match the float families anywhere in the name, not just as a prefix: the
+        // integer<->float conversions (I32_TRUNC_F32_S, I64_REINTERPRET_F64, …) carry the
+        // float type in the MIDDLE of the mnemonic and slipped a startsWith("F..") filter,
+        // leaving a float value reachable on the stack (audit V6j). All WASM opcodes whose
+        // name contains F32/F64 are float ops; contracts are integer-only by construction.
+        if (op.contains("F32") || op.contains("F64") || op.startsWith("V128")
+                || op.contains("X16_") || op.contains("X8_")
+                || op.contains("X4_") || op.contains("X2_")) {
+            throw new IllegalArgumentException(
+                "non-deterministic opcode " + instruction.opcode().name()
+                + " is not allowed (float/SIMD)");
         }
     }
 
@@ -729,6 +804,63 @@ public final class WasmVm {
             throw new IllegalArgumentException("contract declares too many exports: "
                 + exports.exportCount() + " (max " + MAX_MODULE_EXPORTS + ")");
         }
+        // Deploy-time mirror of the runtime boundedMemory cap: a declared initial memory above
+        // MAX_CONTRACT_PAGES must be refused here, not only discovered on every later call (the
+        // same check, shared via checkDeclaredInitialPages, so the two can never drift).
+        var memories = module.memorySection();
+        if (memories.isPresent()) {
+            for (int i = 0; i < memories.get().memoryCount(); i++) {
+                checkDeclaredInitialPages(memories.get().getMemory(i).limits().initialPages());
+            }
+        }
+    }
+
+    /**
+     * The host ABI names a contract may import from module {@code "env"} — exactly the functions
+     * {@link #hostFunctions} provides. Deploy-time validation rejects anything else (audit:
+     * validateCode controlled neither imports nor exports), so a module demanding an unknown host
+     * capability — or importing a memory/table/global instead of a function — never enters on-chain
+     * state; instantiation would fail it later anyway, but as a per-call revert rather than a
+     * one-time deploy rejection.
+     */
+    private static final java.util.Set<String> HOST_IMPORTS = java.util.Set.of(
+        "storage_read", "storage_write", "set_output", "emit_log", "get_caller", "get_input",
+        "get_value", "get_self", "get_deployer", "transfer_value", "call_contract", "box_read");
+
+    /**
+     * Enforces the sandbox ABI at validation time: every import must be a FUNCTION import of a
+     * whitelisted {@code env.*} host name, and the module must export the {@code call} entry point
+     * the executor invokes. Runs AFTER the other rejections so their more specific diagnostics
+     * (float/SIMD, tables, locals, …) keep firing first on modules that violate both.
+     */
+    private static void rejectNonWhitelistedAbi(WasmModule module) {
+        var imports = module.importSection();
+        if (imports != null) {
+            for (int i = 0; i < imports.importCount(); i++) {
+                var imp = imports.getImport(i);
+                if (imp.importType() != com.dylibso.chicory.wasm.types.ExternalType.FUNCTION
+                        || !ENV.equals(imp.module()) || !HOST_IMPORTS.contains(imp.name())) {
+                    throw new IllegalArgumentException("contract imports a non-whitelisted host "
+                        + "function: " + imp.module() + "." + imp.name());
+                }
+            }
+        }
+        var exports = module.exportSection();
+        boolean hasCall = false;
+        if (exports != null) {
+            for (int i = 0; i < exports.exportCount(); i++) {
+                var export = exports.getExport(i);
+                if (ENTRY.equals(export.name())
+                        && export.exportType() == com.dylibso.chicory.wasm.types.ExternalType.FUNCTION) {
+                    hasCall = true;
+                    break;
+                }
+            }
+        }
+        if (!hasCall) {
+            throw new IllegalArgumentException("contract does not export the \"" + ENTRY
+                + "\" entry point");
+        }
     }
 
     /**
@@ -839,6 +971,22 @@ public final class WasmVm {
         return false;
     }
 
+    /**
+     * Turns a contract-controlled buffer length above {@link #HOST_BUFFER_CAP} into a deterministic
+     * full-gas out-of-gas. Must be called AFTER the per-byte charge on the length (a huge length is
+     * always expensive) and BEFORE the {@code byte[len]} allocation it sizes: the cap is a fixed
+     * network constant, so every node rejects at exactly the same length with exactly the same
+     * gasUsed (the full limit), never a heap-dependent {@link OutOfMemoryError} (audit: host
+     * allocations proportional to gas).
+     */
+    static void capHostBuffer(long len, GasMeter gas) {
+        if (len > HOST_BUFFER_CAP) {
+            // Saturating charge: used becomes the limit and OutOfGasException is thrown, so the
+            // outcome is a full-gas out-of-gas identical on every node.
+            gas.charge(gas.remaining() + 1);
+        }
+    }
+
     private HostFunction[] hostFunctions(HostState host, GasMeter gas, ContractCallHandler calls) {
         HostFunction storageRead = new HostFunction(ENV, "storage_read",
             List.of(ValType.I32, ValType.I32, ValType.I32, ValType.I32), List.of(ValType.I32),
@@ -847,6 +995,7 @@ public final class WasmVm {
                 int keyLen = asLen(args[1]);
                 // Charge before touching memory so the work is metered even on a failing path.
                 gas.charge(GasSchedule.STORAGE_READ_BASE + (long) keyLen * GasSchedule.PER_BYTE);
+                capHostBuffer(keyLen, gas);
                 byte[] key = mem.readBytes(asOffset(args[0]), keyLen);
                 byte[] value = host.storageRead(key);
                 if (value == null) {
@@ -857,6 +1006,9 @@ public final class WasmVm {
                 // only `copied` let a caller pass out_cap = 0 and force repeated full loads of a
                 // large value for the flat base cost — the same undercharge box_read was fixed for.
                 gas.charge((long) value.length * GasSchedule.PER_BYTE);
+                // Values written after the cap can never exceed it (storage_write enforces it), so
+                // this is defence in depth for pre-existing state; deterministic either way.
+                capHostBuffer(value.length, gas);
                 int outPtr = asOffset(args[2]);
                 int outCap = asLen(args[3]);
                 int copied = Math.min(value.length, outCap);
@@ -878,6 +1030,8 @@ public final class WasmVm {
                 // not the transient PER_BYTE rate (audit F5).
                 gas.charge(GasSchedule.STORAGE_WRITE_BASE
                     + ((long) keyLen + valLen) * GasSchedule.STORAGE_WRITE_PER_BYTE);
+                capHostBuffer(keyLen, gas);
+                capHostBuffer(valLen, gas);
                 if (keyLen == 0) {
                     // The empty storage key is reserved for the host-written deployer record that
                     // get_deployer reads (set once at deploy). Forbidding contracts from writing it
@@ -896,6 +1050,7 @@ public final class WasmVm {
             (Instance inst, long... args) -> {
                 int len = asLen(args[1]);
                 gas.charge(GasSchedule.OUTPUT_BASE + (long) len * GasSchedule.PER_BYTE);
+                capHostBuffer(len, gas);
                 byte[] out = inst.memory().readBytes(asOffset(args[0]), len);
                 host.setOutput(out);
                 return null;
@@ -910,6 +1065,8 @@ public final class WasmVm {
                 // Long-cast BEFORE the add so the contract-controlled length sum cannot overflow
                 // int before the cast and undercharge a huge log (audit F4).
                 gas.charge(GasSchedule.LOG_BASE + ((long) topicLen + dataLen) * GasSchedule.PER_BYTE);
+                capHostBuffer(topicLen, gas);
+                capHostBuffer(dataLen, gas);
                 byte[] topic = mem.readBytes(asOffset(args[0]), topicLen);
                 byte[] data = mem.readBytes(asOffset(args[2]), dataLen);
                 host.emitLog(topic, data);
@@ -962,6 +1119,7 @@ public final class WasmVm {
                 // copied up to the memory cap for 500 gas, then returned -1 — ~10^5x underpriced, a
                 // deterministic block-filling CPU/GC DoS that defeated gas-as-a-DoS-bound (audit S5).
                 gas.charge(GasSchedule.CALL_BASE + (long) toLen * GasSchedule.PER_BYTE);
+                capHostBuffer(toLen, gas);
                 byte[] to = inst.memory().readBytes(asOffset(args[0]), toLen);
                 return new long[] {host.transferValue(to, args[2])};
             });
@@ -981,11 +1139,17 @@ public final class WasmVm {
                 if (box == null) {
                     return new long[] {-1L};
                 }
-                // serialize() is O(box size) work; copyOut now charges the full serialized length
-                // (a caller passing out_cap = 0 is still billed for the whole box, not just copied
-                // bytes), so no separate length charge is needed here beyond the base.
+                // Charge the KNOWN serialized size BEFORE serialize() materialises the copy —
+                // serializedSize() is O(registers) metadata with no allocation, so the
+                // "charge then work" invariant every other host fn keeps now holds here too
+                // (previously serialize() ran O(box size) work before the per-byte charge, and a
+                // gas-insufficient caller paid for the serialization anyway). The cap check also
+                // precedes the allocation, as everywhere else.
+                long size = box.serializedSize();
+                gas.charge(size * GasSchedule.PER_BYTE);
+                capHostBuffer(size, gas);
                 byte[] serialized = box.serialize();
-                return new long[] {copyOut(inst, serialized, args[1], args[2], gas)};
+                return new long[] {copyOutCharged(inst, serialized, args[1], args[2])};
             });
 
         // call_contract(addr_ptr, addr_len, in_ptr, in_len, out_ptr, out_cap) -> i32:
@@ -1007,6 +1171,8 @@ public final class WasmVm {
                 // A wrong-length callee address simply resolves to nothing: the dispatcher returns
                 // null and the call reports -1, so metering (not rejection) is the fix here.
                 gas.charge(GasSchedule.CALL_BASE + ((long) calleeLen + inputLen) * GasSchedule.PER_BYTE);
+                capHostBuffer(calleeLen, gas);
+                capHostBuffer(inputLen, gas);
                 byte[] callee = mem.readBytes(asOffset(args[0]), calleeLen);
                 byte[] input = mem.readBytes(asOffset(args[2]), inputLen);
                 byte[] output = calls == null ? null : calls.call(callee, input);
@@ -1030,6 +1196,12 @@ public final class WasmVm {
      */
     private static long copyOut(Instance inst, byte[] src, long ptr, long cap, GasMeter gas) {
         gas.charge((long) src.length * GasSchedule.PER_BYTE); // meter the full source, before the write
+        capHostBuffer(src.length, gas);
+        return copyOutCharged(inst, src, ptr, cap);
+    }
+
+    /** The copy half of {@link #copyOut}, for callers that already charged the source length. */
+    private static long copyOutCharged(Instance inst, byte[] src, long ptr, long cap) {
         int copied = Math.min(src.length, asLen(cap));
         if (copied > 0) {
             inst.memory().write(asOffset(ptr), src, 0, copied);

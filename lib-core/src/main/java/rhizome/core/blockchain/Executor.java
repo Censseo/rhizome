@@ -146,6 +146,10 @@ public final class Executor {
         var blockImpl = (BlockImpl) block;
         long height = blockImpl.id();
         long expectedReward = params.miningReward(height);
+        // Consensus-V2 gate (see NetworkParameters.consensusV2Height): below the activation
+        // height the legacy rules apply — no consensus fee floor, and a zero deposit still
+        // creates the recipient wallet — so pre-existing history re-verifies unchanged.
+        boolean consensusV2 = params.consensusV2(height);
 
         // Batch-verify all signatures in parallel before the structural pass.
         if (verifier != null && !verifier.verifyAll(block.transactions())) {
@@ -247,6 +251,23 @@ public final class Executor {
             if (tx.amount().amount() < 0 || tx.fee().amount() < 0) {
                 return INVALID_TRANSACTION_AMOUNT;
             }
+            // Consensus fee floor — the SAME rule MemPool.addTransaction applies at admission,
+            // promoted into validation from consensusV2Height on (audit: fee floor was
+            // mempool-only). Without it a miner
+            // could include zero-fee transfers the relay policy refuses: amount 0 + fee 0 minted
+            // a permanent ledger entry per transfer (deposit created the recipient wallet), and
+            // gasPrice-0 calls ran compute no honest node was paid for. The rule is identical to
+            // the mempool's (miner revenue, so a contract call's declared gas budget counts), so
+            // every mempool-admitted transaction stays consensus-valid. BOX_COLLECT is exempt: it
+            // is self-authorized, minted by the block producer (never pooled), and must carry
+            // fee 0 by the payload rule above. Networks keep the floor at 0 to disable it.
+            // Below consensusV2Height the legacy rule applies: no consensus floor at all, so
+            // blocks already accepted with under-floor fees re-verify unchanged.
+            if (consensusV2 && params.minFee() > 0
+                && tx.kind() != rhizome.core.transaction.TransactionKind.BOX_COLLECT
+                && minerRevenue(tx) < params.minFee()) {
+                return TRANSACTION_FEE_TOO_LOW;
+            }
             SHA256Hash id = t.hashContents();
             if (!seenInBlock.add(id) || alreadyExecuted.test(id)) {
                 return EXPIRED_TRANSACTION;
@@ -331,12 +352,12 @@ public final class Executor {
                 if (charged > 0) {
                     withdraw(ledger, applied, tx.from(), new TransactionAmount(charged));
                 }
-                deposit(ledger, applied, tx.to(), tx.amount());
+                deposit(ledger, applied, tx.to(), tx.amount(), consensusV2);
                 if (fee > 0) {
                     deposit(ledger, applied, miner, new TransactionAmount(fee));
                 }
             }
-            deposit(ledger, applied, miner, ((TransactionImpl) coinbase).amount());
+            deposit(ledger, applied, miner, ((TransactionImpl) coinbase).amount(), consensusV2);
             // GHOST uncle rewards: fresh issuance to each referenced uncle's miner, plus a
             // nephew bonus to this block's miner. Every uncle is a real PoW block, so no
             // reward is minted without matching work. Uncle validity (miner address, depth,
@@ -366,6 +387,37 @@ public final class Executor {
             // in the ledger) must be rejected cleanly, not left as a partial mutation.
             // Underflow is already a LedgerException above; this is the overflow twin.
             return abort(processor, boxProcessor, tokenProcessor, ledger, applied, BALANCE_OVERFLOW);
+        } catch (RuntimeException | Error fatal) {
+            // A fatal failure mid-block (the VM surfaces a node-level OOM as IllegalStateException
+            // rather than heap-dependent gasUsed — see WasmVm) must not slip past abort(): without
+            // this catch the contract/box/token sessions stay open with staged mutations and the
+            // ledger keeps its partially applied ops — silent state corruption instead of the
+            // intended fail-stop. Clean up exactly like a soft abort, then rethrow so the caller
+            // still fails the block loudly.
+            try {
+                abort(processor, boxProcessor, tokenProcessor, ledger, applied, BALANCE_OVERFLOW);
+            } catch (RuntimeException | Error cleanupFailure) {
+                fatal.addSuppressed(cleanupFailure);
+            }
+            throw fatal;
+        }
+    }
+
+    /**
+     * The revenue a miner earns from {@code tx}: the plain fee for value/box/token ops; for a
+     * contract call the fee plus its declared gas budget ({@code gasLimit × gasPrice}, saturating)
+     * — the same upper bound the mempool uses for its admission floor, so the consensus fee floor
+     * above accepts exactly what the relay policy admits. Deterministic at block-assembly time,
+     * when gasUsed is still unknown.
+     */
+    private static long minerRevenue(TransactionImpl tx) {
+        if (!tx.kind().isContract()) {
+            return tx.fee().amount();
+        }
+        try {
+            return Math.addExact(tx.fee().amount(), Math.multiplyExact(tx.gasLimit(), tx.gasPrice()));
+        } catch (ArithmeticException overflow) {
+            return Long.MAX_VALUE;
         }
     }
 
@@ -608,8 +660,37 @@ public final class Executor {
         applied.add(new AppliedOp(AppliedOp.Op.WITHDRAW, wallet, amount));
     }
 
+    /** Deposit under the V2 rule (a zero credit is a strict no-op). */
     private static void deposit(Ledger ledger, List<AppliedOp> applied,
                                 PublicAddress wallet, TransactionAmount amount) {
+        deposit(ledger, applied, wallet, amount, true);
+    }
+
+    /**
+     * Credits {@code amount} to {@code wallet}, creating the wallet if needed.
+     *
+     * <p>{@code skipZeroDeposit} is the consensus-V2 gate ({@code params.consensusV2(height)}):
+     * under V2 a zero credit changes nothing and must NOT create the wallet (audit: ledger
+     * bloat) — amount-0 transfers otherwise minted a permanent ledger entry per call, letting a
+     * miner grow every node's state at no cost. Under the legacy rule (pre-activation height)
+     * a zero credit still creates the wallet, exactly as the chain historically behaved, so
+     * already-accepted blocks re-verify identically.
+     *
+     * <p>Rollback symmetry holds in BOTH modes. In-block abort replays the recorded ops, and a
+     * legacy zero deposit DID record one: {@code revertDeposit(wallet, 0)} then runs against a
+     * wallet the forward pass just created, subtracting 0 from a 0 balance — a safe no-op that
+     * never throws. The reorg path ({@code rollbackBlock}) instead guards every revertDeposit on
+     * {@code > 0}: under V2 that is the exact inverse (the zero deposit never happened); under
+     * the legacy rule it leaves the created 0-balance wallet key behind — a harmless phantom
+     * (block validity is a pure function of balance, never of key-presence, audit consensus
+     * Finding 1), so both modes stay fork-safe.
+     */
+    private static void deposit(Ledger ledger, List<AppliedOp> applied,
+                                PublicAddress wallet, TransactionAmount amount,
+                                boolean skipZeroDeposit) {
+        if (amount.amount() == 0 && skipZeroDeposit) {
+            return;
+        }
         if (!ledger.hasWallet(wallet)) {
             ledger.createWallet(wallet);
         }
@@ -681,7 +762,10 @@ public final class Executor {
                 }
             }
         }
-        ledger.revertDeposit(miner, ((TransactionImpl) coinbase).amount());
+        long coinbaseAmount = ((TransactionImpl) coinbase).amount().amount();
+        if (coinbaseAmount > 0) { // > 0 guard mirrors deposit's zero-credit no-op (exact inverse)
+            ledger.revertDeposit(miner, ((TransactionImpl) coinbase).amount());
+        }
         for (int i = transactions.size() - 1; i >= 0; i--) {
             var tx = (TransactionImpl) transactions.get(i);
             if (tx.isTransactionFee()) {
@@ -703,7 +787,17 @@ public final class Executor {
             if (fee > 0) {
                 ledger.revertDeposit(miner, new TransactionAmount(fee));
             }
-            ledger.revertDeposit(tx.to(), tx.amount());
+            // Guarded like the forward path and compatible with BOTH consensus modes (see the
+            // deposit helper): under V2 deposit(amount 0) is a no-op (it no longer creates the
+            // recipient wallet), so reverting it must be a no-op too — an unconditional
+            // revertDeposit(to, 0) would hit getWalletValue on a wallet that was never created
+            // and throw mid-rollback, corrupting a reorg (same vector as the revertSend guard
+            // below). Under the legacy rule a zero deposit created the wallet at balance 0;
+            // skipping its revert here leaves that phantom key in place, which is still the
+            // exact balance-level inverse (no coins moved) and fork-safe.
+            if (tx.amount().amount() > 0) {
+                ledger.revertDeposit(tx.to(), tx.amount());
+            }
             // Exact inverse of the forward path (executeBlock): the sender is only debited when
             // `charged = amount + fee > 0` (a 0-amount/0-fee transfer from a never-funded key never
             // touches `from`, deliberately — validity is balance-based, audit consensus Finding 1).

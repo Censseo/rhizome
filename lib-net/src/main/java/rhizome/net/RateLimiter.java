@@ -2,17 +2,23 @@ package rhizome.net;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.LongSupplier;
 
 /**
- * Per-client fixed-window rate limiter with a hard cap on the number of tracked
+ * Per-client SLIDING-window rate limiter with a hard cap on the number of tracked
  * clients — so it cannot leak memory under a spray of distinct source IPs
  * (Pandanite issue #52, where the limiter accumulated IPs without eviction).
  *
- * <p>When at capacity, entries whose window has fully expired are swept; if none
- * can be reclaimed, a new client is simply allowed (fail-open on tracking, never
- * unbounded growth).
+ * <p>The window glides rather than resetting: each client keeps the current and the
+ * previous window's counters, and the admitted rate is the weighted sum
+ * {@code prev * (1 - elapsed/window) + curr}. A fixed window lets a client fire a full
+ * budget at the end of one window and another full budget at the start of the next — a
+ * 2× burst the limit was meant to preclude (audit: fixed-window boundary burst); the
+ * weighted sum keeps the long-run rate at the configured budget from any phase.
+ *
+ * <p>When at capacity, entries whose windows have fully expired are swept; if none
+ * can be reclaimed, a new client is metered against a shared overflow bucket
+ * (fail-closed on tracking, never unbounded growth).
  */
 public final class RateLimiter {
 
@@ -31,7 +37,8 @@ public final class RateLimiter {
 
     private static final class Window {
         volatile long start;
-        final AtomicInteger count = new AtomicInteger();
+        int prev; // previous window's total (sliding-weighted into the current estimate)
+        int curr; // current window's total
         Window(long start) { this.start = start; }
     }
 
@@ -74,18 +81,39 @@ public final class RateLimiter {
 
     private boolean count(Window window, long now, int cost) {
         synchronized (window) {
-            if (now - window.start >= windowMs) {
-                window.start = now;
-                window.count.set(0);
+            long elapsed = now - window.start;
+            if (elapsed >= windowMs) {
+                // Slide one window forward, ANCHORED to the boundary (not to now) so the decay
+                // phase stays stable across requests: the just-closed window becomes the
+                // decaying previous one; two or more elapsed windows means nothing counts.
+                if (elapsed >= 2 * windowMs) {
+                    window.prev = 0;
+                    window.start = now;
+                } else {
+                    window.prev = window.curr;
+                    window.start += windowMs;
+                }
+                window.curr = 0;
+                elapsed = now - window.start;
             }
-            return window.count.addAndGet(Math.max(1, cost)) <= maxRequestsPerWindow;
+            // Weighted sliding rate: the previous window's contribution decays linearly as
+            // the current window advances. Checked BEFORE charging: a denied request must not
+            // consume budget, or its charge would cascade into the next window's decaying
+            // previous count and lock an honest borderline client out permanently.
+            double estimate = window.prev * (1.0 - (double) elapsed / windowMs) + window.curr;
+            int c = Math.max(1, cost);
+            if (estimate + c > maxRequestsPerWindow) {
+                return false;
+            }
+            window.curr += c;
+            return true;
         }
     }
 
-    /** Removes clients whose window has fully elapsed. Returns true if any were removed. */
+    /** Removes clients whose sliding window has fully elapsed. Returns true if any were removed. */
     private boolean sweepExpired(long now) {
         int before = clients.size();
-        clients.values().removeIf(w -> now - w.start >= windowMs);
+        clients.values().removeIf(w -> now - w.start >= 2 * windowMs);
         return clients.size() < before;
     }
 

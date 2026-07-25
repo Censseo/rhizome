@@ -78,6 +78,46 @@ class ExecutorTest {
     }
 
     @Test
+    void consensusFeeFloorRejectsFreeTransactionsEvenInAMinersOwnBlock() {
+        // The minFee floor is a CONSENSUS rule, not only mempool admission (audit: the floor was
+        // mempool-only, so a miner could include zero-fee transfers the relay policy refused —
+        // free permanent ledger entries at amount 0, free gasPrice-0 compute). A network with a
+        // floor rejects the block outright; the identical rule as the mempool keeps every
+        // pool-admitted transaction consensus-valid.
+        NetworkParameters floored = params.toBuilder().minFee(10L).build();
+        assertEquals(ExecutionStatus.TRANSACTION_FEE_TOO_LOW,
+            Executor.executeBlock(block(2, coinbase(2), signedSend(100, 0, 0)), ledger, h -> false, floored),
+            "fee 0 under a floor of 10 is a consensus rejection");
+        assertEquals(ExecutionStatus.TRANSACTION_FEE_TOO_LOW,
+            Executor.executeBlock(block(2, coinbase(2), signedSend(100, 9, 0)), ledger, h -> false, floored),
+            "strictly below the floor is rejected");
+        assertEquals(ExecutionStatus.SUCCESS,
+            Executor.executeBlock(block(2, coinbase(2), signedSend(100, 10, 0)), ledger, h -> false, floored),
+            "exactly at the floor passes");
+        // A zero floor (testnet) disables the rule entirely.
+        assertEquals(ExecutionStatus.SUCCESS, execute(block(3, coinbase(3), signedSend(100, 0, 1))));
+    }
+
+    @Test
+    void zeroAmountDepositDoesNotCreateTheRecipientWallet() {
+        // Ledger-bloat fix: deposit(amount 0) is a no-op, so a free 0/0 transfer can no longer
+        // mint a permanent ledger entry per call — and rollback stays a throw-free exact inverse
+        // (the revertDeposit side is guarded on > 0 symmetrically).
+        Transaction free = signedSend(0, 0, 0);
+        Block b = block(2, coinbase(2), free);
+
+        assertEquals(ExecutionStatus.SUCCESS, execute(b));
+        assertFalse(ledger.hasWallet(recipient), "a 0-amount deposit must not create the wallet");
+        long minerAfterApply = ledger.getWalletValue(miner).amount();
+
+        Executor.rollbackBlock(b, ledger, null, 2, params);
+        assertFalse(ledger.hasWallet(recipient), "rollback of a zero credit is a no-op too");
+        assertEquals(0L, ledger.getWalletValue(miner).amount(),
+            "miner back to the pre-block balance (reward reverted, no zero-credit residue)");
+        assertEquals(minerAfterApply, params.miningReward(2));
+    }
+
+    @Test
     void appliesTransfersFeesAndReward() {
         var status = execute(block(2, coinbase(2), signedSend(100_000, 500, 0)));
 

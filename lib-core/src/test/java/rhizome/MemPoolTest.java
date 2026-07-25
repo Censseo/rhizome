@@ -421,4 +421,81 @@ class MemPoolTest {
         assertFalse(mempool.contains(t0.hashContents()));
         assertTrue(mempool.contains(t1.hashContents()));
     }
+
+    @Test
+    void parkedTransactionsExpireAfterTheTtl() {
+        // A fully parked queue (gap at the confirmed nonce) is never minable; it must expire after
+        // PARKED_TTL_MILLIS instead of occupying its slots forever. Purge is lazy: it runs on
+        // addTransaction / getTransactionsForBlock.
+        java.util.concurrent.atomic.AtomicLong clock = new java.util.concurrent.atomic.AtomicLong(1_000_000L);
+        MemPool pool = new MemPool(params, verifier, accounts, 100, 1024, clock::get);
+        // sender parks nonces 1..3 above a gap at nonce 0.
+        for (int nonce = 1; nonce <= 3; nonce++) {
+            assertEquals(ExecutionStatus.SUCCESS, pool.addTransaction(send(1, 1, nonce)));
+        }
+        assertEquals(3, pool.size());
+
+        clock.addAndGet(2 * 60 * 60 * 1000L); // exactly the TTL
+        assertEquals(0, pool.getTransactionsForBlock(10).size(), "expired parked txs are purged on toBlock");
+        assertEquals(0, pool.size());
+
+        // A live queue (contiguous from the confirmed nonce) never expires, even past the TTL.
+        assertEquals(ExecutionStatus.SUCCESS, pool.addTransaction(send(1, 1, 0)));
+        assertEquals(ExecutionStatus.SUCCESS, pool.addTransaction(send(1, 1, 1)));
+        clock.addAndGet(2 * 60 * 60 * 1000L);
+        assertEquals(2, pool.getTransactionsForBlock(10).size(), "live transactions have no TTL");
+    }
+
+    @Test
+    void parkedQueueSurvivesBelowTheTtl() {
+        java.util.concurrent.atomic.AtomicLong clock = new java.util.concurrent.atomic.AtomicLong(1_000_000L);
+        MemPool pool = new MemPool(params, verifier, accounts, 100, 1024, clock::get);
+        assertEquals(ExecutionStatus.SUCCESS, pool.addTransaction(send(1, 1, 2))); // gap at 0..1
+        clock.addAndGet(2 * 60 * 60 * 1000L - 1); // one ms before expiry
+        assertEquals(ExecutionStatus.SUCCESS, pool.addTransaction(send(1, 1, 3)),
+            "an add below the TTL must not purge the parked queue");
+        assertEquals(2, pool.size());
+    }
+
+    @Test
+    void replaceByFeeBumpsALiveTransaction() {
+        // RBF: a live (contiguous-nonce) pooled tx can be replaced at the same sender+nonce when
+        // the new fee is >= old + max(1, old/10). Here old fee 100 → at least 110 required.
+        assertEquals(ExecutionStatus.SUCCESS, mempool.addTransaction(send(100, 100, 0)));
+        assertEquals(ExecutionStatus.INVALID_TRANSACTION_NONCE, mempool.addTransaction(send(100, 109, 0)),
+            "a bump below +10% is rejected as before");
+        assertEquals(ExecutionStatus.INVALID_TRANSACTION_NONCE, mempool.addTransaction(send(100, 100, 0)),
+            "an equal fee is rejected as before");
+
+        Transaction bumped = send(100, 110, 0);
+        assertEquals(ExecutionStatus.SUCCESS, mempool.addTransaction(bumped),
+            "a bump to exactly +10% replaces");
+        assertEquals(1, mempool.size(), "the old transaction left the pool");
+        assertTrue(mempool.contains(bumped.hashContents()));
+
+        // The bumped transaction is the one selected for the block.
+        List<Transaction> selected = mempool.getTransactionsForBlock(10);
+        assertEquals(1, selected.size());
+        assertEquals(110L, ((TransactionImpl) selected.get(0)).fee().amount());
+    }
+
+    @Test
+    void replaceByFeeRequiresAPositiveFeeToReplaceAFreeOne() {
+        // max(1, old/10): a 0-fee transaction needs at least fee 1 to be replaced.
+        assertEquals(ExecutionStatus.SUCCESS, mempool.addTransaction(send(100, 0, 0)));
+        assertEquals(ExecutionStatus.INVALID_TRANSACTION_NONCE, mempool.addTransaction(send(100, 0, 0)));
+        assertEquals(ExecutionStatus.SUCCESS, mempool.addTransaction(send(100, 1, 0)));
+        assertEquals(1, mempool.size());
+    }
+
+    @Test
+    void replaceByFeeRefusesToReplaceAParkedTransaction() {
+        // Only LIVE transactions are replaceable: a gapped (parked) one is not — it expires by
+        // TTL or yields to the capacity eviction, so an attacker cannot churn parked slots by fee.
+        assertEquals(ExecutionStatus.SUCCESS, mempool.addTransaction(send(100, 100, 2))); // gap at 0..1
+        assertEquals(ExecutionStatus.INVALID_TRANSACTION_NONCE, mempool.addTransaction(send(100, 1_000, 2)),
+            "even a much higher fee must not replace a parked transaction");
+        assertEquals(1, mempool.size());
+        assertTrue(mempool.getTransactionsForBlock(10).isEmpty(), "the parked original is still unminable");
+    }
 }

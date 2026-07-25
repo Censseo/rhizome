@@ -5,6 +5,8 @@ import rhizome.net.PeerBroadcaster;
 import rhizome.net.PeerDiscovery;
 import rhizome.net.PeerRegistry;
 import rhizome.net.PeerBanList;
+import rhizome.net.PeerTokenPolicy;
+import rhizome.net.PeerUrls;
 import rhizome.net.RateLimiter;
 
 import java.io.IOException;
@@ -78,6 +80,19 @@ public final class RhizomeNode implements AutoCloseable {
     private final java.net.http.HttpClient syncHttpClient = HttpPeerSource.newClient();
     /** Whether to refuse/ pin private peer hosts (SSRF): on for internet-exposed mainnet. */
     private boolean blockPrivatePeers;
+    /**
+     * Optional bearer token (env {@code RHIZOME_PEER_TOKEN}) for OUTBOUND peer-to-peer requests,
+     * gated by {@link #peerTokenPolicy}: the registry is fed by UNAUTHENTICATED /add_peer and
+     * PEX, so attaching the token to every request (the historical behaviour) leaked the shared
+     * deployment secret — in cleartext over http — to any gossip-learned peer (audit: peer token
+     * exfiltration via gossip). The token now only goes to explicitly configured peers
+     * ({@code config.peers()}) over https; gossip/sync to any other peer is unauthenticated.
+     * When an operator gates the ingest routes behind {@code RHIZOME_API_TOKEN}, configured
+     * peers must therefore be reached over https or their 401-refused pushes simply do not
+     * converge. Never logged.
+     */
+    private String peerToken;
+    private PeerTokenPolicy peerTokenPolicy;
 
     // Ban-score costs per sync outcome. Serving an invalid chain (bad PoW, broken
     // continuity, claimed-heavy-proved-light) is an unambiguous protocol violation
@@ -137,6 +152,19 @@ public final class RhizomeNode implements AutoCloseable {
         boolean allowPrivate = config.allowPrivatePeers()
             || "true".equalsIgnoreCase(System.getenv("RHIZOME_ALLOW_PRIVATE_PEERS"));
         this.blockPrivatePeers = !allowPrivate;
+        String envPeerToken = System.getenv("RHIZOME_PEER_TOKEN");
+        this.peerToken = envPeerToken == null || envPeerToken.isBlank() ? null : envPeerToken.trim();
+        this.peerTokenPolicy = new PeerTokenPolicy(peerToken, config.peers());
+        if (peerToken != null) {
+            for (String peer : config.peers()) {
+                String canonical = PeerUrls.canonicalize(peer);
+                if (canonical != null && canonical.startsWith("http://")) {
+                    log.warn("RHIZOME_PEER_TOKEN is set but configured peer {} is plain http:// — "
+                        + "the token will NOT be sent to it (gossip/sync to this peer is "
+                        + "unauthenticated); use an https:// peer URL to authenticate", peer);
+                }
+            }
+        }
 
         LedgerSnapshot snapshot = config.snapshotPath().isPresent()
             ? SnapshotLoader.fromFile(Path.of(config.snapshotPath().get()))
@@ -164,8 +192,9 @@ public final class RhizomeNode implements AutoCloseable {
             for (String peerUrl : config.peers()) {
                 try {
                     if (SnapshotBootstrap.bootstrap(config.params(), snapshot, store, boxStore, tokenStore,
-                            contractStore, stateStore, new HttpPeerSource(peerUrl, blockPrivatePeers),
-                            System.currentTimeMillis())) {
+                            contractStore, stateStore, new HttpPeerSource(peerUrl, blockPrivatePeers,
+                                syncHttpClient, peerTokenPolicy),
+                            System.currentTimeMillis(), Path.of(config.dataDir()))) {
                         break;
                     }
                 } catch (RuntimeException e) {
@@ -179,7 +208,9 @@ public final class RhizomeNode implements AutoCloseable {
         var boxProcessor = new DefaultBoxProcessor(boxStore, config.params());
         var tokenProcessor = new DefaultTokenProcessor(tokenStore, config.params());
         // Authenticated state root over ledger + boxes + tokens (committed in each header).
-        var stateAccumulator = new StateAccumulator(stateStore, stateStore, config.params().maxReorgDepth());
+        int stateRetainDepth = config.params().maxReorgDepth();
+        checkStateRetention(stateRetainDepth, config.params().maxReorgDepth());
+        var stateAccumulator = new StateAccumulator(stateStore, stateStore, stateRetainDepth);
         // Contracts read data boxes (Ergo-style data inputs) through the box processor's
         // session-aware view, so a box written earlier in the block is visible.
         contractProcessor.setBoxReader(boxProcessor::get);
@@ -233,6 +264,20 @@ public final class RhizomeNode implements AutoCloseable {
         }
     }
 
+    /**
+     * Fail-fast wiring guard: the state accumulator must retain roots at least as deep as the
+     * deepest reorg the engine may perform ({@code maxReorgDepth}), or a reorg past the retained
+     * window could not rebuild the state roots it rolls back over — a boot-time configuration
+     * error, not a mid-reorg surprise (audit: retainDepth below maxReorgDepth).
+     */
+    static void checkStateRetention(int retainDepth, int maxReorgDepth) {
+        if (retainDepth < maxReorgDepth) {
+            throw new IllegalStateException("state accumulator retainDepth=" + retainDepth
+                + " is below maxReorgDepth=" + maxReorgDepth
+                + "; a reorg that deep could not rebuild state roots — raise the retention");
+        }
+    }
+
     /** True when the configured bind address resolves to a loopback interface only. */
     private static boolean isLoopbackBind(String bindAddress) {
         try {
@@ -281,7 +326,7 @@ public final class RhizomeNode implements AutoCloseable {
     }
 
     private void startGossip() {
-        broadcaster = new PeerBroadcaster(registry::snapshot, blockPrivatePeers);
+        broadcaster = new PeerBroadcaster(registry::snapshot, blockPrivatePeers, peerTokenPolicy);
         // Re-broadcast blocks/transactions accepted from RPC (flood; loops terminate
         // because a peer that already has an item rejects it and won't gossip on).
         service.setOnBlockAccepted(broadcaster::broadcastBlock);
@@ -297,14 +342,34 @@ public final class RhizomeNode implements AutoCloseable {
             // ±1 storageFeeFactor, ±2 minValuePerByte, 0/absent = abstain.
             String vote = System.getenv("RHIZOME_VOTE");
             if (vote != null && !vote.isBlank()) {
-                producer.setVote(Integer.parseInt(vote.trim()));
+                producer.setVote(parseVote(vote));
             }
             producer.start();
         });
     }
 
+    /**
+     * Parses {@code RHIZOME_VOTE} with a clear error and bounds it to the protocol's vote domain
+     * (0 abstain, ±1 storageFeeFactor, ±2 minValuePerByte). An out-of-domain value would either
+     * crash the producer thread with a raw {@link NumberFormatException} or mint blocks the
+     * consensus gate rejects as {@code INVALID_VOTE} (audit: unvalidated config).
+     */
+    static int parseVote(String raw) {
+        final int vote;
+        try {
+            vote = Integer.parseInt(raw.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException("RHIZOME_VOTE must be an integer, was: " + raw, e);
+        }
+        if (vote < -2 || vote > 2) {
+            throw new IllegalArgumentException("RHIZOME_VOTE must be in [-2, 2] "
+                + "(0 abstain, ±1 storageFeeFactor, ±2 minValuePerByte), was: " + vote);
+        }
+        return vote;
+    }
+
     private void startNetworkLoops() {
-        discovery = new PeerDiscovery(registry, config.selfUrl(), blockPrivatePeers);
+        discovery = new PeerDiscovery(registry, config.selfUrl(), blockPrivatePeers, peerTokenPolicy);
         syncScheduler = Executors.newScheduledThreadPool(2, r -> {
             Thread t = new Thread(r, "rhizome-net");
             t.setDaemon(true);
@@ -373,7 +438,7 @@ public final class RhizomeNode implements AutoCloseable {
             }
             try {
                 ChainSynchronizer.Result result = synchronizer.syncFrom(
-                    new HttpPeerSource(peerUrl, blockPrivatePeers, syncHttpClient));
+                    new HttpPeerSource(peerUrl, blockPrivatePeers, syncHttpClient, peerTokenPolicy));
                 switch (result) {
                     case EXTENDED, REORGED ->
                         log.info("Synced from {}: {} -> height {}", peerUrl, result, engine.height());
@@ -514,57 +579,65 @@ public final class RhizomeNode implements AutoCloseable {
             try {
                 // The await budget must exceed the worst in-flight syncRound: peer body reads
                 // are deadline-bound at 30 s (BodyReadDeadline), so a stuck sync always unwinds
-                // within ~45 s. Closing the native store handles while a sync thread is inside a
-                // RocksDB call is a JVM-level SIGSEGV (native use-after-free), not a catchable
-                // Java exception — so on timeout, skip the close rather than crash the process:
-                // the daemon threads die with it, and RocksDB recovers via its WAL on next open.
+                // within ~45 s.
                 if (!syncScheduler.awaitTermination(45, TimeUnit.SECONDS)) {
-                    log.error("Network scheduler still busy after 45 s; skipping store close "
-                        + "to avoid a native RocksDB use-after-free (JVM crash)");
-                    return;
+                    // A truly stuck sync thread would make closing the native RocksDB handles a
+                    // use-after-free risk — but returning here leaked discovery, the broadcaster
+                    // and every store handle, wedging the data directory for the next process
+                    // (audit: incomplete shutdown). We therefore log loudly and STILL run the
+                    // full cleanup below; RocksDB's WAL recovers a torn write on next open, and
+                    // the stuck thread is a daemon that dies with the process.
+                    log.error("Network scheduler still busy after 45 s; proceeding with "
+                        + "cleanup anyway (WAL recovery covers a torn write)");
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
         }
-        if (discovery != null) {
-            discovery.close(); // stop the PEX fan-out pool (daemon threads, best-effort)
+        try {
+            if (discovery != null) {
+                discovery.close(); // stop the PEX fan-out pool (daemon threads, best-effort)
+            }
+            if (broadcaster != null) {
+                broadcaster.close();
+            }
+            if (verifier != null) {
+                verifier.shutdown();
+            }
+        } finally {
+            // Close the stores under the engine lock: producer/sync/eventloop are stopped above,
+            // but a straggler (late gossip task, timed-out eventloop job) could still be queued.
+            // Holding the lock guarantees no thread is inside a native write while the handles
+            // close; a late writer afterwards gets a clean "database is closed" Java exception
+            // instead of corrupting the native heap. Runs even if a step above threw, so the
+            // data directory is never left locked open (audit: incomplete shutdown).
+            if (engine != null) {
+                engine.runExclusive(() -> {
+                    if (store != null) {
+                        store.close();
+                    }
+                    if (contractStore != null) {
+                        contractStore.close();
+                    }
+                    if (boxStore != null) {
+                        boxStore.close();
+                    }
+                    if (tokenStore != null) {
+                        tokenStore.close();
+                    }
+                    if (stateStore != null) {
+                        stateStore.close();
+                    }
+                });
+            }
         }
-        if (broadcaster != null) {
-            broadcaster.close();
-        }
-        if (verifier != null) {
-            verifier.shutdown();
-        }
-        // Close the stores under the engine lock: producer/sync/eventloop are stopped above,
-        // but a straggler (late gossip task, timed-out eventloop job) could still be queued.
-        // Holding the lock guarantees no thread is inside a native write while the handles
-        // close; a late writer afterwards gets a clean "database is closed" Java exception
-        // instead of corrupting the native heap.
-        engine.runExclusive(() -> {
-            if (store != null) {
-                store.close();
-            }
-            if (contractStore != null) {
-                contractStore.close();
-            }
-            if (boxStore != null) {
-                boxStore.close();
-            }
-            if (tokenStore != null) {
-                tokenStore.close();
-            }
-            if (stateStore != null) {
-                stateStore.close();
-            }
-        });
     }
 
     public static void main(String[] args) throws Exception {
         NetworkParametersArg net = NetworkParametersArg.fromEnv();
         NodeConfig config = NodeConfig.defaults(net.params(),
             System.getenv().getOrDefault("RHIZOME_DATA", "./data"),
-            Integer.parseInt(System.getenv().getOrDefault("RHIZOME_PORT", "3000")));
+            parsePort(System.getenv().getOrDefault("RHIZOME_PORT", "3000")));
 
         String snapshot = System.getenv("RHIZOME_SNAPSHOT");
         if (snapshot != null && !snapshot.isBlank()) {
@@ -578,7 +651,7 @@ public final class RhizomeNode implements AutoCloseable {
         // dashboard); consensus rules still bound what other nodes accept.
         String interval = System.getenv("RHIZOME_BLOCK_INTERVAL_MS");
         if (interval != null && !interval.isBlank()) {
-            config = config.withBlockIntervalMs(Long.parseLong(interval.trim()));
+            config = config.withBlockIntervalMs(parseBlockIntervalMs(interval));
         }
         String peers = System.getenv("RHIZOME_PEERS");
         if (peers != null && !peers.isBlank()) {
@@ -605,6 +678,38 @@ public final class RhizomeNode implements AutoCloseable {
         Runtime.getRuntime().addShutdownHook(new Thread(node::close));
         node.start();
         Thread.currentThread().join(); // run until killed
+    }
+
+    /**
+     * Parses {@code RHIZOME_PORT} with a clear error and a range check (audit: unvalidated
+     * config — a typo'd port previously died with a raw NumberFormatException stack, or bound
+     * a nonsense port).
+     */
+    static int parsePort(String raw) {
+        final int port;
+        try {
+            port = Integer.parseInt(raw.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException("RHIZOME_PORT must be an integer, was: " + raw, e);
+        }
+        if (port < 1 || port > 65535) {
+            throw new IllegalArgumentException("RHIZOME_PORT must be in [1, 65535], was: " + port);
+        }
+        return port;
+    }
+
+    /** Parses {@code RHIZOME_BLOCK_INTERVAL_MS} with a clear error and a positivity check. */
+    static long parseBlockIntervalMs(String raw) {
+        final long interval;
+        try {
+            interval = Long.parseLong(raw.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException("RHIZOME_BLOCK_INTERVAL_MS must be an integer, was: " + raw, e);
+        }
+        if (interval <= 0) {
+            throw new IllegalArgumentException("RHIZOME_BLOCK_INTERVAL_MS must be positive, was: " + interval);
+        }
+        return interval;
     }
 
     /** Selects the network from RHIZOME_NETWORK (mainnet|testnet). */

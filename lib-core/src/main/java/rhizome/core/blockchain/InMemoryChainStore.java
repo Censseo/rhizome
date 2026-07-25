@@ -19,6 +19,7 @@ public final class InMemoryChainStore implements ChainStore {
 
     private final List<Block> blocks = new ArrayList<>();
     private final Map<SHA256Hash, Long> txIndex = new HashMap<>();
+    private final Map<SHA256Hash, Block> uncles = new HashMap<>();
 
     @Override
     public long height() {
@@ -59,6 +60,16 @@ public final class InMemoryChainStore implements ChainStore {
                 txIndex.remove(t.hashContents());
             }
         }
+    }
+
+    @Override
+    public void putUncle(SHA256Hash hash, Block uncle) {
+        uncles.put(hash, uncle);
+    }
+
+    @Override
+    public Block uncleAt(SHA256Hash hash) {
+        return uncles.get(hash);
     }
 
     @Override

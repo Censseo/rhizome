@@ -5,6 +5,7 @@ import lombok.Getter;
 import lombok.experimental.Accessors;
 import rhizome.core.common.Constants;
 import rhizome.crypto.PowAlgorithm;
+import rhizome.crypto.PowCosts;
 
 /**
  * Consensus configuration for a Rhizome chain.
@@ -38,6 +39,55 @@ public final class NetworkParameters {
 
     private final PowAlgorithm powAlgorithm;
 
+    // --- Proof-of-work costs (memory-hardness upgrade path) ---
+    /**
+     * Pufferfish2 time cost in force from genesis. Defaults to {@link PowCosts#DEFAULT}'s
+     * {@code cost_t} (0), so the existing chain re-verifies unchanged.
+     */
+    @lombok.Builder.Default
+    private final int powCostT = 0;
+    /**
+     * Pufferfish2 memory cost in force from genesis. Defaults to {@link PowCosts#DEFAULT}'s
+     * {@code cost_m} (8), so the existing chain re-verifies unchanged.
+     */
+    @lombok.Builder.Default
+    private final int powCostM = 8;
+    /**
+     * Height at which the PoW costs switch to {@link #powCostTAfter}/{@link #powCostMAfter}
+     * (0 = never). This is THE memory-hardness upgrade path: raising the costs is a
+     * consensus change, so it is scheduled at a coordinated height rather than changed in
+     * place — blocks below the height keep verifying under the genesis costs, blocks at or
+     * above it under the new ones, and no existing block is re-interpreted.
+     */
+    @lombok.Builder.Default
+    private final long powUpgradeHeight = 0;
+    /** PoW time cost from {@link #powUpgradeHeight} on; -1 = unset (only valid when no upgrade). */
+    @lombok.Builder.Default
+    private final int powCostTAfter = -1;
+    /** PoW memory cost from {@link #powUpgradeHeight} on; -1 = unset (only valid when no upgrade). */
+    @lombok.Builder.Default
+    private final int powCostMAfter = -1;
+
+    // --- Consensus-V2 activation ---
+    /**
+     * Height at which the consensus-V2 rules take effect (0 = from genesis). V2 bundles three
+     * audit fixes that would otherwise reinterpret already-accepted history — an unplanned hard
+     * fork on any chain with a past:
+     * <ul>
+     *   <li>difficulty retarget bounds measured by median-of-3 timestamps (anti-timewarp)
+     *       instead of the two raw boundary timestamps;</li>
+     *   <li>the {@link #minFee} floor enforced at consensus ({@code TRANSACTION_FEE_TOO_LOW}),
+     *       not only at mempool admission;</li>
+     *   <li>a zero-amount deposit no longer creates the recipient wallet.</li>
+     * </ul>
+     * On a live chain this MUST be scheduled at a future height coordinated across nodes, exactly
+     * like {@link #powUpgradeHeight}: blocks below the height keep verifying under the legacy
+     * rules, blocks at or above it under V2. On a fresh chain (clean mainnet/testnet) 0 is
+     * correct — V2 applies from genesis and there is no history to reinterpret.
+     */
+    @lombok.Builder.Default
+    private final long consensusV2Height = 0;
+
     // --- Genesis block header ---
     private final long genesisTimestamp;
     private final int genesisDifficulty;
@@ -67,7 +117,9 @@ public final class NetworkParameters {
     /**
      * Minimum fee a poolable transaction must pay (0 = no floor, the default). A configured floor
      * lets an operator reject free transactions at mempool admission (the previously-unused
-     * {@code TRANSACTION_FEE_TOO_LOW} status); it is a local admission policy, not a consensus rule.
+     * {@code TRANSACTION_FEE_TOO_LOW} status). From {@link #consensusV2Height} on the same floor
+     * is also a consensus rule (blocks carrying an under-fee transaction are rejected); below
+     * that height it remains a local admission policy only.
      */
     @lombok.Builder.Default
     private final long minFee = 0L;
@@ -225,6 +277,125 @@ public final class NetworkParameters {
     private final long minValuePerByteMin = 1;
     @lombok.Builder.Default
     private final long minValuePerByteMax = 1_000;
+
+    /**
+     * All-args constructor used by the Lombok builder. Validates the PoW-cost schedule at
+     * build time: the "after" costs may only be set together with a positive
+     * {@link #powUpgradeHeight}, and every cost pair must be a valid {@link PowCosts} —
+     * a misconfigured upgrade must fail fast at node startup, not mid-chain.
+     */
+    NetworkParameters(int chainId, String networkName, PowAlgorithm powAlgorithm,
+                      int powCostT, int powCostM, long powUpgradeHeight,
+                      int powCostTAfter, int powCostMAfter, long consensusV2Height,
+                      long genesisTimestamp, int genesisDifficulty,
+                      int desiredBlockTimeSec, int difficultyLookback, int minDifficulty, int maxDifficulty,
+                      int maxFutureBlockTimeSec, int minBlockTimeSec, int medianTimeWindow,
+                      int maxTransactionsPerBlock, long minFee, int maxBlockSizeBytes,
+                      long maxTxGas, long maxBlockGas, int maxUnclesPerBlock, int uncleMaxDepth,
+                      int maxReorgDepth, java.util.Map<Long, rhizome.crypto.SHA256Hash> checkpoints,
+                      long decimalScaleFactor, long initialReward, long rewardEpochBlocks,
+                      long rewardDecayNum, long rewardDecayDen,
+                      long uncleRewardNum, long uncleRewardDen, long nephewRewardDivisor,
+                      long boxActivationHeight, int maxBoxSizeBytes, int maxBoxRegisters,
+                      long minValuePerByte, long storagePeriodBlocks, long storageFeeFactor,
+                      int maxBoxCollectsPerBlock, long tokenActivationHeight,
+                      int maxTokenSymbolBytes, int maxTokenNameBytes, int maxTokenDecimals,
+                      long votingEpochLength, long storageFeeFactorStep, long storageFeeFactorMin,
+                      long storageFeeFactorMax, long minValuePerByteStep, long minValuePerByteMin,
+                      long minValuePerByteMax) {
+        new PowCosts(powCostT, powCostM); // genesis costs must be valid
+        boolean afterSet = powCostTAfter != -1 || powCostMAfter != -1;
+        if (powUpgradeHeight <= 0 && afterSet) {
+            throw new IllegalArgumentException(
+                "powCostTAfter/powCostMAfter require a positive powUpgradeHeight");
+        }
+        if (powUpgradeHeight > 0) {
+            if (powCostTAfter == -1 || powCostMAfter == -1) {
+                throw new IllegalArgumentException(
+                    "powUpgradeHeight requires both powCostTAfter and powCostMAfter");
+            }
+            new PowCosts(powCostTAfter, powCostMAfter); // upgraded costs must be valid
+        }
+        if (consensusV2Height < 0) {
+            throw new IllegalArgumentException("consensusV2Height must be >= 0");
+        }
+        this.chainId = chainId;
+        this.networkName = networkName;
+        this.powAlgorithm = powAlgorithm;
+        this.powCostT = powCostT;
+        this.powCostM = powCostM;
+        this.powUpgradeHeight = powUpgradeHeight;
+        this.powCostTAfter = powCostTAfter;
+        this.powCostMAfter = powCostMAfter;
+        this.consensusV2Height = consensusV2Height;
+        this.genesisTimestamp = genesisTimestamp;
+        this.genesisDifficulty = genesisDifficulty;
+        this.desiredBlockTimeSec = desiredBlockTimeSec;
+        this.difficultyLookback = difficultyLookback;
+        this.minDifficulty = minDifficulty;
+        this.maxDifficulty = maxDifficulty;
+        this.maxFutureBlockTimeSec = maxFutureBlockTimeSec;
+        this.minBlockTimeSec = minBlockTimeSec;
+        this.medianTimeWindow = medianTimeWindow;
+        this.maxTransactionsPerBlock = maxTransactionsPerBlock;
+        this.minFee = minFee;
+        this.maxBlockSizeBytes = maxBlockSizeBytes;
+        this.maxTxGas = maxTxGas;
+        this.maxBlockGas = maxBlockGas;
+        this.maxUnclesPerBlock = maxUnclesPerBlock;
+        this.uncleMaxDepth = uncleMaxDepth;
+        this.maxReorgDepth = maxReorgDepth;
+        this.checkpoints = checkpoints;
+        this.decimalScaleFactor = decimalScaleFactor;
+        this.initialReward = initialReward;
+        this.rewardEpochBlocks = rewardEpochBlocks;
+        this.rewardDecayNum = rewardDecayNum;
+        this.rewardDecayDen = rewardDecayDen;
+        this.uncleRewardNum = uncleRewardNum;
+        this.uncleRewardDen = uncleRewardDen;
+        this.nephewRewardDivisor = nephewRewardDivisor;
+        this.boxActivationHeight = boxActivationHeight;
+        this.maxBoxSizeBytes = maxBoxSizeBytes;
+        this.maxBoxRegisters = maxBoxRegisters;
+        this.minValuePerByte = minValuePerByte;
+        this.storagePeriodBlocks = storagePeriodBlocks;
+        this.storageFeeFactor = storageFeeFactor;
+        this.maxBoxCollectsPerBlock = maxBoxCollectsPerBlock;
+        this.tokenActivationHeight = tokenActivationHeight;
+        this.maxTokenSymbolBytes = maxTokenSymbolBytes;
+        this.maxTokenNameBytes = maxTokenNameBytes;
+        this.maxTokenDecimals = maxTokenDecimals;
+        this.votingEpochLength = votingEpochLength;
+        this.storageFeeFactorStep = storageFeeFactorStep;
+        this.storageFeeFactorMin = storageFeeFactorMin;
+        this.storageFeeFactorMax = storageFeeFactorMax;
+        this.minValuePerByteStep = minValuePerByteStep;
+        this.minValuePerByteMin = minValuePerByteMin;
+        this.minValuePerByteMax = minValuePerByteMax;
+    }
+
+    /**
+     * Whether the consensus-V2 rules (see {@link #consensusV2Height}) govern a block at
+     * {@code height}: true from the activation height on, false below it. Every V2-gated
+     * rule — the retarget bound measurement, the consensus fee floor, the zero-deposit
+     * wallet-creation skip — keys off this single predicate so both sides of any mirror
+     * (HeaderChain/ChainEngine, Executor apply/rollback) always agree.
+     */
+    public boolean consensusV2(long height) {
+        return height >= consensusV2Height;
+    }
+
+    /**
+     * The Pufferfish2 cost parameters in force for a block at {@code height}: the genesis
+     * costs below {@link #powUpgradeHeight} (or always, when no upgrade is scheduled), the
+     * "after" costs from the upgrade height on.
+     */
+    public PowCosts powCostsAt(long height) {
+        if (powUpgradeHeight <= 0 || height < powUpgradeHeight) {
+            return new PowCosts(powCostT, powCostM);
+        }
+        return new PowCosts(powCostTAfter, powCostMAfter);
+    }
 
     /** Reward paid to an included uncle's miner at {@code height}. */
     public long uncleReward(long height) {

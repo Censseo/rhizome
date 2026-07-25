@@ -15,7 +15,15 @@ public final class SnapshotLoader {
 
     private SnapshotLoader() {}
 
+    /** Hard cap on the snapshot file size so a misconfigured path cannot OOM the boot. */
+    private static final long MAX_SNAPSHOT_FILE_BYTES = 512L * 1024 * 1024;
+
     public static LedgerSnapshot fromFile(Path path) throws IOException {
+        long size = Files.size(path);
+        if (size > MAX_SNAPSHOT_FILE_BYTES) {
+            throw new IOException("snapshot file too large: " + size + " bytes (cap "
+                + MAX_SNAPSHOT_FILE_BYTES + ")");
+        }
         String content = Files.readString(path, StandardCharsets.UTF_8);
         return LedgerSnapshot.fromJson(new JSONObject(content));
     }

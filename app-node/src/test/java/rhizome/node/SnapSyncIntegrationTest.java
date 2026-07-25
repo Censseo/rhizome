@@ -168,8 +168,15 @@ class SnapSyncIntegrationTest {
              var stateStore = new RocksDbStateStore(tempDir.resolve("state").toString())) {
 
             // --- Bootstrap: headers validated from locally-built genesis, state root-verified ---
+            // Chunks spool to disk as they are fetched (audit: snapshot bootstrap heap); the
+            // spool must be gone once the import completes.
+            Path spoolDir = tempDir.resolve("spool");
+            java.nio.file.Files.createDirectories(spoolDir);
             assertTrue(SnapshotBootstrap.bootstrap(PARAMS, genesisSnapshot, store, boxStore, tokenStore,
-                contractStore, stateStore, peer, NOW));
+                contractStore, stateStore, peer, NOW, spoolDir));
+            try (var left = java.nio.file.Files.list(spoolDir)) {
+                assertEquals(0, left.count(), "the snapshot spool file must be deleted after import");
+            }
 
             // --- Normal engine boot on the seeded stores: starts at the pivot, header-only below ---
             var accumulator = new StateAccumulator(stateStore, stateStore, PARAMS.maxReorgDepth());

@@ -75,6 +75,21 @@ public interface ChainStore {
     /** Appends the next block (must be height()+1), flushing any staged ledger writes atomically. */
     void append(Block block);
 
+    /**
+     * Persists the body of an uncle that a canonical block references, so a later
+     * restart or orphan-pool eviction can still serve it to peers syncing past
+     * that block (audit: uncle-sync blocker). Called by the engine after accepting
+     * an uncle-bearing block; the default is a no-op for stores that do not retain
+     * uncle bodies.
+     */
+    default void putUncle(SHA256Hash hash, Block uncle) {}
+
+    /**
+     * A previously persisted uncle body by hash, or {@code null} when unknown or
+     * not retained (see {@link #putUncle}).
+     */
+    default Block uncleAt(SHA256Hash hash) { return null; }
+
     /** Removes the tip block and de-indexes its transactions, flushing staged ledger reverts atomically. */
     void pop();
 

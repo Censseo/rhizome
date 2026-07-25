@@ -36,6 +36,7 @@ import rhizome.crypto.PublicKey;
 import rhizome.core.ledger.InMemoryLedger;
 import rhizome.core.ledger.LedgerSnapshot;
 import rhizome.core.ledger.PublicAddress;
+import rhizome.core.mempool.ExecutionStatus;
 import rhizome.core.mempool.MemPool;
 import rhizome.core.merkletree.MerkleTree;
 import rhizome.core.transaction.Transaction;
@@ -342,5 +343,132 @@ class NodeApiTest {
             .withBody(t.serialize().toBuffer()).build());
         assertEquals(400, add.getCode());
         assertEquals("INVALID_CHAIN_ID", new JSONObject(body(add)).getString("status"));
+    }
+
+    @Test
+    void orphanEndpointServesStoredUncleBodies() throws Exception {
+        // GET /orphan?hash=<hex64> serves the binary body of a known orphan (uncle) — the piece
+        // a syncing peer fetches when a block references an uncle its own pool lacks (audit:
+        // uncle-sync blocker). 404 when unknown, 400 on a malformed hash.
+        var store = new InMemoryChainStore();
+        LedgerSnapshot snapshot = new LedgerSnapshot("test", 0, params.chainId());
+        var localEngine = ChainEngine.init(params, new InMemoryLedger(), store,
+            snapshot, null, clock::get, new SignatureVerifier());
+        var node = new NodeService(localEngine, mempool);
+        var s = NodeApi.servlet(eventloop, node);
+
+        Block orphan = mineNext(List.of()); // valid block, never applied: just bytes for the test
+        store.putUncle(orphan.hash(), orphan);
+
+        HttpResponse found = callWith(s,
+            HttpRequest.get("http://x/orphan?hash=" + orphan.hash().toHexString()).build());
+        assertEquals(200, found.getCode());
+        assertEquals(orphan.hash(), BlockCodec.decode(found.getBody().getArray()).hash());
+
+        assertEquals(404, callWith(s, HttpRequest.get("http://x/orphan?hash="
+            + rhizome.crypto.SHA256Hash.random().toHexString()).build()).getCode());
+        assertEquals(400, callWith(s, HttpRequest.get("http://x/orphan?hash=zz").build()).getCode());
+    }
+
+    @Test
+    void tokenIsCheckedBeforeTheAggregateBudgetsAreConsumed() throws Exception {
+        // Auth BEFORE the global gates (audit: auth after budgets): unauthenticated requests must
+        // get a cheap 401 WITHOUT burning the shared submit budget that gated peers depend on —
+        // otherwise an unauthenticated flood starves the authenticated ones.
+        NodeService gated = new NodeService(engine, mempool, new RateLimiter(1, 3_600_000, 1));
+        var s = NodeApi.servlet(eventloop, gated, new RateLimiter(1_000_000, 60_000, 100),
+            null, null, "s3cret");
+        var auth = io.activej.http.HttpHeaders.AUTHORIZATION;
+
+        assertEquals(401, callWith(s, HttpRequest.post("http://x/submit")
+            .withBody(BlockCodec.encode(mineNext(List.of()))).build()).getCode());
+        assertEquals(401, callWith(s, HttpRequest.post("http://x/submit")
+            .withBody(BlockCodec.encode(mineNext(List.of()))).build()).getCode(),
+            "repeated 401s: the budget was never consumed by unauthenticated requests");
+
+        // The budget (1 per window) is still intact for the authenticated peer.
+        assertEquals(200, callWith(s, HttpRequest.post("http://x/submit")
+            .withHeader(auth, "Bearer s3cret")
+            .withBody(BlockCodec.encode(mineNext(List.of()))).build()).getCode());
+        assertEquals(429, callWith(s, HttpRequest.post("http://x/submit")
+            .withHeader(auth, "Bearer s3cret")
+            .withBody(BlockCodec.encode(mineNext(List.of()))).build()).getCode(),
+            "only now is the aggregate budget spent");
+    }
+
+    @Test
+    void syncAndSnapshotChunkAreChargedToTheAggregateReadGate() throws Exception {
+        // /sync, /headers and /state/snapshot/chunk join the aggregate read budget (audit:
+        // aggregate bound on the sync/snapshot serving paths): a distributed flood of "peers"
+        // must not sum to unbounded lock-guarded reads and egress at cost ~1.
+        var lenientPerIp = new RateLimiter(1_000_000, 60_000, 100);
+        NodeService node = new NodeService(engine, mempool,
+            new RateLimiter(NodeService.SUBMIT_POW_MAX_PER_SEC, 1000, 1),
+            new RateLimiter(NodeService.READONLY_GAS_MAX_PER_SEC, 1000, 1),
+            new RateLimiter(1, 3_600_000, 1)); // aggregate read budget: a single unit
+        var s = NodeApi.servlet(eventloop, node, lenientPerIp);
+
+        // /sync?start=1&end=1 costs 1: admitted once, then the aggregate gate sheds.
+        assertEquals(200, callWith(s, HttpRequest.get("http://x/sync?start=1&end=1").build()).getCode());
+        assertEquals(429, callWith(s, HttpRequest.get("http://x/sync?start=1&end=1").build()).getCode());
+        // A snapshot chunk costs 75 — far over the spent budget: shed at the gate, not 404.
+        assertEquals(429, callWith(s,
+            HttpRequest.get("http://x/state/snapshot/chunk?index=0").build()).getCode());
+    }
+
+    @Test
+    void pushAbuseAccumulatesStrikesAndGetsShedEarly() throws Exception {
+        // Gossip push ban-score (audit): a client spamming /add_transaction with provable junk
+        // accumulates strikes and is shed with 429 BEFORE the body is decoded, for the window.
+        var node = new NodeService(engine, mempool);
+        var s = NodeApi.servlet(eventloop, node);
+        for (int i = 0; i < NodeService.PUSH_STRIKE_LIMIT; i++) {
+            Transaction t = Transaction.of(sender, PublicAddress.random(), new TransactionAmount(100),
+                key, new TransactionAmount(0), 1000L, params.chainId() + 5, 0); // wrong chain-id
+            t.sign(priv);
+            assertEquals(400, callWith(s, HttpRequest.post("http://x/add_transaction")
+                .withBody(t.serialize().toBuffer()).build()).getCode(), "fault " + i);
+        }
+        // Over the threshold: shed before decode — the status would have been another 400.
+        HttpResponse shed = callWith(s, HttpRequest.post("http://x/add_transaction")
+            .withBody(signedSend(100, 99).serialize().toBuffer()).build());
+        assertEquals(429, shed.getCode(), "a push-abuser is shed before the body is decoded");
+
+        // Race-benign outcomes never strike: a duplicate tx (ALREADY_IN_QUEUE) is honest gossip.
+        var node2 = new NodeService(engine, mempool);
+        Transaction t = signedSend(100_000, 0);
+        assertEquals(ExecutionStatus.SUCCESS, node2.submitTransaction(t, "peer-a"));
+        assertEquals(ExecutionStatus.ALREADY_IN_QUEUE, node2.submitTransaction(t, "peer-a"));
+        assertEquals(0, node2.pushStrikeCount("peer-a"), "duplicates must not strike");
+        assertFalse(node2.isPushShed("peer-a"));
+    }
+
+    @Test
+    void outOfIntRangeIndexesAreRejectedBeforeTheCast() throws Exception {
+        // long→int casts on request indexes must be bounds-checked first (audit: unchecked
+        // index cast): an over-range value used to wrap into a valid-looking int.
+        assertEquals(400, call(
+            HttpRequest.get("http://x/state/snapshot/chunk?index=9999999999").build()).getCode());
+        assertEquals(400, call(
+            HttpRequest.get("http://x/state/snapshot/chunk?index=-5").build()).getCode());
+        assertEquals(400, call(
+            HttpRequest.get("http://x/scan/boxes?scanId=9999999999").build()).getCode());
+    }
+
+    @Test
+    void callReadonlyValidatesValueAndSenderBeforeAnyWork() throws Exception {
+        // /call_readonly input validation (audit: readonly input validation): a negative or
+        // absurd value and a malformed sender are cheap 400s — even with no VM wired (503).
+        String to = "00".repeat(25);
+        assertEquals(400, call(HttpRequest.post("http://x/call_readonly")
+            .withBody(("{\"to\":\"" + to + "\",\"value\":-5}").getBytes()).build()).getCode());
+        assertEquals(400, call(HttpRequest.post("http://x/call_readonly")
+            .withBody(("{\"to\":\"" + to + "\",\"value\":" + ((1L << 62) + 1) + "}")
+                .getBytes()).build()).getCode());
+        assertEquals(400, call(HttpRequest.post("http://x/call_readonly")
+            .withBody(("{\"to\":\"" + to + "\",\"from\":\"zz\"}").getBytes()).build()).getCode());
+        // Well-formed input reaches the availability check (no contracts wired in this harness).
+        assertEquals(503, call(HttpRequest.post("http://x/call_readonly")
+            .withBody(("{\"to\":\"" + to + "\"}").getBytes()).build()).getCode());
     }
 }

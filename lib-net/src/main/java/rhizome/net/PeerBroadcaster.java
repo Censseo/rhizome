@@ -46,6 +46,9 @@ public final class PeerBroadcaster implements AutoCloseable {
     private final boolean blockPrivateHosts;
     private final HttpClient http;
     private final ExecutorService pool;
+    /** Decides whether the RHIZOME_PEER_TOKEN secret may be presented to a given peer
+     *  (configured + https only); never logged (audit: peer token exfiltration via gossip). */
+    private final PeerTokenPolicy tokenPolicy;
     private final Set<String> recentlySent = Collections.newSetFromMap(
         Collections.synchronizedMap(new LinkedHashMap<>(DEDUP_WINDOW, 0.75f, false) {
             @Override
@@ -56,8 +59,28 @@ public final class PeerBroadcaster implements AutoCloseable {
 
     /** {@code peers} is queried on each broadcast, so it can reflect a live peer set. */
     public PeerBroadcaster(Supplier<Collection<String>> peers, boolean blockPrivateHosts) {
+        this(peers, blockPrivateHosts, (String) null);
+    }
+
+    /**
+     * As above, presenting {@code peerToken} (nullable) as a bearer token on outbound POSTs.
+     *
+     * @deprecated presents the token to EVERY peer in the (unauthenticated, gossip-fed)
+     *     registry, over any scheme — any peer that got itself added, often over cleartext
+     *     http://, receives the shared secret. Use the {@link PeerTokenPolicy} constructor so
+     *     the token only goes to explicitly configured peers over https.
+     */
+    @Deprecated
+    public PeerBroadcaster(Supplier<Collection<String>> peers, boolean blockPrivateHosts, String peerToken) {
+        this(peers, blockPrivateHosts, PeerTokenPolicy.trustAll(peerToken));
+    }
+
+    /** As above, presenting the token only to peers {@code tokenPolicy} trusts. */
+    public PeerBroadcaster(Supplier<Collection<String>> peers, boolean blockPrivateHosts,
+                           PeerTokenPolicy tokenPolicy) {
         this.peers = peers;
         this.blockPrivateHosts = blockPrivateHosts;
+        this.tokenPolicy = tokenPolicy;
         this.http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build();
         // Bounded queue + discard-oldest: newest blocks/txs win, memory stays capped even if
         // several peers are slow/unresponsive. Each task holds one item body reference.
@@ -110,7 +133,8 @@ public final class PeerBroadcaster implements AutoCloseable {
             log.debug("broadcast to {} refused (non-routable / rebind): {}", peer, e.toString());
             return;
         }
-        HttpRequest request = HttpRequest.newBuilder(URI.create(url))
+        HttpRequest request = PeerAuth.withToken(HttpRequest.newBuilder(URI.create(url)),
+                tokenPolicy.tokenFor(peer))
             .timeout(Duration.ofSeconds(10))
             .header("Content-Type", "application/octet-stream")
             .POST(HttpRequest.BodyPublishers.ofByteArray(body))

@@ -105,6 +105,14 @@ public final class BlockImpl implements Block {
     }
 
     /**
+     * As {@link #verifyNonce(PowAlgorithm)} but under the PoW cost parameters in
+     * force at this block's height (see {@code NetworkParameters#powCostsAt}).
+     */
+    public boolean verifyNonce(PowAlgorithm powAlgorithm, rhizome.crypto.PowCosts costs) {
+        return BlockHeader.of(this).verifyNonce(powAlgorithm, costs);
+    }
+
+    /**
      * Utils
      */
     public void addTransaction(Transaction t) {

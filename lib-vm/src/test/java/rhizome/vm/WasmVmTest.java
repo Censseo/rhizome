@@ -138,4 +138,34 @@ class WasmVmTest {
         assertEquals(cold.gasUsed(), warm.gasUsed(),
             "gasUsed must not depend on module-cache warmth (consensus determinism)");
     }
+
+    @Test
+    void interruptingTheCallerAlsoInterruptsTheWorker() throws InterruptedException {
+        // If the thread joining the fixed-stack execution thread is interrupted, the worker must be
+        // interrupted too — otherwise a 50M-gas execution keeps running detached, burning CPU and
+        // holding its whole call-tree memory (audit: orphan worker thread).
+        java.util.concurrent.atomic.AtomicBoolean workerInterrupted =
+            new java.util.concurrent.atomic.AtomicBoolean();
+        java.util.concurrent.atomic.AtomicBoolean callerRaised =
+            new java.util.concurrent.atomic.AtomicBoolean();
+        Thread caller = new Thread(() -> {
+            try {
+                WasmVm.onBoundedStack(() -> {
+                    while (!Thread.currentThread().isInterrupted()) {
+                        Thread.onSpinWait();
+                    }
+                    workerInterrupted.set(true);
+                    return null;
+                });
+            } catch (IllegalStateException e) {
+                callerRaised.set(true);
+            }
+        });
+        caller.start();
+        Thread.sleep(100); // let the worker start spinning
+        caller.interrupt();
+        caller.join(5_000);
+        assertTrue(callerRaised.get(), "the caller must surface the interruption");
+        assertTrue(workerInterrupted.get(), "the worker must be interrupted with the caller");
+    }
 }

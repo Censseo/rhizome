@@ -55,7 +55,10 @@ public class Crypto {
     }
 
     public static boolean checkSignature(String content, byte[] signature, PublicKey publicKey) {
-        return checkSignature(content.getBytes(), signature, publicKey);
+        // Pin UTF-8 exactly like signWithPrivateKey(String, ...): with the platform default
+        // charset a non-ASCII message would verify only on hosts whose charset matches the
+        // signer's (audit F7).
+        return checkSignature(content.getBytes(StandardCharsets.UTF_8), signature, publicKey);
     }
     
     public static boolean checkSignature(byte[] bytes, byte[] signature, PublicKey publicKey) {
@@ -114,30 +117,45 @@ public class Crypto {
      * never populates it, so caching only ever helped repeat verification of the same input.
      */
     private static final int PUFFERFISH_CACHE_MAX = 4096;
-    private static final Map<SHA256Hash, SHA256Hash> pufferfishCache =
+
+    /**
+     * Cache key: the input hash AND the cost parameters. Two cost pairs over the same
+     * preimage give different outputs, and both can be live simultaneously around a
+     * scheduled PoW-cost upgrade, so keying on the input alone would serve the wrong
+     * costs' result across the boundary.
+     */
+    private record PufferfishCacheKey(SHA256Hash inputHash, PowCosts costs) {}
+
+    private static final Map<PufferfishCacheKey, SHA256Hash> pufferfishCache =
         Collections.synchronizedMap(new LinkedHashMap<>(512, 0.75f, true) {
             @Override
-            protected boolean removeEldestEntry(Map.Entry<SHA256Hash, SHA256Hash> eldest) {
+            protected boolean removeEldestEntry(Map.Entry<PufferfishCacheKey, SHA256Hash> eldest) {
                 return size() > PUFFERFISH_CACHE_MAX;
             }
         });
 
+    /** Pufferfish2 PoW hash under the genesis costs ({@link PowCosts#DEFAULT}). */
     public static SHA256Hash PUFFERFISH(byte[] input, boolean useCache) {
-        SHA256Hash inputHash = SHA256Hash.of(input);
+        return PUFFERFISH(input, useCache, PowCosts.DEFAULT);
+    }
+
+    /** Pufferfish2 PoW hash under the given consensus cost parameters. */
+    public static SHA256Hash PUFFERFISH(byte[] input, boolean useCache, PowCosts costs) {
+        PufferfishCacheKey key = new PufferfishCacheKey(SHA256Hash.of(input), costs);
 
         if (useCache) {
-            SHA256Hash cachedHash = pufferfishCache.get(inputHash);
+            SHA256Hash cachedHash = pufferfishCache.get(key);
             if (cachedHash != null) {
                 return cachedHash;
             }
         }
 
-        byte[] hash = PufferfishAlgorithm.compute(input);
+        byte[] hash = PufferfishAlgorithm.compute(input, costs);
 
         SHA256Hash finalHash = SHA256(hash); // Assuming SHA256 is standard SHA-256 hash
 
         if (useCache) {
-            pufferfishCache.put(inputHash, finalHash);
+            pufferfishCache.put(key, finalHash);
         }
 
         return finalHash;
@@ -163,11 +181,20 @@ public class Crypto {
     }
 
     public static boolean verifyHash(SHA256Hash target, SHA256Hash nonce, int challengeSize, boolean usePufferFish, boolean useCache) {
-        SHA256Hash fullHash = concatHashes(target, nonce, usePufferFish, useCache);
+        return verifyHash(target, nonce, challengeSize, usePufferFish, useCache, PowCosts.DEFAULT);
+    }
+
+    /** Verifies the PoW over {@code (target ‖ nonce)} under the given cost parameters. */
+    public static boolean verifyHash(SHA256Hash target, SHA256Hash nonce, int challengeSize, boolean usePufferFish, boolean useCache, PowCosts costs) {
+        SHA256Hash fullHash = concatHashes(target, nonce, usePufferFish, useCache, costs);
         return checkLeadingZeroBits(fullHash, challengeSize);
     }
 
     public static SHA256Hash concatHashes(SHA256Hash a, SHA256Hash b, boolean usePufferFish, boolean useCache) {
+        return concatHashes(a, b, usePufferFish, useCache, PowCosts.DEFAULT);
+    }
+
+    public static SHA256Hash concatHashes(SHA256Hash a, SHA256Hash b, boolean usePufferFish, boolean useCache, PowCosts costs) {
         // Proof-of-work hash over (target ‖ nonce). The consensus-critical part is that
         // usePufferFish is HONORED: on a PUFFERFISH2 network the header must be verified
         // (and mined) with the memory-hard Pufferfish2 function, not plain SHA-256 — that
@@ -175,7 +202,7 @@ public class Crypto {
         byte[] data = new byte[64];
         System.arraycopy(a.hash(), 0, data, 0, 32);
         System.arraycopy(b.hash(), 0, data, 32, 32);
-        return usePufferFish ? PUFFERFISH(data, useCache) : SHA256(data);
+        return usePufferFish ? PUFFERFISH(data, useCache, costs) : SHA256(data);
     }
 
     public static boolean checkLeadingZeroBits(SHA256Hash hash, int challengeSize) {

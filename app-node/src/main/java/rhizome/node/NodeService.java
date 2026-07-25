@@ -107,16 +107,17 @@ public final class NodeService {
     /**
      * Aggregate compute budget for {@code /call_readonly} dry-runs, in gas units per second, summed
      * across every source IP. A dry-run runs the VM interpreter for up to {@code MAX_READONLY_GAS}
-     * (50M) instructions synchronously on the single event-loop thread; the per-IP HTTP rate limiter
-     * bounds only one IP, so a few IPs each within their per-IP budget could still pin the loop with
-     * back-to-back gas-sink runs and starve block ingestion/sync (audit 5th-pass, net Finding 1 —
-     * the same aggregate-vs-per-IP gap the F1 submitPowGate closed for /submit). This single global
-     * bucket caps total dry-run gas/s below loop capacity; an over-budget call is shed (HTTP 429)
-     * WITHOUT running the VM. Sized to admit many cheap dashboard queries while throttling repeated
-     * max-gas sinks to a couple per second. Charged the (clamped) gasLimit up-front — the actual run
-     * cannot exceed it — so the gate always sheds before the work happens.
+     * (25M, clamped in ContractApi to exactly this budget) synchronously on the single event-loop
+     * thread; the per-IP HTTP rate limiter bounds only one IP, so a few IPs each within their
+     * per-IP budget could still pin the loop with back-to-back gas-sink runs and starve block
+     * ingestion/sync (audit 5th-pass, net Finding 1 — the same aggregate-vs-per-IP gap the F1
+     * submitPowGate closed for /submit). This single global bucket caps total dry-run gas/s below
+     * loop capacity; an over-budget call is shed (HTTP 429) WITHOUT running the VM. Sized to admit
+     * many cheap dashboard queries while throttling repeated max-gas sinks to one per second —
+     * a full 25M-gas interpreted run is already a substantial slice of event-loop time (audit:
+     * readonly gas calibration).
      */
-    static final int READONLY_GAS_MAX_PER_SEC = 100_000_000;
+    static final int READONLY_GAS_MAX_PER_SEC = 25_000_000;
     private final RateLimiter readonlyGasGate;
 
     /**
@@ -287,16 +288,26 @@ public final class NodeService {
      * request with 429 instead of running the VM on the event loop). See {@link #READONLY_GAS_MAX_PER_SEC}.
      */
     public boolean tryReadonlyGasBudget(long gasLimit) {
-        // gasLimit is clamped to MAX_READONLY_GAS (50M) < Integer.MAX_VALUE before it reaches here.
+        // gasLimit is clamped to MAX_READONLY_GAS (= the per-second budget) before it reaches here.
         return readonlyGasGate.allow("readonly", (int) Math.min(gasLimit, MAX_READONLY_GAS_CHARGE));
     }
 
-    private static final long MAX_READONLY_GAS_CHARGE = 50_000_000L;
+    private static final long MAX_READONLY_GAS_CHARGE = 25_000_000L;
 
-    /** Runs a read-only CALL against committed state, discarding writes (no ledger effect). */
+    /** Runs a read-only CALL against committed state, discarding writes (no ledger effect).
+     *  Serialized with block application and sync through the consensus lock: the contract
+     *  processor's session ({@code DefaultBoxProcessor.session}) is a single mutable view, so a
+     *  dry-run racing a sync-driven block apply could read a half-updated state or corrupt the
+     *  session the apply is using (audit: dryRun outside the consensus lock). */
     public rhizome.core.blockchain.ContractProcessor.ContractResult dryRun(
             PublicAddress from, PublicAddress to, byte[] input, long value, long gasLimit) {
-        return contracts.dryRun(from, to, input, value, gasLimit);
+        return engine.withConsistentView(() -> contracts.dryRun(from, to, input, value, gasLimit));
+    }
+
+    /** The full body of a known orphan (uncle candidate) by hash, or {@code null} — served to
+     *  syncing peers via {@code GET /orphan} (audit: uncle-sync blocker). */
+    public Block orphanBlock(rhizome.crypto.SHA256Hash hash) {
+        return engine.orphanBlock(hash);
     }
 
     /** Whether the data-box layer is active on this node. */
@@ -396,25 +407,33 @@ public final class NodeService {
         if (registry == null) {
             return;
         }
+        // Canonicalize BEFORE the coalescing set: case/trailing-dot/default-port/slash variants
+        // of one URL must coalesce into a single in-flight admission (and a single registry
+        // slot) — the registry applies the same canonical form at admission (audit: /add_peer
+        // coalescing bypass).
+        String canonical = rhizome.net.PeerUrls.canonicalize(url);
+        if (canonical == null || canonical.isEmpty()) {
+            return;
+        }
         // Coalesce duplicate in-flight admissions: re-submitting the same slow hostname must not
         // enqueue another full blocking DNS resolve. The set is kept in lock-step with the queue —
         // every queued task removes its URL on completion, and a rejected enqueue removes it below —
         // so it can never grow past the queue bound.
-        if (!pendingAdmissions.add(url)) {
+        if (!pendingAdmissions.add(canonical)) {
             return; // already queued or running
         }
         try {
             peerAdmission.execute(() -> {
                 try {
-                    registry.add(url);
+                    registry.add(canonical);
                 } catch (RuntimeException e) {
                     // Best-effort: a malformed or unresolvable peer is simply not added.
                 } finally {
-                    pendingAdmissions.remove(url);
+                    pendingAdmissions.remove(canonical);
                 }
             });
         } catch (java.util.concurrent.RejectedExecutionException rejected) {
-            pendingAdmissions.remove(url); // queue full: shed load, keep the set bounded
+            pendingAdmissions.remove(canonical); // queue full: shed load, keep the set bounded
         }
     }
 
@@ -557,6 +576,19 @@ public final class NodeService {
     }
 
     /**
+     * As {@link #submitTransaction(Transaction)}, additionally recording a push-abuse strike
+     * against {@code clientKey} when the peer pushed provable junk (audit: gossip push
+     * ban-score). See {@link #notePushFault}.
+     */
+    public ExecutionStatus submitTransaction(Transaction transaction, String clientKey) {
+        ExecutionStatus status = submitTransaction(transaction);
+        if (isPushFault(status)) {
+            notePushFault(clientKey);
+        }
+        return status;
+    }
+
+    /**
      * The aggregate (all-IP) anti-DoS gate for {@code /submit}, consumed at the HTTP boundary
      * <em>before</em> the block body is decoded (audit F1 + S6). {@code /submit} triggers both a full
      * block decode (up to {@code maxBlockSizeBytes}, ~25 000 tx allocations) and, in {@link
@@ -592,6 +624,130 @@ public final class NodeService {
             engine.registerOrphan(block);
         }
         return status;
+    }
+
+    /**
+     * As {@link #submitBlock(Block)}, additionally recording a push-abuse strike against
+     * {@code clientKey} when the peer pushed provable junk (audit: gossip push ban-score).
+     */
+    public ExecutionStatus submitBlock(Block block, String clientKey) {
+        ExecutionStatus status = submitBlock(block);
+        if (isPushFault(status)) {
+            notePushFault(clientKey);
+        }
+        return status;
+    }
+
+    // ---- push-abuse strikes (gossip ban-score for the push paths) ----
+
+    /**
+     * Push faults a client may commit before an early shed kicks in, per rolling window. A peer
+     * spamming {@code /submit} with invalid blocks or {@code /add_transaction} with
+     * corrupt-signature transactions otherwise accumulates no score at all: the pull-sync
+     * ban list only punishes what WE fetch, never what is pushed at us (audit: gossip push
+     * ban-score). The strike table is bounded exactly like the rate limiter's client table —
+     * its key is attacker-influenced — and the shed only throttles the push paths; the peer
+     * is NOT evicted from the registry, so honest pull-sync is unaffected.
+     */
+    static final int PUSH_STRIKE_LIMIT = 20;
+    static final long PUSH_STRIKE_WINDOW_MS = 60_000L;
+    private static final int PUSH_STRIKE_MAX_KEYS = 8_192;
+
+    private static final class Strikes {
+        volatile long windowStart;
+        int count;
+        Strikes(long windowStart) { this.windowStart = windowStart; }
+    }
+
+    private final java.util.Map<String, Strikes> pushStrikes = new java.util.concurrent.ConcurrentHashMap<>();
+    private final Strikes pushStrikesOverflow = new Strikes(0);
+
+    /**
+     * True when {@code clientKey} has pushed more than {@link #PUSH_STRIKE_LIMIT} faults inside
+     * the current window: the HTTP boundary should shed its next push with 429 BEFORE decoding
+     * the body, for the rest of the window.
+     */
+    public boolean isPushShed(String clientKey) {
+        Strikes s = pushStrikes.get(clientKey);
+        if (s == null) {
+            return false;
+        }
+        long now = System.currentTimeMillis();
+        synchronized (s) {
+            if (now - s.windowStart >= PUSH_STRIKE_WINDOW_MS) {
+                return false; // stale window: the next fault starts a fresh count
+            }
+            return s.count >= PUSH_STRIKE_LIMIT;
+        }
+    }
+
+    /**
+     * True for a push outcome that is PROVABLE junk — an explicit whitelist, never a prefix match.
+     * Honest gossip routinely produces non-success statuses that must NOT strike: a rebroadcast
+     * block we already have ({@code INVALID_BLOCK_ID} / {@code INVALID_LASTBLOCK_HASH}), an uncle
+     * reference our pool has not seen ({@code INVALID_UNCLES} — normal for a node with an empty
+     * orphan pool, exactly the condition the sync path now fetches around), a nonce consumed
+     * meanwhile or an insufficient RBF bump ({@code INVALID_TRANSACTION_NONCE}), clock drift
+     * ({@code INVALID_TRANSACTION_TIMESTAMP}, {@code BLOCK_TIMESTAMP_TOO_OLD/TOO_CLOSE}), a state
+     * root our accumulator config disagrees on ({@code INVALID_STATE_ROOT}), a balance view race
+     * ({@code BALANCE_TOO_LOW}), a duplicate tx ({@code ALREADY_IN_QUEUE}) or an anti-DoS shed
+     * ({@code SUBMIT_THROTTLED}). Striking those would throttle honest peers (audit collateral).
+     * The listed statuses are all deterministic structural violations no valid block/tx produces.
+     */
+    private static final java.util.Set<ExecutionStatus> PUSH_FAULT_STATUSES = java.util.Set.of(
+        ExecutionStatus.INVALID_SIGNATURE,
+        ExecutionStatus.INVALID_NONCE,               // failed PoW
+        ExecutionStatus.INVALID_CHAIN_ID,
+        ExecutionStatus.INVALID_DIFFICULTY,
+        ExecutionStatus.INVALID_MERKLE_ROOT,
+        ExecutionStatus.INVALID_TRANSACTION_COUNT,
+        ExecutionStatus.BLOCK_TOO_LARGE,
+        ExecutionStatus.BLOCK_ID_TOO_LARGE,
+        ExecutionStatus.INVALID_TRANSACTION_AMOUNT,
+        ExecutionStatus.TRANSACTION_FEE_TOO_LOW,
+        ExecutionStatus.INVALID_VOTE,
+        ExecutionStatus.HEADER_HASH_INVALID);
+
+    private static boolean isPushFault(ExecutionStatus status) {
+        return status != null && PUSH_FAULT_STATUSES.contains(status);
+    }
+
+    private void notePushFault(String clientKey) {
+        long now = System.currentTimeMillis();
+        Strikes s = pushStrikes.get(clientKey);
+        if (s == null) {
+            if (pushStrikes.size() >= PUSH_STRIKE_MAX_KEYS) {
+                // Table full: sweep expired windows; if nothing is reclaimable, meter the
+                // untracked client against a shared overflow bucket (fail-closed, bounded —
+                // the RateLimiter overflow pattern) rather than growing without limit.
+                long before = pushStrikes.size();
+                pushStrikes.values().removeIf(w -> now - w.windowStart >= PUSH_STRIKE_WINDOW_MS);
+                if (pushStrikes.size() >= before) {
+                    s = pushStrikesOverflow;
+                }
+            }
+            if (s == null) {
+                s = pushStrikes.computeIfAbsent(clientKey, k -> new Strikes(now));
+            }
+        }
+        synchronized (s) {
+            if (now - s.windowStart >= PUSH_STRIKE_WINDOW_MS) {
+                s.windowStart = now;
+                s.count = 0;
+            }
+            s.count++;
+        }
+    }
+
+    /** Visible for testing: strike count recorded for {@code clientKey} in the current window. */
+    int pushStrikeCount(String clientKey) {
+        Strikes s = pushStrikes.get(clientKey);
+        if (s == null) {
+            return 0;
+        }
+        synchronized (s) {
+            return System.currentTimeMillis() - s.windowStart >= PUSH_STRIKE_WINDOW_MS ? 0 : s.count;
+        }
     }
 
     private static <T> void notify(java.util.function.Consumer<T> listener, T value) {

@@ -61,11 +61,13 @@ final class SnapshotBootstrap {
     private static final int MAX_SNAPSHOT_CHUNKS = 1_000_000;
 
     /**
-     * Hard cap on the total snapshot bytes buffered in memory during bootstrap. Chunks are held
-     * whole until the root verifies (see the import comment below), and a hostile bootstrap peer
-     * may serve each chunk at the full 16 MiB its own endpoint permits — {@code MAX_SNAPSHOT_CHUNKS}
-     * such chunks would exhaust any heap long before verification (audit F7). 4 GiB is far above
-     * any plausible mainnet snapshot while keeping the buffered peak bounded.
+     * Hard cap on the total snapshot bytes spooled during bootstrap. Every fetched chunk is
+     * streamed to a temporary file until the root verifies (see the import comment below), and
+     * a hostile bootstrap peer may serve each chunk at the full 16 MiB its own endpoint permits
+     * — {@code MAX_SNAPSHOT_CHUNKS} such chunks would exhaust any heap (audit F7) and, without
+     * the cap, any disk. 4 GiB is far above any plausible mainnet snapshot while keeping the
+     * spool bounded. The heap peak is now ONE chunk (~16 MiB): chunks are decoded lazily from
+     * the spool during verification and replay.
      */
     private static final long MAX_SNAPSHOT_BUFFERED_BYTES = 4L * 1024 * 1024 * 1024;
 
@@ -78,11 +80,25 @@ final class SnapshotBootstrap {
      * Attempts to bootstrap the given (empty) stores from {@code peer}.
      * Returns {@code true} on success; {@code false} when the peer offers no usable
      * snapshot (none materialised, pivot not buried, or verification failed).
+     * Chunk spooling uses the default temporary-file directory.
      */
     static boolean bootstrap(NetworkParameters params, LedgerSnapshot genesisSnapshot,
                              RocksDbNodeStore store, RocksDbBoxStore boxStore, RocksDbTokenStore tokenStore,
                              RocksDbContractStore contractStore, RocksDbStateStore stateStore,
                              PeerSource peer, long nowMillis) {
+        return bootstrap(params, genesisSnapshot, store, boxStore, tokenStore, contractStore, stateStore,
+            peer, nowMillis, java.nio.file.Path.of(System.getProperty("java.io.tmpdir")));
+    }
+
+    /**
+     * As above, spooling fetched chunks to a temporary file inside {@code spoolDir} (the data
+     * directory in production, so a multi-GiB snapshot never lands on a small tmpfs). The spool
+     * is deleted after the import — success or failure (audit: snapshot bootstrap heap).
+     */
+    static boolean bootstrap(NetworkParameters params, LedgerSnapshot genesisSnapshot,
+                             RocksDbNodeStore store, RocksDbBoxStore boxStore, RocksDbTokenStore tokenStore,
+                             RocksDbContractStore contractStore, RocksDbStateStore stateStore,
+                             PeerSource peer, long nowMillis, java.nio.file.Path spoolDir) {
         if (store.chainStore().height() != 0) {
             throw new IllegalStateException("snapshot bootstrap requires an empty chain store");
         }
@@ -144,46 +160,83 @@ final class SnapshotBootstrap {
             log.warn("Snapshot advertises an out-of-range chunk count ({}); refusing", info.chunkCount());
             return false;
         }
-        // Up-front cross-check against the buffered-bytes bound: even at the worst-case chunk
-        // size the advertised set must fit the cap, or the loop below would buffer its way to an
-        // OOM before aborting (audit F7).
+        // Up-front cross-check against the spooled-bytes bound: even at the worst-case chunk
+        // size the advertised set must fit the cap, or the loop below would spool its way to a
+        // full disk before aborting (audit F7).
         if (info.chunkCount() * MAX_CHUNK_BYTES > MAX_SNAPSHOT_BUFFERED_BYTES) {
-            log.warn("Snapshot of {} chunks could exceed the {} byte bootstrap buffer bound; refusing",
+            log.warn("Snapshot of {} chunks could exceed the {} byte bootstrap spool bound; refusing",
                 info.chunkCount(), MAX_SNAPSHOT_BUFFERED_BYTES);
             return false;
         }
-        List<SnapshotChunk> chunks = new ArrayList<>(info.chunkCount());
-        long bufferedBytes = 0;
+        // Spool each chunk to disk AS IT IS FETCHED instead of buffering every chunk on the heap
+        // until the root verifies (audit F7 follow-up: 4 GiB of peer-controlled bytes used to sit
+        // in memory before a single check ran). Only the offset index is retained; chunks are
+        // decoded lazily from the spool during verification and replay, so the heap peak is one
+        // chunk. The spool is deleted in the finally below, on success and on every failure.
+        java.nio.file.Path spool;
         try {
-            for (int i = 0; i < info.chunkCount(); i++) {
-                byte[] raw = peer.snapshotChunk(i);
-                bufferedBytes += raw.length;
-                if (bufferedBytes > MAX_SNAPSHOT_BUFFERED_BYTES) {
-                    log.warn("Snapshot chunks exceeded the {} byte bootstrap buffer bound; aborting",
-                        MAX_SNAPSHOT_BUFFERED_BYTES);
-                    return false;
-                }
-                chunks.add(SnapshotChunk.decode(raw));
-            }
-        } catch (RuntimeException e) {
-            log.warn("Snapshot chunk fetch/decode failed: {}", e.toString());
+            spool = java.nio.file.Files.createTempFile(spoolDir, "rhizome-snapshot-", ".chunks");
+        } catch (java.io.IOException e) {
+            log.warn("Snapshot spool file could not be created: {}", e.toString());
             return false;
         }
-
-        // Rebuild the state tree and require root equality BEFORE seeding any store. Chunks are held
-        // whole here deliberately: the sink writes ledger/nonce bindings through immediately, so the
-        // full set must be verified against the PoW-validated pivot root before any of it is seeded,
-        // and the seeded bytes must be the exact ones verified (no re-fetch). Bounding the peak memory
-        // would need a fully transactional, rollback-capable sink (audit V6a, accepted: the bootstrap
-        // peer is an operator-configured trusted seed, and info.chunkCount() is already bounded).
-        var contracts = new ContractStateAdapter(contractStore);
-        var adapter = new DomainStateAdapter(store.ledger(), store.nonceStore(), boxStore, tokenStore,
-            contracts, contracts);
+        long[] offsets = new long[info.chunkCount()];
+        long[] lengths = new long[info.chunkCount()];
+        long spooledBytes = 0;
+        // Hoisted: the seed phase after the try needs both (the spool is already deleted by then;
+        // chunks re-read nothing — it is only the decoded view the importer verified).
+        DomainStateAdapter adapter = null;
+        List<SnapshotChunk> chunks = null;
+        // One try/finally covers BOTH the fetch/spool loop and the verify/replay below: every
+        // failure path (bound exceeded, fetch error, verification failure) deletes the spool —
+        // a hostile bootstrap peer must never leave gigabytes behind per attempt (audit F7).
         try {
-            StateSnapshotImporter.importVerified(chunks, stateStore, committedRoot.toBytes(), adapter);
-        } catch (StateSnapshotImporter.SnapshotVerificationException e) {
-            log.warn("Snapshot verification failed: {}", e.getMessage());
-            return false;
+            try (var out = java.nio.file.Files.newOutputStream(spool)) {
+                for (int i = 0; i < info.chunkCount(); i++) {
+                    byte[] raw = peer.snapshotChunk(i);
+                    spooledBytes += raw.length;
+                    if (spooledBytes > MAX_SNAPSHOT_BUFFERED_BYTES) {
+                        log.warn("Snapshot chunks exceeded the {} byte bootstrap spool bound; aborting",
+                            MAX_SNAPSHOT_BUFFERED_BYTES);
+                        return false;
+                    }
+                    offsets[i] = spooledBytes - raw.length;
+                    lengths[i] = raw.length;
+                    out.write(raw);
+                }
+            } catch (RuntimeException | java.io.IOException e) {
+                log.warn("Snapshot chunk fetch/spool failed: {}", e.toString());
+                return false;
+            }
+
+            // Rebuild the state tree and require root equality BEFORE seeding any store. The sink
+            // writes ledger/nonce bindings through immediately, so the full set must be verified
+            // against the PoW-validated pivot root before any of it is seeded, and the seeded bytes
+            // must be the exact ones verified (no re-fetch): the spooled, file-backed chunk list
+            // below re-reads the same bytes on each pass (verify, then replay — audit V6a note: a
+            // fully transactional sink would avoid the two-pass decode; the bootstrap peer is an
+            // operator-configured trusted seed and the chunk count is already bounded).
+            var contracts = new ContractStateAdapter(contractStore);
+            adapter = new DomainStateAdapter(store.ledger(), store.nonceStore(), boxStore, tokenStore,
+                contracts, contracts);
+            try (var channel = java.nio.channels.FileChannel.open(spool, java.nio.file.StandardOpenOption.READ)) {
+                chunks = new SpooledChunks(channel, offsets, lengths, info.chunkCount());
+                try {
+                    StateSnapshotImporter.importVerified(chunks, stateStore, committedRoot.toBytes(), adapter);
+                } catch (StateSnapshotImporter.SnapshotVerificationException e) {
+                    log.warn("Snapshot verification failed: {}", e.getMessage());
+                    return false;
+                }
+            } catch (java.io.IOException e) {
+                log.warn("Snapshot spool could not be read: {}", e.toString());
+                return false;
+            }
+        } finally {
+            try {
+                java.nio.file.Files.deleteIfExists(spool);
+            } catch (java.io.IOException e) {
+                log.warn("Snapshot spool {} could not be deleted", spool);
+            }
         }
         // From here on we mutate several independent stores that commit separately. Mark the
         // bootstrap in progress so an interrupted seed is detected at the next boot instead of
@@ -217,5 +270,49 @@ final class SnapshotBootstrap {
             return null;
         }
         return out;
+    }
+
+    /**
+     * A read-only {@link List} view over the spooled chunk file: {@code get(i)} re-reads and
+     * decodes chunk {@code i} from disk, so the importer's two passes (root verification, then
+     * replay) never hold more than one decoded chunk on the heap (audit: snapshot bootstrap
+     * heap). Backed by positional reads on the already-open channel, which the caller closes
+     * after the import completes.
+     */
+    private static final class SpooledChunks extends java.util.AbstractList<SnapshotChunk> {
+        private final java.nio.channels.FileChannel channel;
+        private final long[] offsets;
+        private final long[] lengths;
+        private final int size;
+
+        SpooledChunks(java.nio.channels.FileChannel channel, long[] offsets, long[] lengths, int size) {
+            this.channel = channel;
+            this.offsets = offsets;
+            this.lengths = lengths;
+            this.size = size;
+        }
+
+        @Override
+        public SnapshotChunk get(int index) {
+            if (index < 0 || index >= size) {
+                throw new IndexOutOfBoundsException(index);
+            }
+            java.nio.ByteBuffer buf = java.nio.ByteBuffer.allocate(Math.toIntExact(lengths[index]));
+            try {
+                while (buf.hasRemaining()) {
+                    if (channel.read(buf, offsets[index] + buf.position()) < 0) {
+                        throw new java.io.EOFException("spool truncated at chunk " + index);
+                    }
+                }
+            } catch (java.io.IOException e) {
+                throw new IllegalStateException("snapshot spool read failed at chunk " + index, e);
+            }
+            return SnapshotChunk.decode(buf.array());
+        }
+
+        @Override
+        public int size() {
+            return size;
+        }
     }
 }

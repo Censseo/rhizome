@@ -6,6 +6,7 @@ import java.security.NoSuchAlgorithmException;
 import java.util.List;
 
 import rhizome.crypto.PowAlgorithm;
+import rhizome.crypto.PowCosts;
 import rhizome.crypto.SHA256Hash;
 
 import static rhizome.crypto.Crypto.verifyHash;
@@ -112,9 +113,19 @@ public record BlockHeader(
     /**
      * Checks the proof-of-work nonce under the chain's PoW algorithm — without
      * needing the block body, since the header carries the whole preimage.
+     * Uses the genesis cost parameters ({@link PowCosts#DEFAULT}).
      */
     public boolean verifyNonce(PowAlgorithm powAlgorithm) {
+        return verifyNonce(powAlgorithm, PowCosts.DEFAULT);
+    }
+
+    /**
+     * Checks the proof-of-work nonce under the chain's PoW algorithm and the cost
+     * parameters in force at this header's height (see
+     * {@code NetworkParameters#powCostsAt}) — without needing the block body.
+     */
+    public boolean verifyNonce(PowAlgorithm powAlgorithm, PowCosts costs) {
         boolean usePufferfish = powAlgorithm == PowAlgorithm.PUFFERFISH2;
-        return verifyHash(hash(), nonce, difficulty, usePufferfish, true);
+        return verifyHash(hash(), nonce, difficulty, usePufferfish, true, costs);
     }
 }

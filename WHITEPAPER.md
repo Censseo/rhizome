@@ -29,7 +29,7 @@ Four goals drive the design:
    GHOST-style fork choice (§9) that credits and rewards orphaned (uncle) work, making
    the fast cadence safe against the orphaning a naïve longest chain suffers.
 
-The node is functional and covered by **446 tests**: consensus, the WASM contract VM
+The node is functional and covered by **531 tests**: consensus, the WASM contract VM
 and its persistence, execution, storage, mempool, HTTP API, block production, P2P
 synchronisation with reorganisation, GHOST uncles, data boxes (agent-facing on-chain
 storage with typed registers, an anti-dust deposit and storage rent), native tokens
@@ -322,6 +322,15 @@ test (`emissionScheduleIsCalibratedForTheBlockCadence`): it recomputes the epoch
 real-time span and total issuance from `desiredBlockTimeSec`, so changing the block time
 forces the epoch to be revisited with it.
 
+**Fees and mempool policy.** Fees are consensus-*optional* — a block may include a zero-fee
+transaction and still be valid — but relaying and block-building enforce a mempool policy that
+keeps spam expensive. On mainnet every admitted transaction must promise the miner at least
+`minFee` (10 base units = 0.001 PDN; for a contract `CALL` the declared gas budget
+`gasLimit × gasPrice` counts toward the floor), while testnet sets `minFee = 0` so local devnets
+transact with unfunded fees. The block builder then fills a block **greedily by miner revenue** —
+fronting each sender's ready nonce run, with deterministic tie-breaks — rather than in raw
+address order, so a fee market forms under contention instead of first-come ordering.
+
 ### 5.4 Smart contracts
 
 Contracts are **WebAssembly**, run on the pure-Java [Chicory](https://github.com/dylibso/chicory)
@@ -373,7 +382,10 @@ via the `fromHeight` cursor — push for liveness, cursor for correctness.
 **Gas.** Every executed instruction is charged via the interpreter's execution listener,
 and every host call is charged on top, so a contract that loops forever is aborted
 deterministically at the same step on every node rather than hanging one. Out-of-gas is a
-clean, identical failure everywhere.
+clean, identical failure everywhere. Every call — and every read-only dry run — also pays an
+intrinsic `CALL_BASE` before dispatch, so a call that fails *before* metering begins (an unknown
+contract, or a gas limit too small to run a single instruction) still costs the validator that
+runs it and can never be a free, repeatable load.
 
 **Deploy and call.** A `DEPLOY` installs code at a deterministic address —
 `SHA-256(deployer ‖ nonce)[:25]`, so addresses are predictable and collision-free. A
@@ -437,8 +449,10 @@ paid by the ordinary fee):
 - `BOX_CREATE` locks `value` into a new box at the derived id. The value **leaves the
   ledger** into the box (the chain's total money is now account balances *plus* box values).
 - `BOX_UPDATE` (owner only) replaces the registers, optionally tops up the value, and resets
-  the rent clock — touching a box keeps it alive.
-- `BOX_SPEND` (owner only) destroys the box and returns its value to the owner.
+  the rent clock — but re-arming it first pays the rent accrued since it was last set (below),
+  so touching a box keeps it alive at a real cost, never for free.
+- `BOX_SPEND` (owner only) destroys the box and returns its value to the owner, less any
+  accrued rent (capped at what the box holds).
 - `BOX_COLLECT` charges storage rent (below).
 
 **Anti-dust.** A box must lock at least `size × minValuePerByte`, so writing data on-chain
@@ -446,14 +460,19 @@ costs in proportion to the state it occupies from the moment of creation — ess
 the writers are programs. The locked value is a **refundable deposit**, returned on spend,
 not a fee.
 
-**Storage rent.** After `storagePeriodBlocks` a box becomes collectable. Anyone — in
-practice the miner — may then charge rent of `storageFeeFactor × size`, recreating the box
-with reduced value, its registers, owner and id preserved and its rent clock reset. If the
-charge would drop the value below the dust floor, the whole box is collected and destroyed
-instead: **abandoned state is garbage-collected economically**, and the collected rent
-gives miners a revenue stream that outlives the block subsidy. A box funded at the minimum
-is recycled after roughly one storage period. Rent collection is an *opportunity*, never an
-obligation; a block without it is valid.
+**Storage rent.** Rent accrues at `storageFeeFactor × size` for every **full
+`storagePeriodBlocks` period** elapsed since the box's rent clock was last set, and is charged
+out of the box's locked value **to the block miner** — never back to the owner — on **every**
+operation that touches the box (`BOX_UPDATE`, `BOX_SPEND` and the permissionless `BOX_COLLECT`),
+each settling all periods accrued so far. This closes two loopholes: an active owner resetting
+the clock for free with one zero-value update per period (storing state permanently for
+nothing), and a deeply overdue box shedding its debt one period at a time. After
+`storagePeriodBlocks` a box becomes collectable: a collect recreates it with reduced value, its
+registers, owner and id preserved and its rent clock reset. If the charge would drop the value
+below the dust floor, the whole box is collected and destroyed instead: **abandoned state is
+garbage-collected economically**, and the collected rent gives miners a revenue stream that
+outlives the block subsidy. A box funded at the minimum is recycled after roughly one storage
+period. Rent collection is an *opportunity*, never an obligation; a block without it is valid.
 
 `BOX_COLLECT` is **unsigned and self-authorized**, like the coinbase: the block producer
 mints it, crediting the rent to the miner, so no private key is needed to run the
@@ -577,7 +596,11 @@ without a hard fork. Each block header carries an `int` **vote** (committed in t
 only when cast, so an abstaining block is unchanged): `±1` for the storage-rent factor, `±2`
 for the anti-dust `minValuePerByte`. At each **voting-epoch** boundary the engine tallies that
 epoch's votes and moves a parameter one bounded step when the net vote exceeds half the epoch
-— the change taking effect the next epoch. The current values are **derived from chain
+— the change taking effect the next epoch. Both parameters are **floored at 1**: the vote can
+lower the storage-rent factor or the anti-dust `minValuePerByte` but never to 0, since a
+majority voting either to zero would make permanent on-chain storage free — unbounded state
+bloat that the voters, who do not carry the storage cost, would not internalise. The current
+values are **derived from chain
 history** (like difficulty): kept as a per-epoch-boundary snapshot recomputed from the epoch's
 block votes, so a reorg across a boundary simply drops that snapshot and restores the previous
 values — reorg-safe with no reversible tally. The box processor reads the live values at
@@ -848,7 +871,12 @@ Gas that feeds the fee — and hence the state root — is charged identically o
 notably the module-parse cost is levied on **every** call, cache hit or miss, so a warm/cold
 module cache cannot change `gasUsed`. Call context (`caller`, `self`, `value`, `deployer`)
 is host-supplied per frame and unspoofable; the reentrancy guard and per-frame atomic
-overlay make a rewritten block leave no contract residue.
+overlay make a rewritten block leave no contract residue. The **WASM GC** proposal is rejected
+wholesale at validation — reference/array/struct types and their function-body, global-init and
+element-segment encodings alike — because Chicory 1.7.5's GC opcodes allocate on the JVM heap
+outside every gas and memory budget: `array.new_default(len)` was a one-gas, node-heap-dependent
+OOM and `array.copy`/`fill` an O(n) memcpy for one gas, either of which would diverge `gasUsed`
+(or OOM one node while another reverts) and fork the chain.
 
 ### 7.3 Resource-exhaustion bounds
 
@@ -874,7 +902,11 @@ per-transaction cap (`maxTxGas`) and a per-block declared-gas total (`maxBlockGa
 checked in `executeBlock`'s cheap structural pass **before any instruction runs**, so a
 "poison block" is rejected rather than executed. This is the consensus-side twin of the
 read-only VM gas cap that already bounded `/call_readonly`. **Storage** growth is gas-priced
-and reorg-reversible via the persistent undo journal.
+and reorg-reversible via the persistent undo journal. **Request path:** `/add_transaction` is
+metered by the same per-IP cost and aggregate-admission gate as `/submit`, charged *before* the
+body is decoded, and a read/write inactivity timeout closes a slow-loris client that trickles a
+request or drains a response byte by byte — so neither a flood of cheap submissions nor a pool of
+stalled sockets can occupy the single event-loop thread.
 
 ### 7.4 Network
 
@@ -914,9 +946,12 @@ PoW chain removes it entirely. **Coinbase maturity** (a UTXO concept) does not a
 balance-based ledger — the reward is immediately fungible with no distinct coinbase coin to
 mature — and the orphaned-reward risk is already covered by the finality window.
 
-Two engineering residuals are documented rather than closed. **Full power-loss durability**
-across the independent state databases needs a per-store `fsync`; process-crash consistency
-is already complete via the atomic ledger batch and boot reconciliation (§6.2). And the
+Two engineering residuals are documented rather than closed. Height-advancing writes are now
+**fsynced** (`sync(true)`) in every store, and each store commits its own mutations and undo
+journal in one atomic `WriteBatch`, so an individual database survives power loss; what remains
+is that the independent databases share **no single cross-store atomic commit** — a power cut
+landing between two stores' commits is reconciled at boot (any peripheral store left ahead of the
+chain height is rewound, §6.2) rather than prevented. And the
 **account-nonce domain keeps one permanent leaf per account** that has ever transacted: unlike
 the ledger domain it cannot self-prune at zero balance without reopening replay (a re-funded
 account would accept its old nonces again), so an attacker cycling a fixed principal through
@@ -924,7 +959,7 @@ fresh accounts grows that domain by one leaf per hop. The growth is bounded — 
 the optional minimum-fee floor (each nonce-creating hop then costs a real fee) and by block
 space — rather than eliminated; the floor is off by default and is a per-operator policy knob.
 
-Nine parallel-subsystem review passes hardened this model: from the first (negative-amount
+Eleven parallel-subsystem review passes hardened this model: from the first (negative-amount
 minting, deposit-overflow rollback) through consensus-fork classes (unscaled uncle-reward
 rollback, heap-dependent VM OOM, cache-dependent gas, phantom-wallet validity, reorg-gate
 work-metric mismatch), theft and liveness (unsigned `BOX_COLLECT` drain, mempool-poisoning
@@ -1007,6 +1042,35 @@ Every fix carries a regression test; a
 dependency bump is validated by the same suite (one caught a silent CSRF-guard fail-open from a
 library header-lookup change).
 
+A **tenth** pass — consensus-fork and DoS fixes with crash-atomic stores — metered
+`call_contract`'s callee-address length (a 10⁵× underpriced DoS lever), folded WASM function
+*parameters* into the tree-wide locals budget and capped them at deploy (another heap-dependent
+OOM fork), and **persisted the contract and box receipts** so a reorg after a restart reverses
+cleanly instead of crashing mid-rollback. It made the persistence layer crash-atomic — `WriteBatch`
+commits for each store's mutations and undo journal, fsynced height-advancing writes, double-apply
+journal guards — bounded the vote field at consensus, and hardened the network path (a wall-clock
+deadline over a whole peer exchange, closing a slow-drip liveness drain; a bounded PEX pool;
+admission-time DNS verdicts off the request path; per-subnet admission accounting; a fail-closed
+ban list; 6to4/Teredo SSRF rejection; a 64 MiB aggregate cap per sync window) and the API, crypto
+and wallet (optional `RHIZOME_BIND_ADDRESS`/`RHIZOME_API_TOKEN`, per-client scan-registry caps with
+LRU eviction, a `Host` allowlist on reads, Ed25519 small-order/non-canonical key rejection,
+`--expect-chain-id` confirmation against a malicious chain swap, and domain-separated message
+signing). Node shutdown now closes the HTTP listener first and closes the stores under the engine
+lock, because the newly fsynced writes had widened a close-time race that could abort the JVM.
+
+An **eleventh** pass tightened economics and the last VM fork surface. It rejected the entire
+**WASM GC** family at validation (§7.2), charged an intrinsic `CALL_BASE` on every call and dry run
+(§5.4), and reworked **box storage rent** so accrued rent is charged out of the box to the miner on
+every touch — `BOX_UPDATE`, `BOX_SPEND` and `BOX_COLLECT` — closing the free-re-arm loophole (§5.5).
+It **floored** the votable `storageFeeFactor` and `minValuePerByte` at 1 (§5.8), since a majority
+could otherwise vote permanent state free, and gave the mempool a **fee market**: a mainnet `minFee`
+of 0.001 PDN (testnet 0, contract gas budgets counting toward the floor) with greedy
+revenue-ordered block selection (§5.3). The request path gained a pre-decode admission gate on
+`/add_transaction` symmetric to `/submit` and a read/write inactivity timeout against slow-loris
+trickle (§7.3); the wallet enforces the recipient-address checksum on sends (with `--force` to
+override); and `close()` waits out the network scheduler rather than closing a store under it (a
+RocksDB use-after-free that had been aborting the JVM in integration tests).
+
 ---
 
 ## 8. Snapshot seeding
@@ -1025,7 +1089,7 @@ ledger of a synchronised Pandanite node.
 (`addBlock`/`popBlock`, nonces, work, difficulty); RocksDB storage; mempool; HTTP API;
 block production; synchronisation + reorg by cumulative work; wallet CLI; gossip & peer
 discovery; hardening (checkpoints, finality, bounded rate limiting, ban-score, block-size
-cap); nine parallel-subsystem security-review passes (§7); the **WASM smart-contract layer** — a Chicory-backed
+cap); eleven parallel-subsystem security-review passes (§7); the **WASM smart-contract layer** — a Chicory-backed
 metered VM, a persistent contract store, `DEPLOY`/`CALL` transactions with gas fees,
 atomic per-block contract state with exact reorg reversal, and wallet `deploy`/`call`
 commands; and the **data-box layer** (§5.5) — stable-id, typed-register storage objects
@@ -1046,7 +1110,7 @@ nonces plus an `ACCOUNT_NONCE` state domain (§6.5) so the engine's derived stat
 configurable body pruning (`RHIZOME_PRUNE`) with a `/sync` 410 and a `prunedBelow` advert, and
 trust-minimised snap-sync (`RHIZOME_SYNC=snap`) — periodic per-domain snapshot materialisation,
 `/state/snapshot/*`, and a bootstrap that adopts a peer's state at a buried pivot only when it
-reproduces a PoW-validated header's root. **446 tests, 0 failures.**
+reproduces a PoW-validated header's root. **531 tests, 0 failures.**
 
 **GHOST fork choice.** A fast single longest chain orphans blocks because propagation
 takes a meaningful fraction of the interval (§6.3). A GHOST-style fork choice — the

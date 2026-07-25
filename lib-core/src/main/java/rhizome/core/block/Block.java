@@ -74,6 +74,7 @@ public sealed interface Block permits BlockImpl {
     public List<Transaction> transactions();
     public List<UncleRef> uncles();
     public boolean verifyNonce(rhizome.crypto.PowAlgorithm powAlgorithm);
+    public boolean verifyNonce(rhizome.crypto.PowAlgorithm powAlgorithm, rhizome.crypto.PowCosts costs);
     public SHA256Hash hash();
     public SHA256Hash lastBlockHash();
     public int difficulty();

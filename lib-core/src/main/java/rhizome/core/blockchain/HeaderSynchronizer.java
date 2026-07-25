@@ -38,6 +38,17 @@ public final class HeaderSynchronizer {
 
     private final ChainEngine engine;
     private final ChainSynchronizer fallback;
+    /**
+     * Retarget memo shared across sync rounds (audit: O(height) difficulty-fold DoS).
+     * {@code HeaderChain.validate} used to refold the difficulty from genesis before the first
+     * PoW check on every call — O(forkHeight) header reads per round, so a long chain made each
+     * sync round (and each hostile "I'm heavier" probe) pay a genesis-length walk. Entries are
+     * self-invalidating by boundary-header hash (see {@code HeaderChain.DifficultyCheckpoint}),
+     * so a reorg or a losing branch can never leave a wrong-chain value behind. Guarded by the
+     * map's own monitor: {@code validate} reads and mutates it.
+     */
+    private final java.util.TreeMap<Long, HeaderChain.DifficultyCheckpoint> difficultyMemo =
+        new java.util.TreeMap<>();
 
     public HeaderSynchronizer(ChainEngine engine) {
         this.engine = engine;
@@ -94,8 +105,16 @@ public final class HeaderSynchronizer {
         if (branch == null) {
             return ChainSynchronizer.Result.PEER_INVALID;
         }
-        HeaderChain.Result validated =
-            HeaderChain.validate(engine.params(), engine::headerAt, forkHeight, branch, engine.nowMillis());
+        HeaderChain.Result validated;
+        synchronized (difficultyMemo) {
+            validated = HeaderChain.validate(
+                engine.params(), engine::headerAt, forkHeight, branch, engine.nowMillis(), difficultyMemo);
+            // Bound the memo: one entry per retarget boundary accumulates for the process
+            // lifetime otherwise (monotone ~height/lookback growth). Anything at or below the
+            // fork we just validated against is ancient history a future round will re-derive
+            // in O(1) from a later checkpoint, so dropping it costs nothing (audit follow-up).
+            difficultyMemo.headMap(forkHeight, true).clear();
+        }
         if (!validated.valid()) {
             return ChainSynchronizer.Result.PEER_INVALID;
         }
@@ -246,7 +265,11 @@ public final class HeaderSynchronizer {
                     // The header at this index was PoW-verified by HeaderChain.validate and the body's
                     // hash equals it (checked just above), so the body's work is already proven — apply
                     // it without re-running the memory-hard PoW hash (audit P4). Every other check runs.
-                    if (engine.addValidatedBody(block) != ExecutionStatus.SUCCESS) {
+                    // On INVALID_UNCLES the missing orphan bodies are fetched from the peer and the
+                    // apply retried once (audit: uncle-sync blocker); applyBodies holds no lock, so
+                    // the fetch is legal network I/O here.
+                    if (ChainSynchronizer.applyWithUncleFetch(engine, peer, block, engine::addValidatedBody)
+                            != ExecutionStatus.SUCCESS) {
                         return false;
                     }
                 }
