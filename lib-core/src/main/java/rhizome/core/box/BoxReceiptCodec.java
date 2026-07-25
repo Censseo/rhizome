@@ -66,11 +66,19 @@ public final class BoxReceiptCodec {
         return receipts;
     }
 
-    /** Picks the record layout: current when the payload divides it exactly, else the legacy one. */
+    /**
+     * Picks the record layout: current or legacy when the payload divides it EXACTLY. Anything
+     * else fails: a truncated current-format blob whose tail happens to divide the legacy size
+     * must not be silently reinterpreted under the wrong layout (audit follow-up).
+     */
     private static int recordSizeFor(int count, int remaining) {
         if (count >= 0 && remaining == (long) count * RECORD_SIZE) {
             return RECORD_SIZE;
         }
-        return LEGACY_RECORD_SIZE;
+        if (count >= 0 && remaining == (long) count * LEGACY_RECORD_SIZE) {
+            return LEGACY_RECORD_SIZE;
+        }
+        throw new IllegalStateException("box receipt payload of " + remaining
+            + " bytes matches no layout for count " + count);
     }
 }

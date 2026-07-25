@@ -115,9 +115,15 @@ public final class WasmContractProcessor implements ContractProcessor {
         }
         // Reject oversized, malformed, or non-deterministic (float/SIMD) code at deploy so it
         // never enters on-chain state, rather than only discovering it on every later call.
+        // Only RuntimeException becomes a verdict: an Error here (StackOverflowError in
+        // Parser.parse at a JIT/-Xss-dependent depth, OutOfMemoryError on a small-heap node)
+        // is a HOST-local condition, and normalizing it to "invalid contract code" would make
+        // the deploy verdict node-dependent and FORK consensus — the same class of fork the
+        // CALL path refuses to normalize (see WasmVm). A crash is preferable to a fork, so
+        // Errors propagate to the block executor's fatal catch-all.
         try {
             WasmVm.validateCode(code);
-        } catch (Throwable e) {
+        } catch (RuntimeException e) {
             return ContractResult.reverted(gasUsed, "invalid contract code: " + e.getMessage());
         }
         // Never deploy over live code: the address is derived deterministically from
@@ -626,6 +632,10 @@ public final class WasmContractProcessor implements ContractProcessor {
                 });
             }
             changesByHeight.keySet().removeIf(h -> h <= cutoff);
+            // Interval prune of the durable rows: the per-height deletes above only reach
+            // heights still present in the RAM maps, which are EMPTY after a restart — every
+            // journal/receipt written before it would otherwise stay on disk forever.
+            baseStore.pruneThrough(cutoff);
         }
     }
 }

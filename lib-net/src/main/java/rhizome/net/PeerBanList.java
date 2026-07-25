@@ -15,10 +15,15 @@ import java.util.function.LongSupplier;
  * <p>The table is hard-bounded (like {@link RateLimiter}) so a spray of distinct
  * hosts cannot leak memory: when full, entries that are neither banned nor
  * recently active are swept, and if none can be reclaimed the offence is metered
- * against a shared OVERFLOW bucket instead of being dropped (fail-closed, mirroring
- * {@link RateLimiter}'s overflow design — audit F7): once the spray itself crosses
- * the threshold, every otherwise-untracked host is treated as banned, so an IP-spray
- * cannot make the ban list fail open. Active bans are never swept.
+ * against a shared OVERFLOW bucket instead of being dropped. The bucket only
+ * COUNTS: unlike {@link RateLimiter}'s fail-closed overflow, it never bans
+ * untracked hosts. Extending the ban to every unknown host turned the memory
+ * bound into an eclipse lever — an attacker filling the table (4096 throwaway
+ * IPs, one offence each) made a freshly started node, which tracks nothing yet,
+ * refuse admission to EVERY new peer for the ban window (audit follow-up). A
+ * host is banned only by an entry of its own; the overflow score remains
+ * observable via {@link #overflowScore()} for operators. Active bans are never
+ * swept.
  */
 public final class PeerBanList {
 
@@ -29,10 +34,12 @@ public final class PeerBanList {
     private final LongSupplier nowMillis;
     private final Map<String, Entry> entries = new ConcurrentHashMap<>();
     /**
-     * Shared conservative bucket for offences by hosts that cannot be tracked because the table
-     * is full and nothing is reclaimable. Rather than dropping the offence untracked (fail-open),
-     * the spray accumulates score here and, past the threshold, bans ALL untracked hosts for one
-     * window — tracked honest peers are unaffected, since their own entries are checked first.
+     * Shared bucket for offences by hosts that cannot be tracked because the table
+     * is full and nothing is reclaimable. It ACCUMULATES the spray's score (so the
+     * attack is visible and {@code misbehave} still reports the offending host as
+     * banned once the bucket is hot) but is deliberately never consulted by
+     * {@link #isBanned}: banning all untracked hosts would let a table-filling
+     * spray eclipse a freshly started node from every new peer (see class doc).
      */
     private final Entry overflow = new Entry(0);
 
@@ -113,9 +120,9 @@ public final class PeerBanList {
         Entry entry = entries.get(key);
         if (entry == null) {
             if (entries.size() >= maxTracked && !sweep(now)) {
-                // Fail closed (RateLimiter pattern): meter the untracked host against the shared
-                // overflow bucket rather than dropping the offence — an IP-spray must not be able
-                // to misbehave with impunity just because the table is full.
+                // Table full: meter the untracked host against the shared overflow bucket so the
+                // spray's score still accumulates (and this offending host is reported banned once
+                // the bucket is hot) — but the bucket never bans OTHER untracked hosts (see above).
                 entry = overflow;
             } else {
                 entry = entries.computeIfAbsent(key, k -> new Entry(now));
@@ -162,11 +169,19 @@ public final class PeerBanList {
         long now = nowMillis.getAsLong();
         Entry byHost = entries.get(hostKey(peerUrl));
         Entry byName = entries.get(nameKey(peerUrl));
+        // An untracked host is NEVER banned: the shared overflow bucket only counts the spray,
+        // it must not condemn a host that committed no offence of its own (eclipse lever).
         if (byHost == null && byName == null) {
-            // Untracked host: banned only while the shared overflow bucket is hot (fail closed).
-            return now < overflow.bannedUntil;
+            return false;
         }
         return (byHost != null && now < byHost.bannedUntil) || (byName != null && now < byName.bannedUntil);
+    }
+
+    /** Current score of the shared overflow bucket (spray observability; never a ban source). */
+    public int overflowScore() {
+        synchronized (overflow) {
+            return overflow.score;
+        }
     }
 
     private void decay(Entry entry, long now) {

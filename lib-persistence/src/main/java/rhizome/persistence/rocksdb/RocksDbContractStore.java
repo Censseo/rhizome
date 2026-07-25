@@ -101,6 +101,20 @@ public final class RocksDbContractStore implements ContractStore, AutoCloseable 
         delete(receiptsCf, heightKey(height));
     }
 
+    @Override
+    public void pruneThrough(long maxHeight) {
+        // Interval prune (deleteRange's end key is EXCLUSIVE, hence maxHeight + 1): rows left
+        // by heights the processor no longer has in its RAM maps — everything committed before
+        // a restart — would otherwise accumulate on disk forever.
+        try {
+            byte[] end = heightKey(maxHeight + 1);
+            db.deleteRange(journalCf, heightKey(0), end);
+            db.deleteRange(receiptsCf, heightKey(0), end);
+        } catch (RocksDBException e) {
+            throw new IllegalStateException("contract store pruneThrough failed", e);
+        }
+    }
+
     private static byte[] slot(PublicAddress contract, byte[] key) {
         byte[] addr = contract.toBytes();
         byte[] out = new byte[addr.length + key.length];

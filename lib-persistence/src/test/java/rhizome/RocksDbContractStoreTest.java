@@ -106,6 +106,34 @@ class RocksDbContractStoreTest {
     }
 
     @Test
+    void pruneThroughDropsJournalsAndReceiptsByInterval(@TempDir Path dir) throws Exception {
+        // The processor's per-height deletes only reach heights still in its RAM maps (empty
+        // after a restart); pruneThrough is the interval drop that keeps pre-restart rows from
+        // accumulating forever.
+        try (var store = new RocksDbContractStore(dir.toString())) {
+            for (long h = 1; h <= 6; h++) {
+                store.putJournal(h, new byte[] {(byte) h});
+                store.putReceipts(h, new byte[] {(byte) (h + 10)});
+            }
+            store.pruneThrough(4);
+            for (long h = 1; h <= 4; h++) {
+                assertNull(store.getJournal(h), "journal at/below the cutoff is gone");
+                assertNull(store.getReceipts(h), "receipts at/below the cutoff are gone");
+            }
+            assertArrayEquals(new byte[] {5}, store.getJournal(5));
+            assertArrayEquals(new byte[] {15}, store.getReceipts(5));
+            assertArrayEquals(new byte[] {6}, store.getJournal(6));
+            assertArrayEquals(new byte[] {16}, store.getReceipts(6));
+        }
+        // The interval drop is durable across a reopen.
+        try (var store = new RocksDbContractStore(dir.toString())) {
+            assertNull(store.getJournal(4));
+            assertNull(store.getReceipts(4));
+            assertArrayEquals(new byte[] {5}, store.getJournal(5));
+        }
+    }
+
+    @Test
     void revertBlockRestoresPriorsAndDropsJournalAtomically(@TempDir Path dir) throws Exception {
         PublicAddress contract = PublicAddress.random();
         byte[] key = {0};

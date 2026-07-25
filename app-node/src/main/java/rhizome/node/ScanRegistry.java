@@ -86,8 +86,18 @@ final class ScanRegistry {
         return e == null ? null : e.predicate();
     }
 
-    boolean deregister(int id) {
-        return scans.remove(id) != null;
+    /**
+     * Removes a scan, but only for its owner: the endpoint is unauthenticated and the random
+     * 2^31 ids make guessing expensive, not impossible — without the owner check anyone who
+     * learns or grinds an id could delete another app's scan (audit follow-up). A foreign id
+     * returns false, indistinguishable from an unknown one (non-disclosing).
+     */
+    boolean deregister(int id, String clientKey) {
+        Entry e = scans.get(id);
+        if (e == null || !e.ownerKey().equals(clientKey)) {
+            return false;
+        }
+        return scans.remove(id, e);
     }
 
     /** Scans registered by {@code clientKey} only — /scan/list must not disclose every other

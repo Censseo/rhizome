@@ -574,6 +574,7 @@ public final class RhizomeNode implements AutoCloseable {
         // in flight is mid-append into RocksDB, and closing column-family handles
         // under a live native call crashes the JVM. shutdownNow() only signals —
         // awaitTermination() is what guarantees no writer is left running.
+        boolean syncStuck = false;
         if (syncScheduler != null) {
             syncScheduler.shutdownNow();
             try {
@@ -581,14 +582,18 @@ public final class RhizomeNode implements AutoCloseable {
                 // are deadline-bound at 30 s (BodyReadDeadline), so a stuck sync always unwinds
                 // within ~45 s.
                 if (!syncScheduler.awaitTermination(45, TimeUnit.SECONDS)) {
-                    // A truly stuck sync thread would make closing the native RocksDB handles a
-                    // use-after-free risk — but returning here leaked discovery, the broadcaster
-                    // and every store handle, wedging the data directory for the next process
-                    // (audit: incomplete shutdown). We therefore log loudly and STILL run the
-                    // full cleanup below; RocksDB's WAL recovers a torn write on next open, and
-                    // the stuck thread is a daemon that dies with the process.
-                    log.error("Network scheduler still busy after 45 s; proceeding with "
-                        + "cleanup anyway (WAL recovery covers a torn write)");
+                    // A truly stuck sync thread makes the store close below UNSAFE on two
+                    // counts: if it is inside a native RocksDB call, closing the handles under
+                    // it is a use-after-free (JVM-level SIGSEGV, not a catchable exception);
+                    // if it holds the engine lock while stuck (e.g. in a peer HTTP read inside
+                    // a consistent-view section), acquiring that lock here hangs shutdown
+                    // forever. Neither is recoverable in-process, so the stores are left open:
+                    // the thread is a daemon that dies with the process, the OS releases the
+                    // flock on exit, and RocksDB's WAL recovers a torn write on next open.
+                    syncStuck = true;
+                    log.error("Network scheduler still busy after 45 s; skipping the store "
+                        + "close (native use-after-free / lock-hang risk) — WAL recovery will "
+                        + "cover a torn write on next open");
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -610,8 +615,11 @@ public final class RhizomeNode implements AutoCloseable {
             // Holding the lock guarantees no thread is inside a native write while the handles
             // close; a late writer afterwards gets a clean "database is closed" Java exception
             // instead of corrupting the native heap. Runs even if a step above threw, so the
-            // data directory is never left locked open (audit: incomplete shutdown).
-            if (engine != null) {
+            // data directory is never left locked open (audit: incomplete shutdown). SKIPPED
+            // when the sync scheduler never drained: the stuck thread may be inside a native
+            // call (close = SIGSEGV) or holding this very lock (close = shutdown hang) — see
+            // the scheduler branch above.
+            if (engine != null && !syncStuck) {
                 engine.runExclusive(() -> {
                     if (store != null) {
                         store.close();

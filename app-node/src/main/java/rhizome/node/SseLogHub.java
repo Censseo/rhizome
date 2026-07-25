@@ -16,9 +16,11 @@ import rhizome.core.blockchain.ContractProcessor.ContractLog;
  * Push streaming of contract event logs over Server-Sent Events: the live
  * counterpart of the {@code /logs} height-cursor scan. Each subscriber gets a
  * bounded per-connection buffer; every applied block sends a heartbeat comment
- * (which doubles as a keepalive at the 5-second cadence) and one {@code data:}
- * event per contract log, with the block height as the SSE event id — so a
- * dropped client resumes exactly where it left off via {@code /logs?fromHeight}.
+ * and one {@code data:} event per contract log, with the block height as the SSE
+ * event id — so a dropped client resumes exactly where it left off via
+ * {@code /logs?fromHeight}. A timer heartbeat (see {@link #HEARTBEAT_MS}) covers
+ * production stalls: block-only heartbeats let an idle chain outrun the server's
+ * 30 s read/write timeout and cut every open stream (audit follow-up).
  *
  * <p>A subscriber that cannot keep up (its buffer saturates) is disconnected
  * rather than allowed to grow unbounded memory — the standard SSE contract:
@@ -31,6 +33,10 @@ final class SseLogHub {
 
     /** Queued chunks per subscriber before it is considered too slow and dropped. */
     private static final int SUBSCRIBER_BUFFER = 256;
+
+    /** Idle keepalive cadence: well inside the HTTP server's 30 s read/write idle timeout, so
+     *  streams survive a block-production stall of any length. */
+    private static final long HEARTBEAT_MS = 15_000L;
 
     /** Concurrent streams one client key (IP / IPv6 /64) may hold, so one host cannot deny the rest. */
     private static final int MAX_SUBSCRIBERS_PER_CLIENT = 4;
@@ -51,6 +57,15 @@ final class SseLogHub {
     SseLogHub(Eventloop eventloop, int maxSubscribers) {
         this.eventloop = eventloop;
         this.maxSubscribers = maxSubscribers;
+        startHeartbeat();
+    }
+
+    /** Self-rescheduling timer heartbeat; dies with the event loop at shutdown. */
+    private void startHeartbeat() {
+        eventloop.delay(HEARTBEAT_MS, () -> {
+            fanOut(": tick\n\n");
+            startHeartbeat();
+        });
     }
 
     /**
@@ -120,7 +135,14 @@ final class SseLogHub {
         if (subscribers.isEmpty()) {
             return;
         }
-        String payload = format(height, logsSupplier.get());
+        fanOut(format(height, logsSupplier.get()));
+    }
+
+    /** Sends {@code payload} to every live subscriber, dropping closed or saturated ones. */
+    private void fanOut(String payload) {
+        if (subscribers.isEmpty()) {
+            return;
+        }
         Iterator<Subscriber> it = subscribers.iterator();
         while (it.hasNext()) {
             ChannelBuffer<ByteBuf> buffer = it.next().buffer();

@@ -344,8 +344,8 @@ public final class MemPool {
      * The revenue a miner can earn from {@code tx}: the plain fee for value/box/token ops; for a
      * contract call the fee plus its declared gas budget ({@code gasLimit × gasPrice}, saturating)
      * — an upper bound on the realized {@code gasUsed × gasPrice}, deterministic at assembly time
-     * when gasUsed is still unknown. Used for fee-prioritized selection and the minFee floor
-     * (audit M9).
+     * when gasUsed is still unknown. Used for the minFee admission floor and the RBF bump
+     * (audit M9) — NOT for selection ordering, see {@link #priorityRate}.
      */
     private static long minerRevenue(TransactionImpl tx) {
         if (!tx.kind().isContract()) {
@@ -359,16 +359,32 @@ public final class MemPool {
     }
 
     /**
+     * Selection priority: miner revenue per unit of declared block weight — {@code gasLimit}
+     * for a contract call, 1 for a fixed-cost op (so its priority is simply its fee). Ordering
+     * on raw {@link #minerRevenue} let a transaction buy the front of every block with gas it
+     * never pays: a CALL that reverts immediately is charged only {@code gasUsed × gasPrice}
+     * (CALL_BASE) but could declare up to maxBlockGas, outranking all honest traffic for the
+     * cost of a temporarily locked balance. Bitcoin/Ethereum order by a rate (sat/vB, gas
+     * price) for exactly this reason. {@code minerRevenue} stays the metric for the admission
+     * floor and RBF, where the total locked value is what matters.
+     */
+    private static long priorityRate(TransactionImpl tx) {
+        long weight = tx.kind().isContract() ? Math.max(1L, tx.gasLimit()) : 1L;
+        return minerRevenue(tx) / weight;
+    }
+
+    /**
      * Selects up to {@code maxTransactions} transactions for a new block: per sender, the
      * contiguous nonce run starting at the confirmed next nonce, within the confirmed balance.
      *
-     * <p>Selection is greedy by miner revenue (audit M9): at each step the highest-revenue
-     * <em>currently selectable</em> transaction — the front of some sender's contiguous run — is
-     * taken, then that sender's run advances. Ties break by address then nonce, so the result is
-     * still a deterministic pure function of pool + chain state. The previous raw-address-order
-     * iteration let an attacker grind low-prefix addresses and fill every block with zero-fee
-     * transactions, permanently crowding out fee-paying traffic for free; miners now always take
-     * the best-paying executable work first.
+     * <p>Selection is greedy by revenue RATE (audit M9, then fee-market fix): at each step the
+     * highest-{@link #priorityRate} <em>currently selectable</em> transaction — the front of
+     * some sender's contiguous run — is taken, then that sender's run advances. Ties break by
+     * nonce then address, so the result is still a deterministic pure function of pool + chain
+     * state. The previous raw-address-order iteration let an attacker grind low-prefix
+     * addresses and fill every block with zero-fee transactions, permanently crowding out
+     * fee-paying traffic for free; miners now always take the best-paying executable work
+     * first — and paying for priority requires a real rate, not a declared-never-paid budget.
      */
     public List<Transaction> getTransactionsForBlock(int maxTransactions) {
         lock.lock();
@@ -378,16 +394,16 @@ public final class MemPool {
             // still available to that run. Only the cursor's front tx is a selection candidate.
             record Cursor(long nextNonce, long budget) {}
             Map<PublicAddress, Cursor> cursors = new HashMap<>();
-            // The candidate frontier: one entry per sender, ordered by revenue (desc), then
-            // address, then nonce — a total order, so the greedy pick is deterministic.
+            // The candidate frontier: one entry per sender, ordered by priority rate (desc),
+            // then nonce, then address — a total order, so the greedy pick is deterministic.
             java.util.PriorityQueue<Map.Entry<PublicAddress, Transaction>> frontier =
                 new java.util.PriorityQueue<>(Map.Entry.<PublicAddress, Transaction>comparingByValue(
                     (a, b) -> {
                         var ta = (TransactionImpl) a;
                         var tb = (TransactionImpl) b;
-                        int byRevenue = Long.compare(minerRevenue(tb), minerRevenue(ta));
-                        if (byRevenue != 0) {
-                            return byRevenue;
+                        int byRate = Long.compare(priorityRate(tb), priorityRate(ta));
+                        if (byRate != 0) {
+                            return byRate;
                         }
                         int byNonce = Long.compare(ta.nonce(), tb.nonce());
                         return byNonce != 0 ? byNonce : java.util.Arrays.compareUnsigned(

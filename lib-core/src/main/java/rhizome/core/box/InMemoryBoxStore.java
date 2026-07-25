@@ -64,6 +64,7 @@ public final class InMemoryBoxStore implements BoxStore {
     @Override
     public void pruneJournals(long minHeight) {
         journals.keySet().removeIf(h -> h < minHeight);
+        receipts.keySet().removeIf(h -> h < minHeight); // same schedule (see BoxStore)
     }
 
     @Override

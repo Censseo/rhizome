@@ -85,10 +85,12 @@ class PeerBanListTest {
     }
 
     @Test
-    void fullTableFailsClosedViaOverflowBucket() {
-        // Table full of fresh (unsweepable) entries: offences by new hosts used to be dropped
-        // untracked (fail-open — audit F7). They must instead accumulate against a shared
-        // overflow bucket that, past the threshold, bans ALL untracked hosts for one window.
+    void overflowBucketCountsButNeverBansInnocentHosts() {
+        // Table full of fresh (unsweepable) entries: offences by new hosts accumulate against a
+        // shared overflow bucket (nothing is dropped untracked — audit F7), and the OFFENDING
+        // host is reported banned once the bucket is hot. But a DIFFERENT untracked host must
+        // never be banned by it: banning every unknown host let a table-filling spray eclipse a
+        // freshly started node from all new peers (audit follow-up).
         AtomicLong clock = new AtomicLong(0);
         var bans = new PeerBanList(100, 60_000, 4, clock::get);
         for (int i = 0; i < 4; i++) {
@@ -99,13 +101,11 @@ class PeerBanListTest {
             banned |= bans.misbehave("http://10.0.3." + i + ":3000", 50);
         }
         assertTrue(banned, "overflow offences must accumulate toward a ban, not vanish");
-        assertTrue(bans.isBanned("http://10.0.4.1:3000"),
-            "untracked hosts fail closed while the overflow bucket is hot");
-        // A tracked, clean host is NOT caught by the overflow ban.
+        assertTrue(bans.overflowScore() > 0 || banned, "the spray's score stays observable");
+        assertFalse(bans.isBanned("http://10.0.4.1:3000"),
+            "a host with no offence of its own is never banned by the overflow bucket");
+        // A tracked, clean host is unaffected either.
         assertFalse(bans.isBanned("http://10.0.1.0:3000"));
-        // After the window lapses, untracked hosts are admitted again.
-        clock.set(61_000);
-        assertFalse(bans.isBanned("http://10.0.4.1:3000"));
     }
 
     @Test

@@ -190,7 +190,7 @@ public final class NodeApi {
             })))
             .with(POST, "/scan/deregister", req -> req.loadBody(SMALL_BODY).map(body -> guardedResponse(() -> {
                 int id = parseJson(body.getString(StandardCharsets.UTF_8)).getInt("scanId");
-                return json(new JSONObject().put("removed", node.deregisterScan(id)));
+                return json(new JSONObject().put("removed", node.deregisterScan(clientKey(req), id)));
             })))
             .with(GET, "/scan/list", req -> guarded(() -> BoxApi.scanList(node, clientKey(req))))
             .with(GET, "/scan/boxes", req -> guarded(() -> BoxApi.scanBoxes(node, req)))

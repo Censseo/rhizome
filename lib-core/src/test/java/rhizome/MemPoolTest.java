@@ -258,6 +258,27 @@ class MemPoolTest {
     }
 
     @Test
+    void declaredGasBudgetDoesNotBuySelectionPriority() {
+        // Fee-market fix: a contract CALL's gasLimit is an upper bound it never pays in full
+        // (only gasUsed × gasPrice is charged; an instant reverter pays CALL_BASE), so ordering
+        // on total miner revenue let a reverter declaring a huge budget crowd out every block
+        // for the price of a temporarily locked balance. Selection must use the revenue RATE:
+        // this CALL locks 1_000_000 of budget at a rate of 1, so the plain 100-fee transfer
+        // goes first — while the admission floor still counts the locked total (both admitted).
+        MemPool pool = new MemPool(params, verifier, accounts, 100);
+        assertEquals(ExecutionStatus.SUCCESS, pool.addTransaction(contractCall(0, 1_000_000, 1)));
+        PublicAddress[] h = new PublicAddress[1];
+        assertEquals(ExecutionStatus.SUCCESS, pool.addTransaction(fromFreshSender(h, 100, 0)));
+
+        List<Transaction> one = pool.getTransactionsForBlock(1);
+        assertEquals(1, one.size());
+        assertEquals(h[0], ((TransactionImpl) one.get(0)).from(),
+            "a declared-but-unpaid gas budget must not outrank real per-unit fees");
+        List<Transaction> both = pool.getTransactionsForBlock(10);
+        assertEquals(2, both.size(), "both transactions are minable — just correctly ordered");
+    }
+
+    @Test
     void selectionPrioritizesHigherFeeOverAddressOrder() {
         // M9 regression: block assembly must take the best-paying executable transaction first,
         // not iterate senders in raw address order — otherwise grinding a low-prefix address let

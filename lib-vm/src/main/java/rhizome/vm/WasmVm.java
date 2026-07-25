@@ -637,7 +637,7 @@ public final class WasmVm {
 
     /**
      * Rejects the WASM GC feature family entirely (audit C1). Chicory 1.7.5 implements the GC
-     * opcodes — STRUCT_*, ARRAY_*, REF_TEST/CAST_TEST, BR_ON_CAST*, REF_I31/I31_GET, ANY/EXTERN
+     * opcodes — STRUCT_*, ARRAY_*, REF_TEST/REF_CAST, BR_ON_CAST*, REF_I31/I31_GET, ANY/EXTERN
      * conversions — and they allocate on the JVM <em>heap</em>, outside linear memory:
      * {@code array.new_default} materialises a {@code new long[len]} with {@code len} a runtime
      * operand up to 2^31-1 (~16 GiB in ONE instruction for 1 gas), and Chicory's GcRefStore never
@@ -700,8 +700,10 @@ public final class WasmVm {
 
     private static void rejectIfGc(Instruction instruction) {
         String op = instruction.opcode().name();
+        // REF_TEST*/REF_CAST* are named explicitly: the GC spec has no "cast.test" instruction,
+        // so a prefix like CAST_TEST would silently match nothing (audit follow-up).
         if (op.startsWith("STRUCT_") || op.startsWith("ARRAY_")
-                || op.startsWith("REF_TEST") || op.startsWith("CAST_TEST")
+                || op.startsWith("REF_TEST") || op.startsWith("REF_CAST")
                 || op.startsWith("BR_ON_CAST") || op.startsWith("I31_GET")
                 || op.equals("REF_I31") || op.equals("ANY_CONVERT_EXTERN")
                 || op.equals("EXTERN_CONVERT_ANY")) {

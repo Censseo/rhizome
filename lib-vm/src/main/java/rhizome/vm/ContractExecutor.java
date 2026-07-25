@@ -52,10 +52,13 @@ public final class ContractExecutor {
         // Validate BEFORE storing: this path stored raw code with no checks, so malformed,
         // oversized or non-deterministic (float/SIMD) bytecode could enter on-chain state and
         // only be discovered on every later call (audit F8). The gas fee is still charged for
-        // the validation work, matching the processor's failed-deploy path.
+        // the validation work, matching the processor's failed-deploy path. Only a
+        // RuntimeException is a verdict: an Error (SOE/OOM in the parser) is host-local and
+        // must crash rather than become a node-dependent "invalid code" verdict (consensus
+        // fork class — see WasmContractProcessor.deploy).
         try {
             WasmVm.validateCode(code);
-        } catch (Throwable e) {
+        } catch (RuntimeException e) {
             return new DeployOutcome(address, fee, false, "invalid contract code: " + e.getMessage());
         }
         store.putCode(address, code);

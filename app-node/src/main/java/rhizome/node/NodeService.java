@@ -337,9 +337,9 @@ public final class NodeService {
         return scans.register(clientKey, predicate);
     }
 
-    /** Removes a registered scan; true if it existed. */
-    public boolean deregisterScan(int scanId) {
-        return scans.deregister(scanId);
+    /** Removes a registered scan owned by {@code clientKey}; true if it existed (and was theirs). */
+    public boolean deregisterScan(String clientKey, int scanId) {
+        return scans.deregister(scanId, clientKey);
     }
 
     /** The predicate of a registered scan, or {@code null} if the id is unknown. */

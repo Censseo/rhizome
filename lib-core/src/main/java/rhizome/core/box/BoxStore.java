@@ -28,7 +28,13 @@ public interface BoxStore {
     /** Reverts the box changes committed for {@code height} using the persisted journal. */
     void revertBlock(long height);
 
-    /** Drops journals for heights strictly below {@code minHeight} (unreachable by any reorg). */
+    /**
+     * Drops journals — AND the receipts of the same heights — for heights strictly below
+     * {@code minHeight} (unreachable by any reorg). Receipts ride the same schedule because the
+     * processor's per-height receipt deletes only cover heights still in its RAM map, which is
+     * empty after a restart; without a store-side interval drop, pre-restart receipts would
+     * accumulate forever (audit follow-up).
+     */
     void pruneJournals(long minHeight);
 
     // ---- per-block receipt persistence (audit F7) ----

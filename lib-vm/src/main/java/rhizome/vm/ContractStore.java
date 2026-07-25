@@ -74,6 +74,15 @@ public interface ContractStore {
     /** Drops the persisted receipts for {@code height}. */
     default void deleteReceipts(long height) { }
 
+    /**
+     * Drops ALL persisted journals and receipts for heights {@code <= maxHeight}, in one
+     * interval operation (durable stores only). The processor prunes per-height from its RAM
+     * maps, but those maps are empty after a restart — without an interval prune every journal
+     * and receipt written before the restart would stay on disk forever. Symmetric with
+     * {@code BoxStore.pruneJournals}, which drops both journals and receipts by range.
+     */
+    default void pruneThrough(long maxHeight) { }
+
     // ---- Atomic block commit (audit F1) ----
     // Committing a block's contract mutations one slot at a time and only THEN persisting the
     // undo journal was unrecoverable: a crash mid-flush left storage half-applied with no journal
