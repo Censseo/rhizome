@@ -7,5 +7,9 @@ dependencies {
     api project(':lib-core')
 
     // Deterministic, pure-Java WebAssembly runtime (no JNI) — the smart-contract VM.
+    // PINNED at 1.7.5: WasmVm.preScanModule mirrors this exact version's parser internals
+    // (OpCode.signature table, section decoders, count-sized pre-allocations). Bumping Chicory
+    // without re-verifying the mirror silently reopens the poison-DEPLOY allocation vector —
+    // see the preScanModule javadoc and WasmPreScanCountsTest.
     api 'com.dylibso.chicory:runtime:1.7.5'
 }

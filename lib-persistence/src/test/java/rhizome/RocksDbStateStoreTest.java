@@ -2,6 +2,7 @@ package rhizome;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -116,6 +117,39 @@ class RocksDbStateStoreTest {
             store.discardBatch();
             store.beginBatch(); // after a discard, a new batch opens cleanly
             store.flushBatch();
+        }
+    }
+
+    @Test
+    void asyncSweepDeletesUnreachableNodesAndKeepsRetainedRootsResolvable(@TempDir Path dir)
+            throws Exception {
+        try (var store = new RocksDbStateStore(dir.toString())) {
+            SparseMerkleTree tree = new SparseMerkleTree(store);
+            byte[] liveRoot = SparseMerkleTree.EMPTY_ROOT;
+            for (int i = 1; i <= 10; i++) {
+                liveRoot = tree.update(liveRoot, key32(i), key32(i));
+            }
+            // Retained ABOVE the prune floor, so the sweep's mark phase keeps its nodes.
+            store.putRoot(2048, liveRoot);
+            // Garbage: a whole tree whose root is never recorded — unreachable from any root.
+            byte[] orphanRoot = SparseMerkleTree.EMPTY_ROOT;
+            for (int i = 101; i <= 110; i++) {
+                orphanRoot = tree.update(orphanRoot, key32(i), key32(i));
+            }
+            assertNotNull(store.get(orphanRoot), "orphan nodes are on disk before the sweep");
+
+            store.pruneBelow(1024); // watermark 0 -> one full interval -> async sweep triggered
+
+            // The sweep runs OFF the calling thread (consensus lock must never wait for it),
+            // so poll for the garbage to disappear instead of asserting synchronously.
+            long deadline = System.currentTimeMillis() + 30_000;
+            while (store.get(orphanRoot) != null && System.currentTimeMillis() < deadline) {
+                Thread.sleep(50);
+            }
+            assertNull(store.get(orphanRoot), "sweep must delete nodes no retained root reaches");
+            StateProof proof = tree.prove(liveRoot, key32(3));
+            assertTrue(SparseMerkleTree.verify(liveRoot, key32(3), key32(3), proof),
+                "the retained root's nodes survive the sweep");
         }
     }
 }

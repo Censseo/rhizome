@@ -64,7 +64,12 @@ public final class PersistentHostState implements HostState {
             byte[] v = pending.get(k);
             return v == null ? null : v.clone();
         }
-        return store.getStorage(contract, key);
+        try {
+            return store.getStorage(contract, key);
+        } catch (Throwable t) {
+            // Node-local store failure — must never surface as a contract verdict (see HostFault).
+            throw HostFault.wrap("contract storage read failed", t);
+        }
     }
 
     @Override
@@ -122,7 +127,13 @@ public final class PersistentHostState implements HostState {
         // Memoized: the deployer is set once at deploy and never changes during a call session, so a
         // contract reading it repeatedly should hit the backing store only once.
         if (cachedDeployer == null) {
-            byte[] d = store.getStorage(contract, DEPLOYER_KEY);
+            byte[] d;
+            try {
+                d = store.getStorage(contract, DEPLOYER_KEY);
+            } catch (Throwable t) {
+                // Node-local store failure — must never surface as a contract verdict.
+                throw HostFault.wrap("contract deployer read failed", t);
+            }
             cachedDeployer = d == null ? new byte[0] : d;
         }
         return cachedDeployer;
@@ -140,7 +151,15 @@ public final class PersistentHostState implements HostState {
 
     @Override
     public rhizome.core.box.Box boxRead(byte[] id) {
-        return boxReader == null ? null : boxReader.read(id);
+        if (boxReader == null) {
+            return null;
+        }
+        try {
+            return boxReader.read(id);
+        } catch (Throwable t) {
+            // Node-local store failure — must never surface as a contract verdict.
+            throw HostFault.wrap("box read failed", t);
+        }
     }
 
     @Override

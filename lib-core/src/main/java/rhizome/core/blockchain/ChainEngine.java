@@ -789,6 +789,36 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         }
     }
 
+    /**
+     * Stamp-in-progress version counter (a seqlock) guarding the deliberately lock-free
+     * box/token readers below. {@link #stampStateRoot} increments it at entry (odd = a
+     * commit-then-revert dry-run is mutating the live box/token stores) and again at exit
+     * (even). A reader that observes an odd starting value, or a value that changed across
+     * its read, redoes the read under the engine lock — so those readers can never observe
+     * the phantom, never-committed state a stamp briefly commits before rolling back
+     * (audit review: torn reads through the lock-free API paths), while a reader racing no
+     * stamp pays only two volatile reads and stays off the consensus lock.
+     */
+    private final java.util.concurrent.atomic.AtomicLong stampVersion =
+        new java.util.concurrent.atomic.AtomicLong();
+
+    /** Runs {@code read}, falling back to the engine lock iff a stamp overlapped it (see above). */
+    private <T> T readOutsideStamp(java.util.function.Supplier<T> read) {
+        long v = stampVersion.get();
+        if ((v & 1L) == 0L) {
+            T result = read.get();
+            if (stampVersion.get() == v) {
+                return result; // no stamp overlapped — the lock-free read saw committed state only
+            }
+        }
+        lock.lock();
+        try {
+            return read.get();
+        } finally {
+            lock.unlock();
+        }
+    }
+
     // ---- data boxes ----
 
     /** Whether the data-box layer is wired (box transactions and queries active). */
@@ -833,9 +863,10 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         if (boxProcessor == null) {
             return new rhizome.core.box.BoxProcessor.ScanPage(java.util.List.of(), null);
         }
-        // No engine lock: the scan reads only committed box state (thread-safe), so it does
-        // not contend with block production.
-        return boxProcessor.scan(predicate, afterId, limit, window);
+        // No engine lock on the fast path: the scan reads only committed box state (thread-safe),
+        // so it does not contend with block production — unless a stampStateRoot dry-run is
+        // mid-flight, which readOutsideStamp detects via the stamp seqlock and falls back to the lock.
+        return readOutsideStamp(() -> boxProcessor.scan(predicate, afterId, limit, window));
     }
 
     /** Rent-collectable box ids at the next block height, lowest expiry first (block producer). */
@@ -853,7 +884,11 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
 
     /** Box lifecycle events emitted by the block at {@code height} (for the agent event feed). */
     public java.util.List<rhizome.core.box.BoxProcessor.BoxEvent> boxEvents(long height) {
-        return boxProcessor == null ? java.util.List.of() : boxProcessor.events(height);
+        return boxProcessor == null
+            ? java.util.List.of()
+            // Lock-free unless a stamp is committing-then-reverting phantom events for this
+            // height (readOutsideStamp falls back to the engine lock in that window).
+            : readOutsideStamp(() -> boxProcessor.events(height));
     }
 
     // ---- native tokens ----
@@ -912,7 +947,10 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
 
     /** Token lifecycle events emitted by the block at {@code height}. */
     public java.util.List<rhizome.core.token.TokenProcessor.TokenEvent> tokenEvents(long height) {
-        return tokenProcessor == null ? java.util.List.of() : tokenProcessor.events(height);
+        return tokenProcessor == null
+            ? java.util.List.of()
+            // Same stamp seqlock as boxEvents: never expose phantom, never-committed events.
+            : readOutsideStamp(() -> tokenProcessor.events(height));
     }
 
     // ---- miner-voted parameters ----
@@ -1024,33 +1062,46 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             return;
         }
         lock.lock();
-        // Stage this dry-run's ledger writes in the overlay so they never touch the column family and
-        // are dropped wholesale by discardBlockCommit — a producer-only apply-then-revert that leaves
-        // zero ledger residue even if the process dies mid-stamp (audit S3).
-        store.beginBlockCommit();
         try {
-            var b = (BlockImpl) candidate;
-            java.util.Set<PublicAddress> touched = new java.util.HashSet<>();
-            ExecutionStatus status = Executor.executeBlock(candidate, ledger, store::hasTransaction, params,
-                verifier, contractProcessor, boxProcessor, tokenProcessor, touched);
-            if (status != SUCCESS) {
-                return; // invalid block; leave the state root empty and let addBlock reject it
-            }
-            long h = b.id();
-            byte[] root = stateAccumulator.dryApply(collectStateChanges(candidate, touched, h));
-            b.stateRoot(SHA256Hash.of(root));
-            Executor.rollbackBlock(candidate, ledger, contractProcessor, boxProcessor, h, params);
-            if (contractProcessor != null) {
-                contractProcessor.revertBlock(h);
-            }
-            if (boxProcessor != null) {
-                boxProcessor.revertBlock(h);
-            }
-            if (tokenProcessor != null) {
-                tokenProcessor.revertBlock(h);
+            // Stage this dry-run's ledger writes in the overlay so they never touch the column
+            // family and are dropped wholesale by discardBlockCommit — a producer-only
+            // apply-then-revert that leaves zero ledger residue even if the process dies
+            // mid-stamp (audit S3). Staged BEFORE the stamp window opens: if this throws, the
+            // version was never bumped and the outer finally still releases the lock.
+            store.beginBlockCommit();
+            // Mark the stamp window for the lock-free box/token readers: the executeBlock below
+            // commits this candidate's box/token mutations to the live stores before they are
+            // reverted, so readOutsideStamp must fall back to the engine lock until the rollback
+            // completes (odd = stamp in flight; back to even when the stores are clean again).
+            // No store mutation happens between beginBlockCommit and this increment, so
+            // lock-free readers cannot observe a dirty store outside the window.
+            stampVersion.incrementAndGet();
+            try {
+                var b = (BlockImpl) candidate;
+                java.util.Set<PublicAddress> touched = new java.util.HashSet<>();
+                ExecutionStatus status = Executor.executeBlock(candidate, ledger, store::hasTransaction, params,
+                    verifier, contractProcessor, boxProcessor, tokenProcessor, touched);
+                if (status != SUCCESS) {
+                    return; // invalid block; leave the state root empty and let addBlock reject it
+                }
+                long h = b.id();
+                byte[] root = stateAccumulator.dryApply(collectStateChanges(candidate, touched, h));
+                b.stateRoot(SHA256Hash.of(root));
+                Executor.rollbackBlock(candidate, ledger, contractProcessor, boxProcessor, h, params);
+                if (contractProcessor != null) {
+                    contractProcessor.revertBlock(h);
+                }
+                if (boxProcessor != null) {
+                    boxProcessor.revertBlock(h);
+                }
+                if (tokenProcessor != null) {
+                    tokenProcessor.revertBlock(h);
+                }
+            } finally {
+                store.discardBlockCommit(); // drop the dry-run's staged ledger writes
+                stampVersion.incrementAndGet(); // stamp window closed — stores are clean again
             }
         } finally {
-            store.discardBlockCommit(); // drop the dry-run's staged ledger writes
             lock.unlock();
         }
     }
@@ -1570,9 +1621,11 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
      */
     private boolean uncleEligible(Block uncle, int h, int depth, long tipHeight, UncleContext ctx,
                                   int nephewDifficulty) {
-        if (!uncle.verifyNonce(params.powAlgorithm(), params.powCostsAt(uncle.id()))) {
-            return false; // bad PoW
-        }
+        // Cheapest-first, PoW last — the same DoS-ordering doctrine as addBlock: the memory-hard
+        // verifyNonce runs only for orphans every cheap check already accepts, so a pool full of
+        // already-referenced or out-of-range orphans costs map lookups, not Pufferfish2 hashes,
+        // on every production round (selectUncles scans the whole orphan pool under the engine
+        // lock). Pure checks only, so the verdict is unchanged by the reordering.
         int ud = ((BlockImpl) uncle).difficulty();
         if (ud < params.minDifficulty() || ud > nephewDifficulty) {
             return false; // work must be real and not inflated beyond the nephew's difficulty
@@ -1584,10 +1637,13 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         if (!ctx.recentChain().contains(uncle.lastBlockHash())) {
             return false; // must fork from a recent main-chain block
         }
+        if (ctx.alreadyReferenced().contains(uncle.hash())) {
+            return false; // not already credited
+        }
         if (uid <= tipHeight && store.headerAt(uid).hash().equals(uncle.hash())) {
             return false; // that is the canonical block, not an orphan
         }
-        return !ctx.alreadyReferenced().contains(uncle.hash()); // not already credited
+        return uncle.verifyNonce(params.powAlgorithm(), params.powCostsAt(uid)); // real PoW, last
     }
 
     private record UncleContext(java.util.Set<SHA256Hash> recentChain,

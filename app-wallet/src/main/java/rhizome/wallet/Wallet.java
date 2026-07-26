@@ -137,9 +137,27 @@ public final class Wallet {
      * passphrase is available. Without that opt-in a plaintext write is REFUSED in
      * non-interactive mode (no console): a silently unencrypted seed on disk is spendable by
      * anyone who reads it (audit S-3). Interactive sessions keep the loud warning and must
-     * confirm.
+     * confirm. An EXISTING key file is never overwritten here — see
+     * {@link #save(Path, char[], boolean, boolean)}.
      */
     public void save(Path keyFile, char[] passphrase, boolean allowPlaintext) throws IOException {
+        save(keyFile, passphrase, allowPlaintext, false);
+    }
+
+    /**
+     * As {@link #save(Path, char[], boolean)}; {@code overwrite} (the CLI's {@code --overwrite})
+     * permits replacing an existing key file. By default an existing file is REFUSED: there is
+     * no backup of a spendable private key, so re-running keygen on an existing path must fail
+     * loudly instead of silently destroying the old key. The check runs BEFORE any passphrase
+     * prompt, so a refused overwrite fails fast.
+     */
+    public void save(Path keyFile, char[] passphrase, boolean allowPlaintext, boolean overwrite)
+            throws IOException {
+        if (!overwrite && Files.exists(keyFile, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+            throw new IOException("refusing to overwrite existing wallet key file " + keyFile
+                + " — its private key would be lost forever; move it away first or pass --overwrite "
+                + "to replace it");
+        }
         char[] plaintext = seedJsonChars(null, null);
         char[] pass = resolvePassphrase(passphrase);
         try {
@@ -249,7 +267,14 @@ public final class Wallet {
             Path tmp = Files.createTempFile(dir, ".wallet", ".tmp",
                 java.nio.file.attribute.PosixFilePermissions.asFileAttribute(ownerOnly));
             try {
-                Files.write(tmp, content);
+                // SYNC forces every write to stable storage before the close returns, and the
+                // directory fsync after the rename makes the rename itself durable — otherwise
+                // a crash after save() returns could resurrect the OLD key file (or none at
+                // all) even though the new seed was "written".
+                Files.write(tmp, content,
+                    java.nio.file.StandardOpenOption.WRITE,
+                    java.nio.file.StandardOpenOption.TRUNCATE_EXISTING,
+                    java.nio.file.StandardOpenOption.SYNC);
                 try {
                     Files.move(tmp, keyFile,
                         java.nio.file.StandardCopyOption.ATOMIC_MOVE,
@@ -257,6 +282,7 @@ public final class Wallet {
                 } catch (java.nio.file.AtomicMoveNotSupportedException notAtomic) {
                     Files.move(tmp, keyFile, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
                 }
+                fsyncDirectory(dir);
             } catch (IOException e) {
                 Files.deleteIfExists(tmp);
                 throw e;
@@ -269,9 +295,26 @@ public final class Wallet {
                 Files.createFile(keyFile);
             }
             restrictToOwner(keyFile);
-            try (var out = Files.newOutputStream(keyFile)) {
+            try (var out = Files.newOutputStream(keyFile,
+                    java.nio.file.StandardOpenOption.WRITE,
+                    java.nio.file.StandardOpenOption.TRUNCATE_EXISTING,
+                    java.nio.file.StandardOpenOption.SYNC)) {
                 out.write(content);
             }
+        }
+    }
+
+    /**
+     * Best-effort fsync of a directory after an atomic rename, so the directory entry naming
+     * the key file is itself durable. Platforms that refuse to open or force a directory
+     * channel (e.g. Windows) are left to the OS — the rename has already happened.
+     */
+    private static void fsyncDirectory(Path dir) {
+        try (var channel = java.nio.channels.FileChannel.open(dir,
+                java.nio.file.StandardOpenOption.READ)) {
+            channel.force(true);
+        } catch (IOException | RuntimeException e) {
+            // Directory fsync unsupported here: best-effort only, the key file itself is synced.
         }
     }
 

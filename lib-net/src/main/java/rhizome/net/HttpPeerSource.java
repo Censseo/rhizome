@@ -155,7 +155,9 @@ public final class HttpPeerSource implements PeerSource {
     public BigInteger totalWork() {
         String body = getString("/total_work", SCALAR_CAP);
         try {
-            return new BigInteger(new JSONObject(body).getString("totalWork"));
+            // Depth-bounded: a peer-controlled body must never reach the recursive parser
+            // unbounded (StackOverflowError → fatal, audit F11).
+            return new BigInteger(PeerJson.parseObject(body).getString("totalWork"));
         } catch (RuntimeException e) {
             throw new PeerProtocolException("peer /total_work is malformed", e);
         }
@@ -165,7 +167,9 @@ public final class HttpPeerSource implements PeerSource {
     public SHA256Hash blockHash(long height) {
         String body = getString("/block?blockId=" + height, JSON_BLOCK_CAP);
         try {
-            return Block.of(new JSONObject(body)).hash();
+            // Depth-bounded parse (audit F11): an over-deep block JSON is a protocol error,
+            // not a StackOverflowError.
+            return Block.of(PeerJson.parseObject(body)).hash();
         } catch (RuntimeException e) {
             throw new PeerProtocolException("peer /block is malformed", e);
         }
@@ -208,7 +212,7 @@ public final class HttpPeerSource implements PeerSource {
     public long prunedBelow() {
         String body = getString("/info", SCALAR_CAP);
         try {
-            return new JSONObject(body).optLong("prunedBelow", 0);
+            return PeerJson.parseObject(body).optLong("prunedBelow", 0); // depth-bounded (audit F11)
         } catch (RuntimeException e) {
             throw new PeerProtocolException("peer /info is malformed", e);
         }
@@ -223,7 +227,7 @@ public final class HttpPeerSource implements PeerSource {
             return null; // peer has no materialised snapshot (404) — not an error
         }
         try {
-            JSONObject info = new JSONObject(body);
+            JSONObject info = PeerJson.parseObject(body); // depth-bounded (audit F11)
             long pivotHeight = info.getLong("pivotHeight");
             byte[] stateRoot = rhizome.core.common.Utils.hexStringToByteArray(info.getString("stateRoot"));
             int chunks = info.getInt("chunks");

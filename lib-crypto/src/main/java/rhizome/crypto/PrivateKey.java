@@ -28,6 +28,10 @@ public record PrivateKey(Ed25519PrivateKeyParameters key) implements SimpleHashT
         return null;
     }
 
+    // Residual exposure: the hex String (and the String returned by toHexString) stays on the
+    // heap until GC — seed-handling callers should prefer of(byte[]) and wipe their own copy.
+    // No destroy() is offered: Ed25519PrivateKeyParameters keeps a private internal copy that
+    // BouncyCastle 1.78 exposes no wipe for, so only the mutable buffers created here are zeroed.
     public static PrivateKey of(String hexString) {
         if ("".equals(hexString)) {
             return null;
@@ -35,14 +39,26 @@ public record PrivateKey(Ed25519PrivateKeyParameters key) implements SimpleHashT
         if (hexString.length() != 64) {
             throw new IllegalArgumentException("Invalid private key string length. Expected 64 characters for a 32-byte key.");
         }
-        return new PrivateKey(new Ed25519PrivateKeyParameters(hexStringToByteArray(hexString), 0));    
+        byte[] seed = hexStringToByteArray(hexString);
+        try {
+            return new PrivateKey(new Ed25519PrivateKeyParameters(seed, 0));
+        } finally {
+            java.util.Arrays.fill(seed, (byte) 0);
+        }
     }
 
     public String toHexString() {
         if (key == null) {
             return "";
         }
-        return bytesToHex(key.getEncoded() == null ? new byte[0] : key.getEncoded());
+        byte[] encoded = key.getEncoded();
+        try {
+            return encoded == null ? "" : bytesToHex(encoded);
+        } finally {
+            if (encoded != null) {
+                java.util.Arrays.fill(encoded, (byte) 0);
+            }
+        }
     }
 
     public byte[] toBytes() {

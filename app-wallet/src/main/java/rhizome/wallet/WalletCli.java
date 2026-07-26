@@ -29,6 +29,10 @@ import rhizome.core.transaction.TransactionKind;
  *                               RHIZOME_EXPECT_CHAIN_ID); overrides and re-pins the TOFU pin
  *   --plaintext                 keygen only: permit an UNENCRYPTED key file in non-interactive
  *                               mode (or set RHIZOME_WALLET_PLAINTEXT=1)
+ *   --overwrite                 keygen only: overwrite an EXISTING key file (the old key is
+ *                               destroyed)
+ *   --force                     send/token-transfer only: send to an address with an invalid
+ *                               checksum anyway
  *
  * Chain-id pinning (trust on first use): the first send/deploy/call/... records the node's
  * chainId and URL in the key file; any later node reporting a different chainId aborts the
@@ -75,9 +79,13 @@ public final class WalletCli {
     }
 
     private static void keygen(String[] args) throws Exception {
-        require(args, 2, "keygen <keyfile> [--passphrase-file <path>] [--plaintext]");
+        require(args, 2, "keygen <keyfile> [--passphrase-file <path>] [--plaintext] [--overwrite]");
         Wallet wallet = Wallet.create();
-        wallet.save(Path.of(args[1]), passphraseFromFlag(args), hasFlag(args, "--plaintext"));
+        // Existing key files are refused unless --overwrite is given: re-running keygen on a live
+        // path would silently destroy a spendable private key. The flag is deliberately NOT
+        // --force (which send uses for checksum bypass) so a reflex --force never destroys a key.
+        wallet.save(Path.of(args[1]), passphraseFromFlag(args), hasFlag(args, "--plaintext"),
+            hasFlag(args, "--overwrite"));
         System.out.println("Created wallet " + args[1]);
         System.out.println("Address: " + wallet.address().toHexString());
     }
@@ -282,22 +290,26 @@ public final class WalletCli {
 
     private static void tokenTransfer(String[] args) throws Exception {
         require(args, 6, "token-transfer <nodeUrl> <keyfile> <tokenId> <to> <amount> [--fee <fee>] [--expect-chain-id <n>] [--passphrase-file <path>]");
-        submitTokenAmount(args, TransactionKind.TOKEN_TRANSFER, checkedRecipient(args[4], args),
+        // Validate the recipient BEFORE loading the wallet: a checksum typo should not cost a
+        // passphrase prompt and a scrypt round to discover.
+        PublicAddress recipient = checkedRecipient(args[4], args);
+        Wallet wallet = Wallet.load(Path.of(args[2]), passphraseFromFlag(args));
+        submitTokenAmount(args, wallet, TransactionKind.TOKEN_TRANSFER, recipient,
             args[3], Long.parseLong(args[5]));
     }
 
     private static void tokenBurn(String[] args) throws Exception {
         require(args, 5, "token-burn <nodeUrl> <keyfile> <tokenId> <amount> [--fee <fee>] [--expect-chain-id <n>] [--passphrase-file <path>]");
         Wallet wallet = Wallet.load(Path.of(args[2]), passphraseFromFlag(args));
-        submitTokenAmount(args, TransactionKind.TOKEN_BURN, wallet.address(),
+        submitTokenAmount(args, wallet, TransactionKind.TOKEN_BURN, wallet.address(),
             args[3], Long.parseLong(args[4]));
     }
 
-    private static void submitTokenAmount(String[] args, TransactionKind kind, PublicAddress to,
-                                          String tokenIdHex, long amount) throws Exception {
+    /** The wallet is loaded/decrypted ONCE by the caller — a second load here would re-prompt for the passphrase and re-run scrypt. */
+    private static void submitTokenAmount(String[] args, Wallet wallet, TransactionKind kind,
+                                          PublicAddress to, String tokenIdHex, long amount) throws Exception {
         warnIfInsecureNodeUrl(args[1]);
         WalletClient client = new WalletClient(args[1]);
-        Wallet wallet = Wallet.load(Path.of(args[2]), passphraseFromFlag(args));
         byte[] data = rhizome.core.token.TokenPayload.encodeAmount(Utils.hexStringToByteArray(tokenIdHex), amount);
         long fee = flagPdn(args, "--fee");
         echoPdn("fee", fee);
@@ -444,7 +456,9 @@ public final class WalletCli {
         if (path == null) {
             return null;
         }
-        byte[] bytes = Files.readAllBytes(Path.of(path));
+        Path passFile = Path.of(path);
+        warnIfGroupOrOtherReadable(passFile);
+        byte[] bytes = Files.readAllBytes(passFile);
         try {
             // CR/LF are single bytes in UTF-8, so trailing-newline stripping is safe at byte level.
             int end = bytes.length;
@@ -454,6 +468,25 @@ public final class WalletCli {
             return WalletKeystore.utf8Decode(bytes, end);
         } finally {
             java.util.Arrays.fill(bytes, (byte) 0);
+        }
+    }
+
+    /**
+     * Best-effort permission audit of a passphrase file, mirroring the plaintext-key warning in
+     * {@code Wallet}: a group/other-readable passphrase unlocks the encrypted key file for any
+     * local user, so warn loudly on use. Ignored where POSIX permissions are unsupported.
+     */
+    private static void warnIfGroupOrOtherReadable(Path passFile) {
+        try {
+            var perms = Files.getPosixFilePermissions(passFile);
+            if (perms.contains(java.nio.file.attribute.PosixFilePermission.GROUP_READ)
+                || perms.contains(java.nio.file.attribute.PosixFilePermission.OTHERS_READ)) {
+                System.err.println("WARNING: passphrase file " + passFile
+                    + " is readable by group/other users — anyone who can read it can unlock the"
+                    + " wallet key. Run `chmod 600 " + passFile + "`.");
+            }
+        } catch (UnsupportedOperationException | java.io.IOException e) {
+            // Non-POSIX filesystem or unreadable metadata: nothing to check (best-effort only).
         }
     }
 
@@ -613,6 +646,9 @@ public final class WalletCli {
                                           the keyfile's trust-on-first-use chainId pin
                 --plaintext               keygen only: permit an UNENCRYPTED key file when
                                           non-interactive (or set RHIZOME_WALLET_PLAINTEXT=1)
+                --overwrite               keygen only: overwrite an EXISTING key file (the old
+                                          key is destroyed)
+                --force                   sends only: ignore a bad recipient checksum
               chain-id pinning: the first signing command records the node's chainId+URL in the
                                           keyfile (trust on first use); a different chainId later
                                           aborts signing. Read-only commands never pin.""");

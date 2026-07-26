@@ -252,6 +252,13 @@ public final class ChainSynchronizer {
         // lock so the lock-held apply below does no network I/O (audit: uncle-sync blocker).
         Map<SHA256Hash, Block> branchUncles = prefetchUncles(engine, peer, branch);
         Result outcome = engine.withConsistentView(() -> {
+            // The maxReorgDepth check is RE-DONE here, atomically with the pop below: the earlier
+            // check ran outside the lock, and a concurrent local extension (producer or /submit)
+            // since would otherwise make the actual reorg deeper than the finality window we
+            // validated (audit review: finality TOCTOU — same fix as HeaderSynchronizer).
+            if (engine.height() - forkHeight > engine.params().maxReorgDepth()) {
+                return Result.REORG_TOO_DEEP;
+            }
             // Uncle-inclusive chain weight before we touch anything — the authoritative GHOST metric (§3.7).
             BigInteger localTotal = engine.totalWork();
             List<Block> localBranch = new ArrayList<>();

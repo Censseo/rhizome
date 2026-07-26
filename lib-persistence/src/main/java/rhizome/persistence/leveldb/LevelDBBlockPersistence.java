@@ -20,6 +20,7 @@ import rhizome.persistence.BlockPersistence;
 
 import java.io.IOException;
 import java.math.BigInteger;
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -70,11 +71,44 @@ public class LevelDBBlockPersistence extends LevelDBDataStore implements BlockPe
     }
 
     public List<TransactionDto> getBlockTransactions(BlockDto block) {
-        var transactions = new ArrayList<TransactionDto>();
-        for (int i = 0; i < block.numTransactions(); i++) {            
-            var value = (byte[]) get(composeKey(block.id(), i), byte[].class);
-            transactions.add(BinarySerializable.fromBuffer(value, TransactionDto.class));
+        // One ordered prefix scan instead of a point-get per transaction (audit perf: N+1 gets per
+        // block reconstruction). Transaction records key as blockId(4) ‖ index(4) big-endian, so a
+        // block's rows sort contiguously by index; longer keys sharing the 4-byte blockId prefix
+        // (wallet-index rows) are not transaction records and are skipped.
+        int count = block.numTransactions();
+        var transactions = new ArrayList<TransactionDto>(count);
+        if (count == 0) {
+            return transactions;
         }
+        byte[] prefix = rhizome.core.common.Utils.intToBytes(block.id());
+        TransactionDto[] byIndex = new TransactionDto[count];
+        int found = 0;
+        try (DBIterator iterator = db().iterator(new ReadOptions())) {
+            for (iterator.seek(composeKey(block.id(), 0)); iterator.hasNext(); iterator.next()) {
+                byte[] key = iterator.peekNext().getKey();
+                if (key.length < prefix.length
+                        || !Arrays.equals(Arrays.copyOfRange(key, 0, prefix.length), prefix)) {
+                    break; // past this block's prefix
+                }
+                if (key.length != 2 * Integer.BYTES) {
+                    continue; // a foreign record under the same prefix, not a transaction row
+                }
+                int index = ByteBuffer.wrap(key, Integer.BYTES, Integer.BYTES).getInt();
+                if (index >= 0 && index < count) {
+                    byIndex[index] = BinarySerializable.fromBuffer(
+                        iterator.peekNext().getValue(), TransactionDto.class);
+                    found++;
+                }
+            }
+        } catch (IOException e) {
+            throw new LevelDBException("Could not read block transactions", e);
+        }
+        if (found != count) {
+            // The per-index point-gets this replaces threw on a missing record; fail just as loud.
+            throw new LevelDBException("Block " + block.id() + " is missing transaction records ("
+                + found + " of " + count + ")");
+        }
+        transactions.addAll(Arrays.asList(byIndex));
         return transactions;
     }
 

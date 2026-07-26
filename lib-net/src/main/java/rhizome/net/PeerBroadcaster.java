@@ -1,5 +1,7 @@
 package rhizome.net;
 
+import java.io.IOException;
+import java.io.InputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -14,6 +16,7 @@ import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 
 import org.slf4j.Logger;
@@ -41,6 +44,14 @@ public final class PeerBroadcaster implements AutoCloseable {
     private static final int MAX_QUEUED_SENDS = 256;
     /** Recently broadcast item ids, so an item arriving via several paths is not re-fanned repeatedly. */
     private static final int DEDUP_WINDOW = 2048;
+    /** Wall-clock deadline for one whole gossip send (send + full reply-body read): the request
+     *  timeout alone ends at the response headers, so a slow-drip peer could otherwise park a
+     *  broadcast pool thread in {@code InputStream.read} until the fixed gossip pool starves
+     *  (audit F1/F2 pattern). */
+    private static final Duration SEND_DEADLINE = Duration.ofSeconds(10);
+    /** Cap on the reply body: /submit and /add_transaction answer a tiny JSON status, so
+     *  anything larger is a hostile drip, not a peer response worth reading. */
+    private static final long MAX_REPLY_BYTES = 64 * 1024;
 
     private final Supplier<Collection<String>> peers;
     private final boolean blockPrivateHosts;
@@ -143,14 +154,37 @@ public final class PeerBroadcaster implements AutoCloseable {
         }
         HttpRequest request = PeerAuth.withToken(HttpRequest.newBuilder(URI.create(url)),
                 tokenPolicy.tokenFor(peer))
-            .timeout(Duration.ofSeconds(10))
+            .timeout(SEND_DEADLINE)
             .header("Content-Type", "application/octet-stream")
             .POST(HttpRequest.BodyPublishers.ofByteArray(body))
             .build();
         try {
-            http.send(request, HttpResponse.BodyHandlers.discarding());
+            // Whole-exchange deadline (BodyReadDeadline, audit F1/F2): with discarding() the
+            // reply body is still read AFTER the request timeout stops applying, so a slow-drip
+            // peer could hold a broadcast pool thread indefinitely.
+            AtomicReference<AutoCloseable> openBody = new AtomicReference<>();
+            BodyReadDeadline.call(SEND_DEADLINE, openBody, () -> {
+                HttpResponse<InputStream> response = http.send(request, HttpResponse.BodyHandlers.ofInputStream());
+                InputStream in = response.body();
+                openBody.set(in); // publish so a deadline expiry can cancel the JDK exchange
+                try (in) {
+                    readBounded(in, MAX_REPLY_BYTES);
+                }
+                return null;
+            });
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         } catch (Exception e) {
             log.debug("broadcast to {} failed: {}", url, e.toString());
+        }
+    }
+
+    /** Reads the stream, aborting if it would exceed {@code maxBytes} (never buffers past the cap). */
+    private static void readBounded(InputStream in, long maxBytes) throws IOException {
+        // One byte over the cap is fetched to distinguish "exactly at cap" from "over".
+        byte[] data = in.readNBytes(Math.toIntExact(Math.min(maxBytes + 1, Integer.MAX_VALUE)));
+        if (data.length > maxBytes) {
+            throw new IOException("broadcast reply exceeds " + maxBytes + " bytes");
         }
     }
 

@@ -193,7 +193,7 @@ public final class WasmContractProcessor implements ContractProcessor {
         // dryRun is read-only: transfers are collected for bounds-checking but never applied.
         List<ContractProcessor.NativeTransfer> transfers = new java.util.ArrayList<>();
         java.util.Map<PublicAddress, Long> reservedByContract = new java.util.HashMap<>();
-        CallOutcome outcome = WasmVm.onBoundedStack(() -> runCall(from.toBytes(), to, input, value,
+        CallOutcome outcome = WasmVm.onBoundedStackDryRun(() -> runCall(from.toBytes(), to, input, value,
             meter, scratch, new java.util.ArrayDeque<>(), transfers, reservedByContract));
         if (outcome.success()) {
             return ContractResult.ok(meter.used(), outcome.output(), null, outcome.logs());
@@ -229,7 +229,15 @@ public final class WasmContractProcessor implements ContractProcessor {
         if (stack.contains(contract)) {
             return CallOutcome.fail("reentrant call");
         }
-        byte[] code = parent.getCode(contract);
+        byte[] code;
+        try {
+            code = parent.getCode(contract);
+        } catch (Throwable t) {
+            // Node-local store failure — a fatal HostFault, never a contract verdict: for a
+            // nested call this throws inside the parent's vm.execute, whose catch-all would
+            // otherwise normalize it to a deterministic-looking revert and fork consensus.
+            throw HostFault.wrap("contract code read failed", t);
+        }
         if (code == null) {
             return CallOutcome.fail("no contract at address");
         }
@@ -250,7 +258,15 @@ public final class WasmContractProcessor implements ContractProcessor {
             // shared list per call, which made n transfers cost O(n^2) work for O(n) gas (audit: transfer_value
             // reserved-scan). The value is identical to summing `transfers` where from == contract.
             long reserved = reservedByContract.getOrDefault(contract, 0L);
-            if (amount > nb.balanceOf(contract) - reserved) {
+            long spendable;
+            try {
+                spendable = nb.balanceOf(contract) - reserved;
+            } catch (Throwable t) {
+                // Node-local ledger read failure — a fatal HostFault, never a contract verdict:
+                // this handler runs inside vm.execute's catch-all (see getCode above).
+                throw HostFault.wrap("native balance read failed", t);
+            }
+            if (amount > spendable) {
                 return -1;
             }
             transfers.add(new ContractProcessor.NativeTransfer(contract, PublicAddress.of(toBytes), amount));

@@ -73,6 +73,24 @@ public record PublicKey(Optional<Ed25519PublicKeyParameters> key) implements Sim
         return SIZE;
     }
 
+    // Ed25519PublicKeyParameters implements neither equals nor hashCode, so the record default
+    // would compare keys by identity; compare the canonical 32-byte encodings instead.
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) {
+            return true;
+        }
+        if (!(o instanceof PublicKey other)) {
+            return false;
+        }
+        return java.util.Arrays.equals(toBytes(), other.toBytes());
+    }
+
+    @Override
+    public int hashCode() {
+        return java.util.Arrays.hashCode(toBytes());
+    }
+
     private static boolean isZeroFilled(byte[] bytes) {
         for (byte b : bytes) {
             if (b != 0) {

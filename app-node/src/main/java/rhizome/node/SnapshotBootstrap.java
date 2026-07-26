@@ -244,6 +244,10 @@ final class SnapshotBootstrap {
         // store and is cleared only after the final commit below succeeds.
         store.beginBootstrap();
         adapter.flush(pivot);
+        // Durability barrier for the contract seed: import wrote code/storage slots unsynced
+        // (batched WAL syncs only bound the tail), so fsync before the bootstrap marker can
+        // clear — a power loss must not drop seeded slots the pivot root commits to.
+        contractStore.syncToDisk();
         stateStore.putRoot(pivot, committedRoot.toBytes());
 
         // Adopt the chain: genesis with its body, then validated headers (body-less) to the

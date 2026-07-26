@@ -5,6 +5,7 @@ import org.json.JSONObject;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.transaction.Transaction;
 import rhizome.net.NodeHttpClient;
+import rhizome.net.PeerJson;
 
 /** Talks to a node's HTTP API on the wallet's behalf (query state, submit transfers). */
 public final class WalletClient {
@@ -18,18 +19,21 @@ public final class WalletClient {
     public record WalletInfo(long balance, long nextNonce) {}
 
     public int chainId() {
-        return new JSONObject(get("/info")).getInt("chainId");
+        // PeerJson: the node is remote-controlled input — depth-bound before the recursive
+        // org.json parser runs, same rule as for peer bodies (a hostile node is still a
+        // network peer even though the blast radius here is only this CLI's stack).
+        return PeerJson.parseObject(get("/info")).getInt("chainId");
     }
 
     public WalletInfo walletInfo(PublicAddress address) {
-        JSONObject json = new JSONObject(get("/wallet?address=" + address.toHexString()));
+        JSONObject json = PeerJson.parseObject(get("/wallet?address=" + address.toHexString()));
         return new WalletInfo(json.getLong("balance"), json.getLong("nextNonce"));
     }
 
     /** Submits a signed transaction; returns the node's status string (SUCCESS or a rejection). */
     public String submit(Transaction transaction) {
         byte[] body = transaction.serialize().toBuffer();
-        return new JSONObject(wrap(() -> http.postBinary("/add_transaction", body))).getString("status");
+        return PeerJson.parseObject(wrap(() -> http.postBinary("/add_transaction", body))).getString("status");
     }
 
     /** Raw JSON of a read-only contract call (dry run) against committed state. */

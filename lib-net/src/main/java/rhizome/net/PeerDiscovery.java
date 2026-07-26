@@ -216,7 +216,9 @@ public final class PeerDiscovery {
                 return new String(readBounded(in, MAX_PEERS_BODY_BYTES), StandardCharsets.UTF_8);
             }
         });
-        JSONArray arr = new JSONObject(body).getJSONArray("peers");
+        // Depth-bounded parse (audit F11): an over-deep /peers body fails the round as an
+        // ordinary peer error instead of killing the pool thread with a StackOverflowError.
+        JSONArray arr = PeerJson.parseObject(body).getJSONArray("peers");
         // Bound how many addresses one peer can contribute per round, so a single malicious
         // peer cannot flood the registry with sybil URLs (PEX amplification / eclipse).
         return arr.toList().stream().map(Object::toString).limit(MAX_PEX_PER_PEER).toList();

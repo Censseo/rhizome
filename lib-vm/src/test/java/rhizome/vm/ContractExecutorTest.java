@@ -93,10 +93,12 @@ class ContractExecutorTest {
 
     @Test
     void callToUnknownContractReverts() {
+        // A missing contract still pays the intrinsic CALL_BASE charge (audit H2 alignment with
+        // WasmContractProcessor.call): only the metered intrinsic gas is charged, not the limit.
         var out = exec.call(deployer, PublicAddress.random(), new byte[0], 0, 1_000_000, 1, miner);
         assertFalse(out.succeeded());
-        assertEquals(0, out.feeCharged());
-        assertEquals(0, balance(miner));
+        assertEquals(GasSchedule.CALL_BASE, out.feeCharged());
+        assertEquals(GasSchedule.CALL_BASE, balance(miner));
     }
 
     @Test

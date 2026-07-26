@@ -95,6 +95,23 @@ public final class RocksDbNodeStore implements AutoCloseable {
     // Synced: every write that advances (or rewinds) the chain height must be fsync-durable
     // before the node reports the block applied (audit F3).
     private final WriteOptions writeOptions = new WriteOptions().setSync(true);
+    // Unsynced: bulk seeding (genesis balances, snapshot import, the boot nonce re-sync) writes one
+    // entry per wallet/sender straight through, where a per-entry fsync made snap-sync effectively
+    // unusable (audit perf). WAL writes are still process-crash-safe; any later SYNCED write in this
+    // database (the genesis append, beginBootstrap, markSyncedThrough) fsyncs the shared WAL and so
+    // covers the whole tail, and syncWal every BULK_SYNC_EVERY writes bounds the power-loss tail
+    // in between.
+    private static final long BULK_SYNC_EVERY = 4096;
+    private final WriteOptions bulkWriteOptions = new WriteOptions().setSync(false);
+    private long bulkWritesSinceSync;
+
+    /** Throttles the unsynced bulk-write tail: one WAL fsync per {@link #BULK_SYNC_EVERY} writes. */
+    private void noteBulkWrite() throws RocksDBException {
+        if (++bulkWritesSinceSync >= BULK_SYNC_EVERY) {
+            db.syncWal();
+            bulkWritesSinceSync = 0;
+        }
+    }
 
     /**
      * Ledger writes staged for the current block, so they commit in the SAME atomic {@link WriteBatch}
@@ -218,8 +235,9 @@ public final class RocksDbNodeStore implements AutoCloseable {
         } catch (RocksDBException e) {
             throw new IOException("Failed to read header backfill watermark", e);
         }
-        try {
+        try (WriteBatch batch = new WriteBatch()) {
             long migrated = 0;
+            int inBatch = 0;
             for (long h = 1; h <= height; h++) {
                 byte[] key = heightKey(h);
                 if (db.get(headersCf, key) != null) {
@@ -230,15 +248,25 @@ public final class RocksDbNodeStore implements AutoCloseable {
                     continue; // pruned body with no header: nothing to derive from
                 }
                 Block block = BlockCodec.decode(body);
-                db.put(headersCf, writeOptions, key, HeaderCodec.encode(BlockHeader.of(block)));
+                // One synced batch per chunk instead of one synced put per height — the per-header
+                // fsync made migrating a long chain cost O(height) fsyncs at boot (audit perf). A
+                // crash between chunks is harmless: the sweep is idempotent and the watermark below
+                // is written only after the last chunk.
+                batch.put(headersCf, key, HeaderCodec.encode(BlockHeader.of(block)));
                 migrated++;
+                if (++inBatch >= 1024) {
+                    db.write(writeOptions, batch);
+                    batch.clear();
+                    inBatch = 0;
+                }
             }
             if (migrated > 0) {
                 System.out.println("[RocksDbNodeStore] backfilled " + migrated + " block header(s)");
             }
             // Record that the header CF is now complete through the tip, so the next restart skips this
             // sweep in O(1). Appends past this point keep it current (see HEADERS_BACKFILLED_KEY).
-            db.put(metaCf, writeOptions, HEADERS_BACKFILLED_KEY, longToBytes(height));
+            batch.put(metaCf, HEADERS_BACKFILLED_KEY, longToBytes(height));
+            db.write(writeOptions, batch); // final chunk and the watermark commit atomically
         } catch (RocksDBException e) {
             throw new IOException("Failed to backfill block headers", e);
         }
@@ -355,6 +383,12 @@ public final class RocksDbNodeStore implements AutoCloseable {
 
     @Override
     public void close() {
+        // Best-effort fsync of any bulk-seeded writes not yet covered by a synced batch.
+        try {
+            db.syncWal();
+        } catch (RocksDBException e) {
+            throw new PersistenceException("failed to sync WAL on close", e);
+        }
         defaultCf.close();
         blocksCf.close();
         headersCf.close();
@@ -364,6 +398,7 @@ public final class RocksDbNodeStore implements AutoCloseable {
         noncesCf.close();
         unclesCf.close();
         writeOptions.close();
+        bulkWriteOptions.close();
         db.close();
     }
 
@@ -675,14 +710,17 @@ public final class RocksDbNodeStore implements AutoCloseable {
 
         private void setValue(PublicAddress wallet, long amount) {
             // Inside a block commit, buffer the write so it flushes atomically with the height in
-            // append/pop; otherwise (genesis/snapshot seeding) write straight through (audit S3).
+            // append/pop; otherwise (genesis/snapshot seeding) write straight through (audit S3) —
+            // unsynced, see bulkWriteOptions: the seeding path is one write per wallet and the next
+            // synced batch in this database covers the tail.
             var pending = pendingLedger;
             if (pending != null) {
                 pending.put(wallet, amount);
                 return;
             }
             try {
-                db.put(ledgerCf, writeOptions, wallet.toBytes(), ByteBuffer.allocate(8).putLong(amount).array());
+                db.put(ledgerCf, bulkWriteOptions, wallet.toBytes(), ByteBuffer.allocate(8).putLong(amount).array());
+                noteBulkWrite();
             } catch (RocksDBException e) {
                 throw new LedgerException("Failed to write wallet value", e);
             }
@@ -724,7 +762,9 @@ public final class RocksDbNodeStore implements AutoCloseable {
         @Override
         public void set(PublicAddress sender, long next) {
             // Inside a block commit, buffer the write so it flushes atomically with the height in
-            // append/pop (audit perf: per-sender fsync); otherwise write straight through.
+            // append/pop (audit perf: per-sender fsync); otherwise write straight through — unsynced
+            // (bulk seeding / boot re-sync, see bulkWriteOptions); the markSyncedThrough watermark
+            // that concludes a re-sync stays synced and covers the tail.
             var pending = pendingNonces;
             if (pending != null) {
                 pending.put(sender, next);
@@ -732,10 +772,11 @@ public final class RocksDbNodeStore implements AutoCloseable {
             }
             try {
                 if (next <= 0) {
-                    db.delete(noncesCf, writeOptions, sender.toBytes());
+                    db.delete(noncesCf, bulkWriteOptions, sender.toBytes());
                 } else {
-                    db.put(noncesCf, writeOptions, sender.toBytes(), longToBytes(next));
+                    db.put(noncesCf, bulkWriteOptions, sender.toBytes(), longToBytes(next));
                 }
+                noteBulkWrite();
             } catch (RocksDBException e) {
                 throw new LedgerException("Failed to write account nonce", e);
             }

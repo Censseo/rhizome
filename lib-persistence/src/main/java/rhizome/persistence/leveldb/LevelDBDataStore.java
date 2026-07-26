@@ -21,8 +21,6 @@ import java.io.File;
 import java.io.IOException;
 import java.math.BigInteger;
 import java.nio.ByteBuffer;
-import java.util.ArrayList;
-import java.util.List;
 
 import static org.iq80.leveldb.impl.Iq80DBFactory.factory;
 import static java.nio.charset.StandardCharsets.UTF_8;
@@ -73,21 +71,30 @@ public class LevelDBDataStore {
     public void clear() {
         // Delete by the RAW keys: a UTF-8 String round-trip corrupts any key that is not valid
         // UTF-8 (block/wallet index keys are arbitrary binary), silently failing to delete them
-        // (audit F5). Collect first (mutating mid-iteration is unsafe), then one synced batch.
-        List<byte[]> keys = new ArrayList<>();
+        // (audit F5). Stream the iterator and delete in bounded synced chunks: materialising every
+        // key into a list first OOM'd on a large database (audit: clear() heap). The iterator is a
+        // consistent snapshot, so batch-deleting already-seen keys mid-scan is safe.
+        final int chunkSize = 4096;
         try (DBIterator iterator = db.iterator()) {
-            for (iterator.seekToFirst(); iterator.hasNext(); iterator.next()) {
-                keys.add(iterator.peekNext().getKey());
+            WriteBatch batch = db.createWriteBatch();
+            try {
+                int pending = 0;
+                for (iterator.seekToFirst(); iterator.hasNext(); iterator.next()) {
+                    batch.delete(iterator.peekNext().getKey());
+                    if (++pending >= chunkSize) {
+                        db.write(batch, new WriteOptions().sync(true));
+                        batch.close();
+                        batch = db.createWriteBatch();
+                        pending = 0;
+                    }
+                }
+                if (pending > 0) {
+                    db.write(batch, new WriteOptions().sync(true));
+                }
+            } finally {
+                batch.close(); // IOException propagates to the catch below
             }
         } catch (IOException e) {
-            throw new LevelDBException("Could not clear data store", e);
-        }
-        try (WriteBatch batch = db.createWriteBatch()) {
-            for (byte[] key : keys) {
-                batch.delete(key);
-            }
-            db.write(batch, new WriteOptions().sync(true));
-        } catch (IOException e) { // WriteBatch.close()
             throw new LevelDBException("Could not clear data store", e);
         }
     }

@@ -300,17 +300,29 @@ public final class HeaderSynchronizer {
         // the reorg aborts, the original tip is restored intact, and the next round retries.
 
         // Phase 1 — capture the pre-reorg GHOST weight and local branch, then pop, as one atomic step.
+        // The maxReorgDepth check is RE-DONE here, inside the same atomic view as the pop: the
+        // earlier check ran outside the lock, and a concurrent local extension (the block producer
+        // or /submit adding k blocks between the two) would otherwise make the actual reorg k
+        // blocks deeper than the finality window we validated (audit review: finality TOCTOU).
         List<Block> localBranch = new ArrayList<>();
-        BigInteger localTotal = engine.withConsistentView(() -> {
-            BigInteger total = engine.totalWork();
+        BigInteger[] capturedTotal = new BigInteger[1];
+        boolean depthOk = engine.withConsistentView(() -> {
+            if (engine.height() - forkHeight > engine.params().maxReorgDepth()) {
+                return false;
+            }
+            capturedTotal[0] = engine.totalWork();
             for (long h = forkHeight + 1; h <= engine.height(); h++) {
                 localBranch.add(engine.blockAt(h));
             }
             while (engine.height() > forkHeight) {
                 engine.popBlock();
             }
-            return total;
+            return true;
         });
+        if (!depthOk) {
+            return ChainSynchronizer.Result.REORG_TOO_DEEP;
+        }
+        BigInteger localTotal = capturedTotal[0];
 
         // Phase 2 — fetch and apply the peer bodies. Network I/O, so deliberately OUTSIDE the lock.
         boolean applied = applyBodies(peer, forkHeight, branch);

@@ -82,7 +82,9 @@ public class TransactionStore extends LevelDBDataStore {
         SHA256Hash txHash = t.hashContents();
         byte[] key = txHash.toBytes();
         try {
-            db().delete(key);
+            // fsync like insertTransaction (audit F7): an unsynced delete could resurrect an
+            // index entry after a crash, pointing at a height the node no longer holds.
+            db().delete(key, new WriteOptions().sync(true));
         } catch (DBException e) {
             throw new LedgerException("Could not remove transaction from DB", e);
         }

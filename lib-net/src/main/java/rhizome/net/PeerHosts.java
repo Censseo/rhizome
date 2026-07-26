@@ -19,7 +19,9 @@ import java.util.Map;
  *   <li>{@link #pin} resolves a base URL's host once and rewrites it to the resolved IP
  *       literal, so the connection goes to the exact address we validated — a later DNS
  *       flip (rebinding) cannot redirect it to an internal service. The node API is not
- *       virtual-hosted, so dropping the hostname in favour of the IP is safe.</li>
+ *       virtual-hosted, so dropping the hostname in favour of the IP is safe — EXCEPT for
+ *       {@code https://}, where the hostname must survive for TLS hostname verification
+ *       (the certificate then provides the anti-rebinding binding instead).</li>
  * </ul>
  *
  * <p>Resolution goes through a short-TTL cache ({@link #resolveAll}) so admitting and then
@@ -253,6 +255,11 @@ final class PeerHosts {
      * When {@code blockPrivate} is set, a host that resolves to a non-routable address — or does
      * not resolve — is refused with a {@link SecurityException}. When it is not set (dev/testnet),
      * an unresolvable host is left untouched so local hostnames keep working.
+     *
+     * <p>{@code https://} URLs are validated (resolution + routability) but returned with the
+     * ORIGINAL hostname: an IP literal would fail TLS SAN verification. The dial re-resolves,
+     * so the private-host check is best-effort for https — a rebound IP fails the handshake
+     * (no data leaks) but the attempt itself can reach the internal network.
      */
     static String pin(String baseUrl, boolean blockPrivate) {
         URI uri;
@@ -282,6 +289,20 @@ final class PeerHosts {
         }
         if (blockPrivate && !isRoutable(addr)) {
             throw new SecurityException("peer host resolves to a non-routable address: " + host);
+        }
+        // https keeps the HOSTNAME: TLS endpoint identification matches the certificate's SAN
+        // against the host actually dialed, so rewriting to an IP literal fails the handshake
+        // for every https peer (audit: DNS pinning breaks TLS). The anti-rebinding guarantee
+        // is preserved by the certificate itself — a rebound IP cannot present a valid cert
+        // for the hostname — and the routability check above still ran, so only the rewrite
+        // is skipped. Documented best-effort caveat: the dial RE-RESOLVES the hostname, so
+        // with blockPrivate set a rebind to a private IP is still ATTEMPTED (the TLS
+        // handshake then fails — no data can leave — but the connection attempt itself can
+        // reach the internal network, a port-scan oracle). Accepted trade-off: pinning the
+        // IP would break every legitimate https peer. Cleartext http:// keeps the
+        // IP-literal pin.
+        if ("https".equalsIgnoreCase(uri.getScheme())) {
+            return baseUrl;
         }
         String ip = addr.getHostAddress();
         int scope = ip.indexOf('%');

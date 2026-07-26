@@ -481,6 +481,23 @@ public final class MemPool {
     }
 
     /**
+     * Throttle for the parked-candidate scan in {@link #makeRoomForParkedSlot}: each sender check
+     * calls {@code confirmedNextNonce}, which takes the consensus lock and reads the nonce store,
+     * so an unthrottled per-admission scan let a flood of signed gap-transactions turn every
+     * admission into O(pool-senders) consensus-lock acquisitions — with the mempool lock held
+     * across the whole scan, so admissions transitively stalled behind multi-second {@code
+     * addBlock} executions (audit follow-up: the eviction path needed the same throttle its
+     * sibling {@link #purgeExpiredParked} already had). One scan per second is ample: evictions
+     * between scans drain the cached candidate list, and each candidate is re-validated live
+     * (O(1)) immediately before removal, so a stale cache can never evict a sender that has
+     * become live since the scan.
+     */
+    private static final long PARKED_SCAN_INTERVAL_MS = 1_000L;
+    // Seeded far in the past so the very first call always scans (tests and boot both rely on it).
+    private long lastParkedScanAt = Long.MIN_VALUE / 2;
+    private List<Map.Entry<Transaction, Long>> parkedCandidates = List.of();
+
+    /**
      * Called only when the pool is at capacity. Reclaims one slot held by a <em>fully parked</em>
      * sender — one whose confirmed next nonce is absent from its pending set, so none of its queued
      * transactions can be selected into a block now or by any contiguous run — in favour of a more
@@ -494,20 +511,31 @@ public final class MemPool {
      * evicted, so legitimate saturation still yields {@code QUEUE_FULL}.
      */
     private boolean makeRoomForParkedSlot(PublicAddress from, TransactionImpl incoming) {
+        long now = clock.getAsLong();
+        if (now - lastParkedScanAt >= PARKED_SCAN_INTERVAL_MS) {
+            lastParkedScanAt = now;
+            List<Map.Entry<Transaction, Long>> candidates = new ArrayList<>();
+            for (Map.Entry<PublicAddress, NavigableMap<Long, Transaction>> e : bySender.entrySet()) {
+                NavigableMap<Long, Transaction> pending = e.getValue();
+                long confirmed = accounts.confirmedNextNonce(e.getKey());
+                if (pending.containsKey(confirmed)) {
+                    continue; // sender is making progress (front present) — never evict a live queue
+                }
+                // Fully parked: its deepest (highest-nonce) tx is the furthest from ever being minable.
+                Transaction deepest = pending.lastEntry().getValue();
+                candidates.add(Map.entry(deepest, ((TransactionImpl) deepest).fee().amount()));
+            }
+            parkedCandidates = candidates;
+        }
         Transaction victim = null;
         long victimFee = Long.MAX_VALUE;
-        for (Map.Entry<PublicAddress, NavigableMap<Long, Transaction>> e : bySender.entrySet()) {
-            NavigableMap<Long, Transaction> pending = e.getValue();
-            long confirmed = accounts.confirmedNextNonce(e.getKey());
-            if (pending.containsKey(confirmed)) {
-                continue; // sender is making progress (front present) — never evict a live queue
-            }
-            // Fully parked: its deepest (highest-nonce) tx is the furthest from ever being minable.
-            Transaction deepest = pending.lastEntry().getValue();
-            long fee = ((TransactionImpl) deepest).fee().amount();
-            if (victim == null || fee < victimFee) {
-                victim = deepest;
-                victimFee = fee;
+        for (Map.Entry<Transaction, Long> c : parkedCandidates) {
+            // Skip candidates already gone from the pool (evicted, expired or replaced since the scan).
+            // victim == null: the first live candidate is always elected, even if its fee were
+            // Long.MAX_VALUE (parity with the pre-cache scan loop).
+            if ((victim == null || c.getValue() < victimFee) && contentHashes.contains(c.getKey().hashContents())) {
+                victim = c.getKey();
+                victimFee = c.getValue();
             }
         }
         if (victim == null) {
@@ -518,6 +546,17 @@ public final class MemPool {
         // no-higher-fee newcomer cannot churn the pool.
         boolean incomingReady = incoming.nonce() == accounts.confirmedNextNonce(from);
         if (!incomingReady && incoming.fee().amount() <= victimFee) {
+            return false;
+        }
+        // The parked status is cached: re-verify the victim's sender is STILL fully parked (one
+        // consensus-lock read, not a scan) so a sender unparked since the scan never loses a live tx.
+        Slot victimSlot = slotByHash.get(victim.hashContents());
+        if (victimSlot == null) {
+            return false;
+        }
+        NavigableMap<Long, Transaction> victimPending = bySender.get(victimSlot.sender());
+        if (victimPending == null
+                || victimPending.containsKey(accounts.confirmedNextNonce(victimSlot.sender()))) {
             return false;
         }
         remove(victim.hashContents());

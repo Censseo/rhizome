@@ -402,22 +402,39 @@ public final class RhizomeNode implements AutoCloseable {
             t.setDaemon(true);
             return t;
         });
-        syncScheduler.scheduleWithFixedDelay(this::syncRound,
+        // Every scheduled task is wrapped in guarded(): a task whose run() lets ANY Throwable
+        // escape is silently unscheduled by ScheduledThreadPoolExecutor — one stray Error would
+        // stop that loop forever, with no log line (audit: scheduler task suppression).
+        syncScheduler.scheduleWithFixedDelay(guarded(this::syncRound, "sync round"),
             config.syncPeriodMs(), config.syncPeriodMs(), TimeUnit.MILLISECONDS);
-        syncScheduler.scheduleWithFixedDelay(discovery::round,
+        syncScheduler.scheduleWithFixedDelay(guarded(discovery::round, "peer discovery"),
             config.syncPeriodMs(), config.syncPeriodMs(), TimeUnit.MILLISECONDS);
         // Periodic snapshot materialisation (RHIZOME_SNAPSHOT_EVERY blocks, 0 = never):
         // recapture once the chain has advanced a full interval past the last pivot, so a
         // deep-enough snapshot is always on offer for snap-syncing peers.
         long snapshotEvery = snapshotEveryBlocks();
         if (snapshotEvery > 0) {
-            syncScheduler.scheduleWithFixedDelay(() -> {
+            syncScheduler.scheduleWithFixedDelay(guarded(() -> {
                 if (engine.height() >= service.snapshotPivot() + snapshotEvery && service.materializeSnapshot()) {
                     log.info("Materialized state snapshot at height {} ({} chunks)",
                         service.snapshotPivot(), service.materializedSnapshot().chunks().size());
                 }
-            }, config.syncPeriodMs(), config.syncPeriodMs(), TimeUnit.MILLISECONDS);
+            }, "snapshot materialisation"), config.syncPeriodMs(), config.syncPeriodMs(), TimeUnit.MILLISECONDS);
         }
+    }
+
+    /**
+     * Wraps a scheduled task so NO Throwable reaches the scheduler (which would swallow it and
+     * cancel all future runs without logging). Everything is caught and logged here instead.
+     */
+    private static Runnable guarded(Runnable task, String name) {
+        return () -> {
+            try {
+                task.run();
+            } catch (Throwable t) {
+                log.error("{} failed; the schedule continues", name, t);
+            }
+        };
     }
 
     /** Blocks between snapshot materialisations, from {@code RHIZOME_SNAPSHOT_EVERY} (default ~1 day). */
@@ -484,7 +501,17 @@ public final class RhizomeNode implements AutoCloseable {
                 // Malformed protocol data (junk scalars, absurd snapshot chunk counts) is a
                 // protocol violation like serving an invalid chain — penalize accordingly.
                 penalize(peerUrl, PENALTY_INVALID, "served malformed protocol data");
-            } catch (RuntimeException e) {
+            } catch (Throwable e) {
+                // Every Error is fatal-by-doctrine here: a HostFault is a LOCAL store/infra
+                // failure surfaced from contract execution (see HostFault), and a JVM Error
+                // (OutOfMemoryError, NoClassDefFoundError, ...) means this node is unhealthy
+                // regardless of which peer happened to trigger it. Rethrow so the round aborts
+                // and guarded() logs the full stack as an error — the scheduler boundary keeps
+                // the sync loop alive. Only exceptions (bad peer data, per-peer handling bugs)
+                // are isolated to the peer that caused them.
+                if (e instanceof Error err) {
+                    throw err;
+                }
                 log.warn("Sync from {} failed: {}", peerUrl, e.toString());
             }
         }

@@ -62,4 +62,19 @@ class PublicKeyTest {
         byte[] signature = Crypto.signWithPrivateKey("hello", PrivateKey.of(pair.getPrivate()));
         assertTrue(Crypto.checkSignature("hello", signature, publicKey));
     }
+
+    @Test
+    void identicalEncodingsCompareEqual() {
+        // Ed25519PublicKeyParameters has no equals/hashCode; equality must be by encoding.
+        byte[] encoded = PublicKey.of(Crypto.generateKeyPair().getPublic()).toBytes();
+        PublicKey a = PublicKey.of(encoded);
+        PublicKey b = PublicKey.of(encoded.clone());
+        PublicKey c = PublicKey.of(a.toHexString());
+        assertEquals(a, b);
+        assertEquals(a, c);
+        assertEquals(a.hashCode(), b.hashCode());
+        assertEquals(PublicKey.empty(), PublicKey.empty());
+        assertFalse(a.equals(PublicKey.empty()));
+        assertFalse(a.equals(null));
+    }
 }

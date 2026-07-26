@@ -25,23 +25,45 @@ public final class BlockAssembler {
     private BlockAssembler() {}
 
     public static Block assemble(ChainEngine engine, MemPool mempool, PublicAddress miner, long preferredTimestamp) {
-        long height = engine.height() + 1;
         NetworkParameters params = engine.params();
 
         // Reserve one slot for the coinbase.
         int maxTx = Math.max(0, params.maxTransactionsPerBlock() - 1);
         List<Transaction> selected = mempool.getTransactionsForBlock(maxTx);
 
+        // One atomic snapshot of every engine field the candidate commits to. Previously each
+        // accessor (height, timestamp, difficulty, tip hash, uncles, collectable boxes) took the
+        // engine lock separately, so a block landing mid-assembly produced a TORN candidate —
+        // e.g. height-H difficulty over an H+1 parent hash — wasted mining until addBlock's
+        // revalidation rejected it (audit review). The mempool read stays OUTSIDE the engine
+        // lock: the established lock order is mempool→engine, never engine→mempool.
+        record TipView(long height, long timestamp, int difficulty, SHA256Hash tipHash,
+                       java.util.List<rhizome.core.block.UncleRef> uncles,
+                       java.util.List<byte[]> collectableBoxIds) {}
+        TipView view = engine.withConsistentView(() -> {
+            long h = engine.height() + 1;
+            // Conservative collect budget: selected.size() >= what the size-capped inclusion
+            // loop below actually fits, so this may UNDER-fetch collectable ids (a few collect
+            // slots go unused when the size cap evicts selected txs) but can never push the
+            // block past the per-block tx+collect count cap.
+            int collectBudget = Math.min(params.maxBoxCollectsPerBlock(),
+                Math.max(0, params.maxTransactionsPerBlock() - 1 - selected.size()));
+            return new TipView(h, engine.nextBlockTimestamp(preferredTimestamp), engine.difficulty(),
+                engine.tipHash(), engine.selectUncles(),
+                collectBudget > 0 ? engine.collectableBoxIds(h, collectBudget) : java.util.List.of());
+        });
+        long height = view.height();
+
         var block = (BlockImpl) BlockImpl.builder()
             .id((int) height)
-            .timestamp(engine.nextBlockTimestamp(preferredTimestamp))
-            .difficulty(engine.difficulty())
-            .lastBlockHash(engine.tipHash())
+            .timestamp(view.timestamp())
+            .difficulty(view.difficulty())
+            .lastBlockHash(view.tipHash())
             .nonce(SHA256Hash.empty())
             // Credit valid off-chain siblings as uncles (GHOST): weights the chain
             // toward the true majority of work when blocks are produced faster than
             // they propagate.
-            .uncles(engine.selectUncles())
+            .uncles(view.uncles())
             .build();
 
         Transaction coinbase = Transaction.of(miner, new TransactionAmount(params.miningReward(height)));
@@ -65,11 +87,9 @@ public final class BlockAssembler {
         // Rent collection (GHOST-like opportunistic clean-up): mint an unsigned BOX_COLLECT
         // for each expired box, crediting the rent to the miner. Bounded per block, and
         // included only while the block stays under the size cap.
-        int slotsLeft = Math.max(0, params.maxTransactionsPerBlock() - block.transactions().size());
-        int collectBudget = Math.min(params.maxBoxCollectsPerBlock(), slotsLeft);
-        if (collectBudget > 0) {
+        if (!view.collectableBoxIds().isEmpty()) {
             long ts = block.timestamp();
-            for (byte[] boxId : engine.collectableBoxIds(height, collectBudget)) {
+            for (byte[] boxId : view.collectableBoxIds()) {
                 Transaction collect = TransactionImpl.builder()
                     .kind(TransactionKind.BOX_COLLECT)
                     .from(PublicAddress.empty())

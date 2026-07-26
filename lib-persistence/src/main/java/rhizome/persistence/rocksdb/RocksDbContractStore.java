@@ -11,6 +11,8 @@ import org.rocksdb.RocksDB;
 import org.rocksdb.RocksDBException;
 import org.rocksdb.WriteBatch;
 import org.rocksdb.WriteOptions;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import rhizome.core.ledger.PublicAddress;
 import rhizome.vm.ContractStore;
@@ -22,6 +24,8 @@ import rhizome.vm.StorageChange;
  * for the full node; the in-memory store remains the light/test path.
  */
 public final class RocksDbContractStore implements ContractStore, AutoCloseable {
+
+    private static final Logger log = LoggerFactory.getLogger(RocksDbContractStore.class);
 
     private static final byte[] CF_CODE = "contract_code".getBytes();
     private static final byte[] CF_STORAGE = "contract_storage".getBytes();
@@ -40,6 +44,22 @@ public final class RocksDbContractStore implements ContractStore, AutoCloseable 
     private final ColumnFamilyHandle receiptsCf;
     // Synced: the block commit must be durable before the node reports the height applied (audit F3).
     private final WriteOptions writeOptions = new WriteOptions().setSync(true);
+    // Unsynced: snapshot import seeds every contract code/storage slot through the straight-through
+    // path, where a per-slot fsync made snap-sync effectively unusable (audit perf). WAL writes are
+    // still process-crash-safe; the next synced batch in this database (applyBlock, journal/receipt
+    // writes) fsyncs the shared WAL and covers the tail, and syncWal every BULK_SYNC_EVERY writes
+    // bounds the power-loss tail in between.
+    private static final long BULK_SYNC_EVERY = 4096;
+    private final WriteOptions bulkWriteOptions = new WriteOptions().setSync(false);
+    private long bulkWritesSinceSync;
+
+    /** Throttles the unsynced bulk-write tail: one WAL fsync per {@link #BULK_SYNC_EVERY} writes. */
+    private void noteBulkWrite() throws RocksDBException {
+        if (++bulkWritesSinceSync >= BULK_SYNC_EVERY) {
+            db.syncWal();
+            bulkWritesSinceSync = 0;
+        }
+    }
 
     public RocksDbContractStore(String path) throws IOException {
         List<ColumnFamilyDescriptor> descriptors = List.of(
@@ -105,11 +125,12 @@ public final class RocksDbContractStore implements ContractStore, AutoCloseable 
     public void pruneThrough(long maxHeight) {
         // Interval prune (deleteRange's end key is EXCLUSIVE, hence maxHeight + 1): rows left
         // by heights the processor no longer has in its RAM maps — everything committed before
-        // a restart — would otherwise accumulate on disk forever.
+        // a restart — would otherwise accumulate on disk forever. Synced, consistent with every
+        // other delete in this store (audit: prune durability).
         try {
             byte[] end = heightKey(maxHeight + 1);
-            db.deleteRange(journalCf, heightKey(0), end);
-            db.deleteRange(receiptsCf, heightKey(0), end);
+            db.deleteRange(journalCf, writeOptions, heightKey(0), end);
+            db.deleteRange(receiptsCf, writeOptions, heightKey(0), end);
         } catch (RocksDBException e) {
             throw new IllegalStateException("contract store pruneThrough failed", e);
         }
@@ -128,14 +149,17 @@ public final class RocksDbContractStore implements ContractStore, AutoCloseable 
         return get(codeCf, contract.toBytes());
     }
 
+    // Code/storage slot writes go through the bulk path: they are the snapshot-import seeding
+    // (and in-session folds, always followed by the block's synced applyBlock), never the
+    // journal/receipt writes, which keep the synced put/delete below (audit F3).
     @Override
     public void putCode(PublicAddress contract, byte[] code) {
-        put(codeCf, contract.toBytes(), code);
+        putBulk(codeCf, contract.toBytes(), code);
     }
 
     @Override
     public void deleteCode(PublicAddress contract) {
-        delete(codeCf, contract.toBytes());
+        deleteBulk(codeCf, contract.toBytes());
     }
 
     @Override
@@ -145,12 +169,12 @@ public final class RocksDbContractStore implements ContractStore, AutoCloseable 
 
     @Override
     public void putStorage(PublicAddress contract, byte[] key, byte[] value) {
-        put(storageCf, slot(contract, key), value);
+        putBulk(storageCf, slot(contract, key), value);
     }
 
     @Override
     public void deleteStorage(PublicAddress contract, byte[] key) {
-        delete(storageCf, slot(contract, key));
+        deleteBulk(storageCf, slot(contract, key));
     }
 
     @Override
@@ -239,6 +263,24 @@ public final class RocksDbContractStore implements ContractStore, AutoCloseable 
         }
     }
 
+    private void putBulk(ColumnFamilyHandle cf, byte[] key, byte[] value) {
+        try {
+            db.put(cf, bulkWriteOptions, key, value);
+            noteBulkWrite();
+        } catch (RocksDBException e) {
+            throw new IllegalStateException("contract store write failed", e);
+        }
+    }
+
+    private void deleteBulk(ColumnFamilyHandle cf, byte[] key) {
+        try {
+            db.delete(cf, bulkWriteOptions, key);
+            noteBulkWrite();
+        } catch (RocksDBException e) {
+            throw new IllegalStateException("contract store delete failed", e);
+        }
+    }
+
     @Override
     public void forEachCode(java.util.function.BiConsumer<PublicAddress, byte[]> consumer) {
         try (org.rocksdb.RocksIterator it = db.newIterator(codeCf)) {
@@ -261,13 +303,33 @@ public final class RocksDbContractStore implements ContractStore, AutoCloseable 
     }
 
     @Override
+    public void syncToDisk() {
+        // fsync any bulk-seeded writes not yet covered by a synced batch (snapshot-import tail).
+        try {
+            db.syncWal();
+        } catch (RocksDBException e) {
+            throw new IllegalStateException("contract store WAL sync failed", e);
+        }
+        bulkWritesSinceSync = 0;
+    }
+
+    @Override
     public void close() {
+        // Best-effort fsync of any bulk-seeded writes not yet covered by a synced batch. A
+        // failure here must NOT abort close(): leaking native CF/DB handles on the shutdown
+        // path is worse than a best-effort fsync lost on a store that is about to be closed.
+        try {
+            syncToDisk();
+        } catch (RuntimeException e) {
+            log.warn("contract store WAL sync on close failed; closing anyway", e);
+        }
         defaultCf.close();
         codeCf.close();
         storageCf.close();
         journalCf.close();
         receiptsCf.close();
         writeOptions.close();
+        bulkWriteOptions.close();
         db.close();
     }
 }

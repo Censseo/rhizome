@@ -17,3 +17,11 @@ app-node/data/
 # GraalVM native-image output (./gradlew :app-node:nativeImage)
 /rhizome-node
 /data/
+.claude/
+.opencode/
+CLAUDE.md
+AGENTS.md
+.specforge/
+docs/
+ideas/
+specs/

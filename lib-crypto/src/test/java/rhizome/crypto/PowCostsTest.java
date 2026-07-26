@@ -25,11 +25,23 @@ class PowCostsTest {
     @Test
     void rejectsOutOfRangeCosts() {
         assertThrows(IllegalArgumentException.class, () -> new PowCosts(-1, 8));
+        assertThrows(IllegalArgumentException.class, () -> new PowCosts(PowCosts.MAX_COST_T + 1, 8));
         assertThrows(IllegalArgumentException.class, () -> new PowCosts(0, 0));
         assertThrows(IllegalArgumentException.class, () -> new PowCosts(0, PowCosts.MAX_COST_M + 1));
         // Bounds are accepted.
         new PowCosts(0, PowCosts.MIN_COST_M);
         new PowCosts(3, PowCosts.MAX_COST_M);
+        new PowCosts(PowCosts.MAX_COST_T, 8);
+    }
+
+    @Test
+    void pufferfishEntryPointRejectsOverflowingCostT() {
+        // Defense in depth behind the PowCosts constructor: (1 << 31) + 1 would silently
+        // collapse the mixing loop instead of throwing.
+        assertThrows(IllegalArgumentException.class,
+            () -> Pufferfish2.newHash(new byte[8], PowCosts.MAX_COST_T + 1, 8));
+        assertThrows(IllegalArgumentException.class,
+            () -> Pufferfish2.newHash(new byte[8], -1, 8));
     }
 
     @Test

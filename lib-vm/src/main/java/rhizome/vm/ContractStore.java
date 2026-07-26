@@ -20,6 +20,13 @@ public interface ContractStore {
     /** Value at {@code key} in {@code contract}'s storage, or {@code null} if unset. */
     byte[] getStorage(PublicAddress contract, byte[] key);
 
+    /**
+     * Sets a storage slot. Straight-through calls are for session buffers and snapshot
+     * seeding ONLY: a durable store writes this path deliberately UNSYNCED (bulk-import
+     * throughput), so committing block state through it could silently lose the write on
+     * power loss. Block commits must go through {@link #applyBlock}/{@link #revertBlock}
+     * (synced, atomic with the journal); bulk seeding must end with {@link #syncToDisk()}.
+     */
     void putStorage(PublicAddress contract, byte[] key, byte[] value);
 
     /** Removes a storage entry (used to undo a first write on reorg). */
@@ -82,6 +89,15 @@ public interface ContractStore {
      * {@code BoxStore.pruneJournals}, which drops both journals and receipts by range.
      */
     default void pruneThrough(long maxHeight) { }
+
+    /**
+     * Best-effort durability barrier for unsynced bulk writes. Snapshot import seeds code/storage
+     * slots through the straight-through path, which a durable store deliberately writes WITHOUT
+     * per-entry fsyncs (one fsync per slot made snap-sync unusable); calling this at the end of
+     * the import fsyncs the tail so a power loss cannot drop seeded slots the node has already
+     * reported as imported. No-op for stores whose writes are always synced or non-durable.
+     */
+    default void syncToDisk() { }
 
     // ---- Atomic block commit (audit F1) ----
     // Committing a block's contract mutations one slot at a time and only THEN persisting the

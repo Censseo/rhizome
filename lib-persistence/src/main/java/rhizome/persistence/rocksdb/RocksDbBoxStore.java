@@ -184,8 +184,9 @@ public final class RocksDbBoxStore implements BoxStore, AutoCloseable {
     @Override
     public void pruneJournals(long minHeight) {
         try {
-            db.deleteRange(journalCf, longToBytes(0), longToBytes(minHeight));
-            db.deleteRange(receiptsCf, longToBytes(0), longToBytes(minHeight));
+            // Synced, consistent with every other delete in this store (audit: prune durability).
+            db.deleteRange(journalCf, writeOptions, longToBytes(0), longToBytes(minHeight));
+            db.deleteRange(receiptsCf, writeOptions, longToBytes(0), longToBytes(minHeight));
         } catch (RocksDBException e) {
             throw new IllegalStateException("box store pruneJournals failed", e);
         }

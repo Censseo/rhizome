@@ -26,8 +26,12 @@ public interface BoxProcessor {
      * Validates and applies one box transaction against the open session. Must not
      * mutate the ledger. Returns a {@link BoxResult} whose status is {@code SUCCESS}
      * or the box failure code; the ledger deltas it carries tell the executor what to
-     * move. Unlike a contract revert, a failed box op invalidates the block — box
-     * ops are fully verifiable, so a failure is a malformed/illegal block.
+     * move. A failed box op does NOT invalidate the block: the executor treats a
+     * precondition failure like an Ethereum-style soft revert — the op's state writes
+     * are dropped, its fee still moves to the miner, a zero-delta receipt is recorded
+     * (so {@link #receipts} stays aligned with the block's box txs for
+     * {@link #revertBlock}'s per-receipt reversal walk), and the block stays valid.
+     * See {@code Executor.applyBox} and {@code DefaultBoxProcessor}'s javadoc.
      */
     BoxResult run(TransactionKind kind, PublicAddress from, PublicAddress to,
                   long amount, long nonce, byte[] data, long height);

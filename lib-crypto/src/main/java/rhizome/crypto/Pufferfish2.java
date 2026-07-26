@@ -66,6 +66,13 @@ final class Pufferfish2 {
      * the proof-of-work then feeds to a final SHA-256.
      */
     static byte[] newHash(byte[] pass, int costT, int costM) {
+        // (1 << costT) + 1 below must stay a positive int: costT >= 31 overflows the shift and
+        // silently collapses the mixing loop. PowCosts enforces the same bound; repeat it here
+        // because this entry point does not require a validated PowCosts.
+        if (costT < 0 || costT > PowCosts.MAX_COST_T) {
+            throw new IllegalArgumentException(
+                "costT out of range [0, " + PowCosts.MAX_COST_T + "]: " + costT);
+        }
         byte[] digest = new Pufferfish2().hashpass(new byte[PF_SALT_SZ], costT, costM, pass);
 
         byte[] hash = new byte[PF_HASHSPACE];
