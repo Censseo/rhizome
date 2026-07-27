@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
 
+import rhizome.core.blockchain.DifficultyAdjustment;
 import rhizome.core.blockchain.NetworkParameters;
 import rhizome.crypto.PowAlgorithm;
 
@@ -79,5 +80,53 @@ class NetworkParametersTest {
     void testnetDiffersFromMainnet() {
         assertNotEquals(NetworkParameters.cleanMainnet().chainId(),
             NetworkParameters.testnet().chainId());
+    }
+
+    @Test
+    void devnetHasItsOwnChainIdAndCheapPow() {
+        NetworkParameters devnet = NetworkParameters.devnet();
+        assertEquals(3, devnet.chainId());
+        assertNotEquals(NetworkParameters.testnet().chainId(), devnet.chainId());
+        assertNotEquals(NetworkParameters.cleanMainnet().chainId(), devnet.chainId());
+        assertEquals(PowAlgorithm.SHA256, devnet.powAlgorithm());
+    }
+
+    @Test
+    void devnetRetargetsOnTheCadenceItIsPacedAt() {
+        NetworkParameters devnet = NetworkParameters.devnet();
+
+        // The whole reason devnet exists: a producer paced at 5 s must not be seen as "too fast"
+        // by the retarget. On testnet (90 s target) that same cadence is 18x fast and difficulty
+        // runs away; here observed == desired, so difficulty holds.
+        assertEquals(5, devnet.desiredBlockTimeSec());
+
+        long window = devnet.difficultyLookback();
+        long observedAt5s = window * 5L;
+        assertEquals(devnet.minDifficulty(),
+            DifficultyAdjustment.nextDifficulty(devnet, devnet.minDifficulty(), window, observedAt5s));
+
+        // Contrast: the same 5 s cadence against testnet's 90 s target climbs.
+        NetworkParameters testnet = NetworkParameters.testnet();
+        assertTrue(DifficultyAdjustment.nextDifficulty(
+                testnet, testnet.minDifficulty(), testnet.difficultyLookback(),
+                testnet.difficultyLookback() * 5L) > testnet.minDifficulty(),
+            "testnet is expected to ramp difficulty at 5 s — that is why devnet exists");
+    }
+
+    @Test
+    void devnetDifficultyStaysCheapEnoughToKeepMining() {
+        NetworkParameters devnet = NetworkParameters.devnet();
+
+        // Even a runaway retarget is clamped to work a single core can still do.
+        assertTrue(devnet.maxDifficulty() <= 24,
+            "devnet must stay minable on one core, was " + devnet.maxDifficulty());
+
+        int difficulty = devnet.minDifficulty();
+        for (int i = 0; i < 50; i++) {
+            // Blocks arriving instantly (observed clamped to 1 s) is the worst case for the ramp.
+            difficulty = DifficultyAdjustment.nextDifficulty(devnet, difficulty,
+                devnet.difficultyLookback(), 0);
+        }
+        assertEquals(devnet.maxDifficulty(), difficulty);
     }
 }

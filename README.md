@@ -21,7 +21,7 @@ Configured via environment variables:
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `RHIZOME_NETWORK` | `mainnet` | `mainnet` or `testnet` (low difficulty) |
+| `RHIZOME_NETWORK` | `mainnet` | `mainnet`, `testnet` (low difficulty, 90 s target — built for tests driving controlled clocks) or `devnet` (low difficulty on mainnet's real 5 s target — use this for a local node you actually run and watch) |
 | `RHIZOME_PORT` | `3000` | HTTP API port |
 | `RHIZOME_BIND_ADDRESS` | `0.0.0.0` | HTTP API bind address (`127.0.0.1` for a wallet/dashboard-only node behind a tunnel) |
 | `RHIZOME_API_TOKEN` | — | when set, state-changing/operator routes (`/add_peer`, `/scan/register`, `/scan/deregister`, `/add_transaction`, `/submit`, `/call_readonly`) require `Authorization: Bearer <token>`; P2P protocol endpoints stay open. Note: with a token set, gossip peers must also present it on `/submit` and `/add_transaction` — set `RHIZOME_PEER_TOKEN` on every node of the deployment so outbound peer traffic authenticates |
@@ -32,10 +32,10 @@ Configured via environment variables:
 | `RHIZOME_PEERS` | — | comma-separated initial peers |
 | `RHIZOME_ADVERTISE` | — | public URL advertised to peers |
 | `RHIZOME_ALLOWED_HOSTS` | loopback + advertised + LAN addresses | comma-separated extra `Host` authorities for the DNS-rebinding guard (e.g. a reverse proxy's public name or a Docker/NAT address, each as `name` or `name:port`); the literal value `off` disables the Host allowlist entirely (only the Origin/marker CSRF guard remains — not recommended) |
-| `RHIZOME_BLOCK_INTERVAL_MS` | block target | producer pacing override (local devnets) |
+| `RHIZOME_BLOCK_INTERVAL_MS` | block target | producer pacing override (local devnets). Pacing only — it does **not** move the retarget target, so pacing far below the network's `desiredBlockTimeSec` makes every window look too fast and difficulty runs away until the chain stalls. Use `RHIZOME_NETWORK=devnet`, whose target already is 5 s, instead of pacing a testnet at 5 s |
 
 ```bash
-RHIZOME_NETWORK=testnet RHIZOME_MINER=<address> ./gradlew :app-node:run
+RHIZOME_NETWORK=devnet RHIZOME_MINER=<address> ./gradlew :app-node:run
 ```
 
 ### Node health signals
@@ -81,8 +81,7 @@ offline against your own node:
 A quick local playground:
 
 ```bash
-RHIZOME_NETWORK=testnet RHIZOME_MINER=<address> \
-RHIZOME_BLOCK_INTERVAL_MS=1000 ./gradlew :app-node:run
+RHIZOME_NETWORK=devnet RHIZOME_MINER=<address> ./gradlew :app-node:run
 # then open http://localhost:3000/
 ```
 

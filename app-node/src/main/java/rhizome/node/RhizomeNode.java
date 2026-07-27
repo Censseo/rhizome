@@ -829,13 +829,17 @@ public final class RhizomeNode implements AutoCloseable {
         return interval;
     }
 
-    /** Selects the network from RHIZOME_NETWORK (mainnet|testnet). */
+    /** Selects the network from RHIZOME_NETWORK (mainnet|testnet|devnet). */
     private record NetworkParametersArg(rhizome.core.blockchain.NetworkParameters params) {
         static NetworkParametersArg fromEnv() {
             String name = System.getenv().getOrDefault("RHIZOME_NETWORK", "mainnet");
-            return new NetworkParametersArg("testnet".equalsIgnoreCase(name)
-                ? rhizome.core.blockchain.NetworkParameters.testnet()
-                : rhizome.core.blockchain.NetworkParameters.cleanMainnet());
+            if ("testnet".equalsIgnoreCase(name)) {
+                return new NetworkParametersArg(rhizome.core.blockchain.NetworkParameters.testnet());
+            }
+            if ("devnet".equalsIgnoreCase(name)) {
+                return new NetworkParametersArg(rhizome.core.blockchain.NetworkParameters.devnet());
+            }
+            return new NetworkParametersArg(rhizome.core.blockchain.NetworkParameters.cleanMainnet());
         }
     }
 }

@@ -535,4 +535,43 @@ public final class NetworkParameters {
             .minFee(0)
             .build();
     }
+
+    /**
+     * A local devnet: testnet's cheap PoW on mainnet's real 5-second cadence.
+     *
+     * <p>Testnet deliberately targets 90 s so tests can drive controlled clocks, which makes it
+     * the wrong profile for a node an operator actually runs and watches. Pacing a testnet
+     * producer at the mainnet-like 5 s (RHIZOME_BLOCK_INTERVAL_MS) makes every retarget window
+     * measure ~18x too fast, and since each halving of observed-vs-desired earns +1 bit
+     * ({@link DifficultyAdjustment#nextDifficulty}), difficulty climbs ~4 bits per window until
+     * the chain grinds to a halt — 6 -> 29 bits, i.e. 64 -> ~537M hashes per block, in seven
+     * windows. Devnet fixes the mismatch at the source by retargeting on the same 5 s the
+     * producer is paced at, so difficulty settles near the floor instead of running away.
+     *
+     * <p>Everything else stays borrowed: SHA256 and a difficulty floor of 6 from testnet (coins
+     * are worthless, memory-hard PoW would only slow CI), no mempool fee floor so unfunded local
+     * transactions relay, and a short retarget window so the cadence corrects quickly rather than
+     * after 100 blocks of drift.
+     */
+    public static NetworkParameters devnet() {
+        return cleanMainnet().toBuilder()
+            .chainId(3)
+            .networkName("rhizome-devnet")
+            .powAlgorithm(PowAlgorithm.SHA256)
+            .genesisDifficulty(6)
+            .minDifficulty(6)
+            // Cap the climb well below the point where a single laptop core stalls: even if the
+            // retarget overshoots, 2^24 hashes is seconds of work, not hours. Devnet cares about
+            // staying alive under an operator's eyes, not about PoW being expensive.
+            .maxDifficulty(24)
+            // Keep cleanMainnet's desiredBlockTimeSec(5) — the whole point of the profile.
+            .minBlockTimeSec(0)
+            // Short window: a devnet is restarted constantly and rarely runs 60 blocks, so
+            // retarget on 20 to keep the feedback loop inside a typical session.
+            .difficultyLookback(20)
+            // Wide future bound like testnet: local clocks drift and nodes get suspended.
+            .maxFutureBlockTimeSec(120)
+            .minFee(0)
+            .build();
+    }
 }
