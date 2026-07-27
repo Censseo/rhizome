@@ -12,6 +12,17 @@ import static org.junit.jupiter.api.Assertions.*;
 class TransactionTests {
 
     @Test
+    void builderDefaultsAmountToZero() {
+        // audit: amount had no @Builder.Default — a builder that omitted it hit a null
+        // TransactionAmount (NPE on hashContents/serialize). It now defaults to 0 like fee.
+        TransactionImpl t = TransactionImpl.builder().build();
+        assertEquals(0L, t.amount().amount());
+        assertEquals(0L, t.fee().amount());
+        assertNotNull(t.hashContents());
+        assertNotNull(t.hash());
+    }
+
+    @Test
     void checkTransactionJsonSerialization() {
         User miner = User.create();
         User receiver = User.create();

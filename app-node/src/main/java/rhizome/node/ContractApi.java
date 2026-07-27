@@ -134,7 +134,16 @@ final class ContractApi {
                 .withJson(new JSONObject().put("error", "readonly compute budget exceeded").toString()).build();
         }
 
-        var result = node.dryRun(from, to, input, value, gasLimit);
+        final rhizome.core.blockchain.ContractProcessor.ContractResult result;
+        var dryRun = node.dryRun(from, to, input, value, gasLimit);
+        if (dryRun.isEmpty()) {
+            // Too many dry-runs already running or parked on the consensus lock: shed with 503
+            // (retryable) instead of queueing another blocking-pool thread behind it (audit:
+            // dry-run backlog bounded at admission, NodeService.MAX_CONCURRENT_DRY_RUNS).
+            return HttpResponse.ofCode(503)
+                .withJson(new JSONObject().put("error", "dry-run busy, retry later").toString()).build();
+        }
+        result = dryRun.get();
         org.json.JSONArray logs = new org.json.JSONArray();
         for (var log : result.logs()) {
             logs.put(logJson(log));

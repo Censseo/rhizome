@@ -1,6 +1,6 @@
 package rhizome.vm;
 
-import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 import rhizome.core.ledger.PublicAddress;
@@ -10,6 +10,15 @@ import rhizome.core.ledger.PublicAddress;
  * one call. Writes are buffered in memory and only pushed to the store by
  * {@link #commit()}, which the executor calls on success — so a reverted or
  * out-of-gas call leaves persistent storage untouched (transactional execution).
+ *
+ * <p><b>Array ownership.</b> {@link #storageWrite} defensively copies the key and
+ * value arrays, so an array the caller still holds can never alias the pending
+ * buffer (a mutated key would make its {@link ByteKey} map entry unreachable and
+ * silently lose the write). {@link #storageRead} returns the buffer's own array
+ * WITHOUT copying: the sole consumer (the VM's {@code storage_read} host function)
+ * copies it into contract memory read-only. The load-bearing read-side invariant —
+ * nothing mutates a returned array in place — is the one the session store's flush
+ * paths rely on too.
  */
 public final class PersistentHostState implements HostState {
 
@@ -21,7 +30,10 @@ public final class PersistentHostState implements HostState {
     private final BoxReader boxReader;
     private final NativeTransferHandler transferHandler;
 
-    private final Map<ByteKey, byte[]> pending = new HashMap<>();
+    // LinkedHashMap: commit() order feeds the session's write order, hence the undo journal and
+    // state-root change order — keep it the explicit insertion order, not hash order (audit:
+    // deterministic journal ordering).
+    private final Map<ByteKey, byte[]> pending = new LinkedHashMap<>();
     private final java.util.List<LogEntry> logs = new java.util.ArrayList<>();
     private byte[] output = new byte[0];
 
@@ -57,12 +69,12 @@ public final class PersistentHostState implements HostState {
         this.transferHandler = transferHandler;
     }
 
+    /** Read path: zero-copy by design — see the class-level array-ownership invariant. */
     @Override
     public byte[] storageRead(byte[] key) {
-        ByteKey k = new ByteKey(key);
+        ByteKey k = new ByteKey(key); // borrowed for this lookup only, never retained
         if (pending.containsKey(k)) {
-            byte[] v = pending.get(k);
-            return v == null ? null : v.clone();
+            return pending.get(k);
         }
         try {
             return store.getStorage(contract, key);
@@ -74,6 +86,9 @@ public final class PersistentHostState implements HostState {
 
     @Override
     public void storageWrite(byte[] key, byte[] value) {
+        // Defensive copies on entry (class-level ownership invariant): the key array becomes part
+        // of a ByteKey map key and the value becomes pending state — neither may alias an array
+        // the caller can still mutate.
         pending.put(new ByteKey(key.clone()), value.clone());
     }
 
@@ -84,12 +99,14 @@ public final class PersistentHostState implements HostState {
 
     @Override
     public byte[] caller() {
-        return caller.clone();
+        // Cloned once at construction; the only consumer (the get_caller host fn) copies it into
+        // contract memory read-only, so the per-call clone was pure churn (audit perf).
+        return caller;
     }
 
     @Override
     public byte[] input() {
-        return input.clone();
+        return input; // same discipline as caller()
     }
 
     @Override

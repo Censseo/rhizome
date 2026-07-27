@@ -21,6 +21,8 @@ import rhizome.core.transaction.Transaction;
  */
 public final class NodeService {
 
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(NodeService.class);
+
     private final ChainEngine engine;
     private final MemPool mempool;
     private volatile java.util.function.Consumer<Block> onBlockAccepted;
@@ -32,13 +34,95 @@ public final class NodeService {
     private volatile java.util.function.LongFunction<List<rhizome.core.token.TokenProcessor.TokenEvent>> tokenEventSource;
     private volatile rhizome.core.blockchain.ContractProcessor contracts;
     private volatile rhizome.core.state.snapshot.StateSource snapshotSource;
+    private volatile java.nio.file.Path snapshotSpoolDir;
     private volatile MaterializedSnapshot snapshot;
 
     /** Entry bound per snapshot chunk (bytes are bounded separately by the exporter). */
     static final int SNAPSHOT_CHUNK_ENTRIES = 4096;
 
-    /** A consistent full-state export frozen at one (pivotHeight, stateRoot) point. */
-    record MaterializedSnapshot(long pivotHeight, byte[] stateRoot, List<byte[]> chunks) {}
+    /**
+     * A consistent full-state export frozen at one (pivotHeight, stateRoot) point, backed by a
+     * spool file instead of the heap: the exporter's chunks are stream-encoded into the file at
+     * capture time and only their {@code (offset, length)} index is retained (a few bytes per
+     * chunk), so the RAM peak of a materialisation is one chunk rather than the whole state —
+     * and an idle node serving snapshots holds none of it on the heap (audit: snapshot export
+     * RAM peak). Chunk reads are positional ({@link java.nio.channels.FileChannel#read} with an
+     * explicit offset), which is thread-safe across concurrent API requests sharing one snapshot.
+     * {@link #close()} releases the file; the owner closes a snapshot when it is replaced and at
+     * service shutdown.
+     */
+    static final class MaterializedSnapshot implements AutoCloseable {
+        private final long pivotHeight;
+        private final byte[] stateRoot;
+        private final java.nio.file.Path file;
+        private final long[] offsets;
+        private final long[] lengths;
+        private final java.nio.channels.FileChannel channel;
+
+        private MaterializedSnapshot(long pivotHeight, byte[] stateRoot, java.nio.file.Path file,
+                                     long[] offsets, long[] lengths,
+                                     java.nio.channels.FileChannel channel) {
+            this.pivotHeight = pivotHeight;
+            this.stateRoot = stateRoot;
+            this.file = file;
+            this.offsets = offsets;
+            this.lengths = lengths;
+            this.channel = channel;
+        }
+
+        long pivotHeight() {
+            return pivotHeight;
+        }
+
+        byte[] stateRoot() {
+            return stateRoot;
+        }
+
+        /** The spool the chunks are read from (visible for the replacement/deletion tests). */
+        java.nio.file.Path file() {
+            return file;
+        }
+
+        int chunkCount() {
+            return lengths.length;
+        }
+
+        /** On-wire length of chunk {@code index}, without reading its bytes. */
+        long chunkLength(int index) {
+            return lengths[index];
+        }
+
+        byte[] chunkBytes(int index) {
+            if (index < 0 || index >= lengths.length) {
+                throw new IndexOutOfBoundsException(index);
+            }
+            java.nio.ByteBuffer buf = java.nio.ByteBuffer.allocate(Math.toIntExact(lengths[index]));
+            try {
+                while (buf.hasRemaining()) {
+                    if (channel.read(buf, offsets[index] + buf.position()) < 0) {
+                        throw new java.io.EOFException("snapshot spool truncated at chunk " + index);
+                    }
+                }
+            } catch (java.io.IOException e) {
+                throw new java.io.UncheckedIOException("snapshot chunk read failed", e);
+            }
+            return buf.array();
+        }
+
+        @Override
+        public void close() {
+            try {
+                channel.close();
+            } catch (java.io.IOException e) {
+                log.warn("Snapshot spool {} could not be closed", file, e);
+            }
+            try {
+                java.nio.file.Files.deleteIfExists(file);
+            } catch (java.io.IOException e) {
+                log.warn("Snapshot spool {} could not be deleted", file, e);
+            }
+        }
+    }
 
     /** Maximum blocks a single /logs catch-up scan spans, so agents poll in bounded chunks. */
     public static final int LOG_SCAN_WINDOW = 128;
@@ -74,6 +158,18 @@ public final class NodeService {
 
     /** URLs currently queued/running for admission, so duplicate {@code /add_peer} coalesce. */
     private final java.util.Set<String> pendingAdmissions =
+        java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    /**
+     * Hosts currently queued/running for admission, in lock-step with {@link #pendingAdmissions}.
+     * The URL set alone coalesces only exact duplicates; an attacker varies the port/path of one
+     * slow-resolving host to queue an unbounded number of full blocking DNS resolves for the SAME
+     * host against the single admission thread (audit: add_peer coalescing bypass by port
+     * variation). Coalescing by host too means one slow host occupies at most one queue slot;
+     * the cost is that two honest peers on different ports of one host must wait for the first
+     * admission to finish — an acceptable trade against the bounded queue.
+     */
+    private final java.util.Set<String> pendingAdmissionHosts =
         java.util.concurrent.ConcurrentHashMap.newKeySet();
 
     /**
@@ -131,8 +227,11 @@ public final class NodeService {
      * /call_readonly). This single global bucket caps the total; an over-budget read is shed (HTTP 429)
      * before it decodes anything. Sized well above heavy multi-client dashboard use (each client is
      * already ≤ the per-IP budget) yet far below loop capacity, so it only bites a genuine flood. The
-     * peer-sync reads (/sync, /headers) are deliberately NOT gated here — like submitPowGate leaving
-     * sync ungated, honest chain progress must never be throttled by this browser-facing cap.
+     * peer-serving heavyweights (/sync, /headers, /state/snapshot/chunk, /orphan) are charged to this
+     * budget too (NodeApi.isConsensusLockRead): they run the same lock-guarded store reads per block
+     * served and amplify egress by up to hundreds of blocks (or ~16 MiB) per request, so an
+     * unauthenticated flood of "peers" must not sum past the aggregate bound either — the budget is
+     * sized far above any plausible convergence traffic, so honest sync is unaffected.
      */
     static final int READ_DECODE_MAX_PER_SEC = 8_000;
     private final RateLimiter readGate;
@@ -298,10 +397,35 @@ public final class NodeService {
      *  Serialized with block application and sync through the consensus lock: the contract
      *  processor's session ({@code DefaultBoxProcessor.session}) is a single mutable view, so a
      *  dry-run racing a sync-driven block apply could read a half-updated state or corrupt the
-     *  session the apply is using (audit: dryRun outside the consensus lock). */
-    public rhizome.core.blockchain.ContractProcessor.ContractResult dryRun(
+     *  session the apply is using (audit: dryRun outside the consensus lock).
+     *
+     *  <p>Admission is bounded by {@link #MAX_CONCURRENT_DRY_RUNS}: only that many dry-runs may be
+     *  running or parked on the consensus lock at once. The lock admits a single thread, so without
+     *  a bound a dry-run flood piles up as unbounded parked worker-pool threads behind it, each a
+     *  25M-gas VM run that then delays block application (the old bounded queue inside the VM never
+     *  filled — at most one task was ever submitted to it, because the lock serialized admission
+     *  upstream). A call that cannot take a slot returns {@link java.util.Optional#empty()}
+     *  immediately (the API maps it to 503) instead of queueing. */
+    static final int MAX_CONCURRENT_DRY_RUNS = 8;
+    private final java.util.concurrent.Semaphore dryRunSlots =
+        new java.util.concurrent.Semaphore(MAX_CONCURRENT_DRY_RUNS);
+
+    public java.util.Optional<rhizome.core.blockchain.ContractProcessor.ContractResult> dryRun(
             PublicAddress from, PublicAddress to, byte[] input, long value, long gasLimit) {
-        return engine.withConsistentView(() -> contracts.dryRun(from, to, input, value, gasLimit));
+        if (!dryRunSlots.tryAcquire()) {
+            return java.util.Optional.empty();
+        }
+        try {
+            return java.util.Optional.of(
+                engine.withConsistentView(() -> contracts.dryRun(from, to, input, value, gasLimit)));
+        } finally {
+            dryRunSlots.release();
+        }
+    }
+
+    /** Visible for testing: dry-run admission slots currently free (0 = new dry-runs are shed). */
+    int dryRunSlotsAvailable() {
+        return dryRunSlots.availablePermits();
     }
 
     /** The full body of a known orphan (uncle candidate) by hash, or {@code null} — served to
@@ -342,9 +466,15 @@ public final class NodeService {
         return scans.deregister(scanId, clientKey);
     }
 
-    /** The predicate of a registered scan, or {@code null} if the id is unknown. */
-    public rhizome.core.box.ScanPredicate scanPredicate(int scanId) {
-        return scans.get(scanId);
+    /**
+     * The predicate of a scan owned by {@code clientKey}, or {@code null} — a foreign id is
+     * indistinguishable from an unknown one (non-disclosing, like {@link #deregisterScan};
+     * audit: /scan/boxes owner-gating). Only this owner-scoped lookup refreshes the scan's
+     * idle-eviction activity, so another client polling a learned id cannot keep the victim
+     * scan alive.
+     */
+    public rhizome.core.box.ScanPredicate scanPredicate(String clientKey, int scanId) {
+        return scans.getForOwner(scanId, clientKey);
     }
 
     /** Scans registered by {@code clientKey}, id → predicate (other clients' scans are not
@@ -416,11 +546,17 @@ public final class NodeService {
             return;
         }
         // Coalesce duplicate in-flight admissions: re-submitting the same slow hostname must not
-        // enqueue another full blocking DNS resolve. The set is kept in lock-step with the queue —
-        // every queued task removes its URL on completion, and a rejected enqueue removes it below —
-        // so it can never grow past the queue bound.
+        // enqueue another full blocking DNS resolve — neither under the same canonical URL nor
+        // under a port/path variant of the same host (see pendingAdmissionHosts). The sets are
+        // kept in lock-step with the queue — every queued task removes its entries on completion,
+        // and a rejected enqueue removes them below — so they can never grow past the queue bound.
         if (!pendingAdmissions.add(canonical)) {
             return; // already queued or running
+        }
+        String host = hostOf(canonical);
+        if (host != null && !pendingAdmissionHosts.add(host)) {
+            pendingAdmissions.remove(canonical);
+            return; // another admission for this host is already queued or running
         }
         try {
             peerAdmission.execute(() -> {
@@ -430,10 +566,26 @@ public final class NodeService {
                     // Best-effort: a malformed or unresolvable peer is simply not added.
                 } finally {
                     pendingAdmissions.remove(canonical);
+                    if (host != null) {
+                        pendingAdmissionHosts.remove(host);
+                    }
                 }
             });
         } catch (java.util.concurrent.RejectedExecutionException rejected) {
-            pendingAdmissions.remove(canonical); // queue full: shed load, keep the set bounded
+            pendingAdmissions.remove(canonical); // queue full: shed load, keep the sets bounded
+            if (host != null) {
+                pendingAdmissionHosts.remove(host);
+            }
+        }
+    }
+
+    /** Lower-cased host of a canonical peer URL, or {@code null} when it has none (unparseable). */
+    private static String hostOf(String canonicalUrl) {
+        try {
+            String host = java.net.URI.create(canonicalUrl).getHost();
+            return host == null || host.isEmpty() ? null : host.toLowerCase(java.util.Locale.ROOT);
+        } catch (RuntimeException e) {
+            return null;
         }
     }
 
@@ -457,6 +609,9 @@ public final class NodeService {
     public record StatsWindow(long windowStart, long height, long txCount, long firstTs, long lastTs) {}
 
     private volatile StatsWindow statsWindowCache;
+    /** Serializes stats-window recomputes: without it, N concurrent callers on a stale cache
+     *  all re-decode the same window under the read path (duplicate lock-guarded work). */
+    private final Object statsWindowLock = new Object();
 
     /**
      * Cached aggregate over the last {@code window} blocks for {@code GET /stats}. The dashboard polls
@@ -471,23 +626,31 @@ public final class NodeService {
         if (cached != null && cached.height() == height) {
             return cached;
         }
-        long windowStart = Math.max(1, height - window + 1);
-        long txCount = 0;
-        long firstTs = 0;
-        long lastTs = 0;
-        for (long h = windowStart; h <= height; h++) {
-            var b = (rhizome.core.block.BlockImpl) block(h);
-            txCount += b.transactions().size();
-            if (h == windowStart) {
-                firstTs = b.timestamp();
+        synchronized (statsWindowLock) {
+            // Re-check inside the lock: a concurrent caller may already have recomputed this
+            // height — only one thread re-decodes the window per tip movement.
+            cached = statsWindowCache;
+            if (cached != null && cached.height() == height) {
+                return cached;
             }
-            if (h == height) {
-                lastTs = b.timestamp();
+            long windowStart = Math.max(1, height - window + 1);
+            long txCount = 0;
+            long firstTs = 0;
+            long lastTs = 0;
+            for (long h = windowStart; h <= height; h++) {
+                var b = (rhizome.core.block.BlockImpl) block(h);
+                txCount += b.transactions().size();
+                if (h == windowStart) {
+                    firstTs = b.timestamp();
+                }
+                if (h == height) {
+                    lastTs = b.timestamp();
+                }
             }
+            StatsWindow w = new StatsWindow(windowStart, height, txCount, firstTs, lastTs);
+            statsWindowCache = w;
+            return w;
         }
-        StatsWindow w = new StatsWindow(windowStart, height, txCount, firstTs, lastTs);
-        statsWindowCache = w;
-        return w;
     }
 
     /** Exclusive upper bound of pruned block bodies (0 = archive node). */
@@ -501,24 +664,129 @@ public final class NodeService {
     }
 
     /**
+     * Wires the directory snapshot spools live in (the node's data dir, alongside the stores —
+     * NOT the OS temp dir, which is commonly a tmpfs and would silently put the whole state
+     * back in RAM). Stale {@code rhizome-snapshot-*} spools from a previous process (SIGKILL
+     * leaves them behind — {@link #close()} only runs on a clean shutdown) are swept here,
+     * once, at wiring time. When unset, spools fall back to the default temp dir (tests).
+     */
+    public void setSnapshotSpoolDir(java.nio.file.Path dir) throws java.io.IOException {
+        java.nio.file.Files.createDirectories(dir);
+        int swept = 0;
+        try (var entries = java.nio.file.Files.list(dir)) {
+            for (var stale : (Iterable<java.nio.file.Path>) entries
+                    .filter(p -> p.getFileName().toString().startsWith("rhizome-snapshot-"))
+                    ::iterator) {
+                try {
+                    java.nio.file.Files.deleteIfExists(stale);
+                    swept++;
+                } catch (java.io.IOException e) {
+                    log.warn("Stale snapshot spool {} could not be deleted", stale, e);
+                }
+            }
+        }
+        if (swept > 0) {
+            log.info("Swept {} stale snapshot spool(s) from {}", swept, dir);
+        }
+        this.snapshotSpoolDir = dir;
+    }
+
+    /**
      * Captures a fresh materialised snapshot of the full committed state under the engine
      * lock, so every chunk corresponds to the single {@code (height, stateRoot)} pair it
-     * advertises. Replaces any previous snapshot. False when the node cannot export
-     * (no source wired, or no state accumulator producing roots).
+     * advertises. Chunks are spooled to a temp file as the exporter emits them (see {@link
+     * MaterializedSnapshot}); only the offset index is kept on the heap. Replaces — and deletes
+     * the spool of — any previous snapshot. False when the node cannot export (no source
+     * wired, or no state accumulator producing roots) or when the spool I/O fails; a failure
+     * cleans up the partial file and keeps the previous snapshot.
      */
     public boolean materializeSnapshot() {
         var source = snapshotSource;
         if (source == null || engine.stateRoot() == null) {
             return false;
         }
-        this.snapshot = engine.withConsistentView(() -> {
-            List<byte[]> encoded = new ArrayList<>();
-            for (var chunk : rhizome.core.state.snapshot.StateSnapshotExporter.export(source, SNAPSHOT_CHUNK_ENTRIES)) {
-                encoded.add(chunk.encode());
-            }
-            return new MaterializedSnapshot(engine.height(), engine.stateRoot(), encoded);
-        });
+        final MaterializedSnapshot fresh;
+        try {
+            fresh = engine.withConsistentView(() -> {
+                try {
+                    return captureSnapshot(source);
+                } catch (java.io.IOException e) {
+                    throw new java.io.UncheckedIOException(e);
+                }
+            });
+        } catch (java.io.UncheckedIOException e) {
+            log.error("Snapshot materialisation failed; the previous snapshot is kept",
+                e.getCause());
+            return false;
+        }
+        MaterializedSnapshot previous = this.snapshot;
+        this.snapshot = fresh;
+        if (previous != null) {
+            previous.close();
+        }
         return true;
+    }
+
+    /**
+     * Stream-encodes every exported chunk into a fresh temp spool and returns the file-backed
+     * snapshot over it. At most one chunk is heap-resident at a time. A failure anywhere
+     * (write, channel open) deletes the partial spool before propagating.
+     */
+    private MaterializedSnapshot captureSnapshot(rhizome.core.state.snapshot.StateSource source)
+            throws java.io.IOException {
+        var dir = snapshotSpoolDir;
+        java.nio.file.Path file = dir != null
+            ? java.nio.file.Files.createTempFile(dir, "rhizome-snapshot-", ".chunks")
+            : java.nio.file.Files.createTempFile("rhizome-snapshot-", ".chunks");
+        try {
+            var offsets = new LongIndex();
+            var lengths = new LongIndex();
+            long[] position = {0};
+            try (var out = java.nio.file.Files.newOutputStream(file)) {
+                rhizome.core.state.snapshot.StateSnapshotExporter.export(
+                        source, SNAPSHOT_CHUNK_ENTRIES,
+                        rhizome.core.state.snapshot.StateSnapshotExporter.DEFAULT_CHUNK_BYTES,
+                        chunk -> {
+                            byte[] encoded = chunk.encode();
+                            offsets.add(position[0]);
+                            lengths.add(encoded.length);
+                            try {
+                                out.write(encoded);
+                            } catch (java.io.IOException e) {
+                                throw new java.io.UncheckedIOException(e);
+                            }
+                            position[0] += encoded.length;
+                        });
+            }
+            return new MaterializedSnapshot(engine.height(), engine.stateRoot(), file,
+                offsets.toArray(), lengths.toArray(),
+                java.nio.channels.FileChannel.open(file,
+                    java.nio.file.StandardOpenOption.READ));
+        } catch (java.io.IOException | RuntimeException e) {
+            try {
+                java.nio.file.Files.deleteIfExists(file);
+            } catch (java.io.IOException cleanup) {
+                log.warn("Partial snapshot spool {} could not be deleted", file, cleanup);
+            }
+            throw e;
+        }
+    }
+
+    /** A minimal growable {@code long[]} for the snapshot chunk index (avoids boxed lists). */
+    private static final class LongIndex {
+        private long[] values = new long[64];
+        private int size;
+
+        void add(long value) {
+            if (size == values.length) {
+                values = java.util.Arrays.copyOf(values, size * 2);
+            }
+            values[size++] = value;
+        }
+
+        long[] toArray() {
+            return java.util.Arrays.copyOf(values, size);
+        }
     }
 
     /** The current materialised snapshot, or {@code null} if none has been captured. */
@@ -532,6 +800,31 @@ public final class NodeService {
         return snap == null ? 0 : snap.pivotHeight();
     }
 
+    /**
+     * Releases the file-backed snapshot (closes its channel, deletes its spool). Called at
+     * node shutdown; a fresh materialisation after close starts from no snapshot again.
+     */
+    public void close() {
+        MaterializedSnapshot snap = this.snapshot;
+        this.snapshot = null;
+        if (snap != null) {
+            snap.close();
+        }
+    }
+
+    /** Degraded-mode reason (e.g. a failed reorg restore), or {@code null} when healthy. */
+    public String degradedState() {
+        return engine.degradedState();
+    }
+
+    /**
+     * True while a reorg window is open (pop → body-apply → restore): the node serves the
+     * pre-reorg tip and block production pauses. Surfaced on /stats so an operator can tell
+     * a normal reorg pause from a degraded node.
+     */
+    public boolean isReorgInProgress() {
+        return engine.isReorgInProgress();
+    }
     public java.math.BigInteger totalWork() {
         return engine.totalWork();
     }

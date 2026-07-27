@@ -232,6 +232,14 @@ public final class RhizomeNode implements AutoCloseable {
             boxProcessor, tokenProcessor, stateAccumulator);
         mempool = new MemPool(config.params(), verifier, engine, config.mempoolSize());
         service = new NodeService(engine, mempool);
+        // Snapshot spools live with the stores, not the OS temp dir (often a tmpfs → the whole
+        // state would silently be back in RAM); the setter also sweeps SIGKILL leftovers.
+        try {
+            service.setSnapshotSpoolDir(Path.of(config.dataDir(), "snapshots"));
+        } catch (java.io.IOException e) {
+            throw new IllegalStateException(
+                "cannot create snapshot spool dir under " + config.dataDir(), e);
+        }
         // Expose contract event logs and box lifecycle events (by block height) so agents
         // can watch on-chain state on one feed.
         service.setLogSource(contractProcessor::logs);
@@ -417,7 +425,7 @@ public final class RhizomeNode implements AutoCloseable {
             syncScheduler.scheduleWithFixedDelay(guarded(() -> {
                 if (engine.height() >= service.snapshotPivot() + snapshotEvery && service.materializeSnapshot()) {
                     log.info("Materialized state snapshot at height {} ({} chunks)",
-                        service.snapshotPivot(), service.materializedSnapshot().chunks().size());
+                        service.snapshotPivot(), service.materializedSnapshot().chunkCount());
                 }
             }, "snapshot materialisation"), config.syncPeriodMs(), config.syncPeriodMs(), TimeUnit.MILLISECONDS);
         }
@@ -555,8 +563,21 @@ public final class RhizomeNode implements AutoCloseable {
      * advertised host and the loopback names, each with and without the API port. A browser POST whose
      * Host is not in this set is refused — a rebound page carries the attacker's hostname, not one of
      * these. Lower-cased for case-insensitive matching.
+     *
+     * <p>{@code RHIZOME_ALLOWED_HOSTS} (comma-separated) appends extra authorities for deployments
+     * where clients legitimately arrive through a host this node cannot enumerate — a reverse
+     * proxy's public name, a Docker/NAT address. The literal value {@code off} disables the
+     * allowlist entirely (the Origin/marker CSRF guard remains): a documented escape hatch, NOT
+     * the default — the computed default set is the anti-rebinding control.
      */
     private static java.util.Set<String> allowedHosts(NodeConfig config) {
+        String extra = System.getenv("RHIZOME_ALLOWED_HOSTS");
+        if (extra != null && "off".equalsIgnoreCase(extra.trim())) {
+            log.warn("RHIZOME_ALLOWED_HOSTS=off: the DNS-rebinding Host allowlist is disabled — "
+                + "only the Origin/marker CSRF guard remains. Prefer listing the deployment's "
+                + "public hostnames instead.");
+            return java.util.Set.of();
+        }
         java.util.Set<String> hosts = new java.util.HashSet<>();
         int port = config.apiPort();
         java.util.List<String> names = new java.util.ArrayList<>(java.util.List.of(
@@ -600,6 +621,16 @@ public final class RhizomeNode implements AutoCloseable {
         for (String name : names) {
             hosts.add(name.toLowerCase(java.util.Locale.ROOT));
             hosts.add((name + ":" + port).toLowerCase(java.util.Locale.ROOT));
+        }
+        // Operator-supplied extra authorities (reverse proxy, Docker/NAT): taken verbatim,
+        // lower-cased — the operator knows the public name:port clients actually send.
+        if (extra != null && !extra.isBlank()) {
+            for (String h : extra.split(",")) {
+                String trimmed = h.trim().toLowerCase(java.util.Locale.ROOT);
+                if (!trimmed.isEmpty()) {
+                    hosts.add(trimmed);
+                }
+            }
         }
         return hosts;
     }
@@ -681,6 +712,12 @@ public final class RhizomeNode implements AutoCloseable {
                 verifier.shutdown();
             }
         } finally {
+            // Release the file-backed state snapshot's spool. Independent of the store-close
+            // guard below: it touches only a temp file, and the eventloop (its only reader) is
+            // already drained above.
+            if (service != null) {
+                service.close();
+            }
             // Close the stores under the engine lock: producer/sync/eventloop are stopped above,
             // but a straggler (late gossip task, timed-out eventloop job) could still be queued.
             // Holding the lock guarantees no thread is inside a native write while the handles

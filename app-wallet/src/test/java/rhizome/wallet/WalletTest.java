@@ -132,6 +132,30 @@ class WalletTest {
     }
 
     @Test
+    void plaintextPinRewriteOnAnotherWalletsKeyFileIsRefused() throws Exception {
+        assumeTrue(System.console() == null, "test requires a non-interactive environment");
+        // The encrypted branch verified the sealed key matches before re-sealing; the plaintext
+        // branch did NOT — a wrong keyFile path silently overwrote another wallet's seed with
+        // this wallet's key + pin (audit: unverified plaintext pin rewrite).
+        Wallet alice = Wallet.create();
+        Path aliceFile = tempDir.resolve("alice.json");
+        alice.save(aliceFile, null, true);
+        Wallet bob = Wallet.create();
+        Path bobFile = tempDir.resolve("bob.json");
+        bob.save(bobFile, null, true);
+
+        assertThrows(IOException.class,
+            () -> bob.saveChainIdPin(aliceFile, 7, "http://localhost:7373", null),
+            "pinning a file that holds ANOTHER wallet's key must fail");
+        Wallet reloaded = Wallet.load(aliceFile);
+        assertEquals(alice.address(), reloaded.address(), "alice's key file must be untouched");
+
+        // Bob's own file still pins fine (the guard only fires on a key mismatch).
+        bob.saveChainIdPin(bobFile, 7, "http://localhost:7373", null);
+        assertEquals(7, Wallet.load(bobFile).chainIdPin().chainId());
+    }
+
+    @Test
     void sealedPinIsUnreadableWithoutThePassphrase() throws Exception {
         // On an encrypted key file the pin lives INSIDE the GCM payload: the static cleartext
         // reader sees nothing, and the on-disk bytes do not expose the pin at all.

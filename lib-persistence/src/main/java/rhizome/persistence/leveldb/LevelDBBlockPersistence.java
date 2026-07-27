@@ -7,8 +7,6 @@ import org.iq80.leveldb.WriteBatch;
 import org.iq80.leveldb.WriteOptions;
 
 import io.activej.bytebuf.ByteBuf;
-import io.activej.bytebuf.ByteBufPool;
-import io.activej.common.MemSize;
 import rhizome.core.block.Block;
 import rhizome.core.block.dto.BlockDto;
 import rhizome.crypto.SHA256Hash;
@@ -60,14 +58,6 @@ public class LevelDBBlockPersistence extends LevelDBDataStore implements BlockPe
 
     public BlockDto  getBlockHeader(int blockId) {       
         return BinarySerializable.fromBuffer((byte[])get(blockId, byte[].class), BlockDto.class);
-    }
-    /**
-     * The serialized block header as a pooled {@link ByteBuf}. Ownership: the returned buffer
-     * escapes to the CALLER, who must {@code recycle()} it when done — the store cannot recycle
-     * it, it has no way to know when the caller is finished (audit F12).
-     */
-    public ByteBuf getBlockHeadeAsByteBuf(int blockId) {
-        return (ByteBuf) get(blockId, ByteBuf.class);
     }
 
     public List<TransactionDto> getBlockTransactions(BlockDto block) {
@@ -130,12 +120,25 @@ public class LevelDBBlockPersistence extends LevelDBDataStore implements BlockPe
         return Block.of(block, transactions);
     }
 
+    /**
+     * Hard cap on wallet-history results. The scan materialises every txid of a wallet in RAM;
+     * without a bound, a wallet with a long history (or a crafted address prefix) made one API
+     * call allocate unbounded memory (audit: unbounded wallet-history scan). This legacy store
+     * serves light/test nodes (the full node is RocksDB), whose API consumers always page well
+     * below this; use {@link #getTransactionsForWallet(PublicAddress, int)} for an explicit page.
+     */
+    static final int MAX_WALLET_HISTORY = 10_000;
+
     public List<SHA256Hash> getTransactionsForWallet(PublicAddress wallet) {
+        return getTransactionsForWallet(wallet, MAX_WALLET_HISTORY);
+    }
+
+    public List<SHA256Hash> getTransactionsForWallet(PublicAddress wallet, int limit) {
         var address = wallet.toBytes();
         List<SHA256Hash> transactions = new ArrayList<>();
 
         try (DBIterator iterator = db().iterator(new ReadOptions())) {
-            for(iterator.seek(address); iterator.hasNext(); iterator.next()) {
+            for(iterator.seek(address); iterator.hasNext() && transactions.size() < limit; iterator.next()) {
                 byte[] key = iterator.peekNext().getKey();
                 // Wallet-index keys sort by address prefix: once the prefix no longer matches the
                 // scan is done — continuing to end-of-DB was O(DB size) per query (audit F4).

@@ -45,6 +45,7 @@ public final class RocksDbTokenStore implements TokenStore, AutoCloseable {
     private static final int ADDR = 25;
 
     private final RocksDB db;
+    private final DBOptions dbOptions;
     private final ColumnFamilyHandle defaultCf;
     private final ColumnFamilyHandle metaCf;
     private final ColumnFamilyHandle balanceCf;
@@ -63,15 +64,17 @@ public final class RocksDbTokenStore implements TokenStore, AutoCloseable {
             new ColumnFamilyDescriptor(CF_HOLDER),
             new ColumnFamilyDescriptor(CF_JOURNAL));
         List<ColumnFamilyHandle> handles = new ArrayList<>();
-        // DBOptions is NOT closed after open: closing it while the DB is live corrupts the
-        // native heap (rocksdbjni keeps referencing it) — the audit F12 leak note is
-        // superseded; the object is reclaimed with the process/DB.
+        // DBOptions is kept and closed in close() AFTER db.close(): never while the DB is live
+        // (rocksdbjni keeps referencing it — closing it live corrupts the native heap), and not
+        // at all was a native-handle leak (audit F12).
+        DBOptions options = new DBOptions().setCreateIfMissing(true).setCreateMissingColumnFamilies(true);
         try {
-            DBOptions options = new DBOptions().setCreateIfMissing(true).setCreateMissingColumnFamilies(true);
             this.db = RocksDB.open(options, path, descriptors, handles);
         } catch (RocksDBException e) {
+            options.close();
             throw new IOException("Failed to open token store at " + path, e);
         }
+        this.dbOptions = options;
         this.defaultCf = handles.get(0);
         this.metaCf = handles.get(1);
         this.balanceCf = handles.get(2);
@@ -114,7 +117,11 @@ public final class RocksDbTokenStore implements TokenStore, AutoCloseable {
                     setBalance(batch, b.tokenId(), b.address(), b.amount());
                 }
             }
-            batch.put(journalCf, longToBytes(height), encodeJournal(journal));
+            // A op-less apply persists no journal: revertBlock maps a missing journal to
+            // "nothing to undo", so the 4-byte empty row was a pure cost (audit: empty journals).
+            if (!journal.isEmpty()) {
+                batch.put(journalCf, longToBytes(height), encodeJournal(journal));
+            }
             db.write(writeOptions, batch);
         } catch (RocksDBException e) {
             throw new IllegalStateException("token store applyBlock failed", e);
@@ -191,15 +198,25 @@ public final class RocksDbTokenStore implements TokenStore, AutoCloseable {
     private List<byte[]> indexScan(ColumnFamilyHandle cf, byte[] prefix, byte[] afterId, int limit) {
         List<byte[]> out = new ArrayList<>();
         try (RocksIterator it = db.newIterator(cf)) {
-            for (it.seek(prefix); it.isValid() && out.size() < limit; it.next()) {
+            // Seek straight to the prefix ‖ afterId composite: keys sort lexicographically, so
+            // every subsequent key under the prefix is strictly past the cursor. The old
+            // seek(prefix) + Java-side filter re-scanned the prefix's whole history per page —
+            // O(n) per page, O(n^2) to enumerate (audit: index pagination).
+            if (afterId == null) {
+                it.seek(prefix);
+            } else {
+                byte[] cursor = concat(prefix, afterId);
+                it.seek(cursor);
+                if (it.isValid() && Arrays.equals(it.key(), cursor)) {
+                    it.next(); // exclusive of the cursor
+                }
+            }
+            for (; it.isValid() && out.size() < limit; it.next()) {
                 byte[] key = it.key();
                 if (key.length != prefix.length + 32 || !startsWith(key, prefix)) {
                     break;
                 }
-                byte[] tokenId = Arrays.copyOfRange(key, prefix.length, key.length);
-                if (afterId == null || Arrays.compareUnsigned(tokenId, afterId) > 0) {
-                    out.add(tokenId);
-                }
+                out.add(Arrays.copyOfRange(key, prefix.length, key.length));
             }
         }
         return out;
@@ -216,6 +233,9 @@ public final class RocksDbTokenStore implements TokenStore, AutoCloseable {
             return new Undo(tokenId, null, address, priorAmount, false);
         }
     }
+
+    /** Smallest possible serialized journal entry: tag(1) + tokenId(32) + priorMeta flag(1). */
+    private static final int MIN_JOURNAL_RECORD_BYTES = 1 + 32 + 1;
 
     private static byte[] encodeJournal(List<Undo> journal) {
         int size = 4;
@@ -254,7 +274,9 @@ public final class RocksDbTokenStore implements TokenStore, AutoCloseable {
         // Journals are written by this node from its own mutations, so this is defense-in-depth, not a
         // remote vector — but bound count/length before allocating so a corrupt/truncated blob throws a
         // clean error instead of new ArrayList<>(negative) or new byte[huge] (mirrors every wire decoder).
-        if (count < 0 || count > buffer.remaining()) {
+        // The count is bounded by the SMALLEST possible record (tag 1 + tokenId 32 + meta flag 1),
+        // not by the raw remaining byte count.
+        if (count < 0 || count > buffer.remaining() / MIN_JOURNAL_RECORD_BYTES) {
             throw new IllegalStateException("token journal count out of range: " + count);
         }
         List<Undo> journal = new ArrayList<>(count);
@@ -348,5 +370,6 @@ public final class RocksDbTokenStore implements TokenStore, AutoCloseable {
         journalCf.close();
         writeOptions.close();
         db.close();
+        dbOptions.close(); // after the DB: rocksdbjni references the options while the DB is live
     }
 }

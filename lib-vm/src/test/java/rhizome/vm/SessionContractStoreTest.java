@@ -88,4 +88,81 @@ class SessionContractStoreTest {
         session.deleteStorage(CONTRACT, KEY);
         assertThrows(IllegalStateException.class, session::forwardChanges);
     }
+
+    // ---- array ownership (class-level invariant: writes copy, reads share read-only) ----
+
+    @Test
+    void mutatingTheCallersArrayAfterPutStorageDoesNotChangeSessionState() {
+        byte[] key = {1};
+        byte[] value = {7};
+        session.putStorage(CONTRACT, key, value);
+        key[0] = 99;
+        value[0] = 99;
+        assertArrayEquals(new byte[] {7}, session.getStorage(CONTRACT, new byte[] {1}),
+            "a write takes a defensive copy: the caller's array never aliases session state");
+        assertNull(session.getStorage(CONTRACT, new byte[] {99}),
+            "mutating the caller's key array must not move the entry (the Slot map key is a copy)");
+    }
+
+    @Test
+    void mutatingTheCallersKeyAfterDeleteStorageKeepsTheTombstoneOnTheRightKey() {
+        base.putStorage(CONTRACT, KEY, OLD);
+        byte[] key = {1};
+        session.deleteStorage(CONTRACT, key);
+        key[0] = 99;
+        session.flushWithJournal();
+        assertNull(base.getStorage(CONTRACT, KEY),
+            "the tombstone must stay on the key as it was at delete time");
+        assertNull(base.getStorage(CONTRACT, new byte[] {99}),
+            "no tombstone may leak onto the mutated key");
+    }
+
+    @Test
+    void mutatingTheCallersArrayAfterPutCodeDoesNotChangeSessionState() {
+        byte[] code = {1, 2, 3};
+        session.putCode(CONTRACT, code);
+        code[0] = 99;
+        assertArrayEquals(new byte[] {1, 2, 3}, session.getCode(CONTRACT));
+    }
+
+    @Test
+    void consecutiveReadsAreCoherentAcrossAnIntermediatePut() {
+        session.putStorage(CONTRACT, KEY, new byte[] {1});
+        byte[] first = session.getStorage(CONTRACT, KEY);
+        assertArrayEquals(new byte[] {1}, first);
+        assertArrayEquals(first, session.getStorage(CONTRACT, KEY),
+            "repeated reads of an untouched key agree");
+        session.putStorage(CONTRACT, KEY, new byte[] {2});
+        assertArrayEquals(new byte[] {2}, session.getStorage(CONTRACT, KEY),
+            "an intermediate put is reflected by the next read");
+        assertArrayEquals(new byte[] {1}, first,
+            "a put REPLACES the entry — the array returned before it still holds the old value");
+    }
+
+    @Test
+    void aFoldedChildSharesNoArraysWithItsParent() {
+        SessionContractStore parent = new SessionContractStore(base);
+        SessionContractStore child = new SessionContractStore(parent);
+        byte[] key = {1};
+        byte[] value = {7};
+        child.putStorage(CONTRACT, key, value);
+        child.flushWithJournal(); // fold: child writes merge into the parent
+
+        key[0] = 99;
+        value[0] = 99;
+        assertArrayEquals(new byte[] {7}, parent.getStorage(CONTRACT, new byte[] {1}),
+            "the fold copies at the parent boundary — mutating the child's source arrays "
+                + "after the fold must not be visible in the parent");
+
+        // A later write in the child belongs to a new frame and must not reach the parent.
+        child.putStorage(CONTRACT, new byte[] {1}, new byte[] {42});
+        assertArrayEquals(new byte[] {7}, parent.getStorage(CONTRACT, new byte[] {1}));
+
+        // Reverse direction: a parent write after the fold is equally insulated — the child
+        // reads the parent's copy through the fall-through, unaffected by caller mutation.
+        byte[] parentValue = {5};
+        parent.putStorage(CONTRACT, new byte[] {2}, parentValue);
+        parentValue[0] = 77;
+        assertArrayEquals(new byte[] {5}, child.getStorage(CONTRACT, new byte[] {2}));
+    }
 }

@@ -11,6 +11,7 @@ import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -46,10 +47,12 @@ final class BodyReadDeadline {
             t.setDaemon(true);
             return t;
         },
-        // Unreachable in practice (callers outnumberable by MAX_WORKERS block on get()); if it
-        // ever fired, running inline merely degrades to the pre-fix behaviour rather than
-        // dropping the exchange.
-        new ThreadPoolExecutor.CallerRunsPolicy());
+        // Reject when all workers are busy: running the exchange inline on the CALLER (the old
+        // CallerRunsPolicy) meant future.get() returned an already-computed result, silently
+        // disabling the wall-clock deadline exactly under load — a slow-drip peer could then
+        // stall the caller unbounded. Saturation is surfaced as a BodyReadSaturatedException so
+        // it is distinguishable from a peer failure and never counted against the peer.
+        new ThreadPoolExecutor.AbortPolicy());
 
     /**
      * Runs {@code exchange} on a worker, bounding the whole call (send + full body read) to
@@ -57,48 +60,99 @@ final class BodyReadDeadline {
      * {@code openBody} as soon as headers arrive, so a deadline expiry can close it and cancel
      * the JDK exchange mid-read.
      *
-     * @throws IOException on any I/O failure, on deadline expiry, or if the pool is saturated
+     * @throws IOException on any I/O failure or on deadline expiry
+     * @throws BodyReadSaturatedException if the LOCAL worker pool is saturated (not a peer fault)
      * @throws InterruptedException if the CALLING thread is interrupted while waiting
      */
     static <T> T call(Duration timeout, AtomicReference<AutoCloseable> openBody, Callable<T> exchange)
             throws IOException, InterruptedException {
-        Future<T> future;
-        try {
-            future = WORKERS.submit(exchange);
-        } catch (RejectedExecutionException e) {
-            throw new IOException("peer exchange rejected", e);
-        }
+        Future<T> future = submit(exchange);
         try {
             return future.get(timeout.toMillis(), TimeUnit.MILLISECONDS);
         } catch (TimeoutException e) {
             // Slow-drip (or stuck) peer: cancel the worker and close the published body stream —
             // closing the InputStream cancels the underlying JDK exchange, unblocking the read.
-            future.cancel(true);
-            AutoCloseable body = openBody.get();
-            if (body != null) {
-                try {
-                    body.close();
-                } catch (Exception ignored) {
-                    // best-effort cancellation; the deadline failure below is what matters
-                }
-            }
+            abort(future, openBody);
             throw new IOException("peer response body read exceeded " + timeout.toMillis() + " ms");
         } catch (InterruptedException e) {
             future.cancel(true);
             throw e;
         } catch (ExecutionException e) {
-            Throwable cause = e.getCause();
-            if (cause instanceof IOException io) {
-                throw io;
-            }
-            if (cause instanceof RuntimeException re) {
-                throw re;
-            }
-            if (cause instanceof InterruptedException interrupted) {
-                Thread.currentThread().interrupt();
-                throw interrupted;
-            }
-            throw new IOException("peer exchange failed: " + cause, cause);
+            throw rethrow(e);
         }
+    }
+
+    /**
+     * As {@link #call}, but the bound is an IDLE deadline: the exchange fails only when no
+     * progress has been observed for {@code idleTimeout} — the exchange signals progress by
+     * stamping {@code lastActivityNanos} on every byte it reads. For legitimately huge bodies
+     * (the /sync block window) whose total duration scales with the window: a fixed
+     * whole-exchange deadline never converges on a slow link, while an idle bound still kills
+     * a stalled drip.
+     *
+     * @throws IOException on any I/O failure or on idle-deadline expiry
+     * @throws BodyReadSaturatedException if the LOCAL worker pool is saturated (not a peer fault)
+     * @throws InterruptedException if the CALLING thread is interrupted while waiting
+     */
+    static <T> T callIdle(Duration idleTimeout, AtomicReference<AutoCloseable> openBody,
+                          AtomicLong lastActivityNanos, Callable<T> exchange)
+            throws IOException, InterruptedException {
+        Future<T> future = submit(exchange);
+        long idleNanos = idleTimeout.toNanos();
+        long pollMillis = Math.max(10, Math.min(250, idleTimeout.toMillis() / 8));
+        while (true) {
+            try {
+                return future.get(pollMillis, TimeUnit.MILLISECONDS);
+            } catch (TimeoutException e) {
+                if (System.nanoTime() - lastActivityNanos.get() < idleNanos) {
+                    continue; // progress within the window: slow but alive, not stalled
+                }
+                abort(future, openBody);
+                throw new IOException("peer response body idle for over " + idleTimeout.toMillis() + " ms");
+            } catch (InterruptedException e) {
+                future.cancel(true);
+                throw e;
+            } catch (ExecutionException e) {
+                throw rethrow(e);
+            }
+        }
+    }
+
+    private static <T> Future<T> submit(Callable<T> exchange) throws BodyReadSaturatedException {
+        try {
+            return WORKERS.submit(exchange);
+        } catch (RejectedExecutionException e) {
+            // LOCAL backpressure, not a peer failure: callers must not penalise the peer for it.
+            throw new BodyReadSaturatedException("peer exchange rejected: body-read pool saturated", e);
+        }
+    }
+
+    /** Cancels the worker and closes the published body stream (cancels the JDK exchange). */
+    private static void abort(Future<?> future, AtomicReference<AutoCloseable> openBody) {
+        future.cancel(true);
+        AutoCloseable body = openBody.get();
+        if (body != null) {
+            try {
+                body.close();
+            } catch (Exception ignored) {
+                // best-effort cancellation; the deadline failure raised by the caller is what matters
+            }
+        }
+    }
+
+    /** Unwraps a worker failure to the caller-visible exception taxonomy. */
+    private static IOException rethrow(ExecutionException e) throws IOException, InterruptedException {
+        Throwable cause = e.getCause();
+        if (cause instanceof IOException io) {
+            throw io;
+        }
+        if (cause instanceof RuntimeException re) {
+            throw re;
+        }
+        if (cause instanceof InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw interrupted;
+        }
+        return new IOException("peer exchange failed: " + cause, cause);
     }
 }

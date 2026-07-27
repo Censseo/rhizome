@@ -37,6 +37,7 @@ public final class RocksDbContractStore implements ContractStore, AutoCloseable 
     private static final byte[] CF_RECEIPTS = "contract_receipts".getBytes();
 
     private final RocksDB db;
+    private final DBOptions dbOptions;
     private final ColumnFamilyHandle defaultCf;
     private final ColumnFamilyHandle codeCf;
     private final ColumnFamilyHandle storageCf;
@@ -69,17 +70,19 @@ public final class RocksDbContractStore implements ContractStore, AutoCloseable 
             new ColumnFamilyDescriptor(CF_JOURNAL),
             new ColumnFamilyDescriptor(CF_RECEIPTS));
         List<ColumnFamilyHandle> handles = new ArrayList<>();
-        // DBOptions is NOT closed after open: closing it while the DB is live corrupts the
-        // native heap (rocksdbjni keeps referencing it) — the audit F12 leak note is
-        // superseded; the object is reclaimed with the process/DB.
+        // DBOptions is kept and closed in close() AFTER db.close(): never while the DB is live
+        // (rocksdbjni keeps referencing it — closing it live corrupts the native heap), and not
+        // at all was a native-handle leak (audit F12).
+        DBOptions options = new DBOptions()
+            .setCreateIfMissing(true)
+            .setCreateMissingColumnFamilies(true);
         try {
-            DBOptions options = new DBOptions()
-                .setCreateIfMissing(true)
-                .setCreateMissingColumnFamilies(true);
             this.db = RocksDB.open(options, path, descriptors, handles);
         } catch (RocksDBException e) {
+            options.close();
             throw new IOException("Failed to open contract store at " + path, e);
         }
+        this.dbOptions = options;
         this.defaultCf = handles.get(0);
         this.codeCf = handles.get(1);
         this.storageCf = handles.get(2);
@@ -137,7 +140,10 @@ public final class RocksDbContractStore implements ContractStore, AutoCloseable 
     }
 
     private static byte[] slot(PublicAddress contract, byte[] key) {
-        byte[] addr = contract.toBytes();
+        // record-accessor read: the internal address array is copied straight into the composite,
+        // never retained or mutated — avoiding toBytes()'s defensive 25-byte clone on this
+        // per-storage-op hot path is provably alias-safe here (audit perf).
+        byte[] addr = contract.address();
         byte[] out = new byte[addr.length + key.length];
         System.arraycopy(addr, 0, out, 0, addr.length);
         System.arraycopy(key, 0, out, addr.length, key.length);
@@ -165,6 +171,27 @@ public final class RocksDbContractStore implements ContractStore, AutoCloseable 
     @Override
     public byte[] getStorage(PublicAddress contract, byte[] key) {
         return get(storageCf, slot(contract, key));
+    }
+
+    @Override
+    public List<byte[]> getStorageMulti(List<PublicAddress> contracts, List<byte[]> keys) {
+        if (contracts.size() != keys.size()) {
+            throw new IllegalArgumentException("contracts/keys length mismatch: "
+                + contracts.size() + " vs " + keys.size());
+        }
+        // One native multi-get for the whole journal capture: the default point-read loop made
+        // a K-write block cost K store round-trips at every commit (audit: journal-capture N+1).
+        List<ColumnFamilyHandle> cfs = new ArrayList<>(keys.size());
+        List<byte[]> composite = new ArrayList<>(keys.size());
+        for (int i = 0; i < keys.size(); i++) {
+            cfs.add(storageCf);
+            composite.add(slot(contracts.get(i), keys.get(i)));
+        }
+        try {
+            return db.multiGetAsList(cfs, composite);
+        } catch (RocksDBException e) {
+            throw new IllegalStateException("contract store multi-read failed", e);
+        }
     }
 
     @Override
@@ -331,5 +358,6 @@ public final class RocksDbContractStore implements ContractStore, AutoCloseable 
         writeOptions.close();
         bulkWriteOptions.close();
         db.close();
+        dbOptions.close(); // after the DB: rocksdbjni references the options while the DB is live
     }
 }

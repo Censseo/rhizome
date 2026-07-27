@@ -34,6 +34,14 @@ public final class RateLimiter {
      * single conservative bucket, so total overflow traffic stays bounded.
      */
     private final Window overflow = new Window(0);
+    /**
+     * Amortized-sweep watermark (epoch millis of the last full sweep). Volatile: the due
+     * check runs OUTSIDE the monitor, so the common path never enters {@code synchronized}
+     * just to sweep — under an IP-spray every request is a table miss, and running the
+     * O(maxClients) sweep inside the check-and-insert monitor made every sprayed request
+     * pay it on the event loop (audit: sweep under the global monitor).
+     */
+    private volatile long lastSweepAt = Long.MIN_VALUE;
 
     private static final class Window {
         volatile long start;
@@ -66,15 +74,26 @@ public final class RateLimiter {
      */
     public boolean allow(String client, int cost) {
         long now = nowMillis.getAsLong();
+        maybeSweep(now);
         Window window = clients.get(client);
         if (window == null) {
-            if (clients.size() >= maxClients && !sweepExpired(now)) {
-                // Fail closed: meter every untracked client against one shared bucket rather
-                // than allowing them all unlimited (which an IP-spray could exploit to disable
-                // rate limiting globally). Conservative but bounded.
-                return count(overflow, now, cost);
+            // Check-and-insert under one monitor: a lock-free size() >= maxClients check racing
+            // computeIfAbsent let concurrent admissions push the table past its bound (audit).
+            // The monitor now covers ONLY the check+insert; expiry is reclaimed by the
+            // amortized sweep above, never inside this critical section.
+            synchronized (clients) {
+                window = clients.get(client);
+                if (window == null) {
+                    if (clients.size() >= maxClients) {
+                        // Fail closed: meter every untracked client against one shared bucket rather
+                        // than allowing them all unlimited (which an IP-spray could exploit to disable
+                        // rate limiting globally). Conservative but bounded; the next amortized
+                        // sweep reclaims any expired entries and tracking resumes.
+                        return count(overflow, now, cost);
+                    }
+                    window = clients.computeIfAbsent(client, k -> new Window(now));
+                }
             }
-            window = clients.computeIfAbsent(client, k -> new Window(now));
         }
         return count(window, now, cost);
     }
@@ -110,11 +129,24 @@ public final class RateLimiter {
         }
     }
 
-    /** Removes clients whose sliding window has fully elapsed. Returns true if any were removed. */
-    private boolean sweepExpired(long now) {
-        int before = clients.size();
-        clients.values().removeIf(w -> now - w.start >= 2 * windowMs);
-        return clients.size() < before;
+    /**
+     * Amortized expiry sweep: at most one full pass per window. The due check reads the
+     * volatile watermark outside the monitor; only a due sweep takes the lock (re-checked
+     * inside, so concurrent callers cannot stampede). Sweeping only REMOVES entries, so it
+     * can never race the check-and-insert bound — the monitor-protected size check in
+     * {@link #allow} is what keeps the table at {@code maxClients}.
+     */
+    private void maybeSweep(long now) {
+        if (now < lastSweepAt + windowMs) {
+            return;
+        }
+        synchronized (clients) {
+            if (now < lastSweepAt + windowMs) {
+                return;
+            }
+            lastSweepAt = now;
+            clients.values().removeIf(w -> now - w.start >= 2 * windowMs);
+        }
     }
 
     public int trackedClients() {

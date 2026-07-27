@@ -31,11 +31,27 @@ Configured via environment variables:
 | `RHIZOME_MINER` | — | reward address (enables block production) |
 | `RHIZOME_PEERS` | — | comma-separated initial peers |
 | `RHIZOME_ADVERTISE` | — | public URL advertised to peers |
+| `RHIZOME_ALLOWED_HOSTS` | loopback + advertised + LAN addresses | comma-separated extra `Host` authorities for the DNS-rebinding guard (e.g. a reverse proxy's public name or a Docker/NAT address, each as `name` or `name:port`); the literal value `off` disables the Host allowlist entirely (only the Origin/marker CSRF guard remains — not recommended) |
 | `RHIZOME_BLOCK_INTERVAL_MS` | block target | producer pacing override (local devnets) |
 
 ```bash
 RHIZOME_NETWORK=testnet RHIZOME_MINER=<address> ./gradlew :app-node:run
 ```
+
+### Node health signals
+
+`GET /stats` exposes two operator fields:
+
+- `reorgInProgress` (`bool`) — a reorg window is open (pop → body-apply → restore, up to
+  one header window of 20 000 blocks). While it is open the node keeps serving the pre-reorg
+  tip, rejects incoming tip blocks with `IS_SYNCING`, and **block production pauses** — a
+  miner that stops producing during a deep resync is usually in this state, not broken.
+- `degraded` (`string|null`) — set only when a reorg restore *failed* (the node is running
+  truncated and needs attention). `null` means healthy.
+
+Snapshot spools (`rhizome-snapshot-*.chunks`) live under `$RHIZOME_DATA/snapshots` — not the
+OS temp dir, which is commonly a tmpfs — and stale spools from an unclean shutdown are swept
+at startup.
 
 ## Dashboard
 

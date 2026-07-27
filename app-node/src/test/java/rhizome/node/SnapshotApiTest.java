@@ -68,6 +68,7 @@ class SnapshotApiTest {
     private ChainEngine engine;
     private NodeService node;
     private InMemoryLedger ledger;
+    private DomainStateAdapter snapshotSource;
     private PublicAddress sender;
 
     @BeforeEach
@@ -111,7 +112,8 @@ class SnapshotApiTest {
         }
 
         node = new NodeService(engine, new MemPool(PARAMS, new SignatureVerifier(), engine, 1000));
-        node.setSnapshotSource(new DomainStateAdapter(ledger, nonces, boxStore, tokenStore, null, null));
+        snapshotSource = new DomainStateAdapter(ledger, nonces, boxStore, tokenStore, null, null);
+        node.setSnapshotSource(snapshotSource);
 
         try (ServerSocket probe = new ServerSocket(0)) {
             port = probe.getLocalPort();
@@ -155,6 +157,26 @@ class SnapshotApiTest {
     }
 
     @Test
+    void snapshotChunkCostIsProportionalToServedBytes() {
+        // Audit F3: a flat per-request cost made the route a bandwidth amplifier (~200 MiB/s
+        // per IP at the default 1000 units/s). The cost is now ceil(bytes / 64 KiB), floored —
+        // so the per-IP token budget maps to a bounded egress rate.
+        io.activej.http.HttpRequest chunk0 =
+            io.activej.http.HttpRequest.get("http://x/state/snapshot/chunk?index=0").build();
+        // No snapshot yet: the flat fallback (75) — the handler answers 404 without serving bytes.
+        assertEquals(75, NodeApi.requestCost(node, chunk0));
+
+        assertTrue(node.materializeSnapshot());
+        var snap = node.materializedSnapshot();
+        long expected0 = Math.max(2, (snap.chunkLength(0) + 64L * 1024 - 1) / (64L * 1024));
+        assertEquals((int) expected0, NodeApi.requestCost(node, chunk0),
+            "cost must track the chunk's actual size at one unit per 64 KiB (min 2)");
+        // An out-of-range index serves no bytes (404): back to the flat fallback.
+        assertEquals(75, NodeApi.requestCost(node,
+            io.activej.http.HttpRequest.get("http://x/state/snapshot/chunk?index=9999").build()));
+    }
+
+    @Test
     void materialisationIsAConsistentPointInTimeCapture() {
         assertTrue(node.materializeSnapshot());
         long pivot = node.snapshotPivot();
@@ -164,6 +186,69 @@ class SnapshotApiTest {
         assertEquals(pivot, node.snapshotPivot());
         assertTrue(node.materializeSnapshot());
         assertEquals(pivot, node.snapshotPivot(), "same height, re-captured at same pivot");
-        assertEquals(snapBefore.chunks().size(), node.materializedSnapshot().chunks().size());
+        assertEquals(snapBefore.chunkCount(), node.materializedSnapshot().chunkCount());
+    }
+
+    @Test
+    void spoolDirIsUsedAndStaleSpoolsAreSweptAtWiring() throws Exception {
+        // The spool dir lives with the node's data (the OS temp dir is often a tmpfs, which
+        // would silently put the whole state back in RAM). A SIGKILLed predecessor leaves
+        // rhizome-snapshot-* files behind; wiring the dir sweeps them exactly once.
+        java.nio.file.Path dir = java.nio.file.Files.createTempDirectory("rhizome-spool-test-");
+        try {
+            java.nio.file.Path stale = java.nio.file.Files.write(
+                dir.resolve("rhizome-snapshot-stale.chunks"), new byte[]{1, 2, 3});
+            java.nio.file.Path unrelated = java.nio.file.Files.write(
+                dir.resolve("unrelated-file"), new byte[]{4});
+
+            node.setSnapshotSpoolDir(dir);
+            assertTrue(java.nio.file.Files.notExists(stale), "stale spool swept at wiring");
+            assertTrue(java.nio.file.Files.exists(unrelated), "unrelated files are untouched");
+
+            assertTrue(node.materializeSnapshot());
+            var snap = node.materializedSnapshot();
+            assertEquals(dir, snap.file().getParent(), "new spools land in the wired dir");
+            assertTrue(java.nio.file.Files.exists(snap.file()));
+        } finally {
+            node.close();
+            try (var entries = java.nio.file.Files.list(dir)) {
+                for (var p : entries.toList()) {
+                    java.nio.file.Files.deleteIfExists(p);
+                }
+            }
+            java.nio.file.Files.deleteIfExists(dir);
+        }
+    }
+
+    @Test
+    void fileBackedSnapshotServesTheSameBytesAndReplacesItsSpool() {
+        // The spool-backed materialisation must serve exactly the bytes the in-memory export
+        // produces: re-run the same exporter over the same source (no blocks are being applied,
+        // so the view is unchanged) and compare chunk for chunk.
+        assertTrue(node.materializeSnapshot());
+        var snap = node.materializedSnapshot();
+        assertTrue(java.nio.file.Files.exists(snap.file()), "chunks are spooled to a file");
+        var expected = rhizome.core.state.snapshot.StateSnapshotExporter.export(
+            snapshotSource, NodeService.SNAPSHOT_CHUNK_ENTRIES);
+        assertEquals(expected.size(), snap.chunkCount(), "same chunking as the in-memory export");
+        for (int i = 0; i < expected.size(); i++) {
+            assertArrayEquals(expected.get(i).encode(), snap.chunkBytes(i),
+                "chunk " + i + " served from the spool equals the in-memory export");
+        }
+
+        // Re-materialising deletes the replaced spool; the live one stays servable.
+        java.nio.file.Path replaced = snap.file();
+        assertTrue(node.materializeSnapshot());
+        var next = node.materializedSnapshot();
+        assertTrue(java.nio.file.Files.notExists(replaced),
+            "the replaced snapshot's spool must be deleted");
+        assertTrue(java.nio.file.Files.exists(next.file()));
+        assertEquals(snap.chunkCount(), next.chunkCount());
+
+        // Closing the service releases the live spool.
+        node.close();
+        assertTrue(java.nio.file.Files.notExists(next.file()),
+            "close() must delete the live snapshot spool");
+        assertNull(node.materializedSnapshot());
     }
 }

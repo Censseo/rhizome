@@ -11,6 +11,12 @@ public final class InMemoryContractStore implements ContractStore {
 
     private final Map<PublicAddress, byte[]> code = new HashMap<>();
     private final Map<Slot, byte[]> storage = new HashMap<>();
+    // Journal/receipt columns, mirroring the durable store's hooks: the processor's RAM maps
+    // are byte-budgeted caches that load through these on a miss (eviction, or a revert after
+    // simulated restart), so the fallback must exist even in this non-durable configuration
+    // (audit: bounded RAM retention of journals/receipts).
+    private final Map<Long, byte[]> journals = new HashMap<>();
+    private final Map<Long, byte[]> receipts = new HashMap<>();
 
     /** A (contract, storage-key) pair with value-based equality, for use as a map key. */
     private record Slot(PublicAddress contract, byte[] key) {
@@ -62,5 +68,43 @@ public final class InMemoryContractStore implements ContractStore {
     @Override
     public void forEachStorage(StorageConsumer consumer) {
         storage.forEach((slot, value) -> consumer.accept(slot.contract(), slot.key().clone(), value.clone()));
+    }
+
+    @Override
+    public void putJournal(long height, byte[] serialized) {
+        journals.put(height, serialized.clone());
+    }
+
+    @Override
+    public byte[] getJournal(long height) {
+        byte[] j = journals.get(height);
+        return j == null ? null : j.clone();
+    }
+
+    @Override
+    public void deleteJournal(long height) {
+        journals.remove(height);
+    }
+
+    @Override
+    public void putReceipts(long height, byte[] encoded) {
+        receipts.put(height, encoded.clone());
+    }
+
+    @Override
+    public byte[] getReceipts(long height) {
+        byte[] r = receipts.get(height);
+        return r == null ? null : r.clone();
+    }
+
+    @Override
+    public void deleteReceipts(long height) {
+        receipts.remove(height);
+    }
+
+    @Override
+    public void pruneThrough(long maxHeight) {
+        journals.keySet().removeIf(h -> h <= maxHeight);
+        receipts.keySet().removeIf(h -> h <= maxHeight);
     }
 }

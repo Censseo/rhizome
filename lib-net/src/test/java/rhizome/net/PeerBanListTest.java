@@ -109,6 +109,58 @@ class PeerBanListTest {
     }
 
     @Test
+    void banMirrorSurvivesAFullOffenceTable() {
+        // With the offence table full of fresh (unsweepable) entries, a ban must STILL be
+        // mirrored onto the offender's name key: the anti-dodge protection (audit L1) used to
+        // lapse exactly under a spray, because the mirror was skipped whenever the table was full.
+        AtomicLong clock = new AtomicLong(0);
+        var bans = new PeerBanList(100, 60_000, 4, clock::get);
+        for (int i = 0; i < 4; i++) {
+            bans.misbehave("http://10.0.1." + i + ":3000", 10);
+        }
+        // Table full: the offence itself can only be metered via the overflow bucket, but the
+        // mirrored name-key ban must still land and condemn the OFFENDING host.
+        assertTrue(bans.misbehave("http://10.9.9.9:3000", 100));
+        assertTrue(bans.isBanned("http://10.9.9.9:3000"),
+            "the mirrored ban must condemn the offender even with a full offence table");
+        assertFalse(bans.isBanned("http://10.9.9.8:3000"),
+            "an innocent untracked host is still never banned by overflow pressure");
+    }
+
+    @Test
+    void concurrentSprayKeepsTablesBoundedAndActiveBansStick() throws Exception {
+        // Same spray-under-pressure case as RateLimiter: misses under capacity pressure used to
+        // pay an O(maxTracked) sweep inside the check-and-insert monitor per request. The bounds
+        // must hold under the race, and an active ban must survive (active bans are never swept).
+        var bans = new PeerBanList(100, 60_000, 64);
+        bans.ban("http://10.0.0.9:3000");
+        int threads = 8, perThread = 500;
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(threads);
+        var start = new java.util.concurrent.CountDownLatch(1);
+        var futures = new java.util.ArrayList<java.util.concurrent.Future<?>>();
+        for (int t = 0; t < threads; t++) {
+            int base = t * perThread;
+            futures.add(pool.submit(() -> {
+                start.await();
+                for (int i = 0; i < perThread; i++) {
+                    int n = base + i;
+                    bans.misbehave("http://10.1." + (n / 256) + "." + (n % 256) + ":3000", 10);
+                }
+                return null;
+            }));
+        }
+        start.countDown();
+        for (var f : futures) {
+            f.get(30, java.util.concurrent.TimeUnit.SECONDS);
+        }
+        pool.shutdownNow();
+        assertTrue(bans.trackedPeers() <= 64,
+            "the offence table must stay bounded under a concurrent spray");
+        assertTrue(bans.isBanned("http://10.0.0.9:3000"),
+            "an active ban must survive sweep pressure");
+    }
+
+    @Test
     void registryRejectsAndEvictsBannedPeers() {
         var bans = new PeerBanList(100, 60_000, 128, () -> 0L);
         var registry = new PeerRegistry("http://10.9.0.1:3000", 128, bans);

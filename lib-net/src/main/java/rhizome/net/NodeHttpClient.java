@@ -8,6 +8,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 import org.slf4j.Logger;
@@ -28,6 +29,9 @@ public final class NodeHttpClient {
 
     /** Response cap: API replies are server-side bounded (paginated lists, single objects). */
     private static final long RESPONSE_CAP = 4L * 1024 * 1024;
+
+    /** Backs the once-per-process warning for the cleartext-loopback TOCTOU caveat (below). */
+    private static final AtomicBoolean WARNED_LOOPBACK_TOCTOU = new AtomicBoolean();
 
     private final String baseUrl;
     private final HttpClient http;
@@ -53,6 +57,15 @@ public final class NodeHttpClient {
      * LOOPBACK host (the local dev/wallet pattern, where nothing leaves the machine), but is
      * stripped — with a warning — from a cleartext request to a remote host rather than
      * leaked. Never logs the token itself.
+     *
+     * <p>Known limitation (TOCTOU): the loopback verdict is resolved ONCE here, at
+     * construction, but the JDK client re-resolves the hostname on every request — a hostname
+     * that later flips to a non-loopback address would receive the token in cleartext.
+     * Re-checking at dial time would mean replacing the client transport (out of scope for a
+     * CLI-side client), and pinning the IP was rejected: the node API may sit behind
+     * name-based virtual hosting. Mitigation: pass an IP literal ({@code http://127.0.0.1}) —
+     * literals cannot flip — which deployed configs already do; a hostname verdict therefore
+     * logs a one-time warning.
      */
     private static String cleartextGuard(String baseUrl, String token) {
         if (token == null || token.isEmpty()) {
@@ -74,7 +87,15 @@ public final class NodeHttpClient {
                 // Resolution-based, not a literal allowlist: 127.0.0.2, ::ffff:127.0.0.1 and
                 // any hostname resolving to loopback are all local (cleartext never leaves
                 // the machine). An unresolvable host is not provably loopback — strip.
-                if (java.net.InetAddress.getByName(host).isLoopbackAddress()) {
+                java.net.InetAddress addr = java.net.InetAddress.getByName(host);
+                if (addr.isLoopbackAddress()) {
+                    if (!addr.getHostAddress().equals(host)
+                            && WARNED_LOOPBACK_TOCTOU.compareAndSet(false, true)) {
+                        log.warn("bearer token trusted to loopback '{}' in cleartext: the verdict "
+                            + "was resolved once at construction and the dial re-resolves the host "
+                            + "each request — a DNS flip to a non-loopback address would leak the "
+                            + "token. Use an IP literal (e.g. http://127.0.0.1) to pin it.", host);
+                    }
                     return token;
                 }
             } catch (java.net.UnknownHostException e) {

@@ -30,7 +30,7 @@ public class MerkleTree {
 
     /** Leaf hash: {@code SHA-256(0x00 || txHash)}. */
     public static SHA256Hash leafHash(SHA256Hash txHash) {
-        byte[] t = txHash.toBytes();
+        byte[] t = txHash.raw(); // copied into `in` below, never retained (hot path — see raw())
         byte[] in = new byte[1 + t.length];
         in[0] = LEAF_PREFIX;
         System.arraycopy(t, 0, in, 1, t.length);
@@ -39,8 +39,8 @@ public class MerkleTree {
 
     /** Internal-node hash: {@code SHA-256(0x01 || left || right)}. */
     public static SHA256Hash nodeHash(SHA256Hash left, SHA256Hash right) {
-        byte[] l = left.toBytes();
-        byte[] r = right.toBytes();
+        byte[] l = left.raw(); // same: consumed by the arraycopy immediately
+        byte[] r = right.raw();
         byte[] in = new byte[1 + l.length + r.length];
         in[0] = NODE_PREFIX;
         System.arraycopy(l, 0, in, 1, l.length);

@@ -45,6 +45,16 @@ class PowCostsTest {
     }
 
     @Test
+    void pufferfishEntryPointRejectsOutOfRangeCostM() {
+        // Same defense in depth for the memory cost: 4 * 2^(costM+10) bytes of s-boxes must not
+        // overflow the shift or OOM the JVM on one hash call.
+        assertThrows(IllegalArgumentException.class,
+            () -> Pufferfish2.newHash(new byte[8], 0, PowCosts.MIN_COST_M - 1));
+        assertThrows(IllegalArgumentException.class,
+            () -> Pufferfish2.newHash(new byte[8], 0, PowCosts.MAX_COST_M + 1));
+    }
+
+    @Test
     void differentCostsGiveDifferentOutputs() {
         byte[] input = new byte[64];
         for (int i = 0; i < input.length; i++) {

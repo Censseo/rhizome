@@ -1,5 +1,6 @@
 package rhizome.net;
 
+import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.math.BigInteger;
@@ -10,6 +11,7 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 import rhizome.core.common.Constants;
@@ -20,6 +22,7 @@ import rhizome.core.block.Block;
 import rhizome.core.block.BlockCodec;
 import rhizome.core.block.BlockHeader;
 import rhizome.core.block.HeaderCodec;
+import rhizome.core.blockchain.LocalSaturationException;
 import rhizome.core.blockchain.PeerSource;
 import rhizome.crypto.SHA256Hash;
 
@@ -50,7 +53,10 @@ public final class HttpPeerSource implements PeerSource {
      * Wall-clock deadline for one WHOLE peer exchange (send + full response-body read).
      * {@code HttpRequest.timeout} alone only covers up to the response headers, so a slow-drip
      * peer could otherwise stall the single sync thread in {@code InputStream.read} forever;
-     * the deadline is enforced by {@link BodyReadDeadline} (audit F1).
+     * the deadline is enforced by {@link BodyReadDeadline} (audit F1). The /sync window is the
+     * one exception: it is legitimately huge (up to BLOCKS_PER_FETCH full blocks), so it runs
+     * under this value as an IDLE bound instead of a total one — the deadline slips while the
+     * peer keeps delivering and a stalled drip still dies (audit: fixed /sync deadline).
      */
     private static final Duration REQUEST_DEADLINE = Duration.ofSeconds(30);
     /**
@@ -184,22 +190,29 @@ public final class HttpPeerSource implements PeerSource {
                 tokenPolicy.tokenFor(originalUrl))
             .timeout(requestDeadline).GET().build();
         try {
-            // The request timeout only covers up to the response headers; bound the WHOLE
-            // exchange (send + streamed body decode) with a wall-clock deadline so a slow-drip
-            // peer cannot stall the sync thread in InputStream.read forever (audit F1).
+            // The request timeout only covers up to the response headers; bound the exchange
+            // with an IDLE deadline (audit F1 + fixed-window fix): the /sync window is
+            // legitimately huge, so a fixed whole-exchange deadline never converges on a slow
+            // link. Every chunk read stamps forward progress; only a stalled drip dies.
             AtomicReference<AutoCloseable> openBody = new AtomicReference<>();
-            return BodyReadDeadline.call(requestDeadline, openBody, () -> {
+            AtomicLong lastActivity = new AtomicLong(System.nanoTime());
+            return BodyReadDeadline.callIdle(requestDeadline, openBody, lastActivity, () -> {
                 HttpResponse<InputStream> response = client.send(request, HttpResponse.BodyHandlers.ofInputStream());
                 if (response.statusCode() != 200) {
                     response.body().close();
                     throw new IOException("peer " + path + " returned " + response.statusCode());
                 }
-                InputStream in = response.body();
+                InputStream in = new ProgressInputStream(response.body(), lastActivity);
                 openBody.set(in); // publish so a deadline expiry can cancel the JDK exchange
                 try (in) {
                     return BlockCodec.decodeStreamed(in, Constants.BLOCKS_PER_FETCH, Constants.MAX_BLOCK_SIZE_BYTES);
                 }
             });
+        } catch (BodyReadSaturatedException e) {
+            // LOCAL backpressure, before any I/O reached the peer: distinct from
+            // PeerUnavailableException so the sync round cannot read it as a peer failure
+            // and penalise an honest peer for our own load.
+            throw new LocalSaturationException("local body-read pool saturated: " + path, e);
         } catch (IOException e) {
             throw new PeerUnavailableException("peer request failed: " + path, e);
         } catch (InterruptedException e) {
@@ -327,6 +340,9 @@ public final class HttpPeerSource implements PeerSource {
                     return readBounded(in, maxBytes, path);
                 }
             });
+        } catch (BodyReadSaturatedException e) {
+            // LOCAL backpressure (see blocks()): never a peer fault.
+            throw new LocalSaturationException("local body-read pool saturated: " + path, e);
         } catch (IOException e) {
             throw new PeerUnavailableException("peer request failed: " + path, e);
         } catch (InterruptedException e) {
@@ -343,6 +359,38 @@ public final class HttpPeerSource implements PeerSource {
             throw new IOException("peer " + path + " response exceeds " + maxBytes + " bytes");
         }
         return data;
+    }
+
+    /**
+     * Filter stream stamping {@code lastActivityNanos} on every successful read, so the idle
+     * deadline over the /sync body ({@link BodyReadDeadline#callIdle}) sees a slow-but-alive
+     * peer as progressing and only a stalled drip expires.
+     */
+    private static final class ProgressInputStream extends FilterInputStream {
+        private final AtomicLong lastActivityNanos;
+
+        ProgressInputStream(InputStream in, AtomicLong lastActivityNanos) {
+            super(in);
+            this.lastActivityNanos = lastActivityNanos;
+        }
+
+        @Override
+        public int read() throws IOException {
+            int r = super.read();
+            if (r >= 0) {
+                lastActivityNanos.set(System.nanoTime());
+            }
+            return r;
+        }
+
+        @Override
+        public int read(byte[] b, int off, int len) throws IOException {
+            int n = super.read(b, off, len);
+            if (n > 0) {
+                lastActivityNanos.set(System.nanoTime());
+            }
+            return n;
+        }
     }
 
     /** Signals a transport-level failure talking to the peer (distinct from a bad chain). */

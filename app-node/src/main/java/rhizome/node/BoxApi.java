@@ -80,15 +80,20 @@ final class BoxApi {
     /**
      * Boxes matching a scan: {@code GET /scan/boxes?scanId=N&limit=&after=<boxIdHex>}. The
      * response's {@code next} cursor (a box id) resumes a bounded scan; absent when done.
+     * Restricted to the scan's owner: {@code /scan/register} is unauthenticated, so an
+     * un-gated query let any caller drive the bounded scan loop (and read the matches) of
+     * every registered scan whose id it learned or ground out (audit: scan query gating) —
+     * like {@code /scan/list} and {@code /scan/deregister}, a foreign id is answered
+     * indistinguishably from an unknown one.
      */
-    static HttpResponse scanBoxes(NodeService node, HttpRequest req) {
+    static HttpResponse scanBoxes(NodeService node, String clientKey, HttpRequest req) {
         // Bounds-check BEFORE the long→int cast: an out-of-int-range scanId would silently wrap
         // into another client's valid id (audit: unchecked index cast).
         long rawScanId = parseLong(req.getQueryParameter("scanId"));
         if (rawScanId < 0 || rawScanId > Integer.MAX_VALUE) {
             return badRequest("scanId out of range");
         }
-        rhizome.core.box.ScanPredicate predicate = node.scanPredicate((int) rawScanId);
+        rhizome.core.box.ScanPredicate predicate = node.scanPredicate(clientKey, (int) rawScanId);
         if (predicate == null) {
             return badRequest("unknown scanId");
         }

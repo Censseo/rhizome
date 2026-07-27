@@ -217,6 +217,17 @@ class NodeApiTest {
     }
 
     @Test
+    void addPeerIsWeightedForItsBlockingDnsWork() {
+        // /add_peer queues a blocking DNS resolve on a single off-loop thread behind a bounded
+        // queue — the flat cost of 1 let one IP enqueue ~1000 resolves/s (audit: add_peer cost
+        // vs blocking DNS). It is weighted like /submit (8).
+        assertEquals(8, NodeApi.requestCost(HttpRequest.post("http://x/add_peer").build()));
+        // /state/snapshot/chunk falls back to the flat 75 when the chunk is not resolvable at the
+        // gate (no snapshot materialised here) — the handler answers 404 without serving bytes.
+        assertEquals(75, NodeApi.requestCost(HttpRequest.get("http://x/state/snapshot/chunk?index=0").build()));
+    }
+
+    @Test
     void readonlyGasGateShedsCallsOnceTheGlobalBudgetIsSpent() {
         // Aggregate (all-IP) dry-run gas budget: with a global budget of 100 gas/window, the first
         // call reserving 60 is admitted and the second is shed (the /call_readonly handler then
@@ -255,9 +266,27 @@ class NodeApiTest {
             .withHeader(origin, "http://x").withHeader(host, "x").withHeader(marker, "1")
             .withBody(t.serialize().toBuffer()).build()).getCode());
 
+        // Default-port normalization (audit: CSRF default-port false positive): a browser omits
+        // the scheme default port in Origin while a proxy/explicit client may include it in Host
+        // — these are still the SAME origin and must not be refused as cross-site. (Each passing
+        // case submits a fresh transaction: a duplicate body would be a 400 ALREADY_IN_QUEUE.)
+        assertEquals(200, call(HttpRequest.post("http://x/add_transaction")
+            .withHeader(origin, "http://x").withHeader(host, "x:80").withHeader(marker, "1")
+            .withBody(signedSend(100_000, 1).serialize().toBuffer()).build()).getCode());
+        assertEquals(200, call(HttpRequest.post("http://x/add_transaction")
+            .withHeader(origin, "https://x").withHeader(host, "x:443").withHeader(marker, "1")
+            .withBody(signedSend(100_000, 2).serialize().toBuffer()).build()).getCode());
+        assertEquals(200, call(HttpRequest.post("http://x/add_transaction")
+            .withHeader(origin, "http://x:3000").withHeader(host, "x:3000").withHeader(marker, "1")
+            .withBody(signedSend(100_000, 3).serialize().toBuffer()).build()).getCode());
+        // A genuinely different port is still cross-site (fail-closed on mismatch).
+        assertEquals(403, call(HttpRequest.post("http://x/add_transaction")
+            .withHeader(origin, "http://x").withHeader(host, "x:3000").withHeader(marker, "1")
+            .withBody(signedSend(100_000, 4).serialize().toBuffer()).build()).getCode());
+
         // A non-browser client (no Origin — a peer/CLI) is never blocked.
         assertEquals(200, call(HttpRequest.post("http://x/add_transaction")
-            .withBody(signedSend(100_000, 1).serialize().toBuffer()).build()).getCode());
+            .withBody(signedSend(100_000, 5).serialize().toBuffer()).build()).getCode());
     }
 
     @Test
@@ -470,5 +499,80 @@ class NodeApiTest {
         // Well-formed input reaches the availability check (no contracts wired in this harness).
         assertEquals(503, call(HttpRequest.post("http://x/call_readonly")
             .withBody(("{\"to\":\"" + to + "\"}").getBytes()).build()).getCode());
+    }
+
+    @Test
+    void dryRunIsShedWith503WhenTheAdmissionSlotsAreFull() throws Exception {
+        // The dry-run backlog is bounded at ADMISSION (NodeService.MAX_CONCURRENT_DRY_RUNS
+        // permits taken before the consensus lock): once every slot is running or parked on
+        // the lock, the next call must be shed immediately — Optional.empty here, 503 at the
+        // API — instead of queueing another worker behind a 25M-gas VM run (audit).
+        var entered = new java.util.concurrent.CountDownLatch(1);
+        var release = new java.util.concurrent.CountDownLatch(1);
+        var blocking = new rhizome.core.blockchain.ContractProcessor() {
+            @Override public void begin() {}
+            @Override public ContractResult run(PublicAddress from, rhizome.core.transaction.TransactionKind kind,
+                                                PublicAddress to, byte[] data, long value, long gasLimit, long nonce) {
+                throw new UnsupportedOperationException();
+            }
+            @Override public void commit(long blockHeight) {}
+            @Override public void discard() {}
+            @Override public void revertBlock(long blockHeight) {}
+            @Override public List<ContractReceipt> receipts(long blockHeight) {
+                return List.of();
+            }
+            @Override public ContractResult dryRun(PublicAddress from, PublicAddress to, byte[] input,
+                                                   long value, long gasLimit) {
+                entered.countDown();
+                try {
+                    release.await();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                return ContractResult.ok(1, new byte[0], null);
+            }
+        };
+        var node = new NodeService(engine, mempool);
+        node.setContracts(blocking);
+
+        // Occupy every admission slot: the first dry-run blocks inside the consensus lock, the
+        // rest park on it holding their permits.
+        var results = new java.util.concurrent.ConcurrentLinkedQueue<
+            java.util.Optional<rhizome.core.blockchain.ContractProcessor.ContractResult>>();
+        var threads = new java.util.ArrayList<Thread>();
+        for (int i = 0; i < NodeService.MAX_CONCURRENT_DRY_RUNS; i++) {
+            Thread t = new Thread(() -> results.add(node.dryRun(PublicAddress.empty(),
+                PublicAddress.empty(), new byte[0], 0, 1_000_000L)));
+            t.setDaemon(true);
+            threads.add(t);
+            t.start();
+        }
+        assertTrue(entered.await(10, java.util.concurrent.TimeUnit.SECONDS),
+            "the first dry-run must be running inside the consensus lock");
+        long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10);
+        while (node.dryRunSlotsAvailable() > 0 && System.nanoTime() < deadline) {
+            Thread.sleep(5);
+        }
+        assertEquals(0, node.dryRunSlotsAvailable(), "all dry-run admission slots are taken");
+
+        // The next dry-run sheds immediately, and the API maps the shed to 503 (retryable).
+        assertTrue(node.dryRun(PublicAddress.empty(), PublicAddress.empty(), new byte[0], 0,
+            1_000_000L).isEmpty(), "a dry-run past the bound must not queue");
+        String to = "00".repeat(25);
+        assertEquals(503, ContractApi.callReadonly(node, new JSONObject()
+            .put("to", to).put("gasLimit", 1_000_000L)).getCode());
+
+        // Draining releases every slot: the parked dry-runs complete and new ones are admitted.
+        release.countDown();
+        for (Thread t : threads) {
+            t.join(10_000);
+        }
+        assertEquals(NodeService.MAX_CONCURRENT_DRY_RUNS, results.size());
+        for (var r : results) {
+            assertTrue(r.isPresent(), "an admitted dry-run completes once the lock frees up");
+        }
+        assertEquals(NodeService.MAX_CONCURRENT_DRY_RUNS, node.dryRunSlotsAvailable());
+        assertTrue(node.dryRun(PublicAddress.empty(), PublicAddress.empty(), new byte[0], 0,
+            1_000_000L).isPresent());
     }
 }

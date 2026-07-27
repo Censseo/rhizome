@@ -44,6 +44,7 @@ public final class RocksDbStateStore implements SmtNodeStore, RootStore, AutoClo
     private static final byte[] CF_ROOTS = "state_roots".getBytes();
 
     private final RocksDB db;
+    private final DBOptions dbOptions;
     private final ColumnFamilyHandle defaultCf;
     private final ColumnFamilyHandle nodesCf;
     private final ColumnFamilyHandle rootsCf;
@@ -98,15 +99,17 @@ public final class RocksDbStateStore implements SmtNodeStore, RootStore, AutoClo
             new ColumnFamilyDescriptor(CF_NODES),
             new ColumnFamilyDescriptor(CF_ROOTS));
         List<ColumnFamilyHandle> handles = new ArrayList<>();
-        // DBOptions is NOT closed after open: closing it while the DB is live corrupts the
-        // native heap (rocksdbjni keeps referencing it) — the audit F12 leak note is
-        // superseded; the object is reclaimed with the process/DB.
+        // DBOptions is kept and closed in close() AFTER db.close(): never while the DB is live
+        // (rocksdbjni keeps referencing it — closing it live corrupts the native heap), and not
+        // at all was a native-handle leak (audit F12).
+        DBOptions options = new DBOptions().setCreateIfMissing(true).setCreateMissingColumnFamilies(true);
         try {
-            DBOptions options = new DBOptions().setCreateIfMissing(true).setCreateMissingColumnFamilies(true);
             this.db = RocksDB.open(options, path, descriptors, handles);
         } catch (RocksDBException e) {
+            options.close();
             throw new IOException("Failed to open state store at " + path, e);
         }
+        this.dbOptions = options;
         this.defaultCf = handles.get(0);
         this.nodesCf = handles.get(1);
         this.rootsCf = handles.get(2);
@@ -597,5 +600,6 @@ public final class RocksDbStateStore implements SmtNodeStore, RootStore, AutoClo
         writeOptions.close();
         bulkWriteOptions.close();
         db.close();
+        dbOptions.close(); // after the DB: rocksdbjni references the options while the DB is live
     }
 }

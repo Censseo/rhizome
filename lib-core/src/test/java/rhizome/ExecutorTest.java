@@ -139,6 +139,31 @@ class ExecutorTest {
     }
 
     @Test
+    void rejectsCoinbaseWithNonTransferKind() {
+        // Poison-block vector (audit: coinbase kind never validated). The wire codec serializes
+        // `kind` independently of the isTransactionFee flag, and the signature verifier passes a
+        // fee tx unconditionally — so a coinbase carrying kind=CALL used to be accepted. The
+        // apply pass skips fee txs before dispatching on kind, so it never executed; but the
+        // reorg-time receipt walk counts receipts per non-fee tx while nothing ever emitted one
+        // for it — any later popBlock then failed deterministically and the node could never
+        // reorg past the block again. Pass 1 must reject it with the other coinbase defects.
+        for (var kind : new rhizome.core.transaction.TransactionKind[] {
+                rhizome.core.transaction.TransactionKind.CALL,
+                rhizome.core.transaction.TransactionKind.DEPLOY,
+                rhizome.core.transaction.TransactionKind.BOX_CREATE,
+                rhizome.core.transaction.TransactionKind.TOKEN_MINT}) {
+            var poisoned = TransactionImpl.builder()
+                .to(miner).amount(new TransactionAmount(params.miningReward(2)))
+                .isTransactionFee(true).kind(kind)
+                .data(new byte[0]).build();
+            assertEquals(ExecutionStatus.INCORRECT_MINING_FEE,
+                execute(block(2, poisoned)), "coinbase kind " + kind + " must be rejected");
+        }
+        // Control: the ordinary TRANSFER coinbase still passes.
+        assertEquals(ExecutionStatus.SUCCESS, execute(block(2, coinbase(2))));
+    }
+
+    @Test
     void rejectsWrongReward() {
         var badCoinbase = Transaction.of(miner, new TransactionAmount(params.miningReward(2) + 1));
         assertEquals(ExecutionStatus.INCORRECT_MINING_FEE, execute(block(2, badCoinbase)));

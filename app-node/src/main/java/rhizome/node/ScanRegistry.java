@@ -78,12 +78,25 @@ final class ScanRegistry {
         }
     }
 
-    ScanPredicate get(int id) {
-        // Querying a scan counts as activity, so an actively-polled scan is never the idle-eviction
-        // victim when the table fills up.
-        Entry e = scans.computeIfPresent(id,
-            (k, v) -> new Entry(v.ownerKey(), v.predicate(), System.currentTimeMillis()));
-        return e == null ? null : e.predicate();
+    /**
+     * The predicate of {@code id} for its owner only — a foreign id is indistinguishable from
+     * an unknown one (non-disclosing, like {@link #deregister}). Only an owner query counts as
+     * activity: refreshing for any caller let a non-owner keep a learned victim scan alive
+     * against idle eviction (audit: scan activity refresh gating). The non-owner fast path is a
+     * pure read — no {@link Entry} allocation on the query path (audit: read-path allocation);
+     * the refresh re-allocates only here, for the owner.
+     */
+    ScanPredicate getForOwner(int id, String clientKey) {
+        Entry e = scans.get(id);
+        if (e == null || !e.ownerKey().equals(clientKey)) {
+            return null;
+        }
+        // Querying their own scan counts as activity, so an actively-polled scan is never the
+        // idle-eviction victim when the table fills up. computeIfPresent re-checks the mapping
+        // so a concurrently deregistered scan is not resurrected.
+        scans.computeIfPresent(id, (k, v) -> v.ownerKey().equals(clientKey)
+            ? new Entry(v.ownerKey(), v.predicate(), System.currentTimeMillis()) : v);
+        return e.predicate();
     }
 
     /**

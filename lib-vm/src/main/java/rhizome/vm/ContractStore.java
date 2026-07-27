@@ -21,6 +21,26 @@ public interface ContractStore {
     byte[] getStorage(PublicAddress contract, byte[] key);
 
     /**
+     * Batch variant of {@link #getStorage}: the values for many (contract, key) pairs — possibly
+     * spanning contracts — as a parallel list (null where unset), in the argument order. Used by
+     * the block commit's journal capture: the default loops the point read (correct everywhere);
+     * durable stores override with a single multi-get so a K-write block costs one store
+     * round-trip instead of K (audit: journal-capture N+1).
+     */
+    default java.util.List<byte[]> getStorageMulti(java.util.List<PublicAddress> contracts,
+                                                   java.util.List<byte[]> keys) {
+        if (contracts.size() != keys.size()) {
+            throw new IllegalArgumentException("contracts/keys length mismatch: "
+                + contracts.size() + " vs " + keys.size());
+        }
+        java.util.List<byte[]> out = new java.util.ArrayList<>(keys.size());
+        for (int i = 0; i < keys.size(); i++) {
+            out.add(getStorage(contracts.get(i), keys.get(i)));
+        }
+        return out;
+    }
+
+    /**
      * Sets a storage slot. Straight-through calls are for session buffers and snapshot
      * seeding ONLY: a durable store writes this path deliberately UNSYNCED (bulk-import
      * throughput), so committing block state through it could silently lose the write on

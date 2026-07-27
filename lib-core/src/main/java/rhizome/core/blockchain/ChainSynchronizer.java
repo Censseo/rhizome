@@ -7,6 +7,7 @@ import java.util.List;
 import java.util.Map;
 
 import rhizome.core.block.Block;
+import rhizome.core.block.BlockHeader;
 import rhizome.core.block.BlockImpl;
 import rhizome.core.block.UncleRef;
 import rhizome.core.common.Constants;
@@ -37,6 +38,8 @@ import rhizome.core.mempool.ExecutionStatus;
  */
 public final class ChainSynchronizer {
 
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(ChainSynchronizer.class);
+
     public enum Result { NO_CHANGE, EXTENDED, REORGED, REORG_TOO_DEEP, INCOMPATIBLE, PEER_INVALID, PEER_PRUNED }
 
     /** Extra blocks fetched beyond the fork depth during pre-validation. */
@@ -46,12 +49,29 @@ public final class ChainSynchronizer {
     private static final int MAX_ANCESTOR_PROBES = 64;
 
     private final ChainEngine engine;
+    /**
+     * Retarget memo shared across sync rounds for the stateless header-chain gate (same design as
+     * HeaderSynchronizer's: self-invalidating by boundary-header hash, guarded by its own monitor).
+     */
+    private final java.util.TreeMap<Long, HeaderChain.DifficultyCheckpoint> difficultyMemo =
+        new java.util.TreeMap<>();
 
     public ChainSynchronizer(ChainEngine engine) {
         this.engine = engine;
     }
 
     public Result syncFrom(PeerSource peer) {
+        try {
+            return syncFromOrThrow(peer);
+        } catch (LocalSaturationException e) {
+            // A LOCAL bound (transport backpressure) stopped the exchange before it reached the
+            // peer — not misbehaviour: no ban score, no PEER_INVALID. Retried next round.
+            log.debug("sync deferred: local exchange saturated; will retry next round");
+            return Result.NO_CHANGE;
+        }
+    }
+
+    private Result syncFromOrThrow(PeerSource peer) {
         // Prefilter against BASE work (not the uncle-inclusive total), matching the base-only adoption
         // gate below — see HeaderSynchronizer.syncFrom for the full rationale (audit 5th-pass,
         // reorg-gate metric). peer.totalWork() bounds the peer's base work from above, so this never
@@ -63,6 +83,8 @@ public final class ChainSynchronizer {
         long forkHeight;
         try {
             forkHeight = findCommonAncestor(peer);
+        } catch (LocalSaturationException e) {
+            throw e; // local backpressure, not a peer fault: syncFrom maps it to NO_CHANGE
         } catch (RuntimeException e) {
             // A peer that throws or returns an empty/garbage response while we probe for the common
             // ancestor must be treated as invalid, exactly like the bulk fetch phases below — never
@@ -213,6 +235,8 @@ public final class ChainSynchronizer {
     static Block fetchOrphan(PeerSource peer, SHA256Hash hash) {
         try {
             return peer.orphan(hash);
+        } catch (LocalSaturationException e) {
+            throw e; // local backpressure must not degrade into a peer-invalid verdict
         } catch (RuntimeException e) { // UnsupportedOperationException included: no orphan endpoint
             return null;
         }
@@ -227,10 +251,34 @@ public final class ChainSynchronizer {
         // --- Stateless gate: no local mutation until the peer has PROVEN more work ---
         long prefetchEnd = Math.min(peer.height(), forkHeight + depth + PREFETCH_EXTRA);
         List<Block> branch = fetchRange(peer, forkHeight + 1, prefetchEnd);
-        if (branch == null || !branchChainsFromFork(branch, forkHeight)) {
+        if (branch == null) {
             return Result.PEER_INVALID;
         }
-        if (verifiedWork(branch).compareTo(localWorkAboveFork(forkHeight)) <= 0) {
+        // Validate the branch through the SAME stateless header-chain rule the headers-first path
+        // uses (audit: fallback gate under-validates). The old gate checked only id continuity,
+        // hash chaining and per-block PoW, so a branch carrying a WRONG recomputed difficulty, a
+        // median-time-past violation or a far-future timestamp passed it — every such block is one
+        // addBlock rejects, buying the attacker a pop/restore cycle per round. HeaderChain.validate
+        // recomputes the expected difficulty from header timestamps, enforces MTP, the
+        // min-block-time and future bounds, the checkpoint and the structural uncle limits BEFORE
+        // any local mutation, and returns the branch's base-only work in the same pass.
+        List<BlockHeader> branchHeaders = new ArrayList<>(branch.size());
+        for (Block block : branch) {
+            branchHeaders.add(BlockHeader.of(block));
+        }
+        HeaderChain.Result validated;
+        synchronized (difficultyMemo) {
+            validated = HeaderChain.validate(
+                engine.params(), engine::headerAt, forkHeight, branchHeaders, engine.nowMillis(), difficultyMemo);
+            // Same bounding as HeaderSynchronizer: entries at/below this fork are ancient history a
+            // later round re-derives in O(1) from a newer checkpoint (the memo is self-invalidating
+            // by boundary-header hash, so a losing branch can never leave a wrong-chain value).
+            difficultyMemo.headMap(forkHeight, true).clear();
+        }
+        if (!validated.valid()) {
+            return Result.PEER_INVALID;
+        }
+        if (validated.work().compareTo(localWorkAboveFork(forkHeight)) <= 0) {
             // Claimed heavy, proved light: a structurally valid branch that merely loses the fork race
             // is not a protocol violation — return NO_CHANGE so an honest total-heavier/base-lighter
             // peer is not banned on the first strike (audit 5th-pass, reorg-gate metric).
@@ -270,7 +318,12 @@ public final class ChainSynchronizer {
             }
 
             for (Block block : branch) {
-                ExecutionStatus status = engine.addBlock(block);
+                // addValidatedBody, not addBlock: this exact block's header passed HeaderChain
+                // validation (memory-hard PoW included) moments ago on this thread, and the block
+                // is unmodified since — the addValidatedBody caller contract (hash equals a
+                // PoW-validated header at this height) is satisfied exactly, so re-hashing under
+                // the lock is pure waste (audit P4 pattern). Every other check runs in full.
+                ExecutionStatus status = engine.addValidatedBody(block);
                 if (status == ExecutionStatus.INVALID_UNCLES && !block.uncles().isEmpty()) {
                     // Pool the prefetched orphan bodies (registerOrphan re-checks PoW) and retry
                     // once — the fetch itself happened before the lock was taken.
@@ -280,7 +333,7 @@ public final class ChainSynchronizer {
                             engine.registerOrphan(orphan);
                         }
                     }
-                    status = engine.addBlock(block);
+                    status = engine.addValidatedBody(block);
                 }
                 if (status != ExecutionStatus.SUCCESS) {
                     restore(forkHeight, localBranch);
@@ -321,56 +374,26 @@ public final class ChainSynchronizer {
                 long end = Math.min(to, start + Constants.BLOCKS_PER_FETCH - 1);
                 out.addAll(peer.blocks(start, end));
             }
+        } catch (LocalSaturationException e) {
+            throw e; // local backpressure, not a peer fault: null would read as PEER_INVALID
         } catch (RuntimeException e) {
             return null;
         }
         return out;
     }
 
-    /** Stateless: ids contiguous from the fork, hashes chain, every PoW nonce holds. */
-    private boolean branchChainsFromFork(List<Block> branch, long forkHeight) {
-        if (branch.isEmpty()) {
-            return false;
-        }
-        // Header hash suffices for the anchor and survives pruning (audit F4, same as agrees()).
-        SHA256Hash prevHash = engine.headerAt(forkHeight).hash();
-        long expectedId = forkHeight + 1;
-        for (Block block : branch) {
-            var b = (BlockImpl) block;
-            if (b.id() != expectedId || !b.lastBlockHash().equals(prevHash)
-                || !block.verifyNonce(engine.params().powAlgorithm(), engine.params().powCostsAt(b.id()))) {
-                return false;
-            }
-            prevHash = block.hash();
-            expectedId++;
-        }
-        return true;
-    }
-
     /**
-     * Verified proof-of-work above the fork for the peer's branch. Counts each block's own
-     * {@code 2^difficulty} ONLY — deliberately NOT the uncle work (audit M4). A branch block's uncle
-     * refs are unverified at this stateless stage (validateUncles runs only during addBlock, after
-     * the pop), so an attacker who mined only ~1/3 of the honest work could pad each branch block
-     * with in-range fake uncle refs, inflate claimed work ~3×, pass this gate, and force an expensive
-     * pop/restore cycle before the fakes are finally rejected. Comparing only PoW-verified base work
-     * on both sides removes the inflation lever; a branch that is genuinely heavier has more base
-     * work in every practical case, and the authoritative GHOST accounting (with validated uncle
-     * work) still runs in the engine once the branch is applied.
+     * Local PoW above the fork, base work only — the symmetric counterpart of the branch total
+     * {@link HeaderChain#validate} returns (each block's own {@code 2^difficulty}, deliberately NOT
+     * the uncle work, audit M4: committed uncle refs are unverified at this stateless stage, so
+     * counting them would let a cheap branch inflate its claimed work ~3× and force a pop/restore
+     * cycle before the fakes are rejected). Read from HEADERS, not bodies (audit F4), so a pruned
+     * node whose fork sits below the watermark answers the gate instead of throwing.
      */
-    private BigInteger verifiedWork(List<Block> branch) {
-        BigInteger work = BigInteger.ZERO;
-        for (Block block : branch) {
-            work = work.add(BlockWork.of(((BlockImpl) block).difficulty()));
-        }
-        return work;
-    }
-
-    /** Local PoW above the fork, base work only — the symmetric counterpart of {@link #verifiedWork}. */
     private BigInteger localWorkAboveFork(long forkHeight) {
         BigInteger work = BigInteger.ZERO;
         for (long h = forkHeight + 1; h <= engine.height(); h++) {
-            work = work.add(BlockWork.of(((BlockImpl) engine.blockAt(h)).difficulty()));
+            work = work.add(BlockWork.of(engine.headerAt(h).difficulty()));
         }
         return work;
     }
@@ -388,11 +411,16 @@ public final class ChainSynchronizer {
             if (status != ExecutionStatus.SUCCESS) {
                 // Re-adding a just-canonical block must otherwise succeed; a failure would silently
                 // leave the node permanently shorter. Fail loud so a full resync recovers the suffix
-                // instead of continuing truncated (audit: restore self-truncation).
-                throw new IllegalStateException("failed to restore local branch at "
-                    + ((BlockImpl) block).id() + " after a rejected reorg: " + status
-                    + " — a full resync is required");
+                // instead of continuing truncated (audit: restore self-truncation), and mark the
+                // engine's degraded state so the condition is observable to the API layer (audit:
+                // silent restore failure) — cleared below once a restore fully succeeds.
+                String reason = "failed to restore local branch at " + ((BlockImpl) block).id()
+                    + " after a rejected reorg: " + status + " — a full resync is required";
+                engine.markDegraded(reason);
+                log.error("{}", reason);
+                throw new IllegalStateException(reason);
             }
         }
+        engine.clearDegraded(); // the local branch is whole again
     }
 }

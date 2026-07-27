@@ -57,6 +57,11 @@ public final class NodeApi {
     // A single transaction body may be a contract deploy/call carrying up to MAX_DATA
     // bytes of payload (plus the kind tag and gas fields), so size the cap for that.
     private static final int TX_BODY = TransactionDto.BUFFER_SIZE + 1 + 20 + TransactionDto.MAX_DATA + 1024;
+    // The JSON form of the same transaction hex-encodes the payload (2 chars per byte), so a
+    // deploy/call near MAX_DATA is ~2x the binary size; capping it at SMALL_BODY rejected JSON
+    // transactions whose binary equivalent passes (audit: JSON/binary tx cap asymmetry).
+    private static final int JSON_TX_BODY =
+        TransactionDto.BUFFER_SIZE + 2 * TransactionDto.MAX_DATA + 2048;
 
     // Well-known ActiveJ header tokens: the HTTP parser interns incoming Origin/Host under these, and
     // a custom HttpHeaders.of("Origin"/"Host") token no longer matches them (it did in 6.0-beta2, but
@@ -87,10 +92,32 @@ public final class NodeApi {
     private static final int TX_SUBMIT_COST = 4;
 
     /**
-     * Rate-limit cost of serving one state-snapshot chunk (~MiB-scale, up to the 16 MiB
-     * peer-side fetch cap). Flat because the size is not request-controlled (audit F3).
+     * Fallback rate-limit cost of serving a state-snapshot chunk, charged when the actual
+     * chunk size cannot be resolved at the gate (no snapshot materialised, or a missing /
+     * malformed / out-of-range index the handler will reject cheaply). When the chunk IS
+     * resolvable the cost is proportional to its size — see {@link #snapshotChunkCost}
+     * (audit F3).
      */
     private static final int SNAPSHOT_CHUNK_COST = 75;
+
+    /**
+     * Egress granularity of the snapshot-chunk cost model: one rate-limit unit per 64 KiB
+     * of chunk served, so at the default 1000 units/s an IP is bounded to ~62 MiB/s of
+     * snapshot egress instead of ~200 MiB/s under the old flat cost (audit F3).
+     */
+    private static final long CHUNK_COST_UNIT_BYTES = 64L * 1024;
+
+    /** Floor of the byte-proportional snapshot-chunk cost (lookup + response overhead). */
+    private static final int SNAPSHOT_CHUNK_MIN_COST = 2;
+
+    /**
+     * Rate-limit cost of an /add_peer: admission queues a blocking DNS resolve (ban check,
+     * routability, subnet bucket) on a single off-loop thread behind a bounded queue, so the
+     * flat cost of 1 let one IP enqueue ~1000 resolves/s against a ~5 s/thread drain rate.
+     * Weighted like /submit so the admission queue sees bounded arrivals (audit: add_peer
+     * cost vs blocking DNS).
+     */
+    private static final int ADD_PEER_COST = 8;
 
     /**
      * Rate-limit cost of an /orphan fetch: a lock-guarded orphan-pool / uncle-store read plus
@@ -211,7 +238,7 @@ public final class NodeApi {
                 return json(new JSONObject().put("removed", node.deregisterScan(clientKey(req), id)));
             })))
             .with(GET, "/scan/list", req -> offload(blocking, () -> BoxApi.scanList(node, clientKey(req))))
-            .with(GET, "/scan/boxes", req -> offload(blocking, () -> BoxApi.scanBoxes(node, req)))
+            .with(GET, "/scan/boxes", req -> offload(blocking, () -> BoxApi.scanBoxes(node, clientKey(req), req)))
             // ---- tokens ----
             .with(GET, "/token", req -> offload(blocking, () -> TokenApi.token(node, req)))
             .with(GET, "/token_balance", req -> offload(blocking, () -> TokenApi.tokenBalance(node, req)))
@@ -220,7 +247,8 @@ public final class NodeApi {
             .with(GET, "/state", req -> offload(blocking, () -> StateApi.state(node)))
             .with(GET, "/state/proof", req -> offload(blocking, () -> StateApi.stateProof(node, req)))
             .with(GET, "/state/snapshot/info", req -> guarded(() -> SyncApi.snapshotInfo(node)))
-            .with(GET, "/state/snapshot/chunk", req -> guarded(() -> SyncApi.snapshotChunk(node, req)))
+            // Chunk reads are disk I/O (file-backed spool) — off the event loop like /orphan.
+            .with(GET, "/state/snapshot/chunk", req -> offload(blocking, () -> SyncApi.snapshotChunk(node, req)))
             // ---- contract logs / dry run ----
             .with(GET, "/logs", req -> offload(blocking, () -> ContractApi.logs(node, req)))
             .with(GET, "/logs/stream", req -> guarded(() -> ContractApi.logStream(sse, clientKey(req), clientSubnetKey(req))))
@@ -230,7 +258,7 @@ public final class NodeApi {
             .with(GET, "/sync", req -> guarded(() -> SyncApi.sync(node, req)))
             .with(GET, "/headers", req -> guarded(() -> SyncApi.headers(node, req)))
             .with(GET, "/orphan", req -> offload(blocking, () -> SyncApi.orphan(node, req)))
-            .with(POST, "/add_transaction_json", req -> req.loadBody(SMALL_BODY).then(body -> offload(blocking, () -> {
+            .with(POST, "/add_transaction_json", req -> req.loadBody(JSON_TX_BODY).then(body -> offload(blocking, () -> {
                 Transaction t = Transaction.of(parseJson(body.getString(StandardCharsets.UTF_8)));
                 return statusResponse(node.submitTransaction(t, clientKey(req)));
             })))
@@ -245,7 +273,7 @@ public final class NodeApi {
             .build();
 
         return request -> {
-            int cost = requestCost(request);
+            int cost = requestCost(node, request);
             if (!limiter.allow(clientKey(request), cost)) {
                 return HttpResponse.ofCode(429)
                     .withJson(new JSONObject().put("error", "rate limited").toString())
@@ -408,8 +436,8 @@ public final class NodeApi {
                 && !allowedHosts.contains(host.toLowerCase(java.util.Locale.ROOT))) {
                 return true;
             }
-            String authority = java.net.URI.create(origin).getAuthority();
-            if (authority == null || !authority.equalsIgnoreCase(host)) {
+            java.net.URI originUri = java.net.URI.create(origin);
+            if (!originMatchesHost(originUri, host)) {
                 return true; // cross-site
             }
             // Same-origin (or rebound to look same-origin): require the custom header.
@@ -421,11 +449,64 @@ public final class NodeApi {
     }
 
     /**
+     * Same-origin test for the CSRF guard: the Origin's host must equal the {@code Host} header's
+     * host, comparing EFFECTIVE ports — a browser omits the scheme's default port in {@code Origin}
+     * ({@code http://h} for {@code http://h:80}, {@code https://h} for {@code https://h:443}) while
+     * a proxy or explicit client may still send {@code Host: h:80}. A literal authority string
+     * comparison rejected those same-origin requests as cross-site (audit: CSRF default-port false
+     * positive). A missing port on either side resolves to the Origin scheme's default; any
+     * unparseable shape fails closed (refused as cross-site).
+     */
+    private static boolean originMatchesHost(java.net.URI origin, String hostHeader) {
+        String originHost = origin.getHost();
+        if (originHost == null || originHost.isEmpty()) {
+            return false;
+        }
+        String scheme = origin.getScheme();
+        int defaultPort = "http".equalsIgnoreCase(scheme) ? 80
+            : "https".equalsIgnoreCase(scheme) ? 443 : -1;
+        int originPort = origin.getPort() >= 0 ? origin.getPort() : defaultPort;
+        if (hostHeader == null || hostHeader.isEmpty()) {
+            return false;
+        }
+        // Split host[:port], keeping IPv6 brackets: the port separator is the LAST ':' only
+        // when it follows any ']' (or there is no bracket) and is trailed by digits.
+        String host = hostHeader;
+        int hostPort = defaultPort;
+        int colon = hostHeader.lastIndexOf(':');
+        if (colon > hostHeader.indexOf(']')) {
+            String port = hostHeader.substring(colon + 1);
+            boolean digits = !port.isEmpty();
+            for (int i = 0; i < port.length(); i++) {
+                digits &= Character.isDigit(port.charAt(i));
+            }
+            if (!digits) {
+                return false; // a non-numeric port is not a same-origin Host — fail closed
+            }
+            try {
+                hostPort = Integer.parseInt(port);
+            } catch (NumberFormatException e) {
+                return false; // out-of-int-range port — fail closed
+            }
+            host = hostHeader.substring(0, colon);
+        }
+        return originHost.equalsIgnoreCase(host) && originPort == hostPort;
+    }
+
+    /**
      * Rate-limit cost of a request. Cheap endpoints cost 1; the deep chain scans and the VM
      * dry-run cost proportionally more so a single client cannot drive orders of magnitude more
      * work than the flat per-request budget implies (audit M2).
      */
     static int requestCost(HttpRequest request) {
+        return requestCost(null, request);
+    }
+
+    /**
+     * As {@link #requestCost(HttpRequest)}, with the node available so byte-sized responses
+     * (the state-snapshot chunk) can be charged proportionally to the bytes they will serve.
+     */
+    static int requestCost(NodeService node, HttpRequest request) {
         String path;
         try {
             path = request.getPath();
@@ -504,13 +585,16 @@ public final class NodeApi {
             return NodeService.LOG_SCAN_WINDOW;
         }
         // /state/snapshot/chunk serves a ~MiB-scale binary chunk (the peer-side fetch cap is
-        // 16 MiB) at cost 1 — a cheap bandwidth amplifier. Charge a flat cost proportional to
-        // the typical chunk size (audit F3).
+        // 16 MiB); a flat per-request cost is a bandwidth amplifier (audit F3). Charge
+        // proportionally to the chunk's actual size when it is resolvable at the gate.
         if ("/state/snapshot/chunk".equals(path)) {
-            return SNAPSHOT_CHUNK_COST;
+            return snapshotChunkCost(node, request);
         }
         if ("/orphan".equals(path)) {
             return ORPHAN_COST;
+        }
+        if ("/add_peer".equals(path)) {
+            return ADD_PEER_COST;
         }
         // /scan/boxes examines up to BOX_SCAN_WINDOW boxes per call (bounded store reads, no
         // consensus lock but real disk I/O) — leaving it at cost 1 let a client drive ~512k
@@ -656,6 +740,40 @@ public final class NodeApi {
             return 1; // out of range: rejected cheaply, no store reads
         }
         return (int) Math.max(1, range / blocksPerUnit);
+    }
+
+    /**
+     * Rate-limit cost of serving one state-snapshot chunk, proportional to the bytes actually
+     * served: {@code ceil(chunkBytes / 64 KiB)} floored at {@link #SNAPSHOT_CHUNK_MIN_COST}, so
+     * the per-IP token budget maps to a bounded egress rate (audit F3 — a flat cost let one IP
+     * pull ~200 MiB/s at the default 1000 units/s). Falls back to the flat
+     * {@link #SNAPSHOT_CHUNK_COST} when the chunk is not resolvable at the gate — no snapshot
+     * materialised, or a missing/malformed/out-of-range index — because the handler then
+     * answers 404/400 without serving any chunk bytes. Only the chunk's recorded length is
+     * read here (the in-RAM spool index); the chunk bytes themselves are never touched at
+     * the gate.
+     */
+    private static int snapshotChunkCost(NodeService node, HttpRequest request) {
+        var snap = node == null ? null : node.materializedSnapshot();
+        if (snap == null) {
+            return SNAPSHOT_CHUNK_COST; // 404 path: flat
+        }
+        long index;
+        try {
+            String raw = request.getQueryParameter("index");
+            if (raw == null) {
+                return SNAPSHOT_CHUNK_COST; // the handler rejects it cheaply
+            }
+            index = Long.parseLong(raw.trim());
+        } catch (RuntimeException e) {
+            return SNAPSHOT_CHUNK_COST; // malformed: the handler rejects it cheaply
+        }
+        if (index < 0 || index >= snap.chunkCount()) {
+            return SNAPSHOT_CHUNK_COST; // 400/404 path: flat
+        }
+        long units = (snap.chunkLength((int) index) + CHUNK_COST_UNIT_BYTES - 1)
+            / CHUNK_COST_UNIT_BYTES;
+        return (int) Math.min(Integer.MAX_VALUE, Math.max(SNAPSHOT_CHUNK_MIN_COST, units));
     }
 
     private static String clientKey(HttpRequest request) {

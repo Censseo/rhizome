@@ -99,6 +99,33 @@ class ChainEngineTest {
     }
 
     @Test
+    void rejectsBlockWhoseCoinbaseCarriesAContractKind() {
+        // End-to-end guard for the Executor pass-1 rule: a fee tx (coinbase) with kind=CALL is
+        // structurally invalid and must be refused at addBlock — otherwise the block applies
+        // "cleanly" (apply skips fee txs) but no contract receipt is ever emitted for it, and a
+        // later popBlock would hit the receipt-count guard deterministically: a permanent-fork
+        // poison block.
+        long height = engine.height() + 1;
+        var b = (BlockImpl) BlockImpl.builder()
+            .id((int) height)
+            .timestamp(clock.addAndGet(params.desiredBlockTimeSec() * 1000L))
+            .difficulty(engine.difficulty())
+            .lastBlockHash(engine.tipHash())
+            .build();
+        b.addTransaction(TransactionImpl.builder()
+            .to(miner).amount(new TransactionAmount(params.miningReward(height)))
+            .isTransactionFee(true).kind(rhizome.core.transaction.TransactionKind.CALL)
+            .data(new byte[0]).build());
+        var tree = new MerkleTree();
+        tree.setItems(b.transactions());
+        b.merkleRoot(tree.getRootHash());
+        b.nonce(Miner.mineNonce(b.hash(), b.difficulty(), params.powAlgorithm()));
+
+        assertEquals(ExecutionStatus.INCORRECT_MINING_FEE, engine.addBlock(b));
+        assertEquals(1, engine.height(), "the poison block must not extend the chain");
+    }
+
+    @Test
     void minesAndAppliesBlocks() {
         assertEquals(1, engine.height());
 

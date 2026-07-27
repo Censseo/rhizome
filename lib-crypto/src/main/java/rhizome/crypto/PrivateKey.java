@@ -70,4 +70,12 @@ public record PrivateKey(Ed25519PrivateKeyParameters key) implements SimpleHashT
     public int getSize() {
         return SIZE;
     }
+
+    // Never leak key material into logs/stack traces: the record default would defer to
+    // Ed25519PrivateKeyParameters.toString(), whose output is a library implementation detail
+    // that must never become a secret-disclosure channel. Redact unconditionally (audit).
+    @Override
+    public String toString() {
+        return "PrivateKey[REDACTED]";
+    }
 }

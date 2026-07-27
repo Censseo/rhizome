@@ -84,14 +84,17 @@ public record BlockHeader(
             + (withUncles ? uncles.size() * (SHA256Hash.SIZE + rhizome.core.ledger.PublicAddress.SIZE)
                 + uncles.size() * Integer.BYTES : 0);
         ByteBuffer buffer = ByteBuffer.allocate(size);
-        buffer.put(merkleRoot.toBytes());
-        buffer.put(lastBlockHash.toBytes());
+        // raw() below: ByteBuffer.put copies each array into the preimage buffer immediately and
+        // nothing is retained — a header is hashed at every sync/checkpoint step, so the
+        // per-field clone of toBytes() was pure churn on this hot path (audit perf).
+        buffer.put(merkleRoot.raw());
+        buffer.put(lastBlockHash.raw());
         buffer.putInt(id);
         buffer.putInt(difficulty);
         buffer.putInt(numTransactions);
         buffer.putLong(timestamp);
         if (withStateRoot) {
-            buffer.put(stateRoot.toBytes());
+            buffer.put(stateRoot.raw());
         }
         if (withVote) {
             buffer.putInt(vote);
@@ -99,7 +102,7 @@ public record BlockHeader(
         if (withUncles) {
             ByteBuffer uncleBuf = ByteBuffer.allocate(uncles.size() * Integer.BYTES);
             for (UncleRef uncle : uncles) {
-                buffer.put(uncle.hash().toBytes());
+                buffer.put(uncle.hash().raw());
                 uncleBuf.putInt(uncle.difficulty());
                 buffer.put(uncle.miner().toBytes());
             }

@@ -170,11 +170,24 @@ public final class PeerDiscovery {
             // Cut by the round deadline (invokeAll cancelled the task) — not the peer's fault, so it is
             // not penalised; it will be retried, rotated to the front, next round.
             Thread.currentThread().interrupt();
+        } catch (BodyReadSaturatedException e) {
+            // LOCAL body-read pool saturation: the exchange was rejected before any I/O reached the
+            // peer, so it says nothing about the peer — no failure count, no eviction. It is plain
+            // backpressure: the peer is retried on a later round.
+            log.debug("PEX with {} skipped: local body-read pool saturated", peer);
         } catch (Exception e) {
             int f = failures.merge(peer, 1, Integer::sum);
             if (f >= MAX_FAILURES) {
-                registry.remove(peer);
                 failures.remove(peer);
+                if (registry.isSeed(peer)) {
+                    // A seed is an operator-configured connectivity anchor: it may accumulate
+                    // failure counts (observability) but is NEVER evicted by the PEX failure
+                    // path — otherwise an attacker that can briefly DoS the seeds could
+                    // unanchor the node (mirrors penalize()'s seed exemption, audit M4).
+                    log.debug("seed {} unreachable; keeping the trusted anchor", peer);
+                    return;
+                }
+                registry.remove(peer);
                 log.debug("dropped unreachable peer {}", peer);
             }
         }

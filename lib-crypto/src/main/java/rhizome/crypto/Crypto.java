@@ -4,9 +4,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
 import java.nio.charset.StandardCharsets;
-import java.util.Collections;
-import java.util.LinkedHashMap;
-import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.math.BigInteger;
 
 import org.bouncycastle.crypto.AsymmetricCipherKeyPair;
@@ -107,7 +105,7 @@ public class Crypto {
     }
 
     /**
-     * Bounded LRU of Pufferfish2 results. The cache key wraps the raw 64-byte preimage
+     * Bounded cache of Pufferfish2 results. The cache key wraps the raw 64-byte preimage
      * (target ‖ nonce), both halves of which are fully attacker-controlled on every PoW
      * verification path (addBlock, registerOrphan, header sync, fork-choice branch validation all
      * pass useCache=true). An unbounded map therefore grew
@@ -126,13 +124,16 @@ public class Crypto {
      */
     private record PufferfishCacheKey(SHA256Hash inputHash, PowCosts costs) {}
 
-    private static final Map<PufferfishCacheKey, SHA256Hash> pufferfishCache =
-        Collections.synchronizedMap(new LinkedHashMap<>(512, 0.75f, true) {
-            @Override
-            protected boolean removeEldestEntry(Map.Entry<PufferfishCacheKey, SHA256Hash> eldest) {
-                return size() > PUFFERFISH_CACHE_MAX;
-            }
-        });
+    // ConcurrentHashMap rather than a synchronized LinkedHashMap for two reasons (audit):
+    //  - computeIfAbsent is atomic PER KEY, so N racing verifiers of the same block hash it
+    //    once, while misses on DIFFERENT inputs still hash in parallel. A synchronized-map
+    //    computeIfAbsent would hold the global map lock through the whole memory-hard compute,
+    //    serialising every verifier (and every cache hit) behind a single miss.
+    //  - the size stays bounded by the approximate eviction below: CHM exposes no access order,
+    //    so victims are iteration-order arbitrary instead of true-LRU. The DoS bound is the
+    //    security property; eviction precision only affects the hit rate.
+    private static final ConcurrentHashMap<PufferfishCacheKey, SHA256Hash> pufferfishCache =
+        new ConcurrentHashMap<>();
 
     /** Pufferfish2 PoW hash under the genesis costs ({@link PowCosts#DEFAULT}). */
     public static SHA256Hash PUFFERFISH(byte[] input, boolean useCache) {
@@ -141,24 +142,31 @@ public class Crypto {
 
     /** Pufferfish2 PoW hash under the given consensus cost parameters. */
     public static SHA256Hash PUFFERFISH(byte[] input, boolean useCache, PowCosts costs) {
+        if (!useCache) {
+            // Miner path: never touches the cache — do not even allocate the key.
+            return SHA256(PufferfishAlgorithm.compute(input, costs));
+        }
         PufferfishCacheKey key = new PufferfishCacheKey(SHA256Hash.of(input), costs);
+        SHA256Hash result = pufferfishCache.computeIfAbsent(
+            key, k -> SHA256(PufferfishAlgorithm.compute(input, costs)));
+        evictPufferfishCacheIfOversized();
+        return result;
+    }
 
-        if (useCache) {
-            SHA256Hash cachedHash = pufferfishCache.get(key);
-            if (cachedHash != null) {
-                return cachedHash;
-            }
+    private static void evictPufferfishCacheIfOversized() {
+        int excess = pufferfishCache.size() - PUFFERFISH_CACHE_MAX;
+        if (excess <= 0) {
+            return;
         }
-
-        byte[] hash = PufferfishAlgorithm.compute(input, costs);
-
-        SHA256Hash finalHash = SHA256(hash); // Assuming SHA256 is standard SHA-256 hash
-
-        if (useCache) {
-            pufferfishCache.put(key, finalHash);
+        // Approximate eviction (see the field comment). Racing evictors are benign: the
+        // iterator is weakly consistent and remove() on an already-removed key is a no-op, so
+        // the map can only dip slightly below the cap, never above it for long.
+        var it = pufferfishCache.keySet().iterator();
+        while (excess > 0 && it.hasNext()) {
+            it.next();
+            it.remove();
+            excess--;
         }
-
-        return finalHash;
     }
 
     public static SHA256Hash SHA256(byte[] hash) {
@@ -208,8 +216,10 @@ public class Crypto {
         // (and mined) with the memory-hard Pufferfish2 function, not plain SHA-256 — that
         // is the whole ASIC-resistance property. See PowAlgorithm / NetworkParameters.
         byte[] data = new byte[64];
-        System.arraycopy(a.hash(), 0, data, 0, 32);
-        System.arraycopy(b.hash(), 0, data, 32, 32);
+        // raw(): both halves are copied into `data` on the next two lines and never retained —
+        // this runs twice per PoW verification (audit: hot-path defensive copies).
+        System.arraycopy(a.raw(), 0, data, 0, 32);
+        System.arraycopy(b.raw(), 0, data, 32, 32);
         return usePufferFish ? PUFFERFISH(data, useCache, costs) : SHA256(data);
     }
 
@@ -228,7 +238,7 @@ public class Crypto {
         if (challengeSize > 256) {
             return false;
         }
-        byte[] a = hash.hash();
+        byte[] a = hash.raw(); // read-only scan within this call (hot PoW path — see raw())
         int bytes = challengeSize / 8;
         for (int i = 0; i < bytes; i++) {
             if (a[i] != 0) return false;
@@ -244,6 +254,12 @@ public class Crypto {
     }
 
     public static BigInteger addWork(BigInteger work, int exponent) {
+        // BigInteger.pow would throw a bare ArithmeticException("Negative exponent"); fail fast
+        // with a proper argument error instead — a negative chain-work delta is always an
+        // upstream decoding bug and must surface as such (audit).
+        if (exponent < 0) {
+            throw new IllegalArgumentException("exponent must be non-negative: " + exponent);
+        }
         BigInteger base = BigInteger.valueOf(2);
         return work.add(base.pow(exponent));
     }

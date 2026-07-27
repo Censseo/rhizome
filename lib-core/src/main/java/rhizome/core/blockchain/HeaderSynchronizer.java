@@ -30,6 +30,8 @@ import rhizome.core.mempool.ExecutionStatus;
  */
 public final class HeaderSynchronizer {
 
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(HeaderSynchronizer.class);
+
     /** Max heights advanced in one round, so a hostile "I'm at height 10^9" peer costs a bounded download. */
     static final long MAX_HEADER_WINDOW = 20_000;
 
@@ -56,6 +58,17 @@ public final class HeaderSynchronizer {
     }
 
     public ChainSynchronizer.Result syncFrom(PeerSource peer) {
+        try {
+            return syncFromOrThrow(peer);
+        } catch (LocalSaturationException e) {
+            // A LOCAL bound (transport backpressure) stopped the exchange before it reached the
+            // peer — not misbehaviour: no ban score, no PEER_INVALID. Retried next round.
+            log.debug("sync deferred: local exchange saturated; will retry next round");
+            return ChainSynchronizer.Result.NO_CHANGE;
+        }
+    }
+
+    private ChainSynchronizer.Result syncFromOrThrow(PeerSource peer) {
         // Prefilter against our BASE work, not our uncle-inclusive total. The adoption gate below
         // ranks branches by base-only work (localWorkAboveFork, the M4 rule); ranking this early-out
         // by the uncle-inflated total instead let a node with heavy local uncle work refuse to even
@@ -81,6 +94,8 @@ public final class HeaderSynchronizer {
             forkHeight = findCommonAncestor(peer); // first call touches peer.headers → may fall back
         } catch (UnsupportedOperationException headersUnsupported) {
             throw headersUnsupported; // peer lacks /headers: let syncFrom fall back to full blocks
+        } catch (LocalSaturationException e) {
+            throw e; // local backpressure, not a peer fault: syncFrom maps it to NO_CHANGE
         } catch (RuntimeException e) {
             // A peer that throws or returns an empty/garbage response while we probe for the common
             // ancestor is invalid, exactly like the fetch phases below — it must not propagate out of
@@ -214,6 +229,8 @@ public final class HeaderSynchronizer {
             }
         } catch (UnsupportedOperationException e) {
             throw e; // let syncFrom fall back to full-block sync
+        } catch (LocalSaturationException e) {
+            throw e; // local backpressure, not a peer fault: null would read as PEER_INVALID
         } catch (RuntimeException e) {
             return null;
         }
@@ -250,6 +267,9 @@ public final class HeaderSynchronizer {
                     Thread.currentThread().interrupt();
                     return false;
                 } catch (ExecutionException e) {
+                    if (e.getCause() instanceof LocalSaturationException saturated) {
+                        throw saturated; // local backpressure, not a peer fault (see fetchHeaders)
+                    }
                     return false; // transport/decode failure fetching this window (was a RuntimeException)
                 }
                 // Start the next window's fetch before applying the current one, so the two overlap.
@@ -298,32 +318,68 @@ public final class HeaderSynchronizer {
         // re-adds the local branch with no interleave and so can never throw "full resync required" and
         // silently truncate the chain (audit: reorg atomicity). A forward-apply race is thus self-healing:
         // the reorg aborts, the original tip is restored intact, and the next round retries.
-
-        // Phase 1 — capture the pre-reorg GHOST weight and local branch, then pop, as one atomic step.
-        // The maxReorgDepth check is RE-DONE here, inside the same atomic view as the pop: the
-        // earlier check ran outside the lock, and a concurrent local extension (the block producer
-        // or /submit adding k blocks between the two) would otherwise make the actual reorg k
-        // blocks deeper than the finality window we validated (audit review: finality TOCTOU).
+        //
+        // Reorg window (audit: non-atomic reorg window): phase 2 applies bodies OUTSIDE the lock
+        // while the chain sits truncated at forkHeight. The engine guard (beginReorgWindow) makes
+        // new-tip addBlock from gossip//submit and local production fail fast (IS_SYNCING) for the
+        // whole window instead of accepting a block at forkHeight+1 that restore() would destroy —
+        // honest PoW is never sacrificed to an aborted reorg. The window is opened UNDER the engine
+        // lock, atomically with phase 1's capture+pop below: between "window opens" and "chain
+        // truncated" no new-tip block can land (previously the CAS ran outside the lock, so a block
+        // accepted in that gap had to be rescued by the restore — the very race the guard exists to
+        // prevent). It is closed in finally AFTER the restore/adopt view completes, and never held
+        // across the header download, which already completed above (only the body apply streams,
+        // by design).
         List<Block> localBranch = new ArrayList<>();
         BigInteger[] capturedTotal = new BigInteger[1];
-        boolean depthOk = engine.withConsistentView(() -> {
-            if (engine.height() - forkHeight > engine.params().maxReorgDepth()) {
-                return false;
+        boolean[] opened = new boolean[1];
+        ChainSynchronizer.Result early;
+        try {
+            early = engine.withConsistentView(() -> {
+                // The maxReorgDepth check is RE-DONE here, inside the same atomic view as the pop:
+                // the earlier check ran outside the lock, and a concurrent local extension (the block
+                // producer or /submit adding k blocks between the two) would otherwise make the actual
+                // reorg k blocks deeper than the finality window we validated (audit review: finality
+                // TOCTOU).
+                if (engine.height() - forkHeight > engine.params().maxReorgDepth()) {
+                    return ChainSynchronizer.Result.REORG_TOO_DEEP; // window never opened
+                }
+                if (!engine.beginReorgWindow()) {
+                    return ChainSynchronizer.Result.NO_CHANGE; // a window is already open (defensive)
+                }
+                opened[0] = true;
+                capturedTotal[0] = engine.totalWork();
+                for (long h = forkHeight + 1; h <= engine.height(); h++) {
+                    localBranch.add(engine.blockAt(h));
+                }
+                while (engine.height() > forkHeight) {
+                    engine.popBlock();
+                }
+                return null; // phase 1 complete, window open — phases 2/3 run outside this view
+            });
+        } catch (RuntimeException | Error phase1Failure) {
+            // A pop that throws mid-phase-1 must not leave the just-opened window armed forever
+            // (every new-tip addBlock would fail fast IS_SYNCING from then on). Close it before
+            // propagating; the partially popped chain is the same state a failed reorg's restore
+            // recovers from.
+            if (opened[0]) {
+                engine.endReorgWindow();
             }
-            capturedTotal[0] = engine.totalWork();
-            for (long h = forkHeight + 1; h <= engine.height(); h++) {
-                localBranch.add(engine.blockAt(h));
-            }
-            while (engine.height() > forkHeight) {
-                engine.popBlock();
-            }
-            return true;
-        });
-        if (!depthOk) {
-            return ChainSynchronizer.Result.REORG_TOO_DEEP;
+            throw phase1Failure;
         }
-        BigInteger localTotal = capturedTotal[0];
+        if (early != null) {
+            return early;
+        }
+        try {
+            return applyAndAdopt(peer, forkHeight, branch, localBranch, capturedTotal[0]);
+        } finally {
+            engine.endReorgWindow();
+        }
+    }
 
+    private ChainSynchronizer.Result applyAndAdopt(PeerSource peer, long forkHeight,
+                                                   List<BlockHeader> branch, List<Block> localBranch,
+                                                   BigInteger localTotal) {
         // Phase 2 — fetch and apply the peer bodies. Network I/O, so deliberately OUTSIDE the lock.
         boolean applied = applyBodies(peer, forkHeight, branch);
 
@@ -368,12 +424,17 @@ public final class HeaderSynchronizer {
                 // Re-adding a block that was canonical moments ago must otherwise succeed. Swallowing a
                 // failure would leave the node permanently shorter than it started, silently (audit:
                 // restore self-truncation). Fail loud instead so it is caught and a full resync
-                // recovers the suffix, rather than continuing in a silently-truncated state.
-                throw new IllegalStateException("failed to restore local branch at "
-                    + ((BlockImpl) block).id() + " after a rejected reorg: " + status
-                    + " — a full resync is required");
+                // recovers the suffix, rather than continuing in a silently-truncated state. The
+                // engine's degraded marker makes the condition observable to the API layer (audit:
+                // silent restore failure) — cleared below once a restore fully succeeds.
+                String reason = "failed to restore local branch at " + ((BlockImpl) block).id()
+                    + " after a rejected reorg: " + status + " — a full resync is required";
+                engine.markDegraded(reason);
+                log.error("{}", reason);
+                throw new IllegalStateException(reason);
             }
         }
+        engine.clearDegraded(); // the local branch is whole again
     }
 
     private BigInteger localWorkAboveFork(long forkHeight) {

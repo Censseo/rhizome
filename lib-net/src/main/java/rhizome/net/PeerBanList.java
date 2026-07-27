@@ -23,7 +23,9 @@ import java.util.function.LongSupplier;
  * refuse admission to EVERY new peer for the ban window (audit follow-up). A
  * host is banned only by an entry of its own; the overflow score remains
  * observable via {@link #overflowScore()} for operators. Active bans are never
- * swept.
+ * swept. Bans are additionally mirrored onto hostname keys (audit L1) in a
+ * separate, equally bounded table, so the anti-dodge protection does not lapse
+ * when the offence table is full mid-spray.
  */
 public final class PeerBanList {
 
@@ -42,9 +44,27 @@ public final class PeerBanList {
      * spray eclipse a freshly started node from every new peer (see class doc).
      */
     private final Entry overflow = new Entry(0);
+    /**
+     * Ban mirrors keyed by {@link #nameKey}, in a table SEPARATE from {@link #entries} (own
+     * bound, same size): when the offence table is full mid-spray the mirror must STILL be
+     * written — otherwise the anti-dodge protection (audit L1) silently lapses exactly under
+     * attack, and a banned peer returns by flipping its DNS to a fresh IP. Mirrors carry no
+     * score, only the ban window, and are swept lazily once their ban expires.
+     */
+    private final Map<String, Entry> mirrors = new ConcurrentHashMap<>();
+    /**
+     * Amortized-sweep watermarks (one per table), like {@link RateLimiter}'s: the due check
+     * reads them OUTSIDE the monitor, so a sprayed miss no longer pays an O(maxTracked)
+     * sweep inside the check-and-insert critical section on the event loop (audit: sweep
+     * under the global monitor).
+     */
+    private volatile long lastEntriesSweepAt = Long.MIN_VALUE;
+    private volatile long lastMirrorsSweepAt = Long.MIN_VALUE;
 
     private static final class Entry {
-        long lastOffenseAt;
+        // Volatile: sweep() reads this outside any entry monitor while misbehave mutates it
+        // under synchronized(entry) — the race could sweep a freshly-offending entry (audit).
+        volatile long lastOffenseAt;
         int score;
         volatile long bannedUntil;
         Entry(long now) { this.lastOffenseAt = now; }
@@ -117,15 +137,26 @@ public final class PeerBanList {
     public boolean misbehave(String peerUrl, int points) {
         String key = hostKey(peerUrl);
         long now = nowMillis.getAsLong();
+        maybeSweepEntries(now);
         Entry entry = entries.get(key);
         if (entry == null) {
-            if (entries.size() >= maxTracked && !sweep(now)) {
-                // Table full: meter the untracked host against the shared overflow bucket so the
-                // spray's score still accumulates (and this offending host is reported banned once
-                // the bucket is hot) — but the bucket never bans OTHER untracked hosts (see above).
-                entry = overflow;
-            } else {
-                entry = entries.computeIfAbsent(key, k -> new Entry(now));
+            // Check-and-insert under one monitor: a lock-free size() >= maxTracked check racing
+            // computeIfAbsent let concurrent admissions push the table past its bound (audit).
+            // The monitor covers ONLY the check+insert — expiry is reclaimed by the amortized
+            // sweep above, never inside this critical section.
+            synchronized (entries) {
+                entry = entries.get(key);
+                if (entry == null) {
+                    if (entries.size() >= maxTracked) {
+                        // Table full: meter the untracked host against the shared overflow bucket so the
+                        // spray's score still accumulates (and this offending host is reported banned once
+                        // the bucket is hot) — but the bucket never bans OTHER untracked hosts (see above).
+                        // The next amortized sweep reclaims decayed entries and tracking resumes.
+                        entry = overflow;
+                    } else {
+                        entry = entries.computeIfAbsent(key, k -> new Entry(now));
+                    }
+                }
             }
         }
         synchronized (entry) {
@@ -145,15 +176,30 @@ public final class PeerBanList {
         }
     }
 
-    /** Mirrors a ban onto the hostname key so a DNS rebind to a new IP cannot dodge it (L1). */
+    /**
+     * Mirrors a ban onto the hostname key so a DNS rebind to a new IP cannot dodge it (L1).
+     * Written to the separate {@link #mirrors} table: with the offence table full mid-spray the
+     * mirror used to be skipped, abandoning the anti-dodge protection exactly under attack.
+     */
     private void mirrorToName(String peerUrl, long bannedUntil, long now) {
         String key = nameKey(peerUrl);
-        Entry entry = entries.get(key);
+        maybeSweepMirrors(now);
+        Entry entry = mirrors.get(key);
         if (entry == null) {
-            if (entries.size() >= maxTracked && !sweep(now)) {
-                return; // tracking full: best-effort, the IP-key ban still applies
+            // Same atomic check-and-insert discipline as misbehave (audit: bounded-table race) —
+            // expiry reclaimed by the amortized sweep, outside this critical section.
+            synchronized (mirrors) {
+                entry = mirrors.get(key);
+                if (entry == null) {
+                    if (mirrors.size() >= maxTracked) {
+                        // Full and nothing reclaimed by the last amortized sweep: this mirror is
+                        // dropped — the IP-key ban still applies (best-effort, as before).
+                        return;
+                    }
+                    entry = new Entry(now);
+                    mirrors.put(key, entry);
+                }
             }
-            entry = entries.computeIfAbsent(key, k -> new Entry(now));
         }
         synchronized (entry) {
             entry.bannedUntil = Math.max(entry.bannedUntil, bannedUntil);
@@ -168,7 +214,7 @@ public final class PeerBanList {
     public boolean isBanned(String peerUrl) {
         long now = nowMillis.getAsLong();
         Entry byHost = entries.get(hostKey(peerUrl));
-        Entry byName = entries.get(nameKey(peerUrl));
+        Entry byName = mirrors.get(nameKey(peerUrl));
         // An untracked host is NEVER banned: the shared overflow bucket only counts the spray,
         // it must not condemn a host that committed no offence of its own (eclipse lever).
         if (byHost == null && byName == null) {
@@ -192,11 +238,37 @@ public final class PeerBanList {
         }
     }
 
-    /** Removes entries that are not banned and have fully decayed. Returns true if any went. */
-    private boolean sweep(long now) {
-        int before = entries.size();
-        entries.values().removeIf(e -> now >= e.bannedUntil && now - e.lastOffenseAt >= decayMillis);
-        return entries.size() < before;
+    /**
+     * Amortized expiry sweep of the offence table: at most one full pass per decay window.
+     * The due check reads the volatile watermark outside the monitor; only a due sweep locks
+     * (re-checked inside). Sweeping only REMOVES entries that are neither banned nor recently
+     * active, so it cannot race the check-and-insert bound in {@link #misbehave}.
+     */
+    private void maybeSweepEntries(long now) {
+        if (now < lastEntriesSweepAt + decayMillis) {
+            return;
+        }
+        synchronized (entries) {
+            if (now < lastEntriesSweepAt + decayMillis) {
+                return;
+            }
+            lastEntriesSweepAt = now;
+            entries.values().removeIf(e -> now >= e.bannedUntil && now - e.lastOffenseAt >= decayMillis);
+        }
+    }
+
+    /** As {@link #maybeSweepEntries}, for the name-mirror table (expired-ban mirrors). */
+    private void maybeSweepMirrors(long now) {
+        if (now < lastMirrorsSweepAt + banMillis) {
+            return;
+        }
+        synchronized (mirrors) {
+            if (now < lastMirrorsSweepAt + banMillis) {
+                return;
+            }
+            lastMirrorsSweepAt = now;
+            mirrors.values().removeIf(e -> now >= e.bannedUntil);
+        }
     }
 
     public int trackedPeers() {

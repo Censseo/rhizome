@@ -113,6 +113,16 @@ final class SnapshotBootstrap {
                 pivot, peerHeight, params.maxReorgDepth());
             return false;
         }
+        // The validated-header list below is indexed by (int)(h - 2) up to
+        // validateTo = pivot + maxReorgDepth: a pivot so large that such an index overflows int
+        // would silently WRAP the casts into valid-looking negative/positive indexes (audit:
+        // unchecked pivot cast). Compared overflow-safe on the pivot itself (maxReorgDepth is a
+        // small positive int, so the right-hand side never overflows). Refuse the snapshot like
+        // any other unusable advertisement — a chain billions of blocks long cannot exist anyway.
+        if (pivot > Integer.MAX_VALUE + 2L - params.maxReorgDepth()) {
+            log.warn("Snapshot pivot {} exceeds the supported header-index range; refusing", pivot);
+            return false;
+        }
 
         // Chain identity: genesis is derived locally, never downloaded.
         Block genesis = GenesisBlock.build(params, genesisSnapshot);

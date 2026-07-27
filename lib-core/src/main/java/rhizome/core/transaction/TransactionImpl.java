@@ -28,7 +28,8 @@ public final class TransactionImpl implements Transaction, Comparable<Transactio
     @Builder.Default
     private PublicAddress to = PublicAddress.empty();
 
-    private TransactionAmount amount;
+    @Builder.Default
+    private TransactionAmount amount = new TransactionAmount(0);
 
     @Builder.Default
     private boolean isTransactionFee = false;

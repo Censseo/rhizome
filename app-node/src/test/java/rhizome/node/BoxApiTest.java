@@ -2,6 +2,7 @@ package rhizome.node;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.charset.StandardCharsets;
@@ -180,6 +181,27 @@ class BoxApiTest {
         HttpResponse r = call(HttpRequest.get("http://x/boxes?owner=" + sender.toHexString()).build());
         assertEquals(200, r.getCode());
         assertEquals(2, json(r).getJSONArray("boxes").length());
+    }
+
+    @Test
+    void scanQueryIsRestrictedToItsOwner() {
+        // /scan/register is unauthenticated, so /scan/boxes must not let just any caller drive
+        // another client's scan (audit: scan query gating) — a foreign id is answered exactly
+        // like an unknown one, as /scan/list and /scan/deregister already do. The servlet
+        // harness keys every in-process request as the same "local" client, so the gating is
+        // exercised at the NodeService boundary the route now passes clientKey into.
+        var node = new NodeService(engine, mempool);
+        var predicate = rhizome.core.box.ScanPredicate.fromJson(new JSONObject()
+            .put("type", "registerContains").put("index", 0)
+            .put("value", Utils.bytesToHex("oracle".getBytes(StandardCharsets.UTF_8))));
+        int scanId = node.registerScan("client-a", predicate);
+
+        assertEquals(predicate, node.scanPredicate("client-a", scanId), "the owner sees its scan");
+        assertNull(node.scanPredicate("client-b", scanId),
+            "a foreign scan id must be indistinguishable from an unknown one");
+        assertNull(node.scanPredicate("client-b", scanId + 1), "unknown id");
+        assertTrue(node.deregisterScan("client-a", scanId));
+        assertNull(node.scanPredicate("client-a", scanId), "gone after deregister");
     }
 
     @Test

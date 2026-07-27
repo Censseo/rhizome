@@ -78,4 +78,34 @@ class RateLimiterTest {
         }
         assertTrue(limiter.trackedClients() <= 5, "tracked clients must stay bounded");
     }
+
+    @Test
+    void concurrentSprayKeepsTableBounded() throws Exception {
+        // IP-spray from many threads at once: every request is a table miss under capacity
+        // pressure — exactly the case where the sweep used to run inside the check-and-insert
+        // monitor. The table bound must hold under the race, no admission may throw, and the
+        // fail-closed overflow bucket keeps metering untracked clients.
+        var limiter = new RateLimiter(10, 60_000, 64);
+        int threads = 8, perThread = 500;
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(threads);
+        var start = new java.util.concurrent.CountDownLatch(1);
+        var futures = new java.util.ArrayList<java.util.concurrent.Future<?>>();
+        for (int t = 0; t < threads; t++) {
+            int base = t * perThread;
+            futures.add(pool.submit(() -> {
+                start.await();
+                for (int i = 0; i < perThread; i++) {
+                    limiter.allow("ip-" + (base + i));
+                }
+                return null;
+            }));
+        }
+        start.countDown();
+        for (var f : futures) {
+            f.get(30, java.util.concurrent.TimeUnit.SECONDS);
+        }
+        pool.shutdownNow();
+        assertTrue(limiter.trackedClients() <= 64,
+            "the client table must stay bounded under a concurrent spray");
+    }
 }

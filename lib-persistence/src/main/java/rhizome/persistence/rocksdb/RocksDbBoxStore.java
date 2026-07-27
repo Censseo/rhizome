@@ -52,6 +52,7 @@ public final class RocksDbBoxStore implements BoxStore, AutoCloseable {
     private static final byte[] EMPTY = new byte[0];
 
     private final RocksDB db;
+    private final DBOptions dbOptions;
     private final ColumnFamilyHandle defaultCf;
     private final ColumnFamilyHandle boxesCf;
     private final ColumnFamilyHandle ownerCf;
@@ -70,17 +71,19 @@ public final class RocksDbBoxStore implements BoxStore, AutoCloseable {
             new ColumnFamilyDescriptor(CF_JOURNAL),
             new ColumnFamilyDescriptor(CF_RECEIPTS));
         List<ColumnFamilyHandle> handles = new ArrayList<>();
-        // DBOptions is NOT closed after open: closing it while the DB is live corrupts the
-        // native heap (rocksdbjni keeps referencing it) — the audit F12 leak note is
-        // superseded; the object is reclaimed with the process/DB.
+        // DBOptions is kept and closed in close() AFTER db.close(): never while the DB is live
+        // (rocksdbjni keeps referencing it — closing it live corrupts the native heap), and not
+        // at all was a native-handle leak (audit F12).
+        DBOptions options = new DBOptions()
+            .setCreateIfMissing(true)
+            .setCreateMissingColumnFamilies(true);
         try {
-            DBOptions options = new DBOptions()
-                .setCreateIfMissing(true)
-                .setCreateMissingColumnFamilies(true);
             this.db = RocksDB.open(options, path, descriptors, handles);
         } catch (RocksDBException e) {
+            options.close();
             throw new IOException("Failed to open box store at " + path, e);
         }
+        this.dbOptions = options;
         this.defaultCf = handles.get(0);
         this.boxesCf = handles.get(1);
         this.ownerCf = handles.get(2);
@@ -121,7 +124,11 @@ public final class RocksDbBoxStore implements BoxStore, AutoCloseable {
                     writeBox(batch, m.box());
                 }
             }
-            batch.put(journalCf, longToBytes(height), encodeJournal(journal));
+            // A mutation-less apply persists no journal: revertBlock maps a missing journal to
+            // "nothing to undo", so the 4-byte empty row was a pure cost (audit: empty journals).
+            if (!journal.isEmpty()) {
+                batch.put(journalCf, longToBytes(height), encodeJournal(journal));
+            }
             // Receipts ride the same synced batch (previously a second fsync per block, audit perf).
             if (encodedReceipts != null) {
                 batch.put(receiptsCf, longToBytes(height), encodedReceipts);
@@ -216,15 +223,25 @@ public final class RocksDbBoxStore implements BoxStore, AutoCloseable {
     public List<byte[]> boxIdsByOwner(byte[] owner, byte[] afterId, int limit) {
         List<byte[]> out = new ArrayList<>();
         try (RocksIterator it = db.newIterator(ownerCf)) {
-            for (it.seek(owner); it.isValid() && out.size() < limit; it.next()) {
+            // Seek straight to the owner ‖ afterId composite: keys sort lexicographically, so
+            // every subsequent key under the owner prefix is strictly past the cursor. The old
+            // seek(owner) + Java-side filter re-scanned the owner's whole history per page —
+            // O(n) per page, O(n^2) to enumerate (audit: owner-index pagination).
+            if (afterId == null) {
+                it.seek(owner);
+            } else {
+                byte[] cursor = concat(owner, afterId);
+                it.seek(cursor);
+                if (it.isValid() && Arrays.equals(it.key(), cursor)) {
+                    it.next(); // exclusive of the cursor
+                }
+            }
+            for (; it.isValid() && out.size() < limit; it.next()) {
                 byte[] key = it.key();
                 if (key.length < owner.length || !startsWith(key, owner)) {
                     break;
                 }
-                byte[] boxId = Arrays.copyOfRange(key, owner.length, key.length);
-                if (afterId == null || Arrays.compareUnsigned(boxId, afterId) > 0) {
-                    out.add(boxId);
-                }
+                out.add(Arrays.copyOfRange(key, owner.length, key.length));
             }
         }
         return out;
@@ -274,6 +291,9 @@ public final class RocksDbBoxStore implements BoxStore, AutoCloseable {
 
     private record JournalEntry(byte[] id, byte[] prior) {}
 
+    /** Smallest possible serialized journal entry: boxId(32) + prior-present flag(1). */
+    private static final int MIN_JOURNAL_RECORD_BYTES = 32 + 1;
+
     private static byte[] encodeJournal(List<JournalEntry> journal) {
         int size = 4;
         for (JournalEntry e : journal) {
@@ -299,7 +319,9 @@ public final class RocksDbBoxStore implements BoxStore, AutoCloseable {
         int count = buffer.getInt();
         // Defense-in-depth on a self-written blob: bound count/length before allocating so a corrupt or
         // truncated journal throws a clean error rather than new ArrayList<>(negative) / new byte[huge].
-        if (count < 0 || count > buffer.remaining()) {
+        // The count is bounded by the SMALLEST possible record (id 32 + flag 1), not by the raw
+        // remaining byte count — a huge count in a short buffer must fail even when count <= remaining.
+        if (count < 0 || count > buffer.remaining() / MIN_JOURNAL_RECORD_BYTES) {
             throw new IllegalStateException("box journal count out of range: " + count);
         }
         List<JournalEntry> journal = new ArrayList<>(count);
@@ -373,5 +395,6 @@ public final class RocksDbBoxStore implements BoxStore, AutoCloseable {
         receiptsCf.close();
         writeOptions.close();
         db.close();
+        dbOptions.close(); // after the DB: rocksdbjni references the options while the DB is live
     }
 }

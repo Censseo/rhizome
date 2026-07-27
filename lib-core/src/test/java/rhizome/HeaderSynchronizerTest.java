@@ -17,6 +17,7 @@ import rhizome.core.blockchain.ChainEngine;
 import rhizome.core.blockchain.ChainSynchronizer;
 import rhizome.core.blockchain.HeaderSynchronizer;
 import rhizome.core.blockchain.InMemoryChainStore;
+import rhizome.core.blockchain.LocalSaturationException;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
 import rhizome.core.blockchain.PeerSource;
@@ -196,6 +197,28 @@ class HeaderSynchronizerTest {
         assertEquals(ChainSynchronizer.Result.EXTENDED, r);
         assertEquals(13, local.height());
         assertTrue(local.tipHash().equals(peer.tipHash()));
+    }
+
+    @Test
+    void localSaturationDuringHeaderProbeIsNotPeerInvalid() {
+        // Same rule as ChainSynchronizerTest.localSaturationDuringSyncIsNotPeerInvalid, on the
+        // headers-first path: a LocalSaturationException out of the /headers probe is LOCAL
+        // backpressure (our bounded body-read pool full), not a peer fault — NO_CHANGE, retried
+        // next round, never the ban-score-earning PEER_INVALID.
+        ChainEngine peer = newEngine();
+        mine(peer, PublicAddress.random(), new AtomicLong(0), 5);
+        EnginePeer saturated = new EnginePeer(peer) {
+            @Override public List<BlockHeader> headers(long start, long end) {
+                throw new LocalSaturationException("local body-read pool saturated", null);
+            }
+        };
+
+        ChainEngine local = newEngine();
+        ChainSynchronizer.Result r = new HeaderSynchronizer(local).syncFrom(saturated);
+
+        assertEquals(ChainSynchronizer.Result.NO_CHANGE, r,
+            "local transport backpressure must not be read as a peer fault (PEER_INVALID)");
+        assertEquals(1, local.height(), "genesis only: nothing was applied");
     }
 
     @Test

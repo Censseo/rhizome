@@ -7,16 +7,32 @@ import org.bouncycastle.math.ec.rfc8032.Ed25519;
 import static rhizome.crypto.Hex.bytesToHex;
 import static rhizome.crypto.Hex.hexStringToByteArray;
 
+import java.util.Arrays;
 import java.util.Optional;
 
-public record PublicKey(Optional<Ed25519PublicKeyParameters> key) implements SimpleHashType {
+// A final class rather than a record: records cannot hold per-instance memo state, and the
+// canonical 32-byte encoding is memoised here (see encoded()) so equals/hashCode stop paying
+// an Ed25519PublicKeyParameters.getEncoded() clone per comparison (audit). The public surface
+// — constructor, key() accessor, factories — is unchanged from the record.
+public final class PublicKey implements SimpleHashType {
 
     public static final int SIZE = 32;
+
+    private final Optional<Ed25519PublicKeyParameters> key;
+
+    // Lazy memo of the canonical encoding. volatile + benign race: every racer computes the
+    // identical 32 bytes, so a duplicate computation is harmless. Never exposed without a
+    // clone (see toBytes()).
+    private volatile byte[] encoded;
+
+    public PublicKey(Optional<Ed25519PublicKeyParameters> key) {
+        this.key = key;
+    }
 
     public static PublicKey empty() {
         return new PublicKey(Optional.empty());
     }
-    
+
     public static PublicKey of(AsymmetricKeyParameter keyParameter) {
         if (keyParameter == null) {
             return empty();
@@ -56,12 +72,27 @@ public record PublicKey(Optional<Ed25519PublicKeyParameters> key) implements Sim
         return of(hexStringToByteArray(hexString));
     }
 
+    private byte[] encoded() {
+        byte[] e = encoded;
+        if (e == null) {
+            e = key.map(Ed25519PublicKeyParameters::getEncoded).orElseGet(() -> new byte[SIZE]);
+            encoded = e;
+        }
+        return e;
+    }
+
     public String toHexString() {
-        return key.map(pk -> bytesToHex(pk.getEncoded())).orElse("");
+        return key.isPresent() ? bytesToHex(encoded()) : "";
     }
 
     public byte[] toBytes() {
-        return key.map(Ed25519PublicKeyParameters::getEncoded).orElseGet(() -> new byte[SIZE]);
+        // Defensive copy off the memo: callers must not be able to mutate the encoding that
+        // equals/hashCode rely on.
+        return encoded().clone();
+    }
+
+    public Optional<Ed25519PublicKeyParameters> key() {
+        return key;
     }
 
     public Ed25519PublicKeyParameters get() {
@@ -73,8 +104,8 @@ public record PublicKey(Optional<Ed25519PublicKeyParameters> key) implements Sim
         return SIZE;
     }
 
-    // Ed25519PublicKeyParameters implements neither equals nor hashCode, so the record default
-    // would compare keys by identity; compare the canonical 32-byte encodings instead.
+    // Ed25519PublicKeyParameters implements neither equals nor hashCode, so compare the
+    // canonical 32-byte encodings — via the memo, so no clone per comparison.
     @Override
     public boolean equals(Object o) {
         if (this == o) {
@@ -83,12 +114,12 @@ public record PublicKey(Optional<Ed25519PublicKeyParameters> key) implements Sim
         if (!(o instanceof PublicKey other)) {
             return false;
         }
-        return java.util.Arrays.equals(toBytes(), other.toBytes());
+        return Arrays.equals(encoded(), other.encoded());
     }
 
     @Override
     public int hashCode() {
-        return java.util.Arrays.hashCode(toBytes());
+        return Arrays.hashCode(encoded());
     }
 
     private static boolean isZeroFilled(byte[] bytes) {

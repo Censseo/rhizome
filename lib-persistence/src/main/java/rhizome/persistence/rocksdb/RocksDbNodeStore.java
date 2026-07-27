@@ -84,6 +84,7 @@ public final class RocksDbNodeStore implements AutoCloseable {
     private final int keepBlocks;
 
     private final RocksDB db;
+    private final DBOptions dbOptions;
     private final ColumnFamilyHandle defaultCf;
     private final ColumnFamilyHandle blocksCf;
     private final ColumnFamilyHandle headersCf;
@@ -104,6 +105,9 @@ public final class RocksDbNodeStore implements AutoCloseable {
     private static final long BULK_SYNC_EVERY = 4096;
     private final WriteOptions bulkWriteOptions = new WriteOptions().setSync(false);
     private long bulkWritesSinceSync;
+
+    /** Headers per WriteBatch in {@link #bootstrapHeaders} (audit: unbounded bootstrap batch). */
+    private static final int BOOTSTRAP_BATCH_CHUNK = 10_000;
 
     /** Throttles the unsynced bulk-write tail: one WAL fsync per {@link #BULK_SYNC_EVERY} writes. */
     private void noteBulkWrite() throws RocksDBException {
@@ -161,17 +165,19 @@ public final class RocksDbNodeStore implements AutoCloseable {
             new ColumnFamilyDescriptor(CF_NONCES),
             new ColumnFamilyDescriptor(CF_UNCLES));
         List<ColumnFamilyHandle> handles = new ArrayList<>();
-        // DBOptions is NOT closed after open: closing it while the DB is live corrupts the
-        // native heap (rocksdbjni keeps referencing it) — the audit F12 leak note is
-        // superseded; the object is reclaimed with the process/DB.
+        // DBOptions is kept and closed in close() AFTER db.close(): never while the DB is live
+        // (rocksdbjni keeps referencing it — closing it live corrupts the native heap), and not
+        // at all was a native-handle leak (audit F12).
+        DBOptions options = new DBOptions()
+            .setCreateIfMissing(true)
+            .setCreateMissingColumnFamilies(true);
         try {
-            DBOptions options = new DBOptions()
-                .setCreateIfMissing(true)
-                .setCreateMissingColumnFamilies(true);
             this.db = RocksDB.open(options, path, descriptors, handles);
         } catch (RocksDBException e) {
+            options.close();
             throw new IOException("Failed to open RocksDB at " + path, e);
         }
+        this.dbOptions = options;
         this.defaultCf = handles.get(0);
         this.blocksCf = handles.get(1);
         this.headersCf = handles.get(2);
@@ -291,8 +297,13 @@ public final class RocksDbNodeStore implements AutoCloseable {
         if (headers.isEmpty()) {
             return;
         }
+        // Chunked batches: a single unbounded WriteBatch materialised every header at once —
+        // a long snap-sync range pinned hundreds of MB in the batch's native buffer (audit:
+        // unbounded bootstrap batch). A crash between chunks simply re-runs the bootstrap: the
+        // store still holds exactly genesis (the meta rows land only with the last chunk).
         try (WriteBatch batch = new WriteBatch()) {
             long expected = 2;
+            int inBatch = 0;
             for (BlockHeader header : headers) {
                 if (header.id() != expected) {
                     throw new IllegalArgumentException("non-contiguous bootstrap header at " + header.id()
@@ -300,6 +311,11 @@ public final class RocksDbNodeStore implements AutoCloseable {
                 }
                 batch.put(headersCf, heightKey(expected), HeaderCodec.encode(header));
                 expected++;
+                if (++inBatch >= BOOTSTRAP_BATCH_CHUNK) {
+                    db.write(writeOptions, batch);
+                    batch.clear();
+                    inBatch = 0;
+                }
             }
             long tip = expected - 1;
             batch.put(metaCf, HEIGHT_KEY, heightKey(tip));
@@ -400,6 +416,7 @@ public final class RocksDbNodeStore implements AutoCloseable {
         writeOptions.close();
         bulkWriteOptions.close();
         db.close();
+        dbOptions.close(); // after the DB: rocksdbjni references the options while the DB is live
     }
 
     private static byte[] heightKey(long height) {
@@ -457,7 +474,9 @@ public final class RocksDbNodeStore implements AutoCloseable {
                 batch.put(headersCf, key, HeaderCodec.encode(BlockHeader.of(block)));
                 for (Transaction t : block.transactions()) {
                     if (!((TransactionImpl) t).isTransactionFee()) {
-                        batch.put(txIndexCf, t.hashContents().toBytes(), key);
+                        // raw(): WriteBatch.put copies the key into the native batch buffer
+                        // before returning, so no clone is needed for the JNI hand-off.
+                        batch.put(txIndexCf, t.hashContents().raw(), key);
                     }
                 }
                 batch.put(metaCf, HEIGHT_KEY, key);
@@ -537,10 +556,14 @@ public final class RocksDbNodeStore implements AutoCloseable {
             if (height <= from) {
                 return;
             }
+            // The blocks CF is keyed by the 8-byte big-endian height ONLY, so the pruned bodies
+            // form one contiguous key range [from, height): a single deleteRange tombstone
+            // replaces an unbounded WriteBatch holding one delete per body (audit: giant prune
+            // batch). The range tombstone and the watermark ride the SAME WriteBatch, so a
+            // crash cannot leave bodies deleted with a stale watermark. Headers + txindex are
+            // retained, as before.
             try (WriteBatch batch = new WriteBatch()) {
-                for (long h = from; h < height; h++) {
-                    batch.delete(blocksCf, heightKey(h)); // headers + txindex retained
-                }
+                batch.deleteRange(blocksCf, heightKey(from), heightKey(height));
                 batch.put(metaCf, PRUNED_BELOW_KEY, heightKey(height));
                 db.write(writeOptions, batch);
             } catch (RocksDBException e) {
@@ -561,7 +584,7 @@ public final class RocksDbNodeStore implements AutoCloseable {
                 batch.delete(headersCf, key);
                 for (Transaction t : tip.transactions()) {
                     if (!((TransactionImpl) t).isTransactionFee()) {
-                        batch.delete(txIndexCf, t.hashContents().toBytes());
+                        batch.delete(txIndexCf, t.hashContents().raw()); // copied natively — see append
                     }
                 }
                 batch.put(metaCf, HEIGHT_KEY, heightKey(height - 1));
@@ -583,7 +606,8 @@ public final class RocksDbNodeStore implements AutoCloseable {
         @Override
         public void putUncle(SHA256Hash hash, Block uncle) {
             try {
-                db.put(unclesCf, writeOptions, hash.toBytes(), BlockCodec.encode(uncle));
+                // raw(): db.put copies the key into a native Slice for the duration of the call.
+                db.put(unclesCf, writeOptions, hash.raw(), BlockCodec.encode(uncle));
             } catch (RocksDBException e) {
                 throw new LedgerException("Failed to store uncle " + hash.toHexString(), e);
             }
@@ -592,7 +616,7 @@ public final class RocksDbNodeStore implements AutoCloseable {
         @Override
         public Block uncleAt(SHA256Hash hash) {
             try {
-                byte[] value = db.get(unclesCf, hash.toBytes());
+                byte[] value = db.get(unclesCf, hash.raw());
                 return value == null ? null : BlockCodec.decode(value);
             } catch (RocksDBException e) {
                 throw new LedgerException("Failed to read uncle " + hash.toHexString(), e);
@@ -602,7 +626,7 @@ public final class RocksDbNodeStore implements AutoCloseable {
         @Override
         public boolean hasTransaction(SHA256Hash contentHash) {
             try {
-                return db.get(txIndexCf, contentHash.toBytes()) != null;
+                return db.get(txIndexCf, contentHash.raw()) != null;
             } catch (RocksDBException e) {
                 throw new LedgerException("Failed to read tx index", e);
             }
@@ -611,7 +635,7 @@ public final class RocksDbNodeStore implements AutoCloseable {
         @Override
         public Long transactionHeight(SHA256Hash contentHash) {
             try {
-                byte[] value = db.get(txIndexCf, contentHash.toBytes());
+                byte[] value = db.get(txIndexCf, contentHash.raw());
                 return value == null ? null : bytesToLong(value);
             } catch (RocksDBException e) {
                 throw new LedgerException("Failed to read tx index", e);

@@ -165,6 +165,47 @@ class HttpPeerSourceTest {
     }
 
     @Test
+    void localPoolSaturationIsNotAPeerFailure() throws Exception {
+        // Saturate the shared body-read pool (all 16 workers blocked): the exchange is
+        // rejected LOCALLY before any I/O. It must surface as LocalSaturationException —
+        // NOT PeerUnavailableException (a transport failure) and NOT PeerProtocolException
+        // (misbehaviour) — so the sync round cannot read our own backpressure as a peer
+        // fault and ban-score an honest peer (audit: AbortPolicy saturation imputed to peers).
+        var started = new java.util.concurrent.CountDownLatch(16);
+        var release = new java.util.concurrent.CountDownLatch(1);
+        var threads = new java.util.ArrayList<Thread>();
+        for (int i = 0; i < 16; i++) {
+            Thread t = new Thread(() -> {
+                try {
+                    BodyReadDeadline.call(Duration.ofSeconds(30),
+                        new java.util.concurrent.atomic.AtomicReference<>(), () -> {
+                            started.countDown();
+                            release.await();
+                            return null;
+                        });
+                } catch (Exception ignored) {
+                    // torn down by the test: irrelevant
+                }
+            });
+            t.setDaemon(true);
+            t.start();
+            threads.add(t);
+        }
+        try {
+            assertTrue(started.await(10, java.util.concurrent.TimeUnit.SECONDS), "all workers occupied");
+            var source = new HttpPeerSource(baseUrl);
+            assertThrows(rhizome.core.blockchain.LocalSaturationException.class, source::height);
+            assertThrows(rhizome.core.blockchain.LocalSaturationException.class,
+                () -> source.blocks(1, 10));
+        } finally {
+            release.countDown();
+            for (Thread t : threads) {
+                t.join(5_000);
+            }
+        }
+    }
+
+    @Test
     void configuredPeerTokenIsAttachedAsBearer() {
         // RHIZOME_PEER_TOKEN: outbound requests carry Authorization: Bearer <token> so a
         // token-gated peer accepts them (audit: token-gated node breaks gossip).

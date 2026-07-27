@@ -107,7 +107,7 @@ final class SyncApi {
         return json(new JSONObject()
             .put("pivotHeight", snap.pivotHeight())
             .put("stateRoot", rhizome.core.common.Utils.bytesToHex(snap.stateRoot()))
-            .put("chunks", snap.chunks().size()));
+            .put("chunks", snap.chunkCount()));
     }
 
     /** One binary snapshot chunk by index (bounds-checked against the current materialisation). */
@@ -120,15 +120,27 @@ final class SyncApi {
             return badRequest("index out of range");
         }
         int index = (int) rawIndex;
-        if (snap == null || index >= snap.chunks().size()) {
+        if (snap == null || index >= snap.chunkCount()) {
             return HttpResponse.ofCode(404)
                 .withJson(new JSONObject().put("error", "no such snapshot chunk").toString())
                 .build();
         }
-        return HttpResponse.ok200()
-            .withHeader(HttpHeaders.CONTENT_TYPE, "application/octet-stream")
-            .withBody(snap.chunks().get(index))
-            .build();
+        try {
+            return HttpResponse.ok200()
+                .withHeader(HttpHeaders.CONTENT_TYPE, "application/octet-stream")
+                .withBody(snap.chunkBytes(index))
+                .build();
+        } catch (java.io.UncheckedIOException e) {
+            // Rotation race: materializeSnapshot() closed this snapshot's channel between our
+            // materializedSnapshot() read and the chunk read. It is not a client fault (→ not
+            // the global mapper's 400): tell the peer to re-read /state/snapshot/info.
+            if (e.getCause() instanceof java.nio.channels.ClosedChannelException) {
+                return HttpResponse.ofCode(404)
+                    .withJson(new JSONObject().put("error", "snapshot rotated").toString())
+                    .build();
+            }
+            throw e;
+        }
     }
 
     /**

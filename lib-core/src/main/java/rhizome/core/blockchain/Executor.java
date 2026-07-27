@@ -48,6 +48,8 @@ import static rhizome.core.mempool.ExecutionStatus.*;
  */
 public final class Executor {
 
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(Executor.class);
+
     private Executor() {}
 
     /** One applied ledger mutation, recorded for rollback. */
@@ -166,6 +168,18 @@ public final class Executor {
             if (tx.isTransactionFee()) {
                 if (coinbase != null) {
                     return EXTRA_MINING_FEE;
+                }
+                // The coinbase must be a plain TRANSFER. The wire codec (TransactionDto)
+                // serializes `kind` independently of the isTransactionFee flag, and the
+                // signature verifier passes a fee tx unconditionally — so without this check a
+                // coinbase carrying kind=CALL/BOX_*/TOKEN_* sailed through validation. The apply
+                // pass below (and the reorg walk) skips fee txs before dispatching on kind, so
+                // the poisoned kind never executed — but any code that walks the block by kind
+                // alone (e.g. counting expected contract/box receipts) then disagreed with the
+                // receipt lists, and a popBlock blew up mid-reorg with the ledger half-reverted:
+                // a permanent-fork poison block. Reject it on the cheap structural pass.
+                if (tx.kind() != rhizome.core.transaction.TransactionKind.TRANSFER) {
+                    return INCORRECT_MINING_FEE;
                 }
                 coinbase = t;
                 continue;
@@ -737,6 +751,57 @@ public final class Executor {
         List<BoxProcessor.BoxReceipt> boxReceipts =
             boxProcessor != null ? boxProcessor.receipts(height) : List.of();
         int bi = boxReceipts.size() - 1;
+
+        // Fail-fast BEFORE any mutation on MISSING receipts (audit: mid-rollback
+        // IndexOutOfBounds). The reverse walk below consumes exactly one receipt per
+        // contract/box transaction (applyBlock emits one per tx, even for soft reverts).
+        // Receipts are persisted per block and pruned on the journal schedule
+        // (retainDepth >= maxReorgDepth), so within the reorg window they are always present;
+        // if they are short anyway (store corruption, misconfigured retention),
+        // receipts.get(ri--) used to throw IndexOutOfBoundsException MID-rollback — ledger
+        // partially reverted, a planted-block state-corruption vector. Verify the counts up
+        // front so the pop aborts cleanly with the ledger untouched and a diagnosable message.
+        // A SURPLUS is only warned about: the pre-guard walk consumed one receipt per tx from
+        // the back of the list and tolerated extras (they are left unconsumed), so turning it
+        // into a hard failure would fork nodes that synced past such a block. The counting loop
+        // skips the coinbase exactly like the apply pass and the reverse walk do — kind() is
+        // independent of the fee flag only on rejected blocks (pass 1 pins the coinbase to
+        // TRANSFER), but the three walks must agree structurally regardless.
+        int expectedContract = 0;
+        int expectedBox = 0;
+        for (Transaction t : transactions) {
+            var tx = (TransactionImpl) t;
+            if (tx.isTransactionFee()) {
+                continue;
+            }
+            if (tx.kind().isContract()) {
+                expectedContract++;
+            } else if (tx.kind().isBox()) {
+                expectedBox++;
+            }
+        }
+        if (receipts.size() < expectedContract) {
+            throw new IllegalStateException("cannot roll back block at height " + height + ": it carries "
+                + expectedContract + " contract transactions but only " + receipts.size()
+                + " receipts were found (pruned or lost?) — the ledger is left untouched;"
+                + " receipts must be retained at least maxReorgDepth deep");
+        }
+        if (receipts.size() > expectedContract) {
+            log.warn("block at height {} carries {} contract transactions but {} receipts were "
+                + "found — consuming the trailing {} and tolerating the surplus (legacy behavior)",
+                height, expectedContract, receipts.size(), expectedContract);
+        }
+        if (boxReceipts.size() < expectedBox) {
+            throw new IllegalStateException("cannot roll back block at height " + height + ": it carries "
+                + expectedBox + " box transactions but only " + boxReceipts.size()
+                + " box receipts were found (pruned or lost?) — the ledger is left untouched;"
+                + " receipts must be retained at least maxReorgDepth deep");
+        }
+        if (boxReceipts.size() > expectedBox) {
+            log.warn("block at height {} carries {} box transactions but {} box receipts were "
+                + "found — consuming the trailing {} and tolerating the surplus (legacy behavior)",
+                height, expectedBox, boxReceipts.size(), expectedBox);
+        }
 
         // Exact inverse of payUncleRewards. That path scales each reward to the uncle's PROVEN
         // work — base >>> (nephewDifficulty - ref.difficulty()) via scaleRewardToWork (audit C1) —

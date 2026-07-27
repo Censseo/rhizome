@@ -33,6 +33,8 @@ import com.dylibso.chicory.wasm.types.WasmEncoding;
  */
 public final class WasmVm {
 
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(WasmVm.class);
+
     private static final String ENV = "env";
     private static final String ENTRY = "call";
 
@@ -214,6 +216,11 @@ public final class WasmVm {
      * every call, even a cache hit — with an {@code Arrays.hashCode} loop; equals only runs on a hash
      * collision. The key never affects gas (charged unconditionally before the lookup), so this stays a
      * pure CPU optimization with no consensus effect.
+     *
+     * <p>The record encapsulates its array without cloning: callers on the LOOKUP path create a
+     * throwaway key over their own array, and the put path in {@link #moduleFor} stores a defensive
+     * clone — one copy per cache miss, never per call — so the cache can never alias (and be corrupted
+     * through) a caller-owned array.
      */
     private record CodeKey(byte[] code) {
         @Override public boolean equals(Object o) {
@@ -408,12 +415,21 @@ public final class WasmVm {
      * contract-bearing block validation/production behind untrusted API traffic — a cheap
      * remote validation-latency DoS (audit review). Consensus executions never queue behind
      * this pool; dry-runs queue behind each other and are independently API-rate-limited.
+     *
+     * <p>The backlog bound lives upstream, at the node's dry-run admission point (a semaphore
+     * taken before the consensus lock, NodeService.MAX_CONCURRENT_DRY_RUNS): the consensus lock
+     * serializes admission to this worker, so a bounded queue HERE could never fill — the real
+     * backlog accumulated as parked pool threads in front of the lock. Only admitted dry-runs
+     * (≤ that bound) are ever submitted, so this queue needs no bound of its own.
      */
     private static final java.util.concurrent.ExecutorService DRY_RUN_WORKER =
-        java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
-            Thread t = new Thread(null, r, "rhizome-wasm-dryrun", EXEC_STACK_BYTES);
-            t.setDaemon(true);
-            return t;
+        java.util.concurrent.Executors.newSingleThreadExecutor(new java.util.concurrent.ThreadFactory() {
+            @Override
+            public Thread newThread(Runnable r) {
+                Thread t = new Thread(null, r, "rhizome-wasm-dryrun", EXEC_STACK_BYTES);
+                t.setDaemon(true);
+                return t;
+            }
         });
 
     public static <T> T onBoundedStack(java.util.function.Supplier<T> task) {
@@ -468,11 +484,24 @@ public final class WasmVm {
         return false;
     }
 
-    /** True if {@code e} is Chicory's rewrapped JVM stack overflow ("call stack exhausted"). */
+    /**
+     * True if {@code e} is Chicory's rewrapped JVM stack overflow. Type-first: the pinned
+     * Chicory 1.7.5 (lib-vm/build.gradle) wraps the {@link StackOverflowError} as
+     * {@code ChicoryException("call stack exhausted", cause)} in {@code InterpreterMachine.call}
+     * (verified against the -sources jar), so an SOE anywhere in the cause chain is the stable
+     * signal — it survives Chicory rewording the message. The case-insensitive message match is
+     * kept only as a fallback for a future Chicory that drops the cause; a reworded message WITH
+     * the cause intact is still caught by the type check. Either way the outcome is the same
+     * deterministic full-gas out-of-gas, so a false positive here can only ever pick that safe
+     * normalization.
+     */
     private static boolean isStackExhausted(Throwable e) {
         for (Throwable t = e; t != null; t = t.getCause()) {
+            if (t instanceof StackOverflowError) {
+                return true;
+            }
             String msg = t.getMessage();
-            if (msg != null && msg.contains("call stack exhausted")) {
+            if (msg != null && msg.toLowerCase(java.util.Locale.ROOT).contains("call stack exhausted")) {
                 return true;
             }
         }
@@ -531,7 +560,11 @@ public final class WasmVm {
         rejectOversizedAllocations(module);
         rejectNonWhitelistedAbi(module);
         synchronized (MODULE_CACHE) {
-            MODULE_CACHE.put(key, module);
+            // Defensive clone at the cache boundary (CodeKey does not clone): without it the
+            // retained key would alias the caller's array, and a caller mutating its own copy
+            // after a miss would silently corrupt the key's equals/hashCode. The lookup path
+            // deliberately does not clone — one copy per miss, not per call.
+            MODULE_CACHE.put(new CodeKey(wasmCode.clone()), module);
         }
         return module;
     }
@@ -559,6 +592,10 @@ public final class WasmVm {
         // sum past TREE_MAX_PAGES no matter the host heap (the fork/OOM vector this closes).
         reserveTreePages(initial, frameAdded);
         gas.charge((long) initial * GasSchedule.MEMORY_PER_PAGE);
+        // Clamp the declared max to the network cap: rejecting instead would break every no-max
+        // module (Chicory reports the 65536-page wasm32 ceiling — the bundled fixtures included),
+        // so the max is narrowed here. Deterministic on every node, and logged once per module at
+        // validation time (see rejectOversizedAllocations), so the narrowing is not silent.
         int max = Math.min(Math.max(requested.maximumPages(), initial), MAX_CONTRACT_PAGES);
         return new ByteBufferMemory(new MemoryLimits(initial, max));
     }
@@ -871,7 +908,17 @@ public final class WasmVm {
         var memories = module.memorySection();
         if (memories.isPresent()) {
             for (int i = 0; i < memories.get().memoryCount(); i++) {
-                checkDeclaredInitialPages(memories.get().getMemory(i).limits().initialPages());
+                var limits = memories.get().getMemory(i).limits();
+                checkDeclaredInitialPages(limits.initialPages());
+                if (limits.maximumPages() > MAX_CONTRACT_PAGES) {
+                    // An explicit deploy-time REJECTION would break the bundled fixtures — and
+                    // every no-max module, where Chicory reports the 65536-page wasm32 ceiling —
+                    // so the runtime clamp in boundedMemory stays. Log once per module so the
+                    // silent narrowing is at least visible; this is the cached parse path, so it
+                    // fires once per module per node, never per call (audit: silent memory clamp).
+                    log.warn("contract declares memory max {} pages; clamped to {} at instantiation",
+                        limits.maximumPages(), MAX_CONTRACT_PAGES);
+                }
             }
         }
     }

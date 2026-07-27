@@ -31,6 +31,10 @@ public final class DefaultTokenProcessor implements TokenProcessor {
     private final Map<Long, List<TokenStore.TokenOp>> changesByHeight = new ConcurrentHashMap<>();
     private long lastCommittedHeight = -1;
 
+    /** Blocks between amortized durable interval prunes ({@code pruneJournals}); see commit. */
+    static final long PRUNE_INTERVAL = 32;
+    private long lastIntervalPruneCutoff;
+
     public DefaultTokenProcessor(TokenStore store, NetworkParameters params) {
         this(store, params, params.maxReorgDepth());
     }
@@ -172,8 +176,12 @@ public final class DefaultTokenProcessor implements TokenProcessor {
             }
             sessionBalance.forEach((key, amount) ->
                 ops.add(new TokenStore.TokenOp.BalanceSet(tokenIdOf(key), addressOf(key), amount)));
-            store.applyBlock(blockHeight, ops);
+            // A block with NO token ops persists no journal: every revert path maps a missing
+            // journal to "nothing to undo" (see RocksDbTokenStore.revertBlock's early return),
+            // so the 4-byte empty-journal row was a synced write per block for nothing (audit:
+            // empty-journal fsyncs).
             if (!ops.isEmpty()) {
+                store.applyBlock(blockHeight, ops);
                 changesByHeight.put(blockHeight, ops);
             }
             sessionMeta = null;
@@ -188,7 +196,13 @@ public final class DefaultTokenProcessor implements TokenProcessor {
         if (cutoff > 0) {
             eventsByHeight.keySet().removeIf(h -> h < cutoff);
             changesByHeight.keySet().removeIf(h -> h < cutoff);
-            store.pruneJournals(cutoff);
+            // Amortized interval prune (see PRUNE_INTERVAL): the deleteRange fsync is the
+            // backstop for pre-restart rows, not worth paying every block (audit perf). It only
+            // ever lags the retention window — the reorg depth stays fully covered.
+            if (cutoff - lastIntervalPruneCutoff >= PRUNE_INTERVAL) {
+                store.pruneJournals(cutoff);
+                lastIntervalPruneCutoff = cutoff;
+            }
         }
     }
 

@@ -8,9 +8,6 @@ import org.iq80.leveldb.ReadOptions;
 import org.iq80.leveldb.WriteBatch;
 import org.iq80.leveldb.WriteOptions;
 
-import io.activej.bytebuf.ByteBuf;
-import io.activej.bytebuf.ByteBufPool;
-import io.activej.common.MemSize;
 import lombok.Getter;
 import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
@@ -140,7 +137,9 @@ public class LevelDBDataStore {
     protected Object get(byte[] key, Class<?> type) {
         var value = db.get(key, new ReadOptions());
         if (value == null) {
-            throw new LevelDBException("Empty key: " + key);
+            // Print the key's CONTENT: "Empty key: " + key printed the array identity ([B@1a2b),
+            // useless when diagnosing a missing record (audit: error-message hygiene).
+            throw new LevelDBException("Empty key: " + java.util.Arrays.toString(key));
         }
 
         if(type == String.class) {
@@ -149,21 +148,15 @@ public class LevelDBDataStore {
             return ByteBuffer.wrap(value).getInt();
         } else if (type == Long.class && value.length == Long.BYTES) {
             return ByteBuffer.wrap(value).getLong();
+        } else if (type == Long.class) {
+            // A Long record of the wrong width used to fall through to "Unsupported type",
+            // blaming the TYPE instead of the corrupt length (audit: error-message hygiene).
+            throw new LevelDBException("Long record has " + value.length
+                + " bytes, expected " + Long.BYTES);
         } else if (type == BigInteger.class) {
             return new BigInteger(value);
         } else if (type == byte[].class) {
             return value;
-        } else if (type == ByteBuf.class) {
-            // Ownership: the returned pooled buffer ESCAPES to the caller, who must recycle it
-            // (ByteBuf.recycle()) when done — the store cannot, it has no way to know (audit F12).
-            var buff = ByteBufPool.allocate(MemSize.of(value.length));
-            buff.put(value);
-
-            if (!buff.canRead()) {
-                throw new LevelDBException("Could not read value of record " + key + " from BlockStore db.");
-            }
-
-            return buff;
         } else {
             throw new LevelDBException("Unsupported type");
         }

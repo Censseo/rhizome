@@ -2,7 +2,7 @@ package rhizome.vm;
 
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -21,14 +21,30 @@ import rhizome.core.ledger.PublicAddress;
  * <p>Keys are typed ({@link PublicAddress} and {@link Slot}, both value-equality) rather than hex
  * Strings: storage read/write is on the block's hottest path, so per-op {@code StringBuilder} hex
  * encoding and per-byte {@code Integer.parseInt} decoding on flush were pure allocation/CPU churn.
+ *
+ * <p><b>Array ownership.</b> WRITES defensively copy every entering array (key and value —
+ * {@link #putCode}, {@link #putStorage}, {@link #deleteStorage}), so an array the caller still
+ * holds can never alias session state: mutating it after the call changes nothing here. The copy
+ * is write-only and cheap; the invariant it replaces ("no caller ever mutates an array it handed
+ * over") was untestable, and for a storage key it failed worse than a stale value — the key array
+ * lives INSIDE a {@link Slot} map key, so post-hoc mutation made the whole entry unreachable
+ * (hash lookup) and silently lost the write. READS ({@link #getCode}/{@link #getStorage}) return
+ * the session's own array WITHOUT copying: every downstream consumer treats it as read-only (the
+ * VM copies it into contract memory via {@code Memory.write}, the state-root path only hashes it,
+ * the flush/journal captures pass it on unmutated, the durable base store copies at its own
+ * boundary). The load-bearing read-side invariant: nothing mutates a store-returned array in
+ * place.
  */
 final class SessionContractStore implements ContractStore {
 
     private final ContractStore base;
-    private final Map<PublicAddress, byte[]> codeWrites = new HashMap<>();
-    // A null value is a TOMBSTONE: the key was deleted in this session. HashMap keeps null values,
+    // LinkedHashMap, not HashMap: forwardChanges/pendingChanges/captureJournal iterate these maps
+    // into CONSENSUS-VISIBLE lists (state-root change order, undo-journal order). HashMap order is
+    // a function of hashes and growth history; insertion order is explicit and stable across JVMs.
+    private final Map<PublicAddress, byte[]> codeWrites = new LinkedHashMap<>();
+    // A null value is a TOMBSTONE: the key was deleted in this session. LinkedHashMap keeps null values,
     // so containsKey distinguishes "deleted here" from "not touched here" (audit F9).
-    private final Map<Slot, byte[]> storageWrites = new HashMap<>();
+    private final Map<Slot, byte[]> storageWrites = new LinkedHashMap<>();
 
     /** A (contract, storage-key) pair with value-based equality, for use as a map key. */
     private record Slot(PublicAddress contract, byte[] key) {
@@ -44,14 +60,15 @@ final class SessionContractStore implements ContractStore {
         this.base = base;
     }
 
+    /** Read path: zero-copy by design — see the class-level array-ownership invariant. */
     @Override
     public byte[] getCode(PublicAddress contract) {
-        return codeWrites.containsKey(contract) ? codeWrites.get(contract).clone() : base.getCode(contract);
+        return codeWrites.containsKey(contract) ? codeWrites.get(contract) : base.getCode(contract);
     }
 
     @Override
     public void putCode(PublicAddress contract, byte[] code) {
-        codeWrites.put(contract, code.clone());
+        codeWrites.put(contract, code.clone()); // defensive copy: class-level ownership invariant
     }
 
     @Override
@@ -61,17 +78,19 @@ final class SessionContractStore implements ContractStore {
 
     @Override
     public byte[] getStorage(PublicAddress contract, byte[] key) {
+        // The lookup key is borrowed for this call only and never retained — no copy.
         Slot k = new Slot(contract, key);
         if (storageWrites.containsKey(k)) {
-            byte[] v = storageWrites.get(k);
-            return v == null ? null : v.clone(); // tombstone reads as absent, never the base's old value
+            return storageWrites.get(k); // tombstone reads as absent, never the base's old value
         }
         return base.getStorage(contract, key);
     }
 
     @Override
     public void putStorage(PublicAddress contract, byte[] key, byte[] value) {
-        storageWrites.put(new Slot(contract, key), value.clone());
+        // Both arrays are copied: the key lives inside the Slot map key (post-hoc caller mutation
+        // would make the entry unreachable), the value IS session state.
+        storageWrites.put(new Slot(contract, key.clone()), value.clone());
     }
 
     @Override
@@ -79,7 +98,8 @@ final class SessionContractStore implements ContractStore {
         // Tombstone, not removal: removing the pending write let a later read fall through to the
         // base and return the OLD value — the delete silently vanished from this session's view
         // (audit F9). The null marker makes reads return null and makes the flush emit a delete.
-        storageWrites.put(new Slot(contract, key), null);
+        // The key is copied for the same map-key aliasing reason as putStorage.
+        storageWrites.put(new Slot(contract, key.clone()), null);
     }
 
     /**
@@ -124,14 +144,29 @@ final class SessionContractStore implements ContractStore {
      * ({@code null} if it did not exist) — WITHOUT applying the writes. Paired with {@link
      * #pendingChanges()} so the processor can hand mutations and journal to {@link
      * ContractStore#applyBlock(long, List, byte[])} and have them commit as one atomic unit.
+     *
+     * <p>The storage priors come from ONE batched read ({@link ContractStore#getStorageMulti}):
+     * a point read per written key made a K-write block cost K store round-trips at every commit
+     * (audit: journal-capture N+1). Journal order is the session's insertion order.
      */
     List<ContractUndo> captureJournal() {
-        List<ContractUndo> journal = new ArrayList<>();
+        List<ContractUndo> journal = new ArrayList<>(codeWrites.size() + storageWrites.size());
         codeWrites.forEach((contract, v) ->
             journal.add(new ContractUndo(true, contract, null, base.getCode(contract))));
-        storageWrites.forEach((slot, v) ->
-            journal.add(new ContractUndo(false, slot.contract(), slot.key(),
-                base.getStorage(slot.contract(), slot.key()))));
+        if (!storageWrites.isEmpty()) {
+            List<Slot> slots = new ArrayList<>(storageWrites.keySet());
+            List<PublicAddress> contracts = new ArrayList<>(slots.size());
+            List<byte[]> keys = new ArrayList<>(slots.size());
+            for (Slot slot : slots) {
+                contracts.add(slot.contract());
+                keys.add(slot.key());
+            }
+            List<byte[]> priors = base.getStorageMulti(contracts, keys);
+            for (int i = 0; i < slots.size(); i++) {
+                Slot slot = slots.get(i);
+                journal.add(new ContractUndo(false, slot.contract(), slot.key(), priors.get(i)));
+            }
+        }
         return journal;
     }
 

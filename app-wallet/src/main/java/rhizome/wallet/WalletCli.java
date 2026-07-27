@@ -33,6 +33,8 @@ import rhizome.core.transaction.TransactionKind;
  *                               destroyed)
  *   --force                     send/token-transfer only: send to an address with an invalid
  *                               checksum anyway
+ *   --api-token &lt;token&gt;           bearer token for a node gated by RHIZOME_API_TOKEN (or set
+ *                               RHIZOME_API_TOKEN); never sent in cleartext to a non-loopback host
  *
  * Chain-id pinning (trust on first use): the first send/deploy/call/... records the node's
  * chainId and URL in the key file; any later node reporting a different chainId aborts the
@@ -98,7 +100,7 @@ public final class WalletCli {
     private static void balance(String[] args) {
         require(args, 3, "balance <nodeUrl> <address>");
         warnIfInsecureNodeUrl(args[1]);
-        var info = new WalletClient(args[1]).walletInfo(PublicAddress.of(args[2]));
+        var info = walletClient(args).walletInfo(PublicAddress.of(args[2]));
         System.out.printf("balance: %s PDN (%d base units)%n",
             Helpers.toPDN(info.balance()), info.balance());
         System.out.println("nextNonce: " + info.nextNonce());
@@ -107,7 +109,7 @@ public final class WalletCli {
     private static void send(String[] args) throws Exception {
         require(args, 5, "send <nodeUrl> <keyfile> <to> <amount> [fee] [--expect-chain-id <n>] [--passphrase-file <path>]");
         warnIfInsecureNodeUrl(args[1]);
-        WalletClient client = new WalletClient(args[1]);
+        WalletClient client = walletClient(args);
         Wallet wallet = Wallet.load(Path.of(args[2]), passphraseFromFlag(args));
         PublicAddress to = checkedRecipient(args[3], args);
         TransactionAmount amount = new TransactionAmount(pdnBaseUnits(args[4]));
@@ -130,15 +132,68 @@ public final class WalletCli {
 
     private static final long DEFAULT_GAS_LIMIT = 10_000_000L;
     private static final long DEFAULT_GAS_PRICE = 1L;
+    /** Protocol ceiling on one transaction's gas (NetworkParameters.maxTxGas): the node rejects
+     *  anything above it, so the CLI fails fast instead of signing a doomed transaction. */
+    private static final long MAX_GAS_LIMIT = 50_000_000L;
+    /** Sanity ceiling on the gas price in base units: bounded so {@code gasLimit × gasPrice}
+     *  can never overflow the long arithmetic the fee check uses. */
+    private static final long MAX_GAS_PRICE = 100_000_000_000L;
+
+    /**
+     * Parses a gasLimit/gasPrice CLI argument, failing fast with a clear message on a
+     * non-numeric, non-positive or absurd value (audit): a negative or overflowing gas value
+     * used to be SIGNED here and only rejected by the node after submission. The bounds mirror
+     * the protocol's (maxTxGas; overflow-safe fee product), like {@link #pdnBaseUnits} mirrors
+     * the amount rules. Package-visible for testing (same pattern as {@link #decideChainId}).
+     */
+    static long gasParam(String text, String name, long max) {
+        final long value;
+        try {
+            value = Long.parseLong(text.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException("invalid " + name + ": " + text);
+        }
+        if (value <= 0 || value > max) {
+            throw new IllegalArgumentException("invalid " + name + ": " + text
+                + " (must be between 1 and " + max + ")");
+        }
+        return value;
+    }
+
+    /**
+     * Parses the optional trailing {@code [gasLimit] [gasPrice]} positionals starting at
+     * {@code firstGasIndex}, applying the defaults for any not present. Only the contiguous
+     * token prefix PRECEDING the first flag token ({@code --...}) is considered: everything
+     * from the first {@code --*} on belongs to the flags, so a flag's VALUE can never be
+     * swallowed as a positional — {@code deploy u k w --expect-chain-id 7} must not read
+     * {@code gasPrice=7}, and {@code ... --passphrase-file p} must not fail with
+     * "invalid gasPrice: p" (audit: flag values leaking into gas positionals).
+     * Package-visible for testing (same pattern as {@link #gasParam}).
+     */
+    static long[] gasParams(String[] args, int firstGasIndex) {
+        int positionals = args.length;
+        for (int i = 0; i < args.length; i++) {
+            if (args[i].startsWith("--")) {
+                positionals = i;
+                break;
+            }
+        }
+        long gasLimit = positionals > firstGasIndex
+            ? gasParam(args[firstGasIndex], "gasLimit", MAX_GAS_LIMIT) : DEFAULT_GAS_LIMIT;
+        long gasPrice = positionals > firstGasIndex + 1
+            ? gasParam(args[firstGasIndex + 1], "gasPrice", MAX_GAS_PRICE) : DEFAULT_GAS_PRICE;
+        return new long[] {gasLimit, gasPrice};
+    }
 
     private static void deploy(String[] args) throws Exception {
         require(args, 4, "deploy <nodeUrl> <keyfile> <wasmfile> [gasLimit] [gasPrice] [--expect-chain-id <n>] [--passphrase-file <path>]");
         warnIfInsecureNodeUrl(args[1]);
-        WalletClient client = new WalletClient(args[1]);
+        WalletClient client = walletClient(args);
         Wallet wallet = Wallet.load(Path.of(args[2]), passphraseFromFlag(args));
         byte[] code = Files.readAllBytes(Path.of(args[3]));
-        long gasLimit = args.length >= 5 ? Long.parseLong(args[4]) : DEFAULT_GAS_LIMIT;
-        long gasPrice = args.length >= 6 ? Long.parseLong(args[5]) : DEFAULT_GAS_PRICE;
+        long[] gas = gasParams(args, 4);
+        long gasLimit = gas[0];
+        long gasPrice = gas[1];
 
         long nonce = client.walletInfo(wallet.address()).nextNonce();
         Transaction tx = wallet.signedContract(TransactionKind.DEPLOY, PublicAddress.empty(),
@@ -154,12 +209,13 @@ public final class WalletCli {
     private static void call(String[] args) throws Exception {
         require(args, 5, "call <nodeUrl> <keyfile> <contract> <hexInput> [gasLimit] [gasPrice] [--expect-chain-id <n>] [--passphrase-file <path>]");
         warnIfInsecureNodeUrl(args[1]);
-        WalletClient client = new WalletClient(args[1]);
+        WalletClient client = walletClient(args);
         Wallet wallet = Wallet.load(Path.of(args[2]), passphraseFromFlag(args));
         PublicAddress contract = PublicAddress.of(args[3]);
         byte[] input = args[4].isEmpty() ? new byte[0] : Utils.hexStringToByteArray(args[4]);
-        long gasLimit = args.length >= 6 ? Long.parseLong(args[5]) : DEFAULT_GAS_LIMIT;
-        long gasPrice = args.length >= 7 ? Long.parseLong(args[6]) : DEFAULT_GAS_PRICE;
+        long[] gas = gasParams(args, 5);
+        long gasLimit = gas[0];
+        long gasPrice = gas[1];
 
         long nonce = client.walletInfo(wallet.address()).nextNonce();
         Transaction tx = wallet.signedContract(TransactionKind.CALL, contract,
@@ -177,7 +233,7 @@ public final class WalletCli {
     private static void boxCreate(String[] args) throws Exception {
         require(args, 4, "box-create <nodeUrl> <keyfile> <value> [--owner <addr>] [--fee <fee>] [--reg <type>:<val>]... [--expect-chain-id <n>] [--passphrase-file <path>]");
         warnIfInsecureNodeUrl(args[1]);
-        WalletClient client = new WalletClient(args[1]);
+        WalletClient client = walletClient(args);
         Wallet wallet = Wallet.load(Path.of(args[2]), passphraseFromFlag(args));
         long value = pdnBaseUnits(args[3]);
         long fee = flagPdn(args, "--fee");
@@ -201,7 +257,7 @@ public final class WalletCli {
     private static void boxUpdate(String[] args) throws Exception {
         require(args, 4, "box-update <nodeUrl> <keyfile> <boxId> [--topup <amt>] [--fee <fee>] [--reg <type>:<val>]... [--expect-chain-id <n>] [--passphrase-file <path>]");
         warnIfInsecureNodeUrl(args[1]);
-        WalletClient client = new WalletClient(args[1]);
+        WalletClient client = walletClient(args);
         Wallet wallet = Wallet.load(Path.of(args[2]), passphraseFromFlag(args));
         byte[] boxId = Utils.hexStringToByteArray(args[3]);
         long topup = flagPdn(args, "--topup");
@@ -224,7 +280,7 @@ public final class WalletCli {
     private static void boxSpend(String[] args) throws Exception {
         require(args, 4, "box-spend <nodeUrl> <keyfile> <boxId> [--fee <fee>] [--expect-chain-id <n>] [--passphrase-file <path>]");
         warnIfInsecureNodeUrl(args[1]);
-        WalletClient client = new WalletClient(args[1]);
+        WalletClient client = walletClient(args);
         Wallet wallet = Wallet.load(Path.of(args[2]), passphraseFromFlag(args));
         byte[] boxId = Utils.hexStringToByteArray(args[3]);
         long fee = flagPdn(args, "--fee");
@@ -245,20 +301,20 @@ public final class WalletCli {
     private static void boxShow(String[] args) {
         require(args, 3, "box-show <nodeUrl> <boxId>");
         warnIfInsecureNodeUrl(args[1]);
-        System.out.println(new WalletClient(args[1]).box(args[2]));
+        System.out.println(walletClient(args).box(args[2]));
     }
 
     private static void boxList(String[] args) {
         require(args, 3, "box-list <nodeUrl> <ownerAddr>");
         warnIfInsecureNodeUrl(args[1]);
-        System.out.println(new WalletClient(args[1]).boxesByOwner(PublicAddress.of(args[2])));
+        System.out.println(walletClient(args).boxesByOwner(PublicAddress.of(args[2])));
     }
 
     private static void callReadonly(String[] args) {
         require(args, 4, "call-readonly <nodeUrl> <contract> <hexInput>");
         warnIfInsecureNodeUrl(args[1]);
         byte[] input = args[3].isEmpty() ? new byte[0] : Utils.hexStringToByteArray(args[3]);
-        System.out.println(new WalletClient(args[1]).callReadonly(PublicAddress.of(args[2]), input));
+        System.out.println(walletClient(args).callReadonly(PublicAddress.of(args[2]), input));
     }
 
     // ---- native tokens ----
@@ -266,7 +322,7 @@ public final class WalletCli {
     private static void tokenMint(String[] args) throws Exception {
         require(args, 7, "token-mint <nodeUrl> <keyfile> <symbol> <name> <amount> <decimals> [--fee <fee>] [--expect-chain-id <n>] [--passphrase-file <path>]");
         warnIfInsecureNodeUrl(args[1]);
-        WalletClient client = new WalletClient(args[1]);
+        WalletClient client = walletClient(args);
         Wallet wallet = Wallet.load(Path.of(args[2]), passphraseFromFlag(args));
         String symbol = args[3];
         String name = args[4];
@@ -309,7 +365,7 @@ public final class WalletCli {
     private static void submitTokenAmount(String[] args, Wallet wallet, TransactionKind kind,
                                           PublicAddress to, String tokenIdHex, long amount) throws Exception {
         warnIfInsecureNodeUrl(args[1]);
-        WalletClient client = new WalletClient(args[1]);
+        WalletClient client = walletClient(args);
         byte[] data = rhizome.core.token.TokenPayload.encodeAmount(Utils.hexStringToByteArray(tokenIdHex), amount);
         long fee = flagPdn(args, "--fee");
         echoPdn("fee", fee);
@@ -327,19 +383,19 @@ public final class WalletCli {
     private static void tokenShow(String[] args) {
         require(args, 3, "token-show <nodeUrl> <tokenId>");
         warnIfInsecureNodeUrl(args[1]);
-        System.out.println(new WalletClient(args[1]).token(args[2]));
+        System.out.println(walletClient(args).token(args[2]));
     }
 
     private static void tokenBalance(String[] args) {
         require(args, 4, "token-balance <nodeUrl> <tokenId> <address>");
         warnIfInsecureNodeUrl(args[1]);
-        System.out.println(new WalletClient(args[1]).tokenBalance(args[2], PublicAddress.of(args[3])));
+        System.out.println(walletClient(args).tokenBalance(args[2], PublicAddress.of(args[3])));
     }
 
     private static void tokenList(String[] args) {
         require(args, 3, "token-list <nodeUrl> <holderAddr>");
         warnIfInsecureNodeUrl(args[1]);
-        System.out.println(new WalletClient(args[1]).tokensByHolder(PublicAddress.of(args[2])));
+        System.out.println(walletClient(args).tokensByHolder(PublicAddress.of(args[2])));
     }
 
     /** Collects {@code --reg <type>:<value>} pairs, in order, into box registers. */
@@ -379,6 +435,26 @@ public final class WalletCli {
             }
         }
         return null;
+    }
+
+    /**
+     * A node client for the command's {@code <nodeUrl>} (always args[1]), presenting the
+     * configured API token so the wallet works against a node whose operator routes are gated
+     * by {@code RHIZOME_API_TOKEN} — otherwise every submit/dry-run is 401-refused (audit:
+     * wallet cannot authenticate).
+     */
+    private static WalletClient walletClient(String[] args) {
+        return new WalletClient(args[1], apiToken(args));
+    }
+
+    /** The bearer token for a token-gated node: {@code --api-token <token>}, else the
+     *  {@code RHIZOME_API_TOKEN} env var; null when neither is set (open node). */
+    private static String apiToken(String[] args) {
+        String token = flag(args, "--api-token");
+        if (token == null || token.isEmpty()) {
+            token = System.getenv("RHIZOME_API_TOKEN");
+        }
+        return token == null || token.isEmpty() ? null : token.trim();
     }
 
     /** True when {@code name} appears anywhere in {@code args} (a boolean flag). */
@@ -649,6 +725,8 @@ public final class WalletCli {
                 --overwrite               keygen only: overwrite an EXISTING key file (the old
                                           key is destroyed)
                 --force                   sends only: ignore a bad recipient checksum
+                --api-token <token>       bearer token for a node gated by RHIZOME_API_TOKEN
+                                          (or set RHIZOME_API_TOKEN)
               chain-id pinning: the first signing command records the node's chainId+URL in the
                                           keyfile (trust on first use); a different chainId later
                                           aborts signing. Read-only commands never pin.""");

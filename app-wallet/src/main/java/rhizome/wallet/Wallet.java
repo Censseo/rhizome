@@ -578,6 +578,26 @@ public final class Wallet {
                     java.util.Arrays.fill(pass, '\0');
                 }
             } else {
+                // The same key-identity guard as the encrypted branch: without it, a wrong
+                // keyFile path would silently overwrite ANOTHER wallet's plaintext seed with
+                // this wallet's key + pin (audit: unverified plaintext pin rewrite).
+                byte[] fileSeed = null;
+                byte[] ownSeed = null;
+                try {
+                    fileSeed = extractPrivateKeySeed(content);
+                    ownSeed = privateKey.toBytes();
+                    if (!java.util.Arrays.equals(fileSeed, ownSeed)) {
+                        throw new IOException("refusing to update the chainId pin on " + keyFile
+                            + ": the key in the file does not match this wallet");
+                    }
+                } finally {
+                    if (fileSeed != null) {
+                        java.util.Arrays.fill(fileSeed, (byte) 0);
+                    }
+                    if (ownSeed != null) {
+                        java.util.Arrays.fill(ownSeed, (byte) 0);
+                    }
+                }
                 char[] json = seedJsonChars(chainId, nodeUrl);
                 try {
                     writeOwnerOnly(keyFile, json);

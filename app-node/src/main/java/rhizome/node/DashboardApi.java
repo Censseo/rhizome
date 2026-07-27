@@ -82,7 +82,11 @@ final class DashboardApi {
             .put("storageFeeFactor", node.voteableParams()[0])
             .put("minValuePerByte", node.voteableParams()[1])
             .put("maxBoxRegisters", params.maxBoxRegisters())
-            .put("stateRoot", node.stateRoot() == null ? JSONObject.NULL : hex(node.stateRoot())));
+            .put("stateRoot", node.stateRoot() == null ? JSONObject.NULL : hex(node.stateRoot()))
+            // Operator-visible degraded marker (e.g. failed reorg restore); null when healthy.
+            .put("degraded", node.degradedState() == null ? JSONObject.NULL : node.degradedState())
+            // A normal reorg window also pauses block production — distinguishable from degraded.
+            .put("reorgInProgress", node.isReorgInProgress()));
     }
 
     /**

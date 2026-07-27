@@ -20,6 +20,7 @@ import rhizome.core.blockchain.ChainStore;
 import rhizome.core.blockchain.ChainSynchronizer;
 import rhizome.core.blockchain.ChainSynchronizer.Result;
 import rhizome.core.blockchain.InMemoryChainStore;
+import rhizome.core.blockchain.LocalSaturationException;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
 import rhizome.core.blockchain.PeerSource;
@@ -381,5 +382,102 @@ class ChainSynchronizerTest {
         assertEquals(Result.REORG_TOO_DEEP, result);
         assertEquals(8, local.height());
         assertEquals(localTip, local.tipHash(), "local chain must be untouched");
+    }
+
+    @Test
+    void fallbackGateRejectsWrongDifficultyBeforeAnyPop() {
+        // Audit: the full-block fallback gate checked id/chaining/PoW but NOT the recomputed
+        // difficulty (nor MTP / the future bound), so a peer could drive pop/restore cycles with
+        // blocks addBlock was guaranteed to reject. The gate now runs the same stateless
+        // HeaderChain validation as headers-first sync — a wrong-difficulty branch is refused
+        // BEFORE any local mutation. A pop-counting store proves no pop ever happens.
+        AtomicLong clock = new AtomicLong(1000);
+        PopCountingStore store = new PopCountingStore();
+        LedgerSnapshot snapshot = new LedgerSnapshot("test", 0, PARAMS.chainId());
+        ChainEngine local = ChainEngine.init(PARAMS, new InMemoryLedger(), store, snapshot, null, () -> NOW);
+        mineBlocks(local, PublicAddress.random(), clock, 3); // heights 2..4 at difficulty 4
+        SHA256Hash tipBefore = local.tipHash();
+        BigInteger workBefore = local.totalWork();
+
+        // A branch forking at genesis: valid PoW per block but at difficulty 5 where the
+        // recomputed expectation is 4 — the OLD gate accepted it (PoW holds at 5), popped the
+        // local suffix, then watched addBlock reject every block and restored.
+        List<Block> branch = new ArrayList<>();
+        SHA256Hash parent = local.blockAt(1).hash();
+        for (int h = 2; h <= 5; h++) {
+            var b = (BlockImpl) BlockImpl.builder().id(h).timestamp(9_000_000L + h * 90_000L)
+                .difficulty(5).lastBlockHash(parent).build();
+            b.addTransaction(Transaction.of(PublicAddress.random(),
+                new TransactionAmount(PARAMS.miningReward(h))));
+            var tree = new MerkleTree();
+            tree.setItems(b.transactions());
+            b.merkleRoot(tree.getRootHash());
+            b.nonce(Miner.mineNonce(b.hash(), b.difficulty(), PARAMS.powAlgorithm()));
+            parent = b.hash();
+            branch.add(b);
+        }
+        PeerSource peer = new PeerSource() {
+            public long height() { return 5; }
+            public BigInteger totalWork() { return workBefore.add(BigInteger.valueOf(1_000_000)); }
+            public SHA256Hash blockHash(long h) {
+                return h == 1 ? local.blockAt(1).hash()
+                    : h <= 5 ? branch.get((int) h - 2).hash() : SHA256Hash.random();
+            }
+            public List<Block> blocks(long start, long end) {
+                List<Block> out = new ArrayList<>();
+                for (long h = start; h <= end && h <= 5; h++) {
+                    out.add(branch.get((int) h - 2));
+                }
+                return out;
+            }
+        };
+
+        Result result = new ChainSynchronizer(local).syncFrom(peer);
+
+        assertEquals(Result.PEER_INVALID, result);
+        assertEquals(0, store.pops, "the gate must reject BEFORE any pop/restore cycle");
+        assertEquals(4, local.height());
+        assertEquals(tipBefore, local.tipHash());
+        assertEquals(workBefore, local.totalWork());
+    }
+
+    @Test
+    void localSaturationDuringSyncIsNotPeerInvalid() {
+        // A peer exchange rejected by LOCAL transport backpressure (the bounded body-read pool
+        // being full, surfaced by the HTTP adapter as LocalSaturationException) carries no
+        // information about the peer: it must surface as NO_CHANGE — retried next round — never
+        // as PEER_INVALID, which would ban-score an honest peer for our own load (audit:
+        // AbortPolicy saturation imputed to peers).
+        AtomicLong peerClock = new AtomicLong(0);
+        ChainEngine peerEngine = newEngine();
+        mineBlocks(peerEngine, PublicAddress.random(), peerClock, 5);
+        ChainEngine local = newEngine();
+        PeerSource saturated = new PeerSource() {
+            public long height() { return peerEngine.height(); }
+            public BigInteger totalWork() { return peerEngine.totalWork(); }
+            public SHA256Hash blockHash(long height) {
+                throw new LocalSaturationException("local body-read pool saturated", null);
+            }
+            public List<Block> blocks(long start, long end) {
+                throw new AssertionError("unreachable: the ancestor probe fails first");
+            }
+        };
+
+        Result result = new ChainSynchronizer(local).syncFrom(saturated);
+
+        assertEquals(Result.NO_CHANGE, result,
+            "local transport backpressure must not be read as a peer fault (PEER_INVALID)");
+        assertEquals(1, local.height(), "genesis only: nothing was applied");
+    }
+
+    /** A {@link ChainStore} that counts pops, proving a gate rejected before any local mutation. */
+    private static final class PopCountingStore implements ChainStore {
+        private final InMemoryChainStore delegate = new InMemoryChainStore();
+        int pops;
+        public long height() { return delegate.height(); }
+        public Block blockAt(long height) { return delegate.blockAt(height); }
+        public void append(Block block) { delegate.append(block); }
+        public void pop() { pops++; delegate.pop(); }
+        public boolean hasTransaction(SHA256Hash contentHash) { return delegate.hasTransaction(contentHash); }
     }
 }

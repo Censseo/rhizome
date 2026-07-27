@@ -61,8 +61,9 @@ public final class PeerRegistry {
     private final Map<String, Integer> subnetCounts = new ConcurrentHashMap<>();
     /**
      * Recently removed (failed / evicted) discovered peers, with the earliest re-admission
-     * time. Bounded LRU; a peer dropped for repeated failures cannot be instantly re-added via
-     * PEX to squat its bucket slot again (audit F5).
+     * time. Keyed by HOST (not the full canonical URL), so a removed peer cannot dodge the
+     * window by rotating its port or path. Bounded LRU; a peer dropped for repeated failures
+     * cannot be instantly re-added via PEX to squat its bucket slot again (audit F5).
      */
     private final Map<String, Long> removalCooldowns = Collections.synchronizedMap(
         new LinkedHashMap<String, Long>(64, 0.75f, false) {
@@ -96,9 +97,9 @@ public final class PeerRegistry {
     }
 
     /**
-     * Canonical form used for dedup, the self-pairing refusal and the removal-cooldown key:
-     * case/trailing-dot/default-port/trailing-slash variants of one URL coalesce into a single
-     * entry (see {@link PeerUrls#canonicalize}; audit: /add_peer coalescing & self-pairing).
+     * Canonical form used for dedup and the self-pairing refusal: case/trailing-dot/default-port/
+     * trailing-slash variants of one URL coalesce into a single entry (see
+     * {@link PeerUrls#canonicalize}; audit: /add_peer coalescing & self-pairing).
      */
     static String normalize(String url) {
         return PeerUrls.canonicalize(url);
@@ -140,16 +141,24 @@ public final class PeerRegistry {
         if (banList != null && banList.isBanned(u)) {
             return false;
         }
+        String host = hostOf(u);
         // A peer recently removed as failed/evicted is refused re-admission for a short window,
-        // so it cannot flap straight back into its bucket slot (audit F5).
-        Long cooldownUntil = removalCooldowns.get(u);
+        // so it cannot flap straight back into its bucket slot (audit F5). Keyed by HOST: a
+        // full-URL key was dodgeable by rotating the port or path (audit follow-up).
+        Long cooldownUntil = removalCooldowns.get(host);
         if (cooldownUntil != null) {
             if (nowMillis.getAsLong() < cooldownUntil) {
                 return false;
             }
-            removalCooldowns.remove(u); // window expired: eligible again
+            removalCooldowns.remove(host); // window expired: eligible again
         }
-        String host = hostOf(u);
+        // Cheap rejections BEFORE the blocking DNS resolution below: an exact duplicate or a
+        // full table is decided on the live map directly (both are re-checked authoritatively
+        // under the lock at insertion). A flood of duplicate/full-table adds must not each pay
+        // a resolver round-trip (audit: admission ordering).
+        if (peers.containsKey(u) || peers.size() >= maxPeers) {
+            return false;
+        }
         // The routability verdict is computed ONCE here, at admission; publicSnapshot serves this
         // stored verdict and never resolves DNS on the request path (audit F3).
         boolean routable = !blockPrivateHosts || isPubliclyRoutable(host);
@@ -192,6 +201,11 @@ public final class PeerRegistry {
         return banList != null && banList.isBanned(url);
     }
 
+    /** True if {@code url} names a configured seed peer (trusted anchor, never PEX-evicted). */
+    public boolean isSeed(String url) {
+        return seeds.contains(normalize(url));
+    }
+
     public void addAll(Iterable<String> urls) {
         for (String url : urls) {
             add(url);
@@ -209,7 +223,7 @@ public final class PeerRegistry {
                 // Decrement the bucket recorded at ADMISSION — never re-resolve DNS at removal,
                 // so a DNS flip between add and remove cannot corrupt the accounting (audit F5).
                 subnetCounts.computeIfPresent(entry.subnetBucket(), (k, v) -> v <= 1 ? null : v - 1);
-                removalCooldowns.put(u, nowMillis.getAsLong() + REMOVAL_COOLDOWN_MILLIS);
+                removalCooldowns.put(hostOf(u), nowMillis.getAsLong() + REMOVAL_COOLDOWN_MILLIS);
             }
         }
     }

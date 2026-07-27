@@ -106,6 +106,67 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
      */
     private final java.util.ArrayDeque<Long> mtpWindow = new java.util.ArrayDeque<>();
 
+    /**
+     * Open while a synchronizer runs a NON-atomic reorg (HeaderSynchronizer's pop → body-apply →
+     * restore/adopt sequence, which streams up to MAX_HEADER_WINDOW bodies with interleaved
+     * network I/O and so cannot hold the engine lock across it). During that window the chain sits
+     * truncated at the fork height: a gossiped, submitted or locally-produced block accepted at
+     * forkHeight+1 would be destroyed by the restore (honest PoW lost), and readers would be served
+     * the truncated tip. New-tip {@link #addBlock} therefore fails fast with IS_SYNCING while the
+     * window is open; the synchronizer's own paths (restoreBlock / addValidatedBody) bypass the
+     * guard. The window is opened UNDER the engine lock (inside the synchronizer's capture+pop
+     * {@link #withConsistentView}) and closed in try/finally after the restore/adopt — never
+     * held across downloads.
+     */
+    private final java.util.concurrent.atomic.AtomicBoolean reorgWindowOpen =
+        new java.util.concurrent.atomic.AtomicBoolean();
+
+    /**
+     * Verify-once cache of orphan-header proof of work (audit: uncle re-hash). Every production
+     * round's {@link #selectUncles} scans the whole orphan pool under the engine lock, and each
+     * eligible orphan's memory-hard Pufferfish2 hash was re-run per candidate block — up to 256
+     * hashes per round. PoW validity is a pure function of the header: the hash commits every
+     * header field including the id (which selects the PoW cost via {@code powCostsAt}), so a
+     * cached positive verdict can never go stale — it does NOT depend on the tip, hence needs no
+     * invalidation on pop/reorg. Bounded LRU (access-order); only successes are cached, so an
+     * attacker cannot evict useful entries with junk headers. Engine-lock-guarded like every
+     * caller ({@link #registerOrphan}, {@link #uncleEligible}).
+     */
+    private final java.util.LinkedHashMap<SHA256Hash, Boolean> verifiedOrphanPow =
+        new java.util.LinkedHashMap<>(256, 0.75f, true) {
+            @Override
+            protected boolean removeEldestEntry(Map.Entry<SHA256Hash, Boolean> eldest) {
+                return size() > 1024;
+            }
+        };
+
+    /**
+     * Recently popped canonical blocks (bounded), mapped block-hash → proven PoW nonce, so
+     * {@link #restoreBlock} skips the memory-hard PoW re-verification ONLY for a block whose
+     * header is identical to one this node popped — the hash commits every header field except
+     * the nonce, which is stored alongside so the exact proven (hash, nonce) pair is required.
+     * That pair passed PoW when first accepted, and PoW validity is tip-independent, so
+     * re-hashing it on restore is pure waste (up to maxReorgDepth Pufferfish2 hashes per
+     * rejected reorg, under the lock). Membership is the safety condition: a restore of any
+     * other block (mutated, fabricated) misses the set and falls back to the full check.
+     */
+    private final java.util.LinkedHashMap<SHA256Hash, SHA256Hash> recentlyPoppedBlocks =
+        new java.util.LinkedHashMap<>(64, 0.75f, false) {
+            @Override
+            protected boolean removeEldestEntry(Map.Entry<SHA256Hash, SHA256Hash> eldest) {
+                return size() > 2L * Math.max(1, params.maxReorgDepth());
+            }
+        };
+
+    /**
+     * Observable degraded-state marker (audit: silent restore failure). Set when a post-reorg
+     * restore of the local branch fails — the node is then shorter than it started and needs a
+     * full resync; cleared when a restore completes and the chain is whole again. Volatile-read
+     * getter so an API layer can relay the condition; the failure is also logged and thrown.
+     */
+    private final java.util.concurrent.atomic.AtomicReference<String> degradedState =
+        new java.util.concurrent.atomic.AtomicReference<>();
+
     private ChainEngine(NetworkParameters params, Ledger ledger, ChainStore store,
                         NonceStore nonceStore,
                         LongSupplier nowMillis, SignatureVerifier verifier,
@@ -293,6 +354,13 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
      * orphan pool being a remote liveness lever (audit V5). Uncle rewards come from the same committed
      * references (via the Executor), so they are applied identically with or without the pool.
      *
+     * <p>The block's own PoW is ALSO not re-verified when the block's header is identical to one
+     * this node just popped (audit: restore re-hashes): that exact (hash, nonce) pair proved its
+     * work when first accepted, and PoW validity is tip-independent. {@link #recentlyPoppedBlocks}
+     * membership is the gate — any other block (mutated or fabricated) misses it and gets the full
+     * memory-hard check. Only the PoW is skipped: id continuity, timestamps, difficulty, merkle
+     * root, nonces, the uncle structural bounds and the full state re-application all still run.
+     *
      * <p>Package-private (audit F2): only the in-package synchronizers may drive the trusted path,
      * and even they get the pool-free STRUCTURAL bounds on the committed refs (count cap,
      * distinctness, difficulty range — see {@link #uncleWorkFromRefs}), so a fabricated block can
@@ -326,6 +394,19 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
     private ExecutionStatus addBlock(Block block, boolean trustedRestore, boolean trustedPow) {
         lock.lock();
         try {
+            // Reorg-window guard (audit: non-atomic reorg window). Checked UNDER the lock, and the
+            // window is opened under the same lock (HeaderSynchronizer's phase 1 runs begin inside
+            // the capture+pop withConsistentView), so no new-tip block can slip between the window
+            // opening and the first pop: while a non-atomic reorg holds the chain truncated at the
+            // fork height, refuse NEW tip blocks (gossip, /submit, local production) instead of
+            // accepting one the restore would destroy. The window CLOSES outside the lock (finally,
+            // after the restore/adopt view completes), which can only delay an acceptance by one
+            // IS_SYNCING retry — benign, never a lost block. The trusted paths bypass the guard:
+            // restoreBlock re-adds our own suffix and addValidatedBody applies the proven branch —
+            // both driven by the synchronizer that opened the window.
+            if (!trustedRestore && !trustedPow && reorgWindowOpen.get()) {
+                return IS_SYNCING;
+            }
             var b = (BlockImpl) block;
             long height = store.height();
 
@@ -385,8 +466,12 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             // the caller already proved it: a headers-first-synced body whose hash equals a header
             // HeaderChain.validate PoW-verified carries the same memory-hard proof, so re-hashing it is
             // pure waste (audit P4). trustedPow is reachable only via addValidatedBody, whose contract
-            // pins that hash-equality guarantee.
-            if (!trustedPow && !block.verifyNonce(params.powAlgorithm(), params.powCostsAt(b.id()))) {
+            // pins that hash-equality guarantee. On the trusted-restore path the same skip applies when
+            // the block's header is identical to a block this node just popped — hash match PLUS the
+            // proven nonce (the hash preimage does not commit the nonce). Anything else re-checks in full.
+            boolean powAlreadyProven = trustedPow
+                || (trustedRestore && b.nonce().equals(recentlyPoppedBlocks.get(block.hash())));
+            if (!powAlreadyProven && !block.verifyNonce(params.powAlgorithm(), params.powCostsAt(b.id()))) {
                 return INVALID_NONCE;
             }
 
@@ -512,6 +597,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
                 }
                 currentDifficulty = computeDifficultyFromChain();
                 applyVotingAt(b.id()); // tally this epoch's votes if a boundary; effective next block
+                pruneDerivedStateCaches(b.id()); // bound vote/difficulty memo growth (audit)
                 if (onBlockApplied != null) {
                     onBlockApplied.accept(b.id()); // fast/non-blocking by contract (see setter)
                 }
@@ -597,6 +683,9 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             if (uncleWork != null) {
                 totalWork = totalWork.subtract(uncleWork);
             }
+            // Remember the popped block (hash → proven nonce) so a subsequent restoreBlock of the
+            // SAME header skips the (tip-independent, already-proven) PoW re-verification.
+            recentlyPoppedBlocks.put(tip.hash(), ((BlockImpl) tip).nonce());
             currentDifficulty = computeDifficultyFromChain();
         } finally {
             lock.unlock();
@@ -626,6 +715,54 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         } finally {
             lock.unlock();
         }
+    }
+
+    // ---- reorg window (non-atomic synchronizer reorgs) ----
+
+    /**
+     * Opens the reorg window: while open, new-tip {@link #addBlock} fails fast (IS_SYNCING) and the
+     * block producer stands down. Called by an in-package synchronizer UNDER the engine lock —
+     * atomically with the capture+pop phase of a non-atomic pop → body-apply → restore/adopt
+     * sequence — and closed in try/finally after the restore/adopt (outside the lock, which can
+     * only delay an acceptance by one IS_SYNCING retry). NEVER held across downloads (the body
+     * apply runs outside the lock by design).
+     *
+     * @return false if a window was already open (defensive; sync runs on a single thread).
+     */
+    boolean beginReorgWindow() {
+        return reorgWindowOpen.compareAndSet(false, true);
+    }
+
+    /** Closes the reorg window opened by {@link #beginReorgWindow()}. */
+    void endReorgWindow() {
+        reorgWindowOpen.set(false);
+    }
+
+    /** Whether a non-atomic reorg window is open (the chain may sit truncated at a fork height). */
+    public boolean isReorgInProgress() {
+        return reorgWindowOpen.get();
+    }
+
+    // ---- degraded state (restore failure after a rejected reorg) ----
+
+    /** Marks the node degraded: a post-reorg restore failed and the chain is shorter than it was. */
+    void markDegraded(String reason) {
+        degradedState.set(reason);
+    }
+
+    /** Clears the degraded marker once the local branch is fully restored (chain whole again). */
+    void clearDegraded() {
+        degradedState.set(null);
+    }
+
+    /** The degraded-state reason, or {@code null} when the node is healthy. */
+    public String degradedState() {
+        return degradedState.get();
+    }
+
+    /** Whether the node is in a degraded state (a restore failed; a full resync is required). */
+    public boolean isDegraded() {
+        return degradedState.get() != null;
     }
 
     public SHA256Hash tipHash() {
@@ -1023,6 +1160,57 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         return value;
     }
 
+    /**
+     * Bounds the two per-boundary derived-state memos (audit: unbounded growth — one entry per
+     * retarget/voting boundary for the life of the process, ~300k/yr at mainnet constants).
+     *
+     * <p>{@code difficultyByBoundary}: cached values are byte-identical recomputations from
+     * immutable buried headers, so any resume point yields the same fold — entries below the
+     * reorg window are simply dropped; a post-reorg refold then stays window-sized (the pop path
+     * already clears entries at/above the popped height, which a reorg may rewrite).
+     *
+     * <p>{@code voteParamsByBoundary}: values are NOT recomputable without the tally, so the
+     * prune must preserve pop correctness. A pop-run from the current tip reaches at most
+     * {@code maxReorgDepth} down, so it can only remove boundaries in {@code (tip-mrd, tip]};
+     * popping boundary H falls back to the previous boundary H-epoch, which lies strictly above
+     * {@code tip-mrd-epoch}. Keeping every key above that cutoff therefore preserves every
+     * reachable tally and fallback. The single floor entry at/below the cutoff is retained as
+     * belt-and-braces: it is the live base value a boundary case would read.
+     */
+    private void pruneDerivedStateCaches(long tip) {
+        long mrd = params.maxReorgDepth();
+        // Difficulty memo: keep the window's boundaries PLUS the single floor entry below the
+        // cutoff — the ideal resume point for the fold. Without it, a lookback wider than the
+        // reorg depth would leave the map empty and force a genesis-length refold per add. The
+        // floor entry is immutable sealed history (a legal reorg can never reach it), so its
+        // cached value is exact; popBlock's tailMap clear remains the only invalidator needed.
+        long diffCutoff = tip - mrd;
+        var resume = difficultyByBoundary.floorEntry(diffCutoff);
+        difficultyByBoundary.headMap(diffCutoff, true).clear();
+        if (resume != null) {
+            difficultyByBoundary.put(resume.getKey(), resume.getValue());
+        }
+        long epoch = params.votingEpochLength();
+        if (epoch > 0) {
+            long cutoff = tip - mrd - epoch;
+            var base = voteParamsByBoundary.floorEntry(cutoff);
+            voteParamsByBoundary.headMap(cutoff, true).clear();
+            if (base != null) {
+                voteParamsByBoundary.put(base.getKey(), base.getValue());
+            }
+        }
+    }
+
+    /** Test hook: current sizes of the two per-boundary memos (pruning assertions). */
+    int[] derivedCacheSizesForTest() {
+        lock.lock();
+        try {
+            return new int[] {difficultyByBoundary.size(), voteParamsByBoundary.size()};
+        } finally {
+            lock.unlock();
+        }
+    }
+
     // ---- authenticated state root ----
 
     /** The current authenticated state root (32 bytes), or {@code null} if the accumulator is off. */
@@ -1063,6 +1251,11 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         }
         lock.lock();
         try {
+            // A reorg window is open: the chain sits truncated at a fork height, so stamping a
+            // candidate on it is wasted work whose block addBlock would refuse anyway. Skip.
+            if (reorgWindowOpen.get()) {
+                return;
+            }
             // Stage this dry-run's ledger writes in the overlay so they never touch the column
             // family and are dropped wholesale by discardBlockCommit — a producer-only
             // apply-then-revert that leaves zero ledger residue even if the process dies
@@ -1234,6 +1427,7 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         currentDifficulty = computeDifficultyFromChain();
         rebuildMtpWindow(); // repopulate the median-time ring from headers (P6)
         syncVoteableHolder();
+        pruneDerivedStateCaches(height); // the boot replay repopulated one entry per boundary
     }
 
     /** Sum of 2^difficulty over a header's referenced uncles (from committed difficulties). */
@@ -1444,8 +1638,9 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
                 return; // must fork from our known main-chain parent at height uid-1
             }
             // Only now the memory-hard proof-of-work check, on a block that is at least a
-            // structurally-plausible recent sibling.
-            if (block.verifyNonce(params.powAlgorithm(), params.powCostsAt(uid))) {
+            // structurally-plausible recent sibling — verify-once: a sibling already proven (e.g.
+            // re-gossiped, or scanned by selectUncles on a previous round) is not re-hashed.
+            if (verifyOrphanPowOnce(block, uid)) {
                 orphans.put(block);
             }
         } finally {
@@ -1643,7 +1838,40 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         if (uid <= tipHeight && store.headerAt(uid).hash().equals(uncle.hash())) {
             return false; // that is the canonical block, not an orphan
         }
-        return uncle.verifyNonce(params.powAlgorithm(), params.powCostsAt(uid)); // real PoW, last
+        // Real PoW, last — verify-once: the memory-hard hash is deterministic per header, so an
+        // orphan already proven (registration, an earlier production round's scan, or a previous
+        // block's uncle validation) is a cache hit instead of a fresh Pufferfish2 run. selectUncles
+        // scans the whole pool under the engine lock on EVERY production round; without the cache
+        // that is up to 256 Pufferfish2 hashes per candidate block.
+        return verifyOrphanPowOnce(uncle, uid);
+    }
+
+    /**
+     * {@code verifyNonce} with a bounded verify-once cache keyed by the header hash (see
+     * {@link #verifiedOrphanPow}). Only successful verifications are cached; failures re-run
+     * (they follow the same deterministic verdict, so caching them would only let junk evict
+     * useful entries). Callers hold the engine lock.
+     */
+    private boolean verifyOrphanPowOnce(Block block, int id) {
+        SHA256Hash key = block.hash();
+        if (verifiedOrphanPow.containsKey(key)) {
+            return true;
+        }
+        if (!block.verifyNonce(params.powAlgorithm(), params.powCostsAt(id))) {
+            return false;
+        }
+        verifiedOrphanPow.put(key, Boolean.TRUE);
+        return true;
+    }
+
+    /** Test hook: current size of the orphan-PoW verify-once cache (bounded-LRU assertions). */
+    int verifiedOrphanPowCacheSizeForTest() {
+        lock.lock();
+        try {
+            return verifiedOrphanPow.size();
+        } finally {
+            lock.unlock();
+        }
     }
 
     private record UncleContext(java.util.Set<SHA256Hash> recentChain,

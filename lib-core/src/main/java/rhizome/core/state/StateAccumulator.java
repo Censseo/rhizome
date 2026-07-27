@@ -20,6 +20,16 @@ public final class StateAccumulator {
     private final int retainDepth;
     private volatile byte[] currentRoot;
 
+    /**
+     * Blocks between amortized durable root prunes ({@link RootStore#pruneBelow}). Pruning every
+     * block paid a synced range tombstone per block; pruning every PRUNE_INTERVAL blocks keeps
+     * up to {@code retainDepth + PRUNE_INTERVAL} roots instead — the safe direction, since the
+     * retained window must cover the max reorg depth (audit perf). The SMT node GC watermark
+     * rides the same calls, so its sweep cadence is unaffected (it has its own interval).
+     */
+    static final long PRUNE_INTERVAL = 32;
+    private long lastPruneCutoff;
+
     public StateAccumulator(SmtNodeStore nodes, RootStore roots, int retainDepth) {
         this.tree = new SparseMerkleTree(nodes);
         this.nodes = nodes;
@@ -80,8 +90,11 @@ public final class StateAccumulator {
         roots.putRoot(height, root);
         currentRoot = root;
         long cutoff = height - retainDepth;
-        if (cutoff > 1) {
+        // Amortized prune (see PRUNE_INTERVAL): roots older than the window linger at most
+        // PRUNE_INTERVAL extra heights; the reorg window (retainDepth) always stays covered.
+        if (cutoff > 1 && cutoff - lastPruneCutoff >= PRUNE_INTERVAL) {
             roots.pruneBelow(cutoff); // keep genesis (height 1) and the reorg window
+            lastPruneCutoff = cutoff;
         }
         return root;
     }

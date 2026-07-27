@@ -73,6 +73,13 @@ final class Pufferfish2 {
             throw new IllegalArgumentException(
                 "costT out of range [0, " + PowCosts.MAX_COST_T + "]: " + costT);
         }
+        // Same story for costM: the s-boxes below allocate 4 * 2^(costM+10) bytes, so an
+        // unchecked costM of a few dozen either overflows the 1 << (costM+5) shift or OOMs the
+        // JVM on a single hash call. PowCosts enforces identical bounds; repeat them here.
+        if (costM < PowCosts.MIN_COST_M || costM > PowCosts.MAX_COST_M) {
+            throw new IllegalArgumentException(
+                "costM out of range [" + PowCosts.MIN_COST_M + ", " + PowCosts.MAX_COST_M + "]: " + costM);
+        }
         byte[] digest = new Pufferfish2().hashpass(new byte[PF_SALT_SZ], costT, costM, pass);
 
         byte[] hash = new byte[PF_HASHSPACE];
@@ -140,9 +147,37 @@ final class Pufferfish2 {
 
     private byte[] hashSbox(byte[] key) {
         for (int i = 0; i < PF_SBOX_N; i++) {
-            key = hmac(key, leBytes(s[i]));
+            key = hmacSbox(key, s[i]);
         }
         return key;
+    }
+
+    // Feed buffer for hmacSbox: the MAC input for one s-box is its 2^(costM+5) words serialised
+    // little-endian (what leBytes produced), which used to materialise a fresh 64 KiB byte[] per
+    // HMAC — >1 MB of allocation per hash across all hashSbox calls (audit). Streaming the words
+    // through this reusable scratch feeds the MAC the EXACT same byte sequence (8 bytes per word,
+    // least-significant first, in word order), so the output stays bit-identical to the reference
+    // vectors. Single-threaded like the rest of the instance state.
+    private final byte[] sboxFeed = new byte[8192];
+
+    private byte[] hmacSbox(byte[] key, long[] words) {
+        reusableMac.init(new KeyParameter(key));
+        int n = 0;
+        for (long v : words) {
+            if (n + 8 > sboxFeed.length) {
+                reusableMac.update(sboxFeed, 0, n);
+                n = 0;
+            }
+            for (int j = 0; j < 8; j++) {
+                sboxFeed[n++] = (byte) (v >>> (8 * j));
+            }
+        }
+        if (n > 0) {
+            reusableMac.update(sboxFeed, 0, n);
+        }
+        byte[] out = new byte[PF_DIGEST_LENGTH];
+        reusableMac.doFinal(out, 0);
+        return out;
     }
 
     private void encryptP(long[] saltU) {
@@ -251,17 +286,6 @@ final class Pufferfish2 {
                 v |= (b[i * 8 + j] & 0xffL) << (8 * j);
             }
             out[i] = v;
-        }
-        return out;
-    }
-
-    private static byte[] leBytes(long[] words) {
-        byte[] out = new byte[words.length * 8];
-        for (int i = 0; i < words.length; i++) {
-            long v = words[i];
-            for (int j = 0; j < 8; j++) {
-                out[i * 8 + j] = (byte) (v >>> (8 * j));
-            }
         }
         return out;
     }

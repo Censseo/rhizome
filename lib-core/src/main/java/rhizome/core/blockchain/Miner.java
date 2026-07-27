@@ -28,12 +28,21 @@ public final class Miner {
         boolean usePufferfish = algorithm == PowAlgorithm.PUFFERFISH2;
         byte[] nonce = new byte[SHA256Hash.SIZE];
         new java.security.SecureRandom().nextBytes(nonce);
-        // verifyHash copies the candidate bytes synchronously, so a single wrapper over the
-        // mutable buffer avoids one allocation per attempt; clone only the winning nonce.
-        SHA256Hash candidate = SHA256Hash.of(nonce);
+        // Build the (target ‖ nonce) preimage once and refresh only the nonce half per attempt.
+        // SHA256Hash now defensively copies on construction and on access (audit), so the old
+        // single-wrapper-over-the-mutable-buffer trick would snapshot the nonce and never see
+        // the increments; driving the raw hash functions off the byte buffer keeps the hot loop
+        // allocation-lean without relying on aliasing.
+        byte[] data = new byte[64];
+        // raw(): the target half is arraycopy'd into the preimage once here, never retained.
+        System.arraycopy(target.raw(), 0, data, 0, 32);
         while (true) {
-            if (Crypto.verifyHash(target, candidate, difficulty, usePufferfish, false, costs)) {
-                return SHA256Hash.of(nonce.clone());
+            System.arraycopy(nonce, 0, data, 32, 32);
+            SHA256Hash fullHash = usePufferfish
+                ? Crypto.PUFFERFISH(data, false, costs)
+                : Crypto.SHA256(data);
+            if (Crypto.checkLeadingZeroBits(fullHash, difficulty)) {
+                return SHA256Hash.of(nonce);
             }
             for (int i = nonce.length - 1; i >= 0; i--) {
                 if (++nonce[i] != 0) {

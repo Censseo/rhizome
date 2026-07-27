@@ -5,6 +5,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 import java.util.function.LongSupplier;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import rhizome.core.block.Block;
 import rhizome.core.block.BlockImpl;
 import rhizome.core.ledger.PublicAddress;
@@ -21,6 +24,15 @@ import rhizome.core.mempool.MemPool;
  * rounds simply makes the next candidate build on the newer tip.
  */
 public final class BlockProducer {
+
+    private static final Logger log = LoggerFactory.getLogger(BlockProducer.class);
+
+    /**
+     * Minimum wall-clock time between "produce failed" log lines. At trivial difficulty (or
+     * with pacing disabled) the loop can spin thousands of failing rounds per minute — the
+     * failure must be diagnosable (audit: silent producer loop) without flooding the log.
+     */
+    private static final long PRODUCE_FAILURE_LOG_INTERVAL_MS = 60_000L;
 
     private final ChainEngine engine;
     private final MemPool mempool;
@@ -56,6 +68,13 @@ public final class BlockProducer {
      * tip — the next call rebuilds on the new tip).
      */
     public Optional<Block> produce() {
+        // A non-atomic reorg window is open (headers-first sync): the chain may sit truncated at a
+        // fork height, and a block mined on it would be refused (or destroyed by the restore).
+        // Stand down for the round rather than burning PoW on a candidate that cannot land —
+        // addBlock's reorg-window guard closes the residual race.
+        if (engine.isReorgInProgress()) {
+            return Optional.empty();
+        }
         Block candidate = BlockAssembler.assemble(engine, mempool, miner, nowMillis.getAsLong());
         var block = (BlockImpl) candidate;
         block.vote(vote); // the miner's parameter vote (ABSTAIN by default)
@@ -130,14 +149,26 @@ public final class BlockProducer {
     }
 
     private void loop() {
+        long lastFailureLogMs = Long.MIN_VALUE;
         while (running.get()) {
             long start = nowMillis.getAsLong();
             try {
                 produce();
             } catch (RuntimeException e) {
-                // A produce failure (e.g. transient store error) must not kill the loop.
+                // A produce failure (e.g. transient store error) must not kill the loop — but it
+                // must not be invisible either: a miner failing every round used to die (or spin)
+                // silently, indistinguishable from healthy idle (audit: silent producer loop).
+                // Rate-limited: at trivial difficulty the loop can spin thousands of failing
+                // rounds per minute. The injected clock drives the limit so tests stay
+                // deterministic; the first failure always logs.
                 if (!running.get()) {
                     break;
+                }
+                long now = nowMillis.getAsLong();
+                if (lastFailureLogMs == Long.MIN_VALUE
+                    || now - lastFailureLogMs >= PRODUCE_FAILURE_LOG_INTERVAL_MS) {
+                    lastFailureLogMs = now;
+                    log.warn("block production failed; the producer loop continues", e);
                 }
             }
             long elapsed = nowMillis.getAsLong() - start;

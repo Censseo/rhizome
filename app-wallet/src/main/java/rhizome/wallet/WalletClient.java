@@ -13,7 +13,17 @@ public final class WalletClient {
     private final NodeHttpClient http;
 
     public WalletClient(String baseUrl) {
-        this.http = new NodeHttpClient(baseUrl);
+        this(baseUrl, null);
+    }
+
+    /**
+     * As above, presenting {@code bearerToken} ({@code Authorization: Bearer ...}) to a node
+     * whose operator routes are gated by {@code RHIZOME_API_TOKEN} — without it the wallet's
+     * submits/dry-runs are 401-refused. Nullable. The transport strips it (with a warning)
+     * from cleartext http to a non-loopback host rather than leak the secret.
+     */
+    public WalletClient(String baseUrl, String bearerToken) {
+        this.http = new NodeHttpClient(baseUrl, bearerToken);
     }
 
     public record WalletInfo(long balance, long nextNonce) {}

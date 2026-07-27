@@ -262,11 +262,16 @@ public final class DefaultBoxProcessor implements BoxProcessor {
                     mutations.add(BoxStore.BoxMutation.write(e.getValue()));
                 }
             }
-            // Mutations + journal + receipts as ONE atomic batch where the store supports it
-            // (RocksDB: no second fsync for the receipts, audit perf).
-            store.applyBlock(blockHeight, mutations, encodedReceipts);
-            encodedReceipts = null; // already persisted with the batch
+            // A block with NO box mutations (an empty block, or only soft-reverted box txs)
+            // persists no journal: every revert path maps a missing journal to "nothing to undo"
+            // (see RocksDbBoxStore.revertBlock's early return), so the 4-byte empty-journal row
+            // was a synced write per block for nothing (audit: empty-journal fsyncs). Receipts
+            // still persist — a soft-reverted box tx has one that rollbackBlock consumes.
             if (!mutations.isEmpty()) {
+                // Mutations + journal + receipts as ONE atomic batch where the store supports it
+                // (RocksDB: no second fsync for the receipts, audit perf).
+                store.applyBlock(blockHeight, mutations, encodedReceipts);
+                encodedReceipts = null; // already persisted with the batch
                 changesByHeight.put(blockHeight, mutations);
             }
             session = null;
@@ -385,6 +390,16 @@ public final class DefaultBoxProcessor implements BoxProcessor {
         return new ScanPage(matches, cursor);
     }
 
+    /**
+     * Cadence of the amortized durable interval prune ({@code pruneJournals} range tombstones).
+     * Per-height receipt deletes still run every commit; the interval deleteRange is only the
+     * backstop for rows committed before a restart (the RAM maps are empty then), so it is paid
+     * every PRUNE_INTERVAL blocks instead of ~2 synced tombstone fsyncs per block (audit perf).
+     * It only ever lags the exact per-height schedule — the reorg window stays fully covered.
+     */
+    static final long PRUNE_INTERVAL = 32;
+    private long lastIntervalPruneCutoff;
+
     private void pruneOld() {
         long cutoff = lastCommittedHeight - retainDepth;
         if (cutoff > 0) {
@@ -396,7 +411,10 @@ public final class DefaultBoxProcessor implements BoxProcessor {
             receiptsByHeight.keySet().removeIf(h -> h < cutoff);
             eventsByHeight.keySet().removeIf(h -> h < cutoff);
             changesByHeight.keySet().removeIf(h -> h < cutoff);
-            store.pruneJournals(cutoff);
+            if (cutoff - lastIntervalPruneCutoff >= PRUNE_INTERVAL) {
+                store.pruneJournals(cutoff);
+                lastIntervalPruneCutoff = cutoff;
+            }
         }
     }
 

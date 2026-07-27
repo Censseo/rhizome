@@ -12,4 +12,7 @@ dependencies {
     // without re-verifying the mirror silently reopens the poison-DEPLOY allocation vector —
     // see the preScanModule javadoc and WasmPreScanCountsTest.
     api 'com.dylibso.chicory:runtime:1.7.5'
+
+    // WasmVm logs the memory-max clamp once per validated module (audit: silent clamp).
+    implementation "org.slf4j:slf4j-api:${slf4jVersion}"
 }

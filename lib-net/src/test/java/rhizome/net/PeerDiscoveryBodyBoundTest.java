@@ -97,6 +97,79 @@ class PeerDiscoveryBodyBoundTest {
     }
 
     @Test
+    void discoveredPeersAreEvictedAfterRepeatedPexFailures() {
+        var registry = new PeerRegistry(null, 128);
+        assertTrue(registry.add("http://127.0.0.1:1")); // port 1: connection refused
+        var discovery = new PeerDiscovery(registry, null);
+        for (int i = 0; i < 4; i++) {
+            discovery.round();
+        }
+        assertEquals(0, registry.size(), "a discovered peer is pruned after MAX_FAILURES rounds");
+    }
+
+    @Test
+    void seedsSurviveRepeatedPexFailures() {
+        // 3 failed PEX rounds evict a discovered peer — but a SEED is an operator-configured
+        // anchor and is never evicted by the failure path (mirrors penalize()'s seed exemption):
+        // an attacker that can briefly DoS the seeds must not be able to unanchor the node.
+        var registry = new PeerRegistry(null, 128);
+        registry.addSeeds(List.of("http://127.0.0.1:1")); // port 1: connection refused
+        var discovery = new PeerDiscovery(registry, null);
+        for (int i = 0; i < 4; i++) {
+            discovery.round();
+        }
+        assertTrue(registry.isSeed("http://127.0.0.1:1"),
+            "a seed must survive repeated PEX failures");
+        assertEquals(1, registry.size());
+    }
+
+    @Test
+    void localPoolSaturationIsNotCountedAsPeerFailure() throws Exception {
+        // Saturate the shared body-read pool (all 16 workers blocked) so the peer's PEX
+        // exchange is rejected LOCALLY, before any I/O reaches it. Local backpressure is not
+        // a peer failure: it must not increment the failure count and must never evict the
+        // peer — even past MAX_FAILURES rounds (audit: AbortPolicy saturation imputed to peers).
+        var started = new java.util.concurrent.CountDownLatch(16);
+        var release = new java.util.concurrent.CountDownLatch(1);
+        var threads = new java.util.ArrayList<Thread>();
+        for (int i = 0; i < 16; i++) {
+            Thread t = new Thread(() -> {
+                try {
+                    BodyReadDeadline.call(Duration.ofSeconds(30),
+                        new java.util.concurrent.atomic.AtomicReference<>(), () -> {
+                            started.countDown();
+                            release.await();
+                            return null;
+                        });
+                } catch (Exception ignored) {
+                    // torn down by the test: irrelevant
+                }
+            });
+            t.setDaemon(true);
+            t.start();
+            threads.add(t);
+        }
+        try {
+            assertTrue(started.await(10, java.util.concurrent.TimeUnit.SECONDS), "all workers occupied");
+            var registry = new PeerRegistry(null, 128);
+            assertTrue(registry.add(baseUrl));
+            var discovery = new PeerDiscovery(registry, null);
+            for (int i = 0; i < 4; i++) { // past MAX_FAILURES: an eviction would have happened by now
+                discovery.round();
+            }
+            assertTrue(discovery.failures.isEmpty(),
+                "local saturation must not count as a peer failure");
+            assertEquals(1, registry.size(),
+                "an honest peer must not be evicted over LOCAL pool saturation");
+        } finally {
+            release.countDown();
+            for (Thread t : threads) {
+                t.join(5_000);
+            }
+        }
+    }
+
+    @Test
     void failureCountsArePrunedWhenPeerLeavesRegistry() {
         // A peer that failed is failure-counted; once it leaves the registry (e.g. pruned after
         // repeated failures), the next round must drop its stale failure entry so the map cannot
