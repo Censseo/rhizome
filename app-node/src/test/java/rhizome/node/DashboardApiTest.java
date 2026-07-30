@@ -11,6 +11,7 @@ import java.util.concurrent.atomic.AtomicLong;
 
 import io.activej.eventloop.Eventloop;
 import io.activej.http.AsyncServlet;
+import io.activej.http.HttpHeaders;
 import io.activej.http.HttpRequest;
 import io.activej.http.HttpResponse;
 import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters;
@@ -185,6 +186,27 @@ class DashboardApiTest {
         assertTrue(wasm.getBody().readRemaining() > 0);
 
         assertEquals(404, call(HttpRequest.get("http://x/dashboard/nope.js").build()).getCode());
+    }
+
+    @Test
+    void nodeServesItsOwnDocumentation() throws Exception {
+        HttpResponse manifest = call(HttpRequest.get("http://x/docs/manifest.json").build());
+        assertEquals(200, manifest.getCode());
+        var pages = new JSONObject(body(manifest)).getJSONArray("pages");
+        assertTrue(pages.length() >= 16);
+
+        // Every page the manifest advertises is reachable over HTTP, with the security headers
+        // the dashboard assets carry (the docs page renders this markdown into the same DOM).
+        for (int i = 0; i < pages.length(); i++) {
+            String file = pages.getJSONObject(i).getString("file");
+            HttpResponse doc = call(HttpRequest.get("http://x/docs/" + file).build());
+            assertEquals(200, doc.getCode(), file);
+            assertTrue(body(doc).startsWith("#"), file + " should be markdown");
+            assertEquals("DENY", doc.getHeader(HttpHeaders.of("X-Frame-Options")));
+        }
+
+        assertEquals(404, call(HttpRequest.get("http://x/docs/nope.md").build()).getCode());
+        assertEquals(404, call(HttpRequest.get("http://x/docs/manifest.json/../../logback.xml").build()).getCode());
     }
 
     // ---- stats & features ----

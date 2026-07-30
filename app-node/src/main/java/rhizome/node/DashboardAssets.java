@@ -25,6 +25,7 @@ final class DashboardAssets {
         "app.js",
         "crypto.js",
         "tx.js",
+        "md.js",
         "templates/manifest.json",
         "templates/counter.wasm",
         "templates/token.wasm",

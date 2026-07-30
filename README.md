@@ -77,6 +77,9 @@ offline against your own node:
   node's `minValuePerByte`. Native tokens (mint/transfer/burn, holdings) live
   in the Wallet page. Both activate from the `GET /features` flags, so a node
   built without those layers keeps the pages dormant.
+- **Docs** — this README, the whitepaper and every module spec, bundled into the
+  binary at build time and rendered in the browser, with cross-document links and
+  full-text search across the whole corpus. A node documents itself offline.
 
 A quick local playground:
 

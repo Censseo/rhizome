@@ -25,6 +25,83 @@ application {
     mainClass = 'rhizome.node.RhizomeNode'
 }
 
+// ---- self-served documentation ----
+// The node serves its own docs, so the repository markdown is staged into the jar at build
+// time rather than read from the working tree at runtime: a bare jar and the GraalVM native
+// binary must both carry the documentation they claim to serve.
+//
+// The page list is explicit rather than globbed. Nav order is editorial, the groups are, and
+// a spec that is not listed fails the build (see the completeness check below) instead of
+// silently disappearing from the served docs. Titles come from each file's H1, so they cannot
+// drift from the document.
+def docPages = [
+    [slug: 'readme',       group: 'Vue d\'ensemble', source: 'README.md'],
+    [slug: 'whitepaper',   group: 'Vue d\'ensemble', source: 'WHITEPAPER.md'],
+    [slug: 'index',        group: 'Vue d\'ensemble', source: 'docs/README.md'],
+    [slug: 'consensus',    group: 'Protocole',       source: 'docs/consensus/spec.md'],
+    [slug: 'transactions', group: 'Protocole',       source: 'docs/transactions/spec.md'],
+    [slug: 'state',        group: 'Protocole',       source: 'docs/state/spec.md'],
+    [slug: 'crypto',       group: 'Protocole',       source: 'docs/crypto/spec.md'],
+    [slug: 'persistence',  group: 'Protocole',       source: 'docs/persistence/spec.md'],
+    [slug: 'networking',   group: 'Réseau',          source: 'docs/networking/spec.md'],
+    [slug: 'node-api',     group: 'Réseau',          source: 'docs/node-api/spec.md'],
+    [slug: 'contracts',    group: 'Applicatif',      source: 'docs/contracts/spec.md'],
+    [slug: 'tokens',       group: 'Applicatif',      source: 'docs/tokens/spec.md'],
+    [slug: 'banknotes',    group: 'Applicatif',      source: 'docs/banknotes/spec.md'],
+    [slug: 'boxes',        group: 'Applicatif',      source: 'docs/boxes/spec.md'],
+    [slug: 'wallet',       group: 'Clients',         source: 'docs/wallet/spec.md'],
+    [slug: 'dashboard',    group: 'Clients',         source: 'docs/dashboard/spec.md'],
+]
+
+def stagedDocsRoot = layout.buildDirectory.dir('generated/docs-resources')
+
+def stageDocs = tasks.register('stageDocs') {
+    group = 'build'
+    description = 'Stages the repository markdown documentation, plus a generated manifest, into the node resources.'
+
+    def sources = docPages.collectEntries { [(it.slug): rootProject.file(it.source)] }
+    def specTree = rootProject.fileTree('docs') { include '**/*.md' }
+    def pages = docPages
+    def outDir = stagedDocsRoot
+
+    inputs.files(sources.values())
+    inputs.files(specTree)          // so adding an unregistered spec re-runs the completeness check
+    inputs.property('pages', pages.collect { "${it.slug}|${it.group}|${it.source}" })
+    outputs.dir(outDir)
+
+    doLast {
+        // Every markdown file under docs/ must be reachable from the served nav. Catching this
+        // here rather than in a test means a new spec cannot be merged unrouted.
+        def declared = pages.collect { rootProject.file(it.source).canonicalFile } as Set
+        def orphans = specTree.files.findAll { !declared.contains(it.canonicalFile) }
+        if (orphans) {
+            throw new GradleException('documentation not registered in app-node/build.gradle docPages: '
+                    + orphans.collect { rootProject.relativePath(it) }.sort().join(', '))
+        }
+
+        def dir = outDir.get().dir('docs').asFile
+        dir.deleteDir()
+        dir.mkdirs()
+
+        def entries = pages.collect { page ->
+            def file = sources[page.slug]
+            def text = file.getText('UTF-8')
+            def heading = text.readLines().find { it.startsWith('# ') }
+            if (heading == null) {
+                throw new GradleException("${rootProject.relativePath(file)} has no level-1 heading to title it with")
+            }
+            new File(dir, "${page.slug}.md").setText(text, 'UTF-8')
+            [slug: page.slug, title: heading.substring(2).trim(), group: page.group,
+             file: "${page.slug}.md", source: rootProject.relativePath(file), bytes: file.length()]
+        }
+        new File(dir, 'manifest.json').setText(
+                groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson([pages: entries])), 'UTF-8')
+    }
+}
+
+sourceSets.main.resources.srcDir(stagedDocsRoot)
+tasks.named('processResources') { dependsOn stageDocs }
+
 tasks.named('test') {
     // Use JUnit Platform for unit tests.
     useJUnitPlatform()

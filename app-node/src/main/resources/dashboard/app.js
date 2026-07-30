@@ -315,6 +315,7 @@ function route() {
   const pages = {
     dashboard: renderDashboard, explorer: renderExplorer, wallet: renderWallet,
     contracts: renderContracts, agents: renderAgents, boxes: renderBoxes,
+    docs: renderDocs,
   };
   (pages[page] || renderDashboard)(rest.map(decodeURIComponent));
 }
@@ -1521,6 +1522,230 @@ function renderBoxes() {
   refreshList();
   regsZone.append(regRow());
   refreshMin();
+}
+
+/* ================= page: docs =================
+ * The node's own documentation. /docs/manifest.json lists the pages the build staged into the
+ * jar, /docs/<slug>.md serves each one, md.js renders it. Pages are fetched once and kept: the
+ * whole corpus is a few hundred kilobytes, which is what lets the search below scan every
+ * document in the browser, with no server-side index and no extra endpoint.
+ */
+
+const Docs = { pages: null, bySource: null, text: new Map(), allLoaded: false, query: '' };
+
+async function docsPages() {
+  if (!Docs.pages) {
+    const res = await fetch('/docs/manifest.json');
+    if (!res.ok) throw new Error('manifest indisponible (HTTP ' + res.status + ')');
+    Docs.pages = (await res.json()).pages;
+    Docs.bySource = new Map(Docs.pages.map(p => [p.source, p]));
+  }
+  return Docs.pages;
+}
+
+async function docsText(page) {
+  if (!Docs.text.has(page.slug)) {
+    const res = await fetch('/docs/' + page.file);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    Docs.text.set(page.slug, await res.text());
+  }
+  return Docs.text.get(page.slug);
+}
+
+/** Repo-relative path of `rel` resolved against the directory holding `from`. */
+function docsResolvePath(from, rel) {
+  const out = [];
+  for (const part of from.split('/').slice(0, -1).concat(rel.split('/'))) {
+    if (!part || part === '.') continue;
+    if (part === '..') out.pop();
+    else out.push(part);
+  }
+  return out.join('/');
+}
+
+function docsHref(slug, anchor) {
+  return '#/docs/' + slug + (anchor ? '/' + encodeURIComponent(anchor) : '');
+}
+
+/**
+ * Resolves a link found in the markdown. A sibling document becomes an SPA route and an http(s)
+ * URL stays a link; everything else — the source files the docs cross-reference, which the jar
+ * does not ship — returns null so md.js renders an inert path reference instead of a link that
+ * would 404.
+ */
+function docsResolveLink(href, page) {
+  if (/^[a-z][a-z0-9+.-]*:/i.test(href)) return /^https?:/i.test(href) ? href : null;
+  const cut = href.indexOf('#');
+  const path = cut < 0 ? href : href.slice(0, cut);
+  const anchor = cut < 0 ? '' : href.slice(cut + 1);
+  if (!path) return anchor ? docsHref(page.slug, anchor) : null;
+  const target = Docs.bySource.get(docsResolvePath(page.source, path));
+  return target ? docsHref(target.slug, anchor) : null;
+}
+
+/**
+ * Heading ids exactly as md.js assigns them, so search hits and the TOC land on real anchors.
+ * Fenced blocks are skipped for the same reason the renderer skips them: a shell comment inside
+ * a ```bash block starts with '#' without being a heading, and counting it would shift every
+ * later duplicate-suffixed id.
+ */
+function docsHeadings(markdown) {
+  const seen = new Map();
+  const out = [];
+  let fenced = false;
+  for (const line of markdown.split('\n')) {
+    if (/^```/.test(line)) { fenced = !fenced; continue; }
+    const h = !fenced && /^(#{1,6})\s+(.*?)\s*#*\s*$/.exec(line);
+    if (h) out.push({ level: h[1].length, text: h[2], id: RzMd.slugify(h[2], seen) });
+  }
+  return out;
+}
+
+async function renderDocs(rest) {
+  const route = location.hash;
+  let pages;
+  try {
+    pages = await docsPages();
+  } catch (e) {
+    $view.append(el('div', { class: 'card' },
+      el('h3', null, 'Documentation indisponible'), el('p', { class: 'muted' }, String(e.message))));
+    return;
+  }
+  if (location.hash !== route) return;
+
+  const slug = rest[0] || 'index';
+  const anchor = rest[1] || '';
+  const page = pages.find(p => p.slug === slug) || pages[0];
+
+  const results = el('div', { class: 'doc-results' });
+  const search = el('input', {
+    type: 'search', value: Docs.query,
+    placeholder: 'Rechercher dans toute la documentation…',
+    oninput: ev => docsSearch(ev.target.value.trim(), results),
+  });
+
+  const nav = el('nav', { class: 'doc-nav' });
+  let group = null;
+  for (const p of pages) {
+    if (p.group !== group) { group = p.group; nav.append(el('div', { class: 'doc-nav-group' }, group)); }
+    nav.append(el('a', {
+      href: docsHref(p.slug, ''),
+      class: 'doc-nav-link' + (p.slug === page.slug ? ' active' : ''),
+    }, p.title));
+  }
+
+  const body = el('article', { class: 'doc' }, el('p', { class: 'muted' }, 'Chargement…'));
+
+  $view.append(
+    el('h1', null, 'Documentation'),
+    el('p', { class: 'sub' }, 'Les specs du protocole, servies par le nœud lui-même — '
+      + pages.length + ' documents embarqués dans le binaire.'),
+    el('div', { class: 'searchbar' }, search),
+    results,
+    el('div', { class: 'doc-shell' }, nav, el('div', { class: 'card doc-card' }, body)));
+
+  if (Docs.query.length >= 3) docsSearch(Docs.query, results);
+
+  let markdown;
+  try {
+    markdown = await docsText(page);
+  } catch (e) {
+    body.replaceChildren(el('p', { class: 'bad' }, 'Lecture impossible : ' + e.message));
+    return;
+  }
+  if (location.hash !== route) return;
+
+  const out = RzMd.render(markdown, {
+    resolveLink: href => docsResolveLink(href, page),
+    anchorHref: id => docsHref(page.slug, id),
+  });
+  const sections = out.headings.filter(h => h.level === 2 || h.level === 3);
+  body.replaceChildren();
+  if (sections.length > 3) {
+    // Open by default, but a long spec's outline would push the document off-screen.
+    const toc = el('details', sections.length <= 18 ? { class: 'doc-toc', open: 'open' } : { class: 'doc-toc' },
+      el('summary', null, 'Sur cette page (' + sections.length + ')'));
+    const list = el('div', { class: 'doc-toc-list' });
+    for (const h of sections) {
+      list.append(el('a', { href: docsHref(page.slug, h.id), class: 'lvl' + h.level }, h.text));
+    }
+    toc.append(list);
+    body.append(toc);
+  }
+  body.append(out.node,
+    el('p', { class: 'doc-source muted' }, 'Source : ', el('code', null, page.source)));
+
+  const target = anchor && document.getElementById(anchor);
+  if (target) target.scrollIntoView();
+  else if (!anchor) window.scrollTo(0, 0);
+}
+
+/** Loads every document once, so search can scan the corpus in the browser. */
+async function docsLoadAll() {
+  if (Docs.allLoaded) return;
+  await Promise.all((await docsPages()).map(docsText));
+  Docs.allLoaded = true;
+}
+
+const DOCS_SEARCH_MAX = 40;
+let docsSearchSeq = 0;
+
+async function docsSearch(query, into) {
+  const seq = ++docsSearchSeq;
+  Docs.query = query;
+  if (query.length < 3) { into.replaceChildren(); return; }
+  if (!Docs.allLoaded) into.replaceChildren(el('div', { class: 'card muted' }, 'Indexation…'));
+  await docsLoadAll();
+  if (seq !== docsSearchSeq) return;   // a later keystroke owns the results now
+
+  const needle = query.toLowerCase();
+  const hits = [];
+  outer:
+  for (const page of Docs.pages) {
+    let heading = null;
+    let fenced = false;
+    for (const line of Docs.text.get(page.slug).split('\n')) {
+      if (/^```/.test(line)) { fenced = !fenced; continue; }
+      const h = !fenced && /^(#{1,6})\s+(.*?)\s*#*\s*$/.exec(line);
+      if (h) { heading = h[2]; continue; }
+      const at = line.toLowerCase().indexOf(needle);
+      if (at < 0) continue;
+      hits.push({ page: page, heading: heading, line: line.trim(),
+                  at: at - (line.length - line.trimStart().length) });
+      if (hits.length >= DOCS_SEARCH_MAX) break outer;
+    }
+  }
+
+  if (!hits.length) {
+    into.replaceChildren(el('div', { class: 'card' },
+      el('p', { class: 'muted' }, 'Aucun résultat pour « ' + query + ' ».')));
+    return;
+  }
+
+  // Heading ids are computed per page, once, from the same rule the renderer uses.
+  const ids = new Map();
+  const idFor = (page, headingText) => {
+    if (!headingText) return '';
+    if (!ids.has(page.slug)) ids.set(page.slug, docsHeadings(Docs.text.get(page.slug)));
+    const found = ids.get(page.slug).find(h => h.text === headingText);
+    return found ? found.id : '';
+  };
+
+  const list = el('div', { class: 'card doc-hits' },
+    el('h3', null, hits.length + (hits.length >= DOCS_SEARCH_MAX ? '+' : '') + ' résultat(s)'));
+  for (const hit of hits) {
+    const from = Math.max(0, hit.at - 60);
+    const excerpt = el('div', { class: 'doc-hit-line mono' });
+    if (from > 0) excerpt.append('…');
+    excerpt.append(hit.line.slice(from, hit.at),
+      el('mark', null, hit.line.slice(hit.at, hit.at + query.length)),
+      hit.line.slice(hit.at + query.length, hit.at + query.length + 120));
+    list.append(el('a', { class: 'doc-hit', href: docsHref(hit.page.slug, idFor(hit.page, hit.heading)) },
+      el('div', { class: 'doc-hit-where' },
+        hit.page.title, hit.heading ? ' › ' + hit.heading : ''),
+      excerpt));
+  }
+  into.replaceChildren(list);
 }
 
 /* ================= go ================= */

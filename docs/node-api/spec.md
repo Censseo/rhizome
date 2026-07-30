@@ -51,6 +51,7 @@ aggregate token-bucket gate that sheds with HTTP 429 *before* doing the work.
 | **Tokens** | `/token`, `/tokens`, `/token_balance` |
 | **State** | `/state`, `/state/proof` |
 | **Dashboard** | `/`, `/dashboard`, `/dashboard/*` |
+| **Documentation** | `/docs/manifest.json`, `/docs/*.md` — the repository markdown bundled at build time, served with the dashboard's security headers; see [dashboard](../dashboard/spec.md) U-8 |
 
 ## Features
 

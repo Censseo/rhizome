@@ -184,6 +184,7 @@ public final class NodeApi {
                                        java.util.concurrent.Executor blocking) {
         int maxBlockBody = node.params().maxBlockSizeBytes() + 1024;
         DashboardAssets dashboard = DashboardAssets.load();
+        DocsAssets docs = DocsAssets.load();
 
         RoutingServlet routing = RoutingServlet.builder(reactor)
             // ---- embedded dashboard SPA ----
@@ -192,6 +193,11 @@ public final class NodeApi {
             .with(GET, "/dashboard/*", req -> guarded(() -> {
                 DashboardAssets.Asset a = dashboard.get(req.getRelativePath());
                 return a == null ? notFound("no such asset") : DashboardApi.asset(a);
+            }))
+            // ---- the node's own documentation (markdown + manifest, rendered by the SPA) ----
+            .with(GET, "/docs/*", req -> guarded(() -> {
+                DashboardAssets.Asset a = docs.get(req.getRelativePath());
+                return a == null ? notFound("no such document") : DashboardApi.asset(a);
             }))
             // ---- dashboard/explorer API ----
             .with(GET, "/stats", req -> offload(blocking, () -> DashboardApi.stats(node)))

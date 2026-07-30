@@ -19,15 +19,16 @@ are signed locally in JS — the node never sees a private key.**
 
 | File | Lines | Role |
 |---|---|---|
-| [index.html](../../app-node/src/main/resources/dashboard/index.html) | 40 | shell — nav, `#view` mount point, tip indicator, toast zone |
-| [app.css](../../app-node/src/main/resources/dashboard/app.css) | 162 | the whole design system (dark operator aesthetic) |
-| [app.js](../../app-node/src/main/resources/dashboard/app.js) | 1527 | router + all six pages + node API calls |
+| [index.html](../../app-node/src/main/resources/dashboard/index.html) | 42 | shell — nav, `#view` mount point, tip indicator, toast zone |
+| [app.css](../../app-node/src/main/resources/dashboard/app.css) | 215 | the whole design system (dark operator aesthetic) |
+| [app.js](../../app-node/src/main/resources/dashboard/app.js) | 1752 | router + all seven pages + node API calls |
 | [crypto.js](../../app-node/src/main/resources/dashboard/crypto.js) | 343 | `RzCrypto` — in-browser Ed25519, hashing, address derivation |
 | [tx.js](../../app-node/src/main/resources/dashboard/tx.js) | 230 | `RzTx` — transaction construction and signing |
+| [md.js](../../app-node/src/main/resources/dashboard/md.js) | 233 | `RzMd` — markdown → DOM for the Docs page |
 | [templates/](../../app-node/src/main/resources/dashboard/templates/) | — | bundled contract `.wasm` + `.rs` + `manifest.json` |
 
-Loaded as three classic `<script>` tags (`crypto.js` → `tx.js` → `app.js`), each defining one
-namespace const — no modules, no imports.
+Loaded as four classic `<script>` tags (`crypto.js` → `tx.js` → `md.js` → `app.js`), each defining
+one namespace const — no modules, no imports.
 
 **Does not own**
 
@@ -38,7 +39,7 @@ namespace const — no modules, no imports.
 
 ## Features
 
-### U-1 — Six pages, hash-routed *(implemented)*
+### U-1 — Seven pages, hash-routed *(implemented)*
 
 Nav entries are `data-page` attributes on the shell; `app.js` swaps `#view`.
 
@@ -50,6 +51,7 @@ Nav entries are `data-page` attributes on the shell; `app.js` swaps `#view`.
 | **Contrats** | bundled templates with Rust sources, one-click deploy, typed call builder, read-only queries |
 | **Agents IA** | agent wallets — init/exec, grant/revoke capped session keys, inspect sessions, watch grant/spend events live |
 | **Boxes** | browse, create, update, spend and rent-collect data boxes with typed registers |
+| **Docs** | the node's own documentation — see U-8 |
 
 ### U-2 — Browser-custodied keys *(implemented)*
 
@@ -93,27 +95,50 @@ The Dashboard and Agents pages subscribe to `GET /logs/stream` (SSE). Contract l
 lifecycle events share the feed. On disconnect, resume via the `fromHeight` cursor — **push for
 liveness, cursor for correctness**.
 
+### U-8 — Self-served documentation *(implemented)*
+
+The node serves the repository's own markdown. A Gradle task (`stageDocs` in
+[app-node/build.gradle](../../app-node/build.gradle)) stages `README.md`, `WHITEPAPER.md` and every
+`docs/**/spec.md` into the jar under `docs/`, with a generated `manifest.json` carrying each page's
+slug, title (its H1), nav group and original repo path. [DocsAssets.java](../../app-node/src/main/java/rhizome/node/DocsAssets.java)
+loads them at startup and `GET /docs/*` serves them with the dashboard's security headers.
+
+- **A spec that is not registered in `docPages` fails the build** — documentation cannot be added
+  unrouted, and nothing is read from the working tree at runtime, so the jar and the native binary
+  serve the documentation they were built from.
+- `RzMd` renders the markdown with `createElement`/`textContent` only — **never `innerHTML`** — on a
+  page that holds wallet keys in memory.
+- Links are resolved against the served corpus: a sibling spec becomes a `#/docs/<slug>` route, an
+  http(s) URL opens in a new tab, and anything else — the source files the docs cross-reference,
+  plus `javascript:`/`data:` URLs — renders as an **inert path reference** rather than a live link.
+- Search runs entirely in the browser over the whole corpus (a few hundred kilobytes, fetched once).
+  There is no search endpoint and no server-side index.
+
 ## Conventions (must not regress)
 
 - **Zero dependencies, zero build step.** Vanilla ES2020, served as-is from resources. No npm, no
   bundler, no CDN, no external font or image.
-- Three classic scripts, one namespace const each (`RzCrypto`, `RzTx`, and the app's own) — no ES
-  modules.
+- Four classic scripts, one namespace const each (`RzCrypto`, `RzTx`, `RzMd`, and the app's own) —
+  no ES modules.
 - Private keys never leave the browser and are never sent to any endpoint.
 - Anything votable or configurable (`minValuePerByte`, `minFee`, reward, chain id) is **read from
   the node**, never hardcoded in JS.
 - Optional layers gate on `GET /features` rather than failing at runtime.
 - State-changing POSTs must carry the `X-Rhizome-Request` header and be same-origin — see
   [node-api](../node-api/spec.md) A-3.
-- Dark operator aesthetic; the design system lives entirely in the 162-line `app.css`.
+- Dark operator aesthetic; the design system lives entirely in the 215-line `app.css`.
 
 ## Open items
 
 - UI copy is **mixed French and English** (`Contrats`, `Agents IA` in nav; French template
   descriptions in `manifest.json`; English elsewhere). No i18n layer exists — pick one language or
   add one.
-- `app.js` holds the router and all six pages in a single 1527-line file. Splitting is constrained
+- `app.js` holds the router and all seven pages in a single 1752-line file. Splitting is constrained
   by the no-bundler rule (it would mean more `<script>` tags).
+- The Docs page renders markdown, so `md.js` is only exercised by the browser — the Gradle build
+  checks that every advertised document is bundled and titled by its own H1
+  ([DocsAssetsTest](../../app-node/src/test/java/rhizome/node/DocsAssetsTest.java)), not that the
+  rendering is correct. There is no JS test runner, by the zero-dependency rule.
 
 ## References
 

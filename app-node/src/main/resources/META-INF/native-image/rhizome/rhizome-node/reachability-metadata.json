@@ -524,6 +524,9 @@
       "glob": "dashboard/index.html"
     },
     {
+      "glob": "dashboard/md.js"
+    },
+    {
       "glob": "dashboard/templates/agent_wallet.rs"
     },
     {
@@ -576,6 +579,12 @@
     },
     {
       "glob": "dashboard/tx.js"
+    },
+    {
+      "glob": "docs/manifest.json"
+    },
+    {
+      "glob": "docs/*.md"
     },
     {
       "glob": "librocksdbjni-linux64.so"
