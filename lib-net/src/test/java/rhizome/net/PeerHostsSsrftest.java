@@ -1,6 +1,8 @@
 package rhizome.net;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.net.InetAddress;
@@ -64,6 +66,30 @@ class PeerHostsSsrftest {
         raw[14] = c;
         raw[15] = d;
         return raw;
+    }
+
+    @Test
+    void everyResolvedAddressIsValidatedNotJustTheFirst() throws Exception {
+        // pin() validated resolveFirst() only, while isPubliclyRoutable() checked them all: a name
+        // whose first A record is public and whose second is private passed pinning, and for an
+        // https peer (which keeps the hostname and re-resolves at dial) the connection attempt
+        // could then land on the internal address (audit B-1).
+        String mixed = "mixed-a-records.test";
+        PeerHosts.primeCacheForTests(mixed,
+            InetAddress.getByName("93.184.216.34"), InetAddress.getByName("10.0.0.5"));
+        assertFalse(PeerHosts.isPubliclyRoutable(mixed));
+        assertThrows(SecurityException.class, () -> PeerHosts.pin("https://" + mixed + ":3000", true),
+            "an https peer must not be pinned when any of its addresses is internal");
+        assertThrows(SecurityException.class, () -> PeerHosts.pin("http://" + mixed + ":3000", true),
+            "…nor an http one, whose IP-literal pin would have used the public first address");
+
+        // All-public: unchanged behaviour — http pins to the first literal, https keeps the name.
+        String allPublic = "all-public-a-records.test";
+        PeerHosts.primeCacheForTests(allPublic,
+            InetAddress.getByName("93.184.216.34"), InetAddress.getByName("198.51.100.9"));
+        assertTrue(PeerHosts.isPubliclyRoutable(allPublic));
+        assertEquals("http://93.184.216.34:3000", PeerHosts.pin("http://" + allPublic + ":3000", true));
+        assertEquals("https://" + allPublic + ":3000", PeerHosts.pin("https://" + allPublic + ":3000", true));
     }
 
     @Test

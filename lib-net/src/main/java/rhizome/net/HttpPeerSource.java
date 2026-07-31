@@ -106,20 +106,6 @@ public final class HttpPeerSource implements PeerSource {
         this(baseUrl, blockPrivateHosts, client, REQUEST_DEADLINE);
     }
 
-    /**
-     * As above, presenting {@code peerToken} (nullable) as a bearer token on outbound requests.
-     *
-     * @deprecated presents the token to WHATEVER peer URL this source is pointed at, over any
-     *     scheme — on a registry fed by unauthenticated /add_peer + PEX, any gossip-learned
-     *     (often http://) peer receives the shared secret in cleartext. Use the
-     *     {@link PeerTokenPolicy} constructor so the token only goes to explicitly configured
-     *     peers over https.
-     */
-    @Deprecated
-    public HttpPeerSource(String baseUrl, boolean blockPrivateHosts, HttpClient client, String peerToken) {
-        this(baseUrl, blockPrivateHosts, client, PeerTokenPolicy.trustAll(peerToken));
-    }
-
     /** As above, presenting the token only where {@code tokenPolicy} allows it. */
     public HttpPeerSource(String baseUrl, boolean blockPrivateHosts, HttpClient client,
                           PeerTokenPolicy tokenPolicy) {
@@ -128,7 +114,7 @@ public final class HttpPeerSource implements PeerSource {
 
     /** As above, with an explicit whole-exchange deadline (package-private for tests). */
     HttpPeerSource(String baseUrl, boolean blockPrivateHosts, HttpClient client, Duration requestDeadline) {
-        this(baseUrl, blockPrivateHosts, client, requestDeadline, PeerTokenPolicy.trustAll(null));
+        this(baseUrl, blockPrivateHosts, client, requestDeadline, PeerTokenPolicy.none());
     }
 
     /** As above, with an explicit whole-exchange deadline and a token policy. */

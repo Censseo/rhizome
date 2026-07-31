@@ -3,6 +3,7 @@ package rhizome.node;
 import rhizome.net.HttpPeerSource;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.net.ServerSocket;
@@ -37,6 +38,48 @@ class RhizomeNodeTest {
         long deadline = System.currentTimeMillis() + timeoutMs;
         while (node.engine().height() < target && System.currentTimeMillis() < deadline) {
             Thread.sleep(20);
+        }
+    }
+
+    @Test
+    void aHostThatNeverSpokeTheProtocolIsDroppedNotBanned() throws Exception {
+        // Ban by proxy (audit B-3): on an open node /add_peer is unauthenticated, so an attacker
+        // could enqueue ANY public host. An ordinary web server answering 200 to everything makes
+        // /block_count unparseable — worth a full 100-point penalty, i.e. an immediate 1 h ban of
+        // that host's IP, renewable for as long as the attacker keeps re-adding it. The victim's
+        // own honest node would then be refused by this one. A host that never completed a
+        // protocol exchange is a wrong address, not a misbehaving peer: drop it, never ban it.
+        var victim = com.sun.net.httpserver.HttpServer.create(
+            new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+        victim.createContext("/", exchange -> {
+            byte[] body = "<html>hello</html>".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, body.length);
+            exchange.getResponseBody().write(body);
+            exchange.close();
+        });
+        victim.start();
+        String victimUrl = "http://127.0.0.1:" + victim.getAddress().getPort();
+        try {
+            NodeConfig config = NodeConfig.defaults(FAST, tempDir.resolve("proxy-ban").toString(),
+                freePort()).withAllowPrivatePeers(true);
+            try (RhizomeNode node = new RhizomeNode(config)) {
+                node.start();
+                node.service().addPeer(victimUrl); // the /add_peer path: admission is off-loop
+                long deadline = System.currentTimeMillis() + 10_000;
+                while (!node.knownPeers().contains(victimUrl) && System.currentTimeMillis() < deadline) {
+                    Thread.sleep(20);
+                }
+                assertTrue(node.knownPeers().contains(victimUrl), "the peer should have been admitted");
+
+                node.syncRound(); // reads junk where /block_count should be
+
+                assertFalse(node.knownPeers().contains(victimUrl),
+                    "a host serving junk must be dropped from the registry");
+                assertFalse(node.banList().isBanned(victimUrl),
+                    "…but never banned: it never proved it was a Rhizome node at all");
+            }
+        } finally {
+            victim.stop(0);
         }
     }
 

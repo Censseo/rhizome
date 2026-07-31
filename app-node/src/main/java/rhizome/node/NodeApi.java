@@ -72,6 +72,12 @@ public final class NodeApi {
     /** Non-simple header the dashboard sends on every state-changing POST; forces a CORS preflight
      *  a cross-site/rebinding page cannot satisfy, so its POST is blocked by the browser. */
     private static final HttpHeader H_RZ_REQUEST = HttpHeaders.of("X-Rhizome-Request");
+    /** Optional scan-ownership secret; see {@link ScanRegistry.Owner} and {@link #scanOwner}. */
+    private static final HttpHeader H_SCAN_OWNER = HttpHeaders.of("X-Scan-Owner");
+    /** Cap on the accepted secret: it is only ever hashed, and an unauthenticated route must not
+     *  let a caller push arbitrary bytes through SHA-256. Anything longer is truncated, which
+     *  costs the caller nothing — it is their own opaque token. */
+    private static final int SCAN_OWNER_MAX_CHARS = 256;
 
     /** Rate-limit cost of a /call_readonly, which runs the VM up to its readonly gas cap. */
     private static final int CALL_READONLY_COST = 25;
@@ -235,16 +241,16 @@ public final class NodeApi {
             .with(GET, "/box", req -> offload(blocking, () -> BoxApi.box(node, req)))
             .with(GET, "/boxes", req -> offload(blocking, () -> BoxApi.boxes(node, req)))
             .with(POST, "/scan/register", req -> req.loadBody(SMALL_BODY).map(body -> guardedResponse(() -> {
-                int id = node.registerScan(clientKey(req), rhizome.core.box.ScanPredicate.fromJson(
+                int id = node.registerScan(scanOwner(req), rhizome.core.box.ScanPredicate.fromJson(
                     parseJson(body.getString(StandardCharsets.UTF_8))));
                 return json(new JSONObject().put("scanId", id));
             })))
             .with(POST, "/scan/deregister", req -> req.loadBody(SMALL_BODY).map(body -> guardedResponse(() -> {
                 int id = parseJson(body.getString(StandardCharsets.UTF_8)).getInt("scanId");
-                return json(new JSONObject().put("removed", node.deregisterScan(clientKey(req), id)));
+                return json(new JSONObject().put("removed", node.deregisterScan(scanOwner(req), id)));
             })))
-            .with(GET, "/scan/list", req -> offload(blocking, () -> BoxApi.scanList(node, clientKey(req))))
-            .with(GET, "/scan/boxes", req -> offload(blocking, () -> BoxApi.scanBoxes(node, clientKey(req), req)))
+            .with(GET, "/scan/list", req -> offload(blocking, () -> BoxApi.scanList(node, scanOwner(req))))
+            .with(GET, "/scan/boxes", req -> offload(blocking, () -> BoxApi.scanBoxes(node, scanOwner(req), req)))
             // ---- tokens ----
             .with(GET, "/token", req -> offload(blocking, () -> TokenApi.token(node, req)))
             .with(GET, "/token_balance", req -> offload(blocking, () -> TokenApi.tokenBalance(node, req)))
@@ -780,6 +786,25 @@ public final class NodeApi {
         long units = (snap.chunkLength((int) index) + CHUNK_COST_UNIT_BYTES - 1)
             / CHUNK_COST_UNIT_BYTES;
         return (int) Math.min(Integer.MAX_VALUE, Math.max(SNAPSHOT_CHUNK_MIN_COST, units));
+    }
+
+    /**
+     * The identity a scan request acts under: the client key, plus the optional
+     * {@code X-Scan-Owner} secret that makes ownership independent of the source address
+     * (audit B-5). A header rather than a query parameter: the value is a capability, and query
+     * strings end up in access logs, proxies and browser history.
+     */
+    private static ScanRegistry.Owner scanOwner(HttpRequest request) {
+        String secret;
+        try {
+            secret = request.getHeader(H_SCAN_OWNER);
+        } catch (RuntimeException e) {
+            secret = null;
+        }
+        if (secret != null && secret.length() > SCAN_OWNER_MAX_CHARS) {
+            secret = secret.substring(0, SCAN_OWNER_MAX_CHARS);
+        }
+        return ScanRegistry.Owner.of(clientKey(request), secret);
     }
 
     private static String clientKey(HttpRequest request) {

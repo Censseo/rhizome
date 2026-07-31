@@ -1,6 +1,7 @@
 package rhizome.wallet;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -229,12 +230,16 @@ class WalletTest {
         legacy.put("nodeUrl", "http://legacy:7373");
         Files.writeString(keyfile, legacy.toString(2));
 
-        // Legacy read path: cleartext pin still visible, and load surfaces it too.
+        // Legacy read path: cleartext pin still visible, and load surfaces it too — but marked
+        // UNSEALED, because anyone with write access to the file could have forged it. The CLI
+        // uses that flag to re-seal the pin at the next signing command (audit BAS-3).
         Wallet.TofuPin legacyPin = Wallet.readChainIdPin(keyfile);
         assertEquals(5, legacyPin.chainId());
+        assertFalse(legacyPin.sealed(), "a pin outside the envelope is not authenticated");
         Wallet loaded = Wallet.load(keyfile, "s3cret".toCharArray());
         assertEquals(5, loaded.chainIdPin().chainId());
         assertEquals("http://legacy:7373", loaded.chainIdPin().nodeUrl());
+        assertFalse(loaded.chainIdPin().sealed());
 
         // Migration: re-pinning seals the pin; nothing cleartext remains.
         loaded.saveChainIdPin(keyfile, 5, "http://localhost:7373", "s3cret".toCharArray());
@@ -243,5 +248,25 @@ class WalletTest {
         Wallet.TofuPin sealed = Wallet.load(keyfile, "s3cret".toCharArray()).chainIdPin();
         assertEquals(5, sealed.chainId());
         assertEquals("http://localhost:7373", sealed.nodeUrl());
+        assertTrue(sealed.sealed(), "a pin read from inside the envelope is authenticated");
+    }
+
+    @Test
+    void nodeUrlWithJsonMetacharactersDoesNotCorruptTheKeyFile() throws Exception {
+        // nodeUrl comes straight from argv and used to be written verbatim: a quote produced a
+        // malformed key file, and the escape-free reader would truncate the value (audit INF-4).
+        Wallet wallet = Wallet.create();
+        Path keyfile = tempDir.resolve("tofu-badurl.json");
+        wallet.save(keyfile, null, true);
+        wallet.saveChainIdPin(keyfile, 3, "http://evil\"}\\x:7373", null);
+
+        // The file stays parseable JSON, the pin is intact, and the key still loads.
+        org.json.JSONObject onDisk = new org.json.JSONObject(Files.readString(keyfile));
+        assertEquals(3, onDisk.getInt("chainId"));
+        Wallet loaded = Wallet.load(keyfile);
+        assertEquals(wallet.address(), loaded.address());
+        assertEquals(3, loaded.chainIdPin().chainId());
+        assertEquals("http://evil}x:7373", loaded.chainIdPin().nodeUrl(),
+            "quotes and backslashes are dropped; everything else, even '}', survives inside the string");
     }
 }

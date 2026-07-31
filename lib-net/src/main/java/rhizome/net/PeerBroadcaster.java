@@ -83,20 +83,7 @@ public final class PeerBroadcaster implements AutoCloseable {
 
     /** {@code peers} is queried on each broadcast, so it can reflect a live peer set. */
     public PeerBroadcaster(Supplier<Collection<String>> peers, boolean blockPrivateHosts) {
-        this(peers, blockPrivateHosts, (String) null);
-    }
-
-    /**
-     * As above, presenting {@code peerToken} (nullable) as a bearer token on outbound POSTs.
-     *
-     * @deprecated presents the token to EVERY peer in the (unauthenticated, gossip-fed)
-     *     registry, over any scheme — any peer that got itself added, often over cleartext
-     *     http://, receives the shared secret. Use the {@link PeerTokenPolicy} constructor so
-     *     the token only goes to explicitly configured peers over https.
-     */
-    @Deprecated
-    public PeerBroadcaster(Supplier<Collection<String>> peers, boolean blockPrivateHosts, String peerToken) {
-        this(peers, blockPrivateHosts, PeerTokenPolicy.trustAll(peerToken));
+        this(peers, blockPrivateHosts, PeerTokenPolicy.none());
     }
 
     /** As above, presenting the token only to peers {@code tokenPolicy} trusts. */

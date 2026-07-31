@@ -70,18 +70,6 @@ public final class Wallet {
     }
 
     /**
-     * The key material as JSON. Package-private so the API that exposes the secret is not public
-     * (audit F4); {@link #save} builds its own wipeable copy instead of routing the seed through
-     * {@link JSONObject#toString} Strings.
-     */
-    JSONObject toJson() {
-        return new JSONObject()
-            .put("privateKey", privateKey.toHexString())
-            .put("publicKey", publicKey.toHexString())
-            .put("address", address.toHexString());
-    }
-
-    /**
      * Env var holding the passphrase that encrypts the key file at rest (empty/unset = plaintext).
      * LAST RESORT only: environment variables are visible to any same-UID (or root) process via
      * {@code /proc/<pid>/environ} for the whole lifetime of the process (audit F3). Prefer the
@@ -216,10 +204,8 @@ public final class Wallet {
             String tail = "\",\n  \"publicKey\": \"" + publicKey.toHexString()
                 + "\",\n  \"address\": \"" + address.toHexString() + "\"";
             if (chainId != null) {
-                // nodeUrl is written verbatim: node URLs never contain characters that JSON
-                // string escaping would alter (no quotes/backslashes).
                 tail += ",\n  \"chainId\": " + chainId
-                    + ",\n  \"nodeUrl\": \"" + (nodeUrl == null ? "" : nodeUrl) + "\"";
+                    + ",\n  \"nodeUrl\": \"" + jsonSafeUrl(nodeUrl) + "\"";
             }
             tail += "\n}";
             char[] json = new char[head.length() + seedHex.length + tail.length()];
@@ -234,6 +220,28 @@ public final class Wallet {
     }
 
     private static final char[] HEX_DIGITS = "0123456789abcdef".toCharArray();
+
+    /**
+     * The node URL reduced to characters that survive this file's escape-free JSON reader
+     * ({@link #jsonFieldValueRange}): quotes, backslashes and control characters are dropped
+     * rather than escaped, because the reader does not decode escapes and would truncate the
+     * value at the first {@code \"} — and a {@code "} straight from {@code args[1]} would make
+     * the whole key file malformed (audit INF-4). The field is informational (it only names the
+     * node in the pin-mismatch message), so dropping is preferable to refusing to pin.
+     */
+    private static String jsonSafeUrl(String nodeUrl) {
+        if (nodeUrl == null) {
+            return "";
+        }
+        StringBuilder safe = new StringBuilder(nodeUrl.length());
+        for (int i = 0; i < nodeUrl.length(); i++) {
+            char c = nodeUrl.charAt(i);
+            if (c >= ' ' && c != '"' && c != '\\' && c != 0x7F) {
+                safe.append(c);
+            }
+        }
+        return safe.toString();
+    }
 
     /**
      * Writes the key file so it is readable only by its owner (mode {@code 0600}), never briefly
@@ -291,14 +299,18 @@ public final class Wallet {
             // Non-POSIX (e.g. Windows): create the file EMPTY, restrict it to the owner, then
             // stream the content into the SAME file (newOutputStream opens, never re-creates, so
             // the restrictive ACL cannot be reset by a create-with-default-permissions).
-            if (Files.notExists(keyFile)) {
+            // NOFOLLOW_LINKS refuses to write THROUGH a symlink: unlike the POSIX path — where
+            // the rename replaces the directory entry — this branch would otherwise follow a
+            // link planted at the target and deposit the seed wherever it points (audit INF-6).
+            if (Files.notExists(keyFile, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
                 Files.createFile(keyFile);
             }
             restrictToOwner(keyFile);
             try (var out = Files.newOutputStream(keyFile,
                     java.nio.file.StandardOpenOption.WRITE,
                     java.nio.file.StandardOpenOption.TRUNCATE_EXISTING,
-                    java.nio.file.StandardOpenOption.SYNC)) {
+                    java.nio.file.StandardOpenOption.SYNC,
+                    java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
                 out.write(content);
             }
         }
@@ -356,11 +368,14 @@ public final class Wallet {
                 // The pin lives INSIDE the sealed payload (audit: TOFU pin outside the GCM
                 // envelope was rewritable without the passphrase). A file written by the
                 // previous version may still carry it as cleartext metadata next to the
-                // envelope — read it from there so verification keeps working until the next
-                // saveChainIdPin migrates it into the envelope.
+                // envelope — read it from there so verification keeps working, but flag it as
+                // UNSEALED: anyone with write access to the file could have forged it (audit
+                // BAS-3), so the signing path re-seals it instead of trusting it indefinitely.
                 pin = extractPin(plaintext);
                 if (pin == null) {
-                    pin = extractPin(content);
+                    TofuPin legacy = extractPin(content);
+                    pin = legacy == null ? null
+                        : new TofuPin(legacy.chainId(), legacy.nodeUrl(), false);
                 }
             } else {
                 warnIfGroupOrOtherReadable(keyFile);
@@ -478,8 +493,20 @@ public final class Wallet {
      * first signed for. The node's /info answer is unauthenticated, so the wallet would
      * otherwise sign whatever chainId any hostile/MITM'd node returns — replaying the
      * transaction onto a different chain (audit F2).
+     *
+     * <p>{@code sealed} is true when the pin's integrity matches the key file's own: sealed
+     * inside the GCM envelope, or read from a plaintext key file (where the seed itself is in
+     * clear, so pin forgery adds nothing). It is FALSE only for a legacy pin found as cleartext
+     * metadata beside an encrypted envelope — forgeable with mere write access to the file, so
+     * the signing path re-seals it at the first opportunity (audit BAS-3).
      */
-    public record TofuPin(int chainId, String nodeUrl) {}
+    public record TofuPin(int chainId, String nodeUrl, boolean sealed) {
+
+        /** A pin whose integrity is backed by the key file's own protection. */
+        public TofuPin(int chainId, String nodeUrl) {
+            this(chainId, nodeUrl, true);
+        }
+    }
 
     /**
      * The TOFU pin stored as CLEARTEXT in {@code keyFile}, or null when the file has no
@@ -491,7 +518,11 @@ public final class Wallet {
     public static TofuPin readChainIdPin(Path keyFile) throws IOException {
         char[] content = readChars(keyFile);
         try {
-            return extractPin(content);
+            TofuPin pin = extractPin(content);
+            // A cleartext pin found on an ENCRYPTED file is legacy metadata sitting outside the
+            // envelope: unauthenticated, hence not sealed (audit BAS-3).
+            return pin != null && WalletKeystore.isEncrypted(content)
+                ? new TofuPin(pin.chainId(), pin.nodeUrl(), false) : pin;
         } finally {
             java.util.Arrays.fill(content, '\0');
         }
@@ -555,7 +586,11 @@ public final class Wallet {
                     try {
                         sealedSeed = extractPrivateKeySeed(decrypted);
                         ownSeed = privateKey.toBytes();
-                        if (!java.util.Arrays.equals(sealedSeed, ownSeed)) {
+                        // Constant-time by convention: no timing oracle exists here (both seeds
+                        // are local secrets, compared once per run), but secret comparisons in
+                        // this codebase go through isEqual so none has to be argued about
+                        // individually (audit INF-1).
+                        if (!java.security.MessageDigest.isEqual(sealedSeed, ownSeed)) {
                             throw new IOException("refusing to re-seal " + keyFile
                                 + ": the decrypted key does not match this wallet");
                         }
@@ -586,7 +621,7 @@ public final class Wallet {
                 try {
                     fileSeed = extractPrivateKeySeed(content);
                     ownSeed = privateKey.toBytes();
-                    if (!java.util.Arrays.equals(fileSeed, ownSeed)) {
+                    if (!java.security.MessageDigest.isEqual(fileSeed, ownSeed)) { // see above
                         throw new IOException("refusing to update the chainId pin on " + keyFile
                             + ": the key in the file does not match this wallet");
                     }

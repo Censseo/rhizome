@@ -70,9 +70,9 @@ final class BoxApi {
     /** Registered box scans owned by {@code clientKey}: {@code GET /scan/list}. Restricted to
      *  the caller's own registrations — an unauthenticated listing of every predicate on the
      *  node leaks what all apps are watching (audit F1). */
-    static HttpResponse scanList(NodeService node, String clientKey) {
+    static HttpResponse scanList(NodeService node, ScanRegistry.Owner owner) {
         org.json.JSONArray arr = new org.json.JSONArray();
-        node.scansOf(clientKey).forEach((id, predicate) ->
+        node.scansOf(owner).forEach((id, predicate) ->
             arr.put(new JSONObject().put("scanId", id).put("predicate", predicate.toJson())));
         return json(new JSONObject().put("scans", arr));
     }
@@ -86,14 +86,14 @@ final class BoxApi {
      * like {@code /scan/list} and {@code /scan/deregister}, a foreign id is answered
      * indistinguishably from an unknown one.
      */
-    static HttpResponse scanBoxes(NodeService node, String clientKey, HttpRequest req) {
+    static HttpResponse scanBoxes(NodeService node, ScanRegistry.Owner owner, HttpRequest req) {
         // Bounds-check BEFORE the long→int cast: an out-of-int-range scanId would silently wrap
         // into another client's valid id (audit: unchecked index cast).
         long rawScanId = parseLong(req.getQueryParameter("scanId"));
         if (rawScanId < 0 || rawScanId > Integer.MAX_VALUE) {
             return badRequest("scanId out of range");
         }
-        rhizome.core.box.ScanPredicate predicate = node.scanPredicate(clientKey, (int) rawScanId);
+        rhizome.core.box.ScanPredicate predicate = node.scanPredicate(owner, (int) rawScanId);
         if (predicate == null) {
             return badRequest("unknown scanId");
         }

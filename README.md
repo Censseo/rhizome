@@ -21,16 +21,16 @@ Configured via environment variables:
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `RHIZOME_NETWORK` | `mainnet` | `mainnet`, `testnet` (low difficulty, 90 s target — built for tests driving controlled clocks) or `devnet` (low difficulty on mainnet's real 5 s target — use this for a local node you actually run and watch) |
+| `RHIZOME_NETWORK` | `mainnet` | `mainnet`, `testnet` (low difficulty, 90 s target — built for tests driving controlled clocks) or `devnet` (low difficulty on mainnet's real 5 s target — use this for a local node you actually run and watch). Anything else is **refused at startup**: a typo must not silently start you on mainnet |
 | `RHIZOME_PORT` | `3000` | HTTP API port |
-| `RHIZOME_BIND_ADDRESS` | `0.0.0.0` | HTTP API bind address (`127.0.0.1` for a wallet/dashboard-only node behind a tunnel) |
+| `RHIZOME_BIND_ADDRESS` | `127.0.0.1` | HTTP API bind address. Loopback by default; binding a public address additionally requires `RHIZOME_API_TOKEN`, or `RHIZOME_ALLOW_OPEN_API=true` to accept that `/add_peer` and the other operator routes are open to the network |
 | `RHIZOME_API_TOKEN` | — | when set, state-changing/operator routes (`/add_peer`, `/scan/register`, `/scan/deregister`, `/add_transaction`, `/submit`, `/call_readonly`) require `Authorization: Bearer <token>`; P2P protocol endpoints stay open. Note: with a token set, gossip peers must also present it on `/submit` and `/add_transaction` — set `RHIZOME_PEER_TOKEN` on every node of the deployment so outbound peer traffic authenticates |
 | `RHIZOME_PEER_TOKEN` | — | bearer token for *outbound* peer-to-peer requests (gossip `/submit` & `/add_transaction`, PEX fetch/announce, sync GETs), sent **only to the peers of `RHIZOME_PEERS` and only over `https://`** — the peer registry is fed by unauthenticated `/add_peer`/PEX, so gossip-learned or cleartext-http peers never receive the secret. Required when your nodes gate ingest with `RHIZOME_API_TOKEN` (configure those peers with `https://` URLs), otherwise cross-node pushes are refused (401) and gossip stops converging. Never logged |
 | `RHIZOME_DATA` | `./data` | RocksDB data directory |
 | `RHIZOME_SNAPSHOT` | — | snapshot file seeding the genesis |
 | `RHIZOME_MINER` | — | reward address (enables block production) |
 | `RHIZOME_PEERS` | — | comma-separated initial peers |
-| `RHIZOME_ADVERTISE` | — | public URL advertised to peers |
+| `RHIZOME_ADVERTISE` | — | public URL advertised to peers; must be an `http(s)` URL with a host (a malformed value used to silently break self-pairing refusal, PEX and the `Host` allowlist) |
 | `RHIZOME_ALLOWED_HOSTS` | loopback + advertised + LAN addresses | comma-separated extra `Host` authorities for the DNS-rebinding guard (e.g. a reverse proxy's public name or a Docker/NAT address, each as `name` or `name:port`); the literal value `off` disables the Host allowlist entirely (only the Origin/marker CSRF guard remains — not recommended) |
 | `RHIZOME_BLOCK_INTERVAL_MS` | block target | producer pacing override (local devnets). Pacing only — it does **not** move the retarget target, so pacing far below the network's `desiredBlockTimeSec` makes every window look too fast and difficulty runs away until the chain stalls. Use `RHIZOME_NETWORK=devnet`, whose target already is 5 s, instead of pacing a testnet at 5 s |
 

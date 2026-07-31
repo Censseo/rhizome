@@ -57,12 +57,12 @@ public final class WalletClient {
 
     /** Raw JSON of a token's metadata by id. */
     public String token(String tokenIdHex) {
-        return get("/token?id=" + tokenIdHex);
+        return get("/token?id=" + query(tokenIdHex));
     }
 
     /** Raw JSON of a token balance for an address. */
     public String tokenBalance(String tokenIdHex, PublicAddress address) {
-        return get("/token_balance?id=" + tokenIdHex + "&address=" + address.toHexString());
+        return get("/token_balance?id=" + query(tokenIdHex) + "&address=" + address.toHexString());
     }
 
     /** Raw JSON of the tokens held by an address. */
@@ -72,7 +72,18 @@ public final class WalletClient {
 
     /** Raw JSON of a box by id (or the node's error JSON), for the box CLI to print. */
     public String box(String boxIdHex) {
-        return get("/box?id=" + boxIdHex);
+        return get("/box?id=" + query(boxIdHex));
+    }
+
+    /**
+     * Percent-encodes a caller-supplied query value. The CLI already validates ids as 32-byte hex
+     * (audit BAS-2), but this method is public API: without encoding, a value containing {@code &}
+     * would append parameters of its own to the node request, and one containing a space or CRLF
+     * would fail late inside {@code URI.create}. Addresses go through {@code toHexString} and need
+     * no encoding.
+     */
+    private static String query(String value) {
+        return java.net.URLEncoder.encode(value, java.nio.charset.StandardCharsets.UTF_8);
     }
 
     /** Raw JSON of the boxes owned by an address. */

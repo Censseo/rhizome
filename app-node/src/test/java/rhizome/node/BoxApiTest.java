@@ -194,14 +194,50 @@ class BoxApiTest {
         var predicate = rhizome.core.box.ScanPredicate.fromJson(new JSONObject()
             .put("type", "registerContains").put("index", 0)
             .put("value", Utils.bytesToHex("oracle".getBytes(StandardCharsets.UTF_8))));
-        int scanId = node.registerScan("client-a", predicate);
+        var clientA = ScanRegistry.Owner.of("client-a", null);
+        var clientB = ScanRegistry.Owner.of("client-b", null);
+        int scanId = node.registerScan(clientA, predicate);
 
-        assertEquals(predicate, node.scanPredicate("client-a", scanId), "the owner sees its scan");
-        assertNull(node.scanPredicate("client-b", scanId),
+        assertEquals(predicate, node.scanPredicate(clientA, scanId), "the owner sees its scan");
+        assertNull(node.scanPredicate(clientB, scanId),
             "a foreign scan id must be indistinguishable from an unknown one");
-        assertNull(node.scanPredicate("client-b", scanId + 1), "unknown id");
-        assertTrue(node.deregisterScan("client-a", scanId));
-        assertNull(node.scanPredicate("client-a", scanId), "gone after deregister");
+        assertNull(node.scanPredicate(clientB, scanId + 1), "unknown id");
+        assertTrue(node.deregisterScan(clientA, scanId));
+        assertNull(node.scanPredicate(clientA, scanId), "gone after deregister");
+    }
+
+    @Test
+    void scanOwnershipSurvivesASharedClientAddress() {
+        // Ownership used to be the source IP alone, which identifies a user only when there is
+        // one user per address: behind a NAT or a reverse proxy every co-tenant shared the owner
+        // key, so /scan/list handed them each other's ids and predicates and /scan/deregister let
+        // them wipe them — no id-guessing required (audit B-5). An X-Scan-Owner secret binds the
+        // scan to something the neighbour does not have.
+        var node = new NodeService(engine, mempool);
+        var predicate = rhizome.core.box.ScanPredicate.fromJson(new JSONObject()
+            .put("type", "registerContains").put("index", 0)
+            .put("value", Utils.bytesToHex("oracle".getBytes(StandardCharsets.UTF_8))));
+        // Same address, three tenants: one with a secret, one with another, one with none.
+        var mine = ScanRegistry.Owner.of("203.0.113.7", "s3cret-of-app-a");
+        var neighbour = ScanRegistry.Owner.of("203.0.113.7", "some-other-secret");
+        var noSecret = ScanRegistry.Owner.of("203.0.113.7", null);
+        int scanId = node.registerScan(mine, predicate);
+
+        assertEquals(predicate, node.scanPredicate(mine, scanId));
+        assertNull(node.scanPredicate(neighbour, scanId), "a co-tenant must not reach my scan");
+        assertNull(node.scanPredicate(noSecret, scanId),
+            "and must not reach it by simply omitting the header");
+        assertTrue(node.scansOf(neighbour).isEmpty(), "nor discover its id through /scan/list");
+        assertTrue(node.scansOf(noSecret).isEmpty());
+        assertFalse(node.deregisterScan(neighbour, scanId), "nor wipe it");
+        assertFalse(node.deregisterScan(noSecret, scanId));
+        assertEquals(1, node.scansOf(mine).size());
+
+        // A blank header is the same as none at all (no accidental "" owner), and the same
+        // secret from a DIFFERENT address is still refused — both halves must match.
+        assertNull(node.scanPredicate(ScanRegistry.Owner.of("203.0.113.7", "   "), scanId));
+        assertNull(node.scanPredicate(ScanRegistry.Owner.of("198.51.100.4", "s3cret-of-app-a"), scanId));
+        assertTrue(node.deregisterScan(mine, scanId), "the owner still owns it");
     }
 
     @Test

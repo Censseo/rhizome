@@ -107,6 +107,14 @@ final class PeerHosts {
         return DNS_CACHE.size();
     }
 
+    /** Visible for testing: seed the resolution cache for {@code host}. Lets a test exercise the
+     *  all-addresses rules ({@link #isPubliclyRoutable}, {@link #pin}) without depending on a live
+     *  resolver that hands back several A records, one of them private. */
+    static void primeCacheForTests(String host, InetAddress... addrs) {
+        DNS_CACHE.put(host.toLowerCase(Locale.ROOT),
+            new CacheEntry(addrs.clone(), System.nanoTime() + CACHE_TTL_NANOS));
+    }
+
     /** Visible for testing: true if {@code host} currently holds a live cached NEGATIVE resolution. */
     static boolean isCachedNegative(String host) {
         CacheEntry cached = DNS_CACHE.get(host.toLowerCase(Locale.ROOT));
@@ -260,6 +268,13 @@ final class PeerHosts {
      * ORIGINAL hostname: an IP literal would fail TLS SAN verification. The dial re-resolves,
      * so the private-host check is best-effort for https — a rebound IP fails the handshake
      * (no data leaks) but the attempt itself can reach the internal network.
+     *
+     * <p>Every resolved address is checked, not just the pinned first one (audit B-1): the dial
+     * picks its own address from the record for https (and the JDK may fail over to the next one
+     * generally), so a name whose FIRST A record is public and whose second is {@code 10.x} used
+     * to pass admission and still direct a connection attempt at the internal network. This is
+     * the same all-addresses rule {@link #isPubliclyRoutable} applies at peer admission, so a
+     * peer that was admitted also pins — one verdict, one place.
      */
     static String pin(String baseUrl, boolean blockPrivate) {
         URI uri;
@@ -278,18 +293,33 @@ final class PeerHosts {
             }
             return baseUrl;
         }
-        InetAddress addr;
+        InetAddress[] addrs;
         try {
-            addr = resolveFirst(host);
+            addrs = resolveAll(host);
         } catch (UnknownHostException e) {
             if (blockPrivate) {
                 throw new SecurityException("unresolvable peer host: " + host);
             }
             return baseUrl; // permissive (dev/testnet): keep the hostname
         }
-        if (blockPrivate && !isRoutable(addr)) {
-            throw new SecurityException("peer host resolves to a non-routable address: " + host);
+        if (addrs.length == 0) {
+            if (blockPrivate) {
+                throw new SecurityException("peer host resolves to no address: " + host);
+            }
+            return baseUrl;
         }
+        if (blockPrivate) {
+            // ALL addresses, not just the pinned first one: the https dial re-resolves and may
+            // use any of them, so a public first record must not vouch for a private second one
+            // (audit B-1). Same rule as isPubliclyRoutable at admission.
+            for (InetAddress a : addrs) {
+                if (!isRoutable(a)) {
+                    throw new SecurityException("peer host " + host + " resolves to a non-routable "
+                        + "address (" + addrs.length + " address(es) returned)");
+                }
+            }
+        }
+        InetAddress addr = addrs[0];
         // https keeps the HOSTNAME: TLS endpoint identification matches the certificate's SAN
         // against the host actually dialed, so rewriting to an IP literal fails the handshake
         // for every https peer (audit: DNS pinning breaks TLS). The anti-rebinding guarantee

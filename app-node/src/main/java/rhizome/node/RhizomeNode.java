@@ -153,6 +153,14 @@ public final class RhizomeNode implements AutoCloseable {
                 + "network. Set RHIZOME_API_TOKEN, bind 127.0.0.1, or set RHIZOME_ALLOW_OPEN_API=true "
                 + "for a pure P2P relay.");
         }
+        // The opt-in is legitimate for a relay, but it is worth saying out loud what it buys the
+        // network: anyone can POST /add_peer, so anyone chooses hosts this node will periodically
+        // fetch (SSRF-filtered, bounded, evicted on failure — audit B-3).
+        if (config.apiToken().isEmpty() && !isLoopbackBind(config.bindAddress())) {
+            log.warn("RHIZOME_ALLOW_OPEN_API=true: /add_peer and the other operator routes are "
+                + "unauthenticated on {}. Any caller can enqueue a host for this node to fetch; "
+                + "set RHIZOME_API_TOKEN unless this is a public relay.", config.bindAddress());
+        }
         // Block SSRF-prone (loopback / private / metadata) peer hosts by DEFAULT on every node.
         // The previous heuristic keyed this off whether the *advertised* self URL was loopback, but
         // a node may bind a public address while /add_peer stays unauthenticated, so an exposed
@@ -491,6 +499,12 @@ public final class RhizomeNode implements AutoCloseable {
             try {
                 ChainSynchronizer.Result result = synchronizer.syncFrom(
                     new HttpPeerSource(peerUrl, blockPrivatePeers, syncHttpClient, peerTokenPolicy));
+                // Any Result at all means the peer answered well-formed protocol data, so it is
+                // a real Rhizome node and from here on it can earn ban score — including for the
+                // PEER_INVALID case just below (a node that speaks the protocol and lies IS
+                // misbehaving). Only the malformed-data path can still see an unconfirmed peer;
+                // see penalize (audit B-3).
+                registry.markConfirmed(peerUrl);
                 switch (result) {
                     case EXTENDED, REORGED ->
                         log.info("Synced from {}: {} -> height {}", peerUrl, result, engine.height());
@@ -525,7 +539,23 @@ public final class RhizomeNode implements AutoCloseable {
         }
     }
 
+    /**
+     * Applies ban score for misbehaviour — but only to a peer that has proven it speaks the
+     * protocol. {@code /add_peer} is unauthenticated on an open node, so an attacker could point
+     * us at any public host: a plain web server answering 200 to everything raises
+     * PeerProtocolException, which used to be worth an immediate ban of the VICTIM's resolved IP
+     * (100 points = the threshold), renewable for as long as the attacker kept re-adding it — a
+     * remote blocklisting primitive that would also refuse the victim's honest node later
+     * (audit B-3). An unconfirmed host is treated as what it is, a wrong address: dropped from
+     * the registry, which also arms the 5-minute host re-admission cooldown.
+     */
     private void penalize(String peerUrl, int points, String reason) {
+        if (!registry.isConfirmed(peerUrl)) {
+            registry.remove(peerUrl);
+            log.debug("Dropped unconfirmed peer {} ({}) — not a protocol-speaking node, not banned",
+                peerUrl, reason);
+            return;
+        }
         if (registry.penalize(peerUrl, points)) {
             log.warn("Banned peer {} ({})", peerUrl, reason);
         } else {
@@ -776,7 +806,7 @@ public final class RhizomeNode implements AutoCloseable {
         }
         String advertise = System.getenv("RHIZOME_ADVERTISE");
         if (advertise != null && !advertise.isBlank()) {
-            config = config.withAdvertisedUrl(advertise.trim());
+            config = config.withAdvertisedUrl(parseAdvertisedUrl(advertise));
         }
         // Bind address for the HTTP API (default 127.0.0.1 — secure by default, audit H-2);
         // a public-facing node binds 0.0.0.0 explicitly and must then also set
@@ -815,6 +845,31 @@ public final class RhizomeNode implements AutoCloseable {
         return port;
     }
 
+    /**
+     * Validates {@code RHIZOME_ADVERTISE}: it must be an http(s) URL with a host. A malformed
+     * value used to be accepted verbatim and then degrade three things at once, silently
+     * (audit I-6): {@link PeerRegistry}'s self URL (canonicalized to something no peer URL can
+     * equal, so the self-pairing refusal stops firing and the node syncs from itself), the
+     * address handed to peers by PEX, and the {@code Host} allowlist, which drops it and falls
+     * back to the loopback names — locking browsers out of the dashboard over the real hostname.
+     */
+    static String parseAdvertisedUrl(String raw) {
+        String url = raw.trim();
+        try {
+            java.net.URI uri = java.net.URI.create(url);
+            String scheme = uri.getScheme();
+            boolean http = "http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme);
+            if (http && uri.getHost() != null && !uri.getHost().isEmpty()) {
+                return url;
+            }
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException("RHIZOME_ADVERTISE must be an http(s) URL with a host "
+                + "(e.g. https://node.example:3000), was: " + raw, e);
+        }
+        throw new IllegalArgumentException("RHIZOME_ADVERTISE must be an http(s) URL with a host "
+            + "(e.g. https://node.example:3000), was: " + raw);
+    }
+
     /** Parses {@code RHIZOME_BLOCK_INTERVAL_MS} with a clear error and a positivity check. */
     static long parseBlockIntervalMs(String raw) {
         final long interval;
@@ -829,17 +884,28 @@ public final class RhizomeNode implements AutoCloseable {
         return interval;
     }
 
+    /**
+     * Resolves {@code RHIZOME_NETWORK} (absent/blank → mainnet). An unrecognised value is a hard
+     * failure, not a fall-through to mainnet: {@code RHIZOME_NETWORK=testnett} used to start the
+     * node on MAINNET without a word — wrong chain, wasted mining, mainnet peers dialled — while
+     * every other config variable already fails fast on a typo (audit B-4). Fail-unsafe defaults
+     * are the one kind of default this node does not get to have.
+     */
+    static rhizome.core.blockchain.NetworkParameters parseNetwork(String raw) {
+        String name = raw == null || raw.isBlank() ? "mainnet" : raw.trim();
+        return switch (name.toLowerCase(java.util.Locale.ROOT)) {
+            case "mainnet" -> rhizome.core.blockchain.NetworkParameters.cleanMainnet();
+            case "testnet" -> rhizome.core.blockchain.NetworkParameters.testnet();
+            case "devnet" -> rhizome.core.blockchain.NetworkParameters.devnet();
+            default -> throw new IllegalArgumentException(
+                "RHIZOME_NETWORK must be one of mainnet, testnet, devnet — was: " + raw);
+        };
+    }
+
     /** Selects the network from RHIZOME_NETWORK (mainnet|testnet|devnet). */
     private record NetworkParametersArg(rhizome.core.blockchain.NetworkParameters params) {
         static NetworkParametersArg fromEnv() {
-            String name = System.getenv().getOrDefault("RHIZOME_NETWORK", "mainnet");
-            if ("testnet".equalsIgnoreCase(name)) {
-                return new NetworkParametersArg(rhizome.core.blockchain.NetworkParameters.testnet());
-            }
-            if ("devnet".equalsIgnoreCase(name)) {
-                return new NetworkParametersArg(rhizome.core.blockchain.NetworkParameters.devnet());
-            }
-            return new NetworkParametersArg(rhizome.core.blockchain.NetworkParameters.cleanMainnet());
+            return new NetworkParametersArg(parseNetwork(System.getenv("RHIZOME_NETWORK")));
         }
     }
 }

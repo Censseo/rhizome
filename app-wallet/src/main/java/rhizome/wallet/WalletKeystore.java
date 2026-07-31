@@ -120,10 +120,15 @@ final class WalletKeystore {
             RNG.nextBytes(salt);
             byte[] iv = new byte[IV_LEN];
             RNG.nextBytes(iv);
-            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
-            cipher.init(Cipher.ENCRYPT_MODE, deriveScryptKey(passphrase, salt, SCRYPT_N, SCRYPT_R, SCRYPT_P),
-                new GCMParameterSpec(TAG_BITS, iv));
-            byte[] ciphertext = cipher.doFinal(plaintextBytes);
+            WipeableKey key = deriveScryptKey(passphrase, salt, SCRYPT_N, SCRYPT_R, SCRYPT_P);
+            byte[] ciphertext;
+            try {
+                Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+                cipher.init(Cipher.ENCRYPT_MODE, key, new GCMParameterSpec(TAG_BITS, iv));
+                ciphertext = cipher.doFinal(plaintextBytes);
+            } finally {
+                key.destroy();
+            }
             Base64.Encoder b64 = Base64.getEncoder();
             return new JSONObject()
                 .put(MARKER, 1)
@@ -149,7 +154,7 @@ final class WalletKeystore {
             byte[] salt = b64.decode(o.getString("salt"));
             byte[] iv = b64.decode(o.getString("iv"));
             byte[] ciphertext = b64.decode(o.getString("ct"));
-            SecretKey key;
+            WipeableKey key;
             String kdf = o.optString("kdf", "pbkdf2-hmac-sha256");
             if ("scrypt".equals(kdf)) {
                 int n = o.getInt("n");
@@ -175,9 +180,14 @@ final class WalletKeystore {
             } else {
                 throw new IllegalStateException("wallet keystore has an unknown kdf: " + kdf);
             }
-            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
-            cipher.init(Cipher.DECRYPT_MODE, key, new GCMParameterSpec(TAG_BITS, iv));
-            byte[] plaintext = cipher.doFinal(ciphertext);
+            byte[] plaintext;
+            try {
+                Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+                cipher.init(Cipher.DECRYPT_MODE, key, new GCMParameterSpec(TAG_BITS, iv));
+                plaintext = cipher.doFinal(ciphertext);
+            } finally {
+                key.destroy();
+            }
             try {
                 return utf8Decode(plaintext);
             } finally {
@@ -208,38 +218,73 @@ final class WalletKeystore {
         return out;
     }
 
-    private static SecretKey deriveScryptKey(char[] passphrase, byte[] salt, int n, int r, int p) {
+    private static WipeableKey deriveScryptKey(char[] passphrase, byte[] salt, int n, int r, int p) {
         // scrypt takes the password as bytes; convert without a String intermediate and wipe
         // both the password bytes and the derived key material once copied (audit S-9).
         byte[] passwordBytes = utf8Encode(passphrase);
         try {
-            byte[] key = org.bouncycastle.crypto.generators.SCrypt.generate(
-                passwordBytes, salt, n, r, p, KEY_BITS / 8);
-            try {
-                return new SecretKeySpec(key, "AES"); // SecretKeySpec clones key into its own array
-            } finally {
-                java.util.Arrays.fill(key, (byte) 0);
-            }
+            return new WipeableKey(org.bouncycastle.crypto.generators.SCrypt.generate(
+                passwordBytes, salt, n, r, p, KEY_BITS / 8));
         } finally {
             java.util.Arrays.fill(passwordBytes, (byte) 0);
         }
     }
 
-    private static SecretKey deriveKey(char[] passphrase, byte[] salt, int iterations)
+    private static WipeableKey deriveKey(char[] passphrase, byte[] salt, int iterations)
             throws GeneralSecurityException {
         SecretKeyFactory factory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256");
-        // Clear the derived secret and the PBEKeySpec's internal copy of the passphrase once the key
-        // material has been copied into the SecretKeySpec, so neither lingers on the heap (audit S-9).
+        // Clear the PBEKeySpec's internal copy of the passphrase once the key material has been
+        // derived, so it does not linger on the heap (audit S-9).
         PBEKeySpec spec = new PBEKeySpec(passphrase, salt, iterations, KEY_BITS);
         try {
-            byte[] key = factory.generateSecret(spec).getEncoded();
-            try {
-                return new SecretKeySpec(key, "AES"); // SecretKeySpec clones key into its own array
-            } finally {
-                java.util.Arrays.fill(key, (byte) 0);
-            }
+            return new WipeableKey(factory.generateSecret(spec).getEncoded());
         } finally {
             spec.clearPassword();
+        }
+    }
+
+    /**
+     * An AES {@link SecretKey} whose bytes can actually be wiped once the cipher is done with
+     * them. {@link SecretKeySpec} cannot: it inherits the default {@code Destroyable.destroy()},
+     * which throws {@code DestroyFailedException} and clears nothing, so the derived 256-bit key
+     * would sit on the heap until GC — the one gap in this file's wipe discipline (audit INF-3).
+     * The JCA only needs {@code "RAW"}/{@code "AES"} plus {@link #getEncoded()}, so a hand-rolled
+     * key is a drop-in (each {@code getEncoded} hands out a copy the provider owns; the provider
+     * keeps its own expanded round-key schedule regardless, which is outside our reach).
+     */
+    private static final class WipeableKey implements SecretKey {
+
+        private final byte[] key;
+        private boolean destroyed;
+
+        WipeableKey(byte[] key) {
+            this.key = key; // ownership transferred: destroy() wipes this very array
+        }
+
+        @Override
+        public String getAlgorithm() {
+            return "AES";
+        }
+
+        @Override
+        public String getFormat() {
+            return "RAW";
+        }
+
+        @Override
+        public byte[] getEncoded() {
+            return destroyed ? null : key.clone();
+        }
+
+        @Override
+        public void destroy() {
+            java.util.Arrays.fill(key, (byte) 0);
+            destroyed = true;
+        }
+
+        @Override
+        public boolean isDestroyed() {
+            return destroyed;
         }
     }
 }

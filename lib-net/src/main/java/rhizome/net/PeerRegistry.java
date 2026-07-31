@@ -57,6 +57,13 @@ public final class PeerRegistry {
     private final Map<String, Entry> peers = new ConcurrentHashMap<>();
     /** Config/seed peers: exempt from SSRF + subnet caps and never evicted by capacity. */
     private final Set<String> seeds = ConcurrentHashMap.newKeySet();
+    /**
+     * Peers that have answered at least one well-formed protocol exchange, i.e. that are
+     * demonstrably Rhizome nodes rather than whatever host an unauthenticated {@code /add_peer}
+     * pointed us at. Bounded by the peer table (cleared in {@link #remove}). See
+     * {@link #markConfirmed} for why the distinction carries a ban decision.
+     */
+    private final Set<String> confirmed = ConcurrentHashMap.newKeySet();
     /** Live count of discovered (non-seed) peers per subnet bucket. */
     private final Map<String, Integer> subnetCounts = new ConcurrentHashMap<>();
     /**
@@ -184,8 +191,33 @@ public final class PeerRegistry {
         }
     }
 
+    /**
+     * Records that {@code url} answered a well-formed protocol exchange. Only a CONFIRMED peer
+     * can earn ban score (see {@link #penalize}): {@code /add_peer} is unauthenticated on an open
+     * node, so anyone could have us add {@code https://victim.example} — an ordinary web server
+     * answering 200 to everything — and its junk "protocol data" then banned the victim's
+     * resolved IP for the full ban window, renewable indefinitely (audit B-3, ban by proxy). A
+     * host that has never spoken the protocol is not a misbehaving peer, it is a bad address:
+     * the proportionate answer is eviction plus the re-admission cooldown, not a blocklist entry
+     * that would also refuse the victim's honest node later.
+     */
+    public void markConfirmed(String url) {
+        String u = normalize(url);
+        if (u != null && peers.containsKey(u)) {
+            confirmed.add(u);
+        }
+    }
+
+    /** True if {@code url} has answered a valid protocol exchange, or is a configured seed
+     *  (the operator vouched for it). See {@link #markConfirmed}. */
+    public boolean isConfirmed(String url) {
+        String u = normalize(url);
+        return u != null && (confirmed.contains(u) || seeds.contains(u));
+    }
+
     /** Records misbehaviour; if it tips the peer over the ban threshold, evicts it. Seed peers
-     *  are trusted anchors and are never auto-banned or evicted (audit M4 collateral bans). */
+     *  are trusted anchors and are never auto-banned or evicted (audit M4 collateral bans).
+     *  Callers must not penalize a peer that {@link #isConfirmed} rejects — see there. */
     public boolean penalize(String url, int points) {
         if (banList == null || seeds.contains(normalize(url))) {
             return false;
@@ -216,6 +248,7 @@ public final class PeerRegistry {
         String u = normalize(url);
         synchronized (lock) {
             Entry entry = peers.remove(u);
+            confirmed.remove(u); // bounded by the peer table: never outlives its entry
             if (entry == null) {
                 return;
             }

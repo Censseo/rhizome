@@ -17,6 +17,11 @@ import java.util.Set;
  * returns the token when (a) the canonicalized URL ({@link PeerUrls#canonicalize}) is in the
  * configured set AND (b) the scheme is {@code https://} — never in cleartext over http.
  * Gossip/sync to any other peer proceeds unauthenticated.
+ *
+ * <p>These are the only two policies production code can build: this constructor and
+ * {@link #none()}. The former trust-all escape hatch (and the deprecated {@code String
+ * peerToken} constructors that reached it) is gone — it was a standing invitation to
+ * reintroduce the exfiltration by wiring a new component the convenient way (audit B-2).
  */
 public final class PeerTokenPolicy {
 
@@ -46,15 +51,24 @@ public final class PeerTokenPolicy {
         this.trusted = null;
     }
 
+    /** The policy for a node with no peer token: nothing is ever authenticated outbound. */
+    public static PeerTokenPolicy none() {
+        return new PeerTokenPolicy(null, java.util.List.of());
+    }
+
     /**
-     * Legacy/test policy presenting the token to EVERY peer, over any scheme — including
-     * gossip-learned peers reached over cleartext {@code http://}. This reproduces the exact
-     * pre-fix behaviour behind the deprecated {@code String peerToken} constructors and is
-     * INSECURE on a registry populated by unauthenticated PEX: any peer that gets itself added
-     * receives the shared secret. Only use in tests or single-operator deployments where every
-     * registry entry is trusted.
+     * Test-only policy presenting the token to EVERY peer over ANY scheme — the pre-fix
+     * behaviour, kept solely so the transport tests can assert that {@code HttpPeerSource}
+     * actually attaches {@code Authorization: Bearer} when a policy hands it a token (a plain
+     * {@code HttpServer} cannot speak https, and the real policy refuses cleartext).
+     *
+     * <p>Deliberately NOT public (audit B-2): it was reachable from production wiring through
+     * deprecated {@code String peerToken} constructors, so any component built that way handed
+     * the deployment's shared admin secret — in cleartext over {@code http://} — to every
+     * gossip-learned peer. Production code builds {@link #PeerTokenPolicy(String, Collection)}
+     * or {@link #none()}; there is no supported way back to trust-all.
      */
-    public static PeerTokenPolicy trustAll(String token) {
+    static PeerTokenPolicy unsafeTrustAllForTests(String token) {
         return new PeerTokenPolicy(token, true);
     }
 
@@ -70,7 +84,7 @@ public final class PeerTokenPolicy {
             return null;
         }
         if (trusted == null) {
-            return token; // legacy trust-all: any peer, any scheme (see trustAll javadoc)
+            return token; // test-only trust-all (see unsafeTrustAllForTests): any peer, any scheme
         }
         String canonical = PeerUrls.canonicalize(url);
         if (canonical == null || !trusted.contains(canonical)) {

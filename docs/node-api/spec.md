@@ -59,9 +59,9 @@ aggregate token-bucket gate that sheds with HTTP 429 *before* doing the work.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `RHIZOME_NETWORK` | `mainnet` | `mainnet` or `testnet` (low difficulty, `minFee = 0`) |
+| `RHIZOME_NETWORK` | `mainnet` | `mainnet`, `testnet` (low difficulty, `minFee = 0`) or `devnet`; any other value is **refused at startup** |
 | `RHIZOME_PORT` | `3000` | HTTP API port |
-| `RHIZOME_BIND_ADDRESS` | `0.0.0.0` | bind address (`127.0.0.1` for a wallet/dashboard-only node behind a tunnel) |
+| `RHIZOME_BIND_ADDRESS` | `127.0.0.1` | bind address; binding a public address additionally requires `RHIZOME_API_TOKEN` or `RHIZOME_ALLOW_OPEN_API=true` |
 | `RHIZOME_API_TOKEN` | — | bearer token gating state-changing/operator routes |
 | `RHIZOME_PEER_TOKEN` | — | outbound peer bearer token (see [networking](../networking/spec.md) P-8) |
 | `RHIZOME_ALLOW_OPEN_API` | — | opt out of the operator-route gate |
@@ -70,7 +70,7 @@ aggregate token-bucket gate that sheds with HTTP 429 *before* doing the work.
 | `RHIZOME_SNAPSHOT` | — | snapshot file seeding the genesis |
 | `RHIZOME_MINER` | — | reward address (enables block production) |
 | `RHIZOME_PEERS` | — | comma-separated initial peers |
-| `RHIZOME_ADVERTISE` | — | public URL advertised to peers |
+| `RHIZOME_ADVERTISE` | — | public URL advertised to peers; must be an `http(s)` URL with a host |
 | `RHIZOME_BLOCK_INTERVAL_MS` | block target | producer pacing override (local devnets) |
 | `RHIZOME_VOTE` | — | miner's economic-parameter vote |
 | `RHIZOME_PRUNE` | — | keep only the most recent N block bodies |
@@ -155,6 +155,31 @@ read-only gas gate.
 `POST /scan/register` / `POST /scan/deregister` / `GET /scan/list` / `GET /scan/boxes`. Scan ids are
 **CSPRNG-generated** so an unauthenticated caller cannot enumerate and wipe another app's scans;
 per-client caps with LRU eviction bound the registry. Scans are **node-local, not consensus**.
+
+Ownership is the source address **plus** an optional `X-Scan-Owner` secret the client chooses and
+sends on all four routes. Send one whenever the node is reached through a NAT, a shared VPN or a
+reverse proxy: there every co-tenant arrives with the same address, so address-only ownership let
+them list, query and deregister each other's scans. Both halves must match — the same secret from a
+different address does not carry ownership either. The node stores only its SHA-256. A client that
+sends no header keeps the address-only behaviour, which is all a single-tenant deployment needs.
+
+## Known limits (accepted, not defects)
+
+Deployment-shaped gaps that no code change inside the node closes. Stated here so an operator can
+decide rather than discover.
+
+- **The per-IP limiter is per *address*, not per user.** The key is the IPv4 address or the IPv6
+  `/64`; an attacker holding a `/48` has 65 536 distinct keys, and NAT co-tenants share one. The
+  bound that actually holds against a distributed flood is the **aggregate** gate (A-4), which is
+  why every expensive route is charged to one before it decodes anything.
+- **No `X-Forwarded-For` support.** Behind a reverse proxy every request carries the proxy's
+  address, so all clients share one per-IP budget (a single client can exhaust it for everyone) and
+  the address half of scan ownership collapses (A-11 — send `X-Scan-Owner`). Terminate rate
+  limiting at the proxy, or bind the node where it sees real client addresses.
+- **Reads are never token-gated.** `RHIZOME_API_TOKEN` covers state-changing/operator POSTs only;
+  `/stats`, `/wallet?address=…`, `/logs/stream` and the rest stay readable by anything that reaches
+  the port. Chain data is public by design — an SSE stream carries only on-chain events — but a
+  *private* explorer is not something this node offers. Put it behind your own authenticating proxy.
 
 ## Invariants (must never regress)
 

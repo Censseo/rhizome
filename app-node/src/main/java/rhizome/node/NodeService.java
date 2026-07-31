@@ -456,31 +456,31 @@ public final class NodeService {
 
     // ---- box scans (EIP-1) ----
 
-    /** Registers a declarative box scan for {@code clientKey}; returns its node-local id. */
-    public int registerScan(String clientKey, rhizome.core.box.ScanPredicate predicate) {
-        return scans.register(clientKey, predicate);
+    /** Registers a declarative box scan for {@code owner}; returns its node-local id. */
+    public int registerScan(ScanRegistry.Owner owner, rhizome.core.box.ScanPredicate predicate) {
+        return scans.register(owner, predicate);
     }
 
-    /** Removes a registered scan owned by {@code clientKey}; true if it existed (and was theirs). */
-    public boolean deregisterScan(String clientKey, int scanId) {
-        return scans.deregister(scanId, clientKey);
+    /** Removes a registered scan owned by {@code owner}; true if it existed (and was theirs). */
+    public boolean deregisterScan(ScanRegistry.Owner owner, int scanId) {
+        return scans.deregister(scanId, owner);
     }
 
     /**
-     * The predicate of a scan owned by {@code clientKey}, or {@code null} — a foreign id is
+     * The predicate of a scan owned by {@code owner}, or {@code null} — a foreign id is
      * indistinguishable from an unknown one (non-disclosing, like {@link #deregisterScan};
      * audit: /scan/boxes owner-gating). Only this owner-scoped lookup refreshes the scan's
      * idle-eviction activity, so another client polling a learned id cannot keep the victim
      * scan alive.
      */
-    public rhizome.core.box.ScanPredicate scanPredicate(String clientKey, int scanId) {
-        return scans.getForOwner(scanId, clientKey);
+    public rhizome.core.box.ScanPredicate scanPredicate(ScanRegistry.Owner owner, int scanId) {
+        return scans.getForOwner(scanId, owner);
     }
 
-    /** Scans registered by {@code clientKey}, id → predicate (other clients' scans are not
+    /** Scans registered by {@code owner}, id → predicate (other clients' scans are not
      *  disclosed — /scan/register is unauthenticated; audit F1). */
-    public java.util.Map<Integer, rhizome.core.box.ScanPredicate> scansOf(String clientKey) {
-        return scans.scansOf(clientKey);
+    public java.util.Map<Integer, rhizome.core.box.ScanPredicate> scansOf(ScanRegistry.Owner owner) {
+        return scans.scansOf(owner);
     }
 
     /** Evaluates a predicate over committed boxes, one bounded, pollable window at a time. */
@@ -949,7 +949,7 @@ public final class NodeService {
      */
     static final int PUSH_STRIKE_LIMIT = 20;
     static final long PUSH_STRIKE_WINDOW_MS = 60_000L;
-    private static final int PUSH_STRIKE_MAX_KEYS = 8_192;
+    static final int PUSH_STRIKE_MAX_KEYS = 8_192;
 
     private static final class Strikes {
         volatile long windowStart;
@@ -958,7 +958,6 @@ public final class NodeService {
     }
 
     private final java.util.Map<String, Strikes> pushStrikes = new java.util.concurrent.ConcurrentHashMap<>();
-    private final Strikes pushStrikesOverflow = new Strikes(0);
 
     /**
      * True when {@code clientKey} has pushed more than {@link #PUSH_STRIKE_LIMIT} faults inside
@@ -1014,18 +1013,33 @@ public final class NodeService {
         long now = System.currentTimeMillis();
         Strikes s = pushStrikes.get(clientKey);
         if (s == null) {
-            if (pushStrikes.size() >= PUSH_STRIKE_MAX_KEYS) {
-                // Table full: sweep expired windows; if nothing is reclaimable, meter the
-                // untracked client against a shared overflow bucket (fail-closed, bounded —
-                // the RateLimiter overflow pattern) rather than growing without limit.
-                long before = pushStrikes.size();
-                pushStrikes.values().removeIf(w -> now - w.windowStart >= PUSH_STRIKE_WINDOW_MS);
-                if (pushStrikes.size() >= before) {
-                    s = pushStrikesOverflow;
+            // Check-and-insert under one monitor (the PeerBanList discipline): a lock-free
+            // size() check racing computeIfAbsent lets concurrent faults push the table past
+            // its bound.
+            synchronized (pushStrikes) {
+                s = pushStrikes.get(clientKey);
+                if (s == null) {
+                    if (pushStrikes.size() >= PUSH_STRIKE_MAX_KEYS) {
+                        // Table full: reclaim expired windows first, then make room by dropping
+                        // the STALEST window. The client offending right now is always tracked,
+                        // so its next fault sheds.
+                        //
+                        // It used to be metered against a shared overflow bucket instead — which
+                        // isPushShed never consulted, so once 8192 keys were live the shed
+                        // silently stopped applying to every new IP (audit I-2, fail-open). The
+                        // bucket could not simply be consulted either: shedding every untracked
+                        // client would hand an attacker a global push-path DoS for the price of
+                        // filling the table, the same eclipse lever PeerBanList refuses for its
+                        // own overflow. Evicting the stalest entry has neither failure mode —
+                        // and the eviction victim is another recent offender, since honest
+                        // clients accrue no strikes at all (see PUSH_FAULT_STATUSES).
+                        pushStrikes.values().removeIf(w -> now - w.windowStart >= PUSH_STRIKE_WINDOW_MS);
+                        if (pushStrikes.size() >= PUSH_STRIKE_MAX_KEYS) {
+                            evictStalestStrikes();
+                        }
+                    }
+                    s = pushStrikes.computeIfAbsent(clientKey, k -> new Strikes(now));
                 }
-            }
-            if (s == null) {
-                s = pushStrikes.computeIfAbsent(clientKey, k -> new Strikes(now));
             }
         }
         synchronized (s) {
@@ -1034,6 +1048,23 @@ public final class NodeService {
                 s.count = 0;
             }
             s.count++;
+        }
+    }
+
+    /** Drops the entry whose window started longest ago, freeing exactly one slot. Called only
+     *  under the {@link #pushStrikes} monitor, and only when the table is full and nothing
+     *  expired — the same O(n) cost the sweep just above already pays in that state. */
+    private void evictStalestStrikes() {
+        String stalestKey = null;
+        long stalest = Long.MAX_VALUE;
+        for (var e : pushStrikes.entrySet()) {
+            if (e.getValue().windowStart < stalest) {
+                stalest = e.getValue().windowStart;
+                stalestKey = e.getKey();
+            }
+        }
+        if (stalestKey != null) {
+            pushStrikes.remove(stalestKey);
         }
     }
 

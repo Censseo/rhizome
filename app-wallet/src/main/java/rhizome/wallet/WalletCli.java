@@ -53,6 +53,22 @@ public final class WalletCli {
             usage();
             System.exit(2);
         }
+        try {
+            dispatch(args);
+        } catch (IllegalArgumentException | java.io.IOException | WalletClient.WalletException e) {
+            // Bad CLI input and unreachable/hostile nodes are ordinary outcomes, not crashes: a
+            // raw stack trace buries the one line that matters (audit INF-7). Nothing sensitive
+            // rides in these messages — amounts, addresses and paths only, never the passphrase
+            // or the seed — and RHIZOME_WALLET_DEBUG=1 restores the full trace for diagnosis.
+            System.err.println("error: " + (e.getMessage() == null ? e.toString() : e.getMessage()));
+            if ("1".equals(System.getenv("RHIZOME_WALLET_DEBUG"))) {
+                e.printStackTrace();
+            }
+            System.exit(2);
+        }
+    }
+
+    private static void dispatch(String[] args) throws Exception {
         switch (args[0]) {
             case "keygen" -> keygen(args);
             case "address" -> address(args);
@@ -259,7 +275,7 @@ public final class WalletCli {
         warnIfInsecureNodeUrl(args[1]);
         WalletClient client = walletClient(args);
         Wallet wallet = Wallet.load(Path.of(args[2]), passphraseFromFlag(args));
-        byte[] boxId = Utils.hexStringToByteArray(args[3]);
+        byte[] boxId = idBytes(args[3], "boxId");
         long topup = flagPdn(args, "--topup");
         long fee = flagPdn(args, "--fee");
         byte[] data = rhizome.core.box.BoxPayload.encodeUpdate(boxId, parseRegisters(args));
@@ -282,7 +298,7 @@ public final class WalletCli {
         warnIfInsecureNodeUrl(args[1]);
         WalletClient client = walletClient(args);
         Wallet wallet = Wallet.load(Path.of(args[2]), passphraseFromFlag(args));
-        byte[] boxId = Utils.hexStringToByteArray(args[3]);
+        byte[] boxId = idBytes(args[3], "boxId");
         long fee = flagPdn(args, "--fee");
         byte[] data = rhizome.core.box.BoxPayload.encodeTarget(boxId);
         echoPdn("fee", fee);
@@ -301,7 +317,7 @@ public final class WalletCli {
     private static void boxShow(String[] args) {
         require(args, 3, "box-show <nodeUrl> <boxId>");
         warnIfInsecureNodeUrl(args[1]);
-        System.out.println(walletClient(args).box(args[2]));
+        System.out.println(walletClient(args).box(hexId(args[2], "boxId")));
     }
 
     private static void boxList(String[] args) {
@@ -324,12 +340,14 @@ public final class WalletCli {
         warnIfInsecureNodeUrl(args[1]);
         WalletClient client = walletClient(args);
         Wallet wallet = Wallet.load(Path.of(args[2]), passphraseFromFlag(args));
-        String symbol = args[3];
-        String name = args[4];
-        long amount = Long.parseLong(args[5]);
-        int decimals = Integer.parseInt(args[6]);
+        String symbol = tokenText(args[3], "symbol", MAX_TOKEN_SYMBOL_BYTES);
+        String name = tokenText(args[4], "name", MAX_TOKEN_NAME_BYTES);
+        long amount = tokenAmount(args[5]);
+        int decimals = tokenDecimals(args[6]);
         long fee = flagPdn(args, "--fee");
         byte[] data = rhizome.core.token.TokenPayload.encodeMint(amount, decimals, symbol, name);
+        System.err.println("mint: " + amount + " units of " + symbol
+            + " (" + name + "), " + decimals + " decimals");
         echoPdn("fee", fee);
 
         long nonce = client.walletInfo(wallet.address()).nextNonce();
@@ -349,16 +367,19 @@ public final class WalletCli {
         // Validate the recipient BEFORE loading the wallet: a checksum typo should not cost a
         // passphrase prompt and a scrypt round to discover.
         PublicAddress recipient = checkedRecipient(args[4], args);
+        // Validate the token id and amount BEFORE the passphrase prompt too — same reason.
+        String tokenId = hexId(args[3], "tokenId");
+        long amount = tokenAmount(args[5]);
         Wallet wallet = Wallet.load(Path.of(args[2]), passphraseFromFlag(args));
-        submitTokenAmount(args, wallet, TransactionKind.TOKEN_TRANSFER, recipient,
-            args[3], Long.parseLong(args[5]));
+        submitTokenAmount(args, wallet, TransactionKind.TOKEN_TRANSFER, recipient, tokenId, amount);
     }
 
     private static void tokenBurn(String[] args) throws Exception {
         require(args, 5, "token-burn <nodeUrl> <keyfile> <tokenId> <amount> [--fee <fee>] [--expect-chain-id <n>] [--passphrase-file <path>]");
+        String tokenId = hexId(args[3], "tokenId");
+        long amount = tokenAmount(args[4]);
         Wallet wallet = Wallet.load(Path.of(args[2]), passphraseFromFlag(args));
-        submitTokenAmount(args, wallet, TransactionKind.TOKEN_BURN, wallet.address(),
-            args[3], Long.parseLong(args[4]));
+        submitTokenAmount(args, wallet, TransactionKind.TOKEN_BURN, wallet.address(), tokenId, amount);
     }
 
     /** The wallet is loaded/decrypted ONCE by the caller — a second load here would re-prompt for the passphrase and re-run scrypt. */
@@ -366,8 +387,9 @@ public final class WalletCli {
                                           PublicAddress to, String tokenIdHex, long amount) throws Exception {
         warnIfInsecureNodeUrl(args[1]);
         WalletClient client = walletClient(args);
-        byte[] data = rhizome.core.token.TokenPayload.encodeAmount(Utils.hexStringToByteArray(tokenIdHex), amount);
+        byte[] data = rhizome.core.token.TokenPayload.encodeAmount(idBytes(tokenIdHex, "tokenId"), amount);
         long fee = flagPdn(args, "--fee");
+        System.err.println("amount: " + amount + " units of token " + tokenIdHex);
         echoPdn("fee", fee);
 
         long nonce = client.walletInfo(wallet.address()).nextNonce();
@@ -383,13 +405,14 @@ public final class WalletCli {
     private static void tokenShow(String[] args) {
         require(args, 3, "token-show <nodeUrl> <tokenId>");
         warnIfInsecureNodeUrl(args[1]);
-        System.out.println(walletClient(args).token(args[2]));
+        System.out.println(walletClient(args).token(hexId(args[2], "tokenId")));
     }
 
     private static void tokenBalance(String[] args) {
         require(args, 4, "token-balance <nodeUrl> <tokenId> <address>");
         warnIfInsecureNodeUrl(args[1]);
-        System.out.println(walletClient(args).tokenBalance(args[2], PublicAddress.of(args[3])));
+        System.out.println(walletClient(args)
+            .tokenBalance(hexId(args[2], "tokenId"), PublicAddress.of(args[3])));
     }
 
     private static void tokenList(String[] args) {
@@ -511,6 +534,94 @@ public final class WalletCli {
         }
     }
 
+    /** Byte length of a box id / token id: both are SHA-256 derived (Box.deriveId, TokenMeta.deriveId). */
+    private static final int ID_BYTES = 32;
+    /** Protocol bounds on mint metadata (NetworkParameters.maxTokenSymbolBytes/NameBytes/Decimals):
+     *  mirrored here so the CLI refuses what the node would reject, before signing. */
+    private static final int MAX_TOKEN_SYMBOL_BYTES = 16;
+    private static final int MAX_TOKEN_NAME_BYTES = 64;
+    private static final int MAX_TOKEN_DECIMALS = 18;
+
+    /**
+     * Validates a 32-byte box/token id given as hex and returns it unchanged. Unvalidated ids used
+     * to flow straight into the node's query string — where a {@code &} silently injected extra
+     * query parameters — and into fixed-size payload buffers, where anything but exactly 32 bytes
+     * raised a bare {@code BufferOverflowException} or produced a payload the node would reject
+     * after signing (audit BAS-2). Package-visible for testing (same pattern as {@link #gasParam}).
+     */
+    static String hexId(String text, String name) {
+        if (text == null || text.length() != ID_BYTES * 2) {
+            throw new IllegalArgumentException("invalid " + name + ": expected " + (ID_BYTES * 2)
+                + " hex characters, got " + (text == null ? "none" : text.length()));
+        }
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            boolean hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+            if (!hex) {
+                throw new IllegalArgumentException("invalid " + name + ": not hex: " + text);
+            }
+        }
+        return text;
+    }
+
+    /** The validated id as raw bytes, for the payload encoders. */
+    static byte[] idBytes(String text, String name) {
+        return Utils.hexStringToByteArray(hexId(text, name));
+    }
+
+    /**
+     * Parses a native-token amount (integer units of the token, not PDN). Rejects non-numeric,
+     * zero and negative values: a raw {@code Long.parseLong} let a mistyped {@code -5} be SIGNED
+     * and only bounce at the node, where the rejection reason is invisible to the operator
+     * (audit BAS-1). The node's rule is {@code amount > 0} (TokenPayload.decodeAmount/decodeMint).
+     */
+    static long tokenAmount(String text) {
+        final long value;
+        try {
+            value = Long.parseLong(text.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException("invalid token amount: " + text);
+        }
+        if (value <= 0) {
+            throw new IllegalArgumentException("invalid token amount: " + text
+                + " (must be a positive whole number of token units)");
+        }
+        return value;
+    }
+
+    /**
+     * Parses a mint's decimals. Bounded to the protocol range: {@code encodeMint} narrows it with
+     * a {@code (byte)} cast, so an out-of-range value used to be silently TRUNCATED into a
+     * different token than the operator asked for (audit BAS-1).
+     */
+    static int tokenDecimals(String text) {
+        final int value;
+        try {
+            value = Integer.parseInt(text.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException("invalid decimals: " + text);
+        }
+        if (value < 0 || value > MAX_TOKEN_DECIMALS) {
+            throw new IllegalArgumentException("invalid decimals: " + text
+                + " (must be between 0 and " + MAX_TOKEN_DECIMALS + ")");
+        }
+        return value;
+    }
+
+    /**
+     * Bounds a mint's symbol/name by UTF-8 BYTE length — the unit the payload's single length byte
+     * and the node's limits both use. {@code encodeMint} casts that length to a byte, so an
+     * over-long string used to wrap around into a corrupt payload rather than fail (audit BAS-1).
+     */
+    static String tokenText(String value, String what, int maxBytes) {
+        int bytes = value.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+        if (bytes == 0 || bytes > maxBytes) {
+            throw new IllegalArgumentException("invalid token " + what + ": " + value
+                + " (must be 1 to " + maxBytes + " bytes in UTF-8, got " + bytes + ")");
+        }
+        return value;
+    }
+
     /**
      * Echoes the exact parsed amount to stderr before anything is signed, so the operator sees
      * precisely what will be submitted (audit F6).
@@ -613,6 +724,10 @@ public final class WalletCli {
                 System.err.println("pinned chainId " + nodeChainId + " (node " + args[1] + ") in "
                     + keyFile + " — first use, trust-on-first-use: a different chainId from any "
                     + "future node will abort signing (override with --expect-chain-id).");
+            } else if (pin != null && !pin.sealed()) {
+                System.err.println("migrated the chainId pin of " + keyFile + " INSIDE the "
+                    + "encrypted payload — until now it sat beside the envelope in cleartext, "
+                    + "where anyone able to write the file could have forged it (audit BAS-3).");
             }
         }
         return decision.chainId();
@@ -653,7 +768,12 @@ public final class WalletCli {
                 + "; signing could replay the transaction onto a different chain. Pass "
                 + "--expect-chain-id " + nodeChainId + " to override and re-pin.");
         }
-        return new ChainIdDecision(nodeChainId, false);
+        // A matching but UNSEALED pin (legacy cleartext metadata beside an encrypted envelope) is
+        // re-pinned so it moves inside the GCM payload: while it sits outside, anyone with write
+        // access to the key file can forge it, and the forgery is indistinguishable from a real
+        // first-use pin (audit BAS-3). Re-sealing needs the passphrase, which the signing command
+        // has just resolved anyway.
+        return new ChainIdDecision(nodeChainId, !pin.sealed());
     }
 
     private static boolean insecureSchemeWarned;

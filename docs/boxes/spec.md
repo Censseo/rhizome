@@ -139,7 +139,10 @@ balances exactly, atomically with the block.
   returns matches in bounded, cursor-paged windows — using the owner index when the predicate is
   owner-anchored, a full-table page otherwise. **Scans are node-local, not consensus.**
 - Scan ids are CSPRNG-generated so an unauthenticated caller cannot enumerate and wipe another
-  app's scans; per-client caps with LRU eviction bound the registry.
+  app's scans; per-client caps with LRU eviction bound the registry. Ownership is the source
+  address plus an optional `X-Scan-Owner` secret — send one when the node sits behind a NAT or a
+  reverse proxy, where the address alone identifies nobody (see
+  [node-api](../node-api/spec.md) A-11).
 - Wallet gains `box-create` / `box-update` / `box-spend` / `box-show` / `box-list`.
 
 ### B-9 — Light-client provability *(implemented)*

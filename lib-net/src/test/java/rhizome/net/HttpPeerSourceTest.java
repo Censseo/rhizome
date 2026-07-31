@@ -208,7 +208,9 @@ class HttpPeerSourceTest {
     @Test
     void configuredPeerTokenIsAttachedAsBearer() {
         // RHIZOME_PEER_TOKEN: outbound requests carry Authorization: Bearer <token> so a
-        // token-gated peer accepts them (audit: token-gated node breaks gossip).
+        // token-gated peer accepts them (audit: token-gated node breaks gossip). The policy
+        // decides WHETHER to hand over the token (PeerTokenPolicyTest); this asserts the
+        // transport actually attaches what it is handed — and nothing when it is handed null.
         var seen = new java.util.concurrent.atomic.AtomicReference<String>();
         server.createContext("/block_count", exchange -> {
             seen.set(exchange.getRequestHeaders().getFirst("Authorization"));
@@ -217,11 +219,31 @@ class HttpPeerSourceTest {
             exchange.getResponseBody().write(body);
             exchange.close();
         });
-        assertEquals(42L, new HttpPeerSource(baseUrl, false, HttpPeerSource.newClient(), "s3cret").height());
+        assertEquals(42L, new HttpPeerSource(baseUrl, false, HttpPeerSource.newClient(),
+            PeerTokenPolicy.unsafeTrustAllForTests("s3cret")).height());
         assertEquals("Bearer s3cret", seen.get());
         // A tokenless source sends no Authorization header at all.
         seen.set(null);
         assertEquals(42L, new HttpPeerSource(baseUrl).height());
         org.junit.jupiter.api.Assertions.assertNull(seen.get());
+    }
+
+    @Test
+    void aConfiguredPeerReachedOverCleartextGetsNoToken() {
+        // End-to-end counterpart of PeerTokenPolicyTest: the real policy is wired into the real
+        // transport and the peer IS configured — but the URL is http://, so the shared secret
+        // must not cross the wire (audit B-2: the deprecated constructors used to send it).
+        var seen = new java.util.concurrent.atomic.AtomicReference<String>();
+        server.createContext("/block_count", exchange -> {
+            seen.set(exchange.getRequestHeaders().getFirst("Authorization"));
+            byte[] body = "42".getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, body.length);
+            exchange.getResponseBody().write(body);
+            exchange.close();
+        });
+        var policy = new PeerTokenPolicy("s3cret", java.util.List.of(baseUrl));
+        assertEquals(42L, new HttpPeerSource(baseUrl, false, HttpPeerSource.newClient(), policy).height());
+        org.junit.jupiter.api.Assertions.assertNull(seen.get(),
+            "the peer token must never travel over cleartext http, configured or not");
     }
 }

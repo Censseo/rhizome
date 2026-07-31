@@ -61,6 +61,13 @@ path.
 - The peer registry is the **single admission choke point**: a banned host cannot be reintroduced
   via config, `/add_peer`, or PEX.
 - The ban list is **fail-closed**.
+- **Only a confirmed peer can accrue ban score.** A host that has never answered a well-formed
+  protocol exchange is dropped from the registry (with the re-admission cooldown), never banned.
+  `/add_peer` is unauthenticated on an open node, so an attacker could otherwise enqueue
+  `https://victim.example` — any web server that answers 200 to everything — and its unparseable
+  `/block_count` would blocklist the victim's IP for the ban window, renewable indefinitely, so
+  this node would later refuse the victim's *honest* node too. Junk from a host that never spoke
+  the protocol means wrong address, not misbehaving peer.
 
 ### P-4 — Rate and size limits *(implemented)*
 
@@ -139,11 +146,24 @@ Content and root verification: see [state](../state/spec.md).
 Required when nodes gate ingest with `RHIZOME_API_TOKEN`; otherwise cross-node pushes are refused
 (401) and gossip stops converging.
 
+The scoping is structural, not conventional: `PeerTokenPolicy` offers production code exactly two
+policies — configured-peers-over-https, and none. There is no trust-all factory and no
+`String peerToken` constructor on `HttpPeerSource` / `PeerBroadcaster` / `PeerDiscovery` to reach
+one, because a component wired the convenient way would hand the deployment's shared secret to
+every gossip-learned peer in cleartext.
+
 ### P-9 — SSRF / rebinding defence on outbound connections *(implemented)*
 
 - Added peers must resolve to **routable IPs** (SSRF/rebinding filter on by default, opt-out only
   via `RHIZOME_ALLOW_PRIVATE_PEERS`); 6to4/Teredo are rejected.
+- **Every** address a name resolves to must be routable, at admission *and* at pin time — not just
+  the first. A record whose first A is public and whose second is `10.x` used to pass both.
 - The connect target is **re-pinned to the validated literal on every send**.
+- `https://` peers keep their **hostname** (an IP literal fails TLS SAN verification), so the dial
+  re-resolves and the routability check is best-effort there: a name rebound between validation and
+  dial still gets a connection *attempt*. The handshake then fails — no data leaves — but the
+  attempt is observable, so an https peer remains a weak internal port-scan oracle. Pinning the IP
+  would break every legitimate https peer; the certificate is what binds the connection instead.
 - **Redirects are refused.**
 - Outbound resolution is DNS-cached with a short TTL **over the already-validated address**, so the
   pin's "connect to a validated IP" property is preserved. The resolver cache is an **access-order
@@ -172,8 +192,10 @@ would only waste work and mislabel honest peers `PEER_INVALID`.
   path.
 - Every outbound read is size-bounded and deadline-bounded; a misbehaving peer is dropped, not
   propagated as an exception through the sync pass.
-- `RHIZOME_PEER_TOKEN` goes only to configured peers, only over `https://`, and is never logged.
+- `RHIZOME_PEER_TOKEN` goes only to configured peers, only over `https://`, and is never logged —
+  and no API exists that could send it anywhere else.
 - The connect target is re-pinned to a validated IP literal on every send; redirects refused.
+- Ban score is only ever applied to a peer that has answered a well-formed protocol exchange.
 - The work gate ranks branches by **base-only** own-block PoW, consistently at both prefilter and
   adopt (see [consensus](../consensus/spec.md) C-7).
 - Block/body application under sync is serial and in-order under the engine lock — never

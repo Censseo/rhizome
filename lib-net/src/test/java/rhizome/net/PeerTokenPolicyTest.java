@@ -1,6 +1,7 @@
 package rhizome.net;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
 import java.util.List;
@@ -53,13 +54,32 @@ class PeerTokenPolicyTest {
     }
 
     @Test
-    void trustAllReproducesTheLegacyBehaviour() {
-        // Tests/legacy only: the deprecated String peerToken constructors presented the token to
-        // every peer over any scheme — insecure on a gossip-fed registry, preserved for
-        // backward compatibility behind @Deprecated.
-        var policy = PeerTokenPolicy.trustAll(TOKEN);
-        assertEquals(TOKEN, policy.tokenFor("http://anything.example:3000"));
-        assertEquals(TOKEN, policy.tokenFor("https://unconfigured.example"));
-        assertNull(PeerTokenPolicy.trustAll(null).tokenFor("https://unconfigured.example"));
+    void theNoTokenPolicyNeverAuthenticatesAnything() {
+        var policy = PeerTokenPolicy.none();
+        assertNull(policy.tokenFor("https://peer1.example:3000"));
+        assertNull(policy.tokenFor("http://peer1.example:3000"));
+        assertNull(policy.tokenFor(null));
+    }
+
+    @Test
+    void thePublicApiOffersNoTrustAllPolicy() {
+        // The deprecated String-peerToken constructors of HttpPeerSource/PeerBroadcaster/
+        // PeerDiscovery delegated to a trust-all policy that handed the shared secret to every
+        // gossip-learned peer in cleartext. They are gone, and so is the public factory behind
+        // them: this fails the moment either shape reappears (audit B-2).
+        for (java.lang.reflect.Method m : PeerTokenPolicy.class.getMethods()) {
+            assertFalse(m.getName().toLowerCase(java.util.Locale.ROOT).contains("trustall"),
+                "public trust-all factory reintroduced: " + m);
+        }
+        for (Class<?> wired : java.util.List.of(
+                HttpPeerSource.class, PeerBroadcaster.class, PeerDiscovery.class)) {
+            for (var c : wired.getConstructors()) {
+                Class<?>[] params = c.getParameterTypes();
+                // The removed shape: a trailing String peerToken tacked onto an existing
+                // constructor. (The 2-arg PeerDiscovery(registry, selfUrl) is not it.)
+                assertFalse(params.length >= 3 && params[params.length - 1] == String.class,
+                    "a trailing String token parameter is the removed trust-all shape: " + c);
+            }
+        }
     }
 }

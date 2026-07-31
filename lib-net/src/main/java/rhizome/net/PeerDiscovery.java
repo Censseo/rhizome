@@ -77,20 +77,7 @@ public final class PeerDiscovery {
     }
 
     public PeerDiscovery(PeerRegistry registry, String selfUrl, boolean blockPrivateHosts) {
-        this(registry, selfUrl, blockPrivateHosts, FETCH_DEADLINE, PeerTokenPolicy.trustAll(null));
-    }
-
-    /**
-     * As above, presenting {@code peerToken} (nullable) as a bearer token on outbound requests.
-     *
-     * @deprecated presents the token to EVERY registry peer, over any scheme — the registry is
-     *     fed by unauthenticated /add_peer + PEX, so any gossip-learned (often http://) peer
-     *     receives the shared secret in cleartext. Use the {@link PeerTokenPolicy} constructor
-     *     so the token only goes to explicitly configured peers over https.
-     */
-    @Deprecated
-    public PeerDiscovery(PeerRegistry registry, String selfUrl, boolean blockPrivateHosts, String peerToken) {
-        this(registry, selfUrl, blockPrivateHosts, PeerTokenPolicy.trustAll(peerToken));
+        this(registry, selfUrl, blockPrivateHosts, FETCH_DEADLINE, PeerTokenPolicy.none());
     }
 
     /** As above, presenting the token only to peers {@code tokenPolicy} trusts. */
@@ -101,7 +88,7 @@ public final class PeerDiscovery {
 
     /** As above, with an explicit per-exchange deadline (package-private for tests). */
     PeerDiscovery(PeerRegistry registry, String selfUrl, boolean blockPrivateHosts, Duration fetchDeadline) {
-        this(registry, selfUrl, blockPrivateHosts, fetchDeadline, PeerTokenPolicy.trustAll(null));
+        this(registry, selfUrl, blockPrivateHosts, fetchDeadline, PeerTokenPolicy.none());
     }
 
     /** As above, with an explicit per-exchange deadline and a token policy. */

@@ -148,6 +148,29 @@ class PeerRegistrySecurityTest {
     }
 
     @Test
+    void confirmationTracksOnlyPeersThatSpokeTheProtocol() {
+        // A peer only becomes ban-eligible once it has answered a well-formed exchange: on an
+        // open node anyone can /add_peer an arbitrary public host, and junk from a host that
+        // never spoke the protocol must not blocklist its IP (audit B-3).
+        var reg = new PeerRegistry("http://self:3000", 100, null, false);
+        reg.addSeeds(java.util.List.of("http://seed.example:3000"));
+        assertTrue(reg.add("http://93.184.216.34:3000"));
+
+        assertFalse(reg.isConfirmed("http://93.184.216.34:3000"), "freshly added, never talked to");
+        assertTrue(reg.isConfirmed("http://seed.example:3000"), "the operator vouched for a seed");
+
+        reg.markConfirmed("http://93.184.216.34:3000/"); // canonicalized, like every other lookup
+        assertTrue(reg.isConfirmed("http://93.184.216.34:3000"));
+
+        // An unknown URL cannot be confirmed into existence, and removal clears the flag so a
+        // re-admitted host starts unconfirmed again.
+        reg.markConfirmed("http://198.51.100.7:3000");
+        assertFalse(reg.isConfirmed("http://198.51.100.7:3000"));
+        reg.remove("http://93.184.216.34:3000");
+        assertFalse(reg.isConfirmed("http://93.184.216.34:3000"));
+    }
+
+    @Test
     void selfUrlIsRecognizedInAllItsForms() {
         // The self-pairing refusal must see through the same variants, or PEX hands us back
         // our own advertised URL and we peer with ourselves (audit: self-pairing bypass).

@@ -473,6 +473,31 @@ class NodeApiTest {
     }
 
     @Test
+    void aFullStrikeTableStillTracksTheClientOffendingNow() {
+        // The strike table is bounded, and once it was full every NEW client's faults went to a
+        // shared overflow bucket that isPushShed never read — so the shed silently stopped
+        // applying to every fresh IP (audit I-2, fail-open). Filling the table must not buy an
+        // attacker immunity: the newcomer is tracked (the stalest window is evicted to make
+        // room) and sheds on schedule.
+        var node = new NodeService(engine, mempool);
+        Transaction junk = Transaction.of(sender, PublicAddress.random(), new TransactionAmount(100),
+            key, new TransactionAmount(0), 1000L, params.chainId() + 5, 0); // wrong chain-id
+        junk.sign(priv);
+        for (int i = 0; i < NodeService.PUSH_STRIKE_MAX_KEYS; i++) {
+            assertEquals(ExecutionStatus.INVALID_CHAIN_ID, node.submitTransaction(junk, "filler-" + i));
+        }
+        assertEquals(1, node.pushStrikeCount("filler-0"), "the table is full and every filler tracked");
+
+        for (int i = 0; i <= NodeService.PUSH_STRIKE_LIMIT; i++) {
+            assertEquals(ExecutionStatus.INVALID_CHAIN_ID, node.submitTransaction(junk, "latecomer"));
+        }
+        assertEquals(NodeService.PUSH_STRIKE_LIMIT + 1, node.pushStrikeCount("latecomer"),
+            "a client arriving after the table filled must still accumulate its own strikes");
+        assertTrue(node.isPushShed("latecomer"),
+            "filling the strike table with 8192 keys must not exempt the next abuser from the shed");
+    }
+
+    @Test
     void outOfIntRangeIndexesAreRejectedBeforeTheCast() throws Exception {
         // long→int casts on request indexes must be bounds-checked first (audit: unchecked
         // index cast): an over-range value used to wrap into a valid-looking int.
