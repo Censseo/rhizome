@@ -96,7 +96,14 @@ public final class ChainSynchronizer {
         }
 
         if (forkHeight == engine.height()) {
-            return applyRange(peer, forkHeight + 1, peer.height()) ? Result.EXTENDED : Result.PEER_INVALID;
+            // Bound the extension window exactly like the headers-first path
+            // (HeaderSynchronizer.MAX_HEADER_WINDOW): peer.height() is self-reported, and a
+            // peer that forced this fallback (by refusing /headers) could otherwise declare a
+            // near-infinite height and pin the sync thread on empty/timing-out fetches forever
+            // — the round budget is only checked BETWEEN peers, never mid-sync (audit: sync
+            // window). Returning EXTENDED after a capped window lets the next round continue.
+            long to = Math.min(peer.height(), forkHeight + HeaderSynchronizer.MAX_HEADER_WINDOW);
+            return applyRange(peer, forkHeight + 1, to) ? Result.EXTENDED : Result.PEER_INVALID;
         }
         return reorg(peer, forkHeight);
     }
@@ -358,10 +365,12 @@ public final class ChainSynchronizer {
         });
         if (outcome == Result.REORGED) {
             // Branch prefix applied and (by the gate) already heavier than what it replaced; keep
-            // extending toward the peer tip, best effort. Network I/O, so deliberately OUTSIDE the lock —
+            // extending toward the peer tip, best effort — but capped like the direct-extension
+            // path above: peer.height() is self-reported and must never size an unbounded fetch
+            // loop (audit: sync window). Network I/O, so deliberately OUTSIDE the lock —
             // each applyRange addBlock is individually locked and an interleaved peer/producer block just
             // ends the best-effort extension early.
-            applyRange(peer, prefetchEnd + 1, peer.height());
+            applyRange(peer, prefetchEnd + 1, Math.min(peer.height(), prefetchEnd + HeaderSynchronizer.MAX_HEADER_WINDOW));
         }
         return outcome;
     }
@@ -416,7 +425,7 @@ public final class ChainSynchronizer {
                 // silent restore failure) — cleared below once a restore fully succeeds.
                 String reason = "failed to restore local branch at " + ((BlockImpl) block).id()
                     + " after a rejected reorg: " + status + " — a full resync is required";
-                engine.markDegraded(reason);
+                engine.markDegraded(reason, false); // a later full restore genuinely heals this
                 log.error("{}", reason);
                 throw new IllegalStateException(reason);
             }

@@ -537,6 +537,15 @@ public final class WasmVm {
      * fixed, length-derived parse cost is deterministic on every node (audit 5th-pass, VM Finding 1).
      */
     private static WasmModule moduleFor(byte[] wasmCode, GasMeter gas) {
+        // Defence in depth (audit: code-size at execution): validateCode enforces this cap at
+        // deploy, so stored code is always within it — but the runtime path re-checks rather
+        // than trusting the store, at zero cost relative to the parse charge below. The check
+        // precedes the gas charge (cheapest-first; unreachable with authenticated state, so
+        // consensus-neutral either way).
+        if (wasmCode.length > MAX_CODE_SIZE) {
+            throw new IllegalArgumentException(
+                "contract code too large: " + wasmCode.length + " > " + MAX_CODE_SIZE);
+        }
         if (gas != null) {
             gas.charge(GasSchedule.MODULE_PARSE_BASE
                 + (long) wasmCode.length * GasSchedule.MODULE_PARSE_PER_BYTE);
@@ -1751,8 +1760,11 @@ public final class WasmVm {
     static void capHostBuffer(long len, GasMeter gas) {
         if (len > HOST_BUFFER_CAP) {
             // Saturating charge: used becomes the limit and OutOfGasException is thrown, so the
-            // outcome is a full-gas out-of-gas identical on every node.
-            gas.charge(gas.remaining() + 1);
+            // outcome is a full-gas out-of-gas identical on every node. remaining()+1 can only
+            // overflow when remaining() == Long.MAX_VALUE (unreachable on the consensus path,
+            // where a base charge always lands first) — clamped here so even that theoretical
+            // case saturates instead of wrapping negative.
+            gas.charge(gas.remaining() == Long.MAX_VALUE ? Long.MAX_VALUE : gas.remaining() + 1);
         }
     }
 
@@ -1852,6 +1864,11 @@ public final class WasmVm {
             List.of(ValType.I32, ValType.I32), List.of(ValType.I32),
             (Instance inst, long... args) -> new long[] {copyOut(inst, host.input(), args[0], args[1], gas)});
 
+        // Deliberately the one uncharged host fn: host.value() is an O(1) field read with no
+        // allocation, so a loop of get_value calls costs the caller 1 gas per iteration (the
+        // `call` instruction itself) — as unprofitable as an empty loop. Adding a charge now
+        // would change gasUsed on already-executed calls — a consensus change requiring an
+        // activation height, not a fix (audit: get_value metering).
         HostFunction getValue = new HostFunction(ENV, "get_value",
             List.of(), List.of(ValType.I64),
             (Instance inst, long... args) -> new long[] {host.value()});

@@ -8,6 +8,9 @@ import java.util.Map;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.LongSupplier;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import rhizome.core.block.Block;
 import rhizome.core.block.BlockHeader;
 import rhizome.core.block.BlockImpl;
@@ -48,6 +51,8 @@ import static rhizome.core.mempool.ExecutionStatus.*;
  * reads of its Bigint total work).
  */
 public final class ChainEngine implements Blockchain, rhizome.core.mempool.AccountView {
+
+    private static final Logger log = LoggerFactory.getLogger(ChainEngine.class);
 
     private final NetworkParameters params;
     private final Ledger ledger;
@@ -166,6 +171,8 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
      */
     private final java.util.concurrent.atomic.AtomicReference<String> degradedState =
         new java.util.concurrent.atomic.AtomicReference<>();
+    private final java.util.concurrent.atomic.AtomicBoolean degradedRestartRequired =
+        new java.util.concurrent.atomic.AtomicBoolean();
 
     private ChainEngine(NetworkParameters params, Ledger ledger, ChainStore store,
                         NonceStore nonceStore,
@@ -280,14 +287,16 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
     }
 
     /**
-     * Boot recovery for a torn multi-store commit (audit S3). A block's state commits in program order
-     * — contract, box, token processors, then the state accumulator, then the atomic block/height/ledger
-     * batch last. The ledger rides that final batch so it can never disagree with the height, but the
-     * peripheral stores commit first and, if the process died before the height landed, are left one (or,
-     * on a power loss, more) block ahead. Rewind each back down to the chain height using its per-block
-     * undo journal, so the node comes up at one consistent height instead of wedging on the next block's
-     * state-root check. Bounded by the reorg window: journals older than that are gone (a deeper tear is
-     * unrecoverable — impossible on a clean process crash, only on a power loss without per-store fsync).
+     * Boot recovery for a torn multi-store commit (audit S3) or a torn popBlock revert (audit:
+     * revert-path tear). A block's state commits in program order — contract, box, token
+     * processors, then the state accumulator, then the atomic block/height/ledger batch last —
+     * and a pop lands the height/ledger batch FIRST and reverts the peripherals SECOND, so any
+     * crash, in either direction, leaves the peripheral stores one (or, on a power loss, more)
+     * block AHEAD of the chain height with their undo journals still present. Rewind each back
+     * down to the chain height using its per-block undo journal, so the node comes up at one
+     * consistent height instead of wedging on the next block's state-root check. Bounded by the
+     * reorg window: journals older than that are gone (a deeper tear is unrecoverable —
+     * impossible on a clean process crash, only on a power loss without per-store fsync).
      *
      * <p>Processor {@code revertBlock} is a no-op when there is no journal at that height, so sweeping
      * the window is safe on a normal (untorn) boot; the accumulator's is not, so it is driven by its
@@ -394,6 +403,19 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
     private ExecutionStatus addBlock(Block block, boolean trustedRestore, boolean trustedPow) {
         lock.lock();
         try {
+            // Degraded barrier (audit 17th pass): after a failed post-pop peripheral revert or a
+            // failed post-reorg restore, the local state is suspect — a peripheral store may sit
+            // AHEAD of the height (its receipts would be silently overwritten by a new block at
+            // that height, destroying the journal boot recovery needs), or the chain is shorter
+            // than it was. Refuse every NEW-tip write — gossip, /submit, production and
+            // peer-branch adoption alike — instead of entrenching state boot recovery has not
+            // repaired. Only the trusted RESTORE path bypasses the barrier: it re-applies this
+            // node's own already-canonical suffix and clears the flag on success
+            // (ChainSynchronizer.restore), so the barrier cannot wedge recovery — and a degraded
+            // node refusing work is exactly the fail-loud signal that a restart is required.
+            if (!trustedRestore && isDegraded()) {
+                return NODE_DEGRADED;
+            }
             // Reorg-window guard (audit: non-atomic reorg window). Checked UNDER the lock, and the
             // window is opened under the same lock (HeaderSynchronizer's phase 1 runs begin inside
             // the capture+pop withConsistentView), so no new-tip block can slip between the window
@@ -622,8 +644,22 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         this.onBlockApplied = listener;
     }
 
-    /** Removes the tip block (never genesis), reverting ledger and nonces. */
-    public void popBlock() {
+    /**
+     * Removes the tip block (never genesis), reverting ledger and nonces. Package-private
+     * (audit: unguarded public popBlock): truncating the canonical chain is a
+     * synchronizer-only operation — tests and recovery simulations use
+     * {@link ChainEngineTestAccess#popBlock(ChainEngine)}.
+     * <p>Crash-consistency ordering (audit: revert-path tear): the height/ledger batch lands
+     * FIRST, the peripheral reverts (contract, box, token, state) SECOND. A crash before the
+     * pop leaves every store at the old height (staged ledger writes are discarded); a crash
+     * during the peripheral phase leaves those stores AHEAD of the height with their undo
+     * journals still present — the exact torn-commit shape {@link #reconcilePeripheralStores}
+     * rewinds at boot. Reverting the peripherals BEFORE the pop instead consumed each store's
+     * journal and receipts while the chain still sat at the old height: a reverse-direction
+     * tear no recovery pass could detect, wedging the node on its fork or silently diverging
+     * its state.
+     */
+    void popBlock() {
         lock.lock();
         try {
             long height = store.height();
@@ -632,23 +668,13 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             }
             Block tip = store.tip();
             // Stage the ledger reversals so store.pop() flushes them atomically with the height
-            // decrement — the pop is then atomic for the ledger too (audit S3).
+            // decrement — the pop is then atomic for the ledger too (audit S3). rollbackBlock only
+            // READS the peripherals' receipts (still present at this point: they are dropped by
+            // the revert phase below, after the height has moved).
             store.beginBlockCommit();
             boolean popped = false;
             try {
                 Executor.rollbackBlock(tip, ledger, contractProcessor, boxProcessor, height, params);
-                if (contractProcessor != null) {
-                    contractProcessor.revertBlock(height); // undo this block's contract-state changes
-                }
-                if (boxProcessor != null) {
-                    boxProcessor.revertBlock(height); // undo this block's box-state changes
-                }
-                if (tokenProcessor != null) {
-                    tokenProcessor.revertBlock(height); // undo this block's token-state changes
-                }
-                if (stateAccumulator != null) {
-                    stateAccumulator.revertBlock(height); // move the state root back one block
-                }
                 // Stage the nonce reversals BEFORE the pop so they flush in the same atomic batch
                 // as the height decrement (audit perf: per-sender fsync) — derived purely from the
                 // popped tip, so on a failed pop they are discarded, as they were previously never
@@ -662,6 +688,10 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
                     store.discardBlockCommit();
                 }
             }
+            // The height has moved: FIRST bring the in-memory view down to H-1 so it always
+            // agrees with the store, even if a peripheral revert below fails (audit 17th pass:
+            // throwing out of popBlock with the memory bookkeeping skipped left totalWork, the
+            // MTP window and currentDifficulty describing a chain that no longer existed).
             // Slide the median-time window back one block (P6): the popped tip leaves the window, and a
             // lower height re-enters at the front when the chain is still taller than the window.
             mtpWindow.removeLast();
@@ -687,6 +717,34 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             // SAME header skips the (tip-independent, already-proven) PoW re-verification.
             recentlyPoppedBlocks.put(tip.hash(), ((BlockImpl) tip).nonce());
             currentDifficulty = computeDifficultyFromChain();
+            // THEN revert the peripheral stores (each restores from its own journal and drops
+            // journal + receipts in one atomic unit). A failure here is a recoverable tear: the
+            // ledger, height and in-memory state all agree at H-1, and every peripheral not yet
+            // reverted is AHEAD of the height with its journal intact — exactly the direction
+            // reconcilePeripheralStores rewinds at boot. Mark the node degraded restart-required:
+            // the addBlock barrier then refuses every new-tip write until the operator restarts
+            // into boot recovery (a restore never rewinds the torn peripheral, so it cannot
+            // clear the mark).
+            try {
+                if (contractProcessor != null) {
+                    contractProcessor.revertBlock(height); // undo this block's contract-state changes
+                }
+                if (boxProcessor != null) {
+                    boxProcessor.revertBlock(height); // undo this block's box-state changes
+                }
+                if (tokenProcessor != null) {
+                    tokenProcessor.revertBlock(height); // undo this block's token-state changes
+                }
+                if (stateAccumulator != null) {
+                    stateAccumulator.revertBlock(height); // move the state root back one block
+                }
+            } catch (RuntimeException e) {
+                markDegraded("peripheral revert failed after popping block " + height
+                    + " (" + e.getMessage() + ") — a peripheral store is ahead of the chain"
+                    + " height; new-tip blocks are refused until the node restarts into boot"
+                    + " recovery (a restore cannot clear this mark)", true);
+                throw e;
+            }
         } finally {
             lock.unlock();
         }
@@ -743,15 +801,39 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         return reorgWindowOpen.get();
     }
 
-    // ---- degraded state (restore failure after a rejected reorg) ----
+    // ---- degraded state (restore failure after a rejected reorg, or a failed post-pop revert) ----
 
-    /** Marks the node degraded: a post-reorg restore failed and the chain is shorter than it was. */
-    void markDegraded(String reason) {
+    /**
+     * Marks the node degraded: local state is suspect and every NEW-tip {@link #addBlock} is
+     * refused with {@code NODE_DEGRADED}. Two causes, two healing paths (audit 17th-pass
+     * counter-review): a restore failure ({@code restartRequired = false}) heals when a later
+     * full restore succeeds and calls {@link #clearDegraded}; a torn pop
+     * ({@code restartRequired = true} — a peripheral store sits AHEAD of the chain height)
+     * is only rewound by boot recovery, so the mark survives every restore until the operator
+     * restarts the node.
+     */
+    void markDegraded(String reason, boolean restartRequired) {
+        if (restartRequired) {
+            // Set BEFORE the reason so a concurrent clearDegraded never observes a
+            // restart-required mark as clearable — and never unset here: a later
+            // restore-failure mark must not downgrade a torn pop to restore-clearable.
+            degradedRestartRequired.set(true);
+        }
         degradedState.set(reason);
     }
 
-    /** Clears the degraded marker once the local branch is fully restored (chain whole again). */
+    /**
+     * Clears the degraded marker once the local branch is fully restored (chain whole again).
+     * A no-op when the mark demands a restart: the restore re-applied the suffix but never
+     * rewound the torn peripheral — only boot recovery ({@code reconcilePeripheralStores})
+     * does, so the barrier stays up until the operator restarts.
+     */
     void clearDegraded() {
+        if (degradedRestartRequired.get()) {
+            log.warn("refusing to clear the degraded marker ({}): the cause requires a node"
+                + " restart into boot recovery", degradedState.get());
+            return;
+        }
         degradedState.set(null);
     }
 
@@ -760,7 +842,15 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
         return degradedState.get();
     }
 
-    /** Whether the node is in a degraded state (a restore failed; a full resync is required). */
+    /**
+     * Whether the node is in a degraded state. This is a HARD barrier, not just an observable
+     * flag: while set, {@code addBlock} refuses new-tip writes and the block producer stands
+     * down, so the node does NOT progress at all — not even by direct extension (audit 17th
+     * pass). Fail-loud by design: the only external signal is the {@code degraded} field of
+     * {@code /stats}, which supervision must alert on (otherwise a frozen node goes
+     * unnoticed), and restart-required marks only clear via an operator restart into boot
+     * recovery.
+     */
     public boolean isDegraded() {
         return degradedState.get() != null;
     }
@@ -1631,6 +1721,13 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             if (b.difficulty() < params.minDifficulty()) {
                 return; // worthless as an uncle; also forgeable free "work"
             }
+            // Same serialized-size bound addBlock enforces, checked BEFORE the PoW hash: the
+            // pool retains full bodies, so without it a spray of max-size orphans (each with a
+            // real but cheap minDifficulty PoW) could pin ~maxSize × maxBlockSizeBytes of heap
+            // (audit: orphan body retention).
+            if (serializedSize(block) > params.maxBlockSizeBytes()) {
+                return; // too large to ever be accepted or referenced
+            }
             if (uid <= GenesisBlock.GENESIS_ID || uid > tip || uid < tip - depth + 1) {
                 return; // not a recent past sibling of a block we could still build on
             }
@@ -1755,6 +1852,8 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
     public List<UncleRef> selectUncles() {
         lock.lock();
         try {
+            // Block ids are int on the wire (BlockDto/HeaderCodec), so the chain is protocol-capped
+            // at 2^31-1 blocks (~340 years at 5 s) — an accepted protocol limit, frozen by the format.
             int h = (int) (store.height() + 1);
             int depth = params.uncleMaxDepth();
             long tipHeight = store.height();

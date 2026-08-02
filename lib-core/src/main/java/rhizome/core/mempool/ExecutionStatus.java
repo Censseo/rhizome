@@ -62,5 +62,10 @@ public enum ExecutionStatus {
      *  (VoteableParams 1/2). The codecs reject this on the wire; this status is the same
      *  rule enforced at the consensus gate for every other ingress path (audit F1). */
     INVALID_VOTE,
+    /** The node is degraded (a post-pop peripheral revert or a post-reorg restore failed):
+     *  every NEW-tip write is refused until the synchronizer's restore heals the suffix or the
+     *  node restarts into boot recovery. Not a validity verdict — never a push fault (audit
+     *  17th pass: degraded must be a hard barrier, not just an observable flag). */
+    NODE_DEGRADED,
     SUCCESS
 }

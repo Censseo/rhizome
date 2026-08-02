@@ -17,6 +17,7 @@ import org.junit.jupiter.api.Test;
 import rhizome.core.block.Block;
 import rhizome.core.block.BlockImpl;
 import rhizome.core.blockchain.ChainEngine;
+import rhizome.core.blockchain.ChainEngineTestAccess;
 import rhizome.core.blockchain.Contracts;
 import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.Miner;
@@ -170,13 +171,13 @@ class ContractConsensusTest {
         assertArrayEquals(le64(2), contracts.getStorage(contract, new byte[] {0}));
 
         // Pop the two calls: the counter rewinds 2 -> 1 -> absent, exactly.
-        engine.popBlock();
+        ChainEngineTestAccess.popBlock(engine);
         assertArrayEquals(le64(1), contracts.getStorage(contract, new byte[] {0}), "call 2 reverted");
-        engine.popBlock();
+        ChainEngineTestAccess.popBlock(engine);
         assertEquals(null, contracts.getStorage(contract, new byte[] {0}), "call 1 reverted");
 
         // Pop the deploy: the code is removed.
-        engine.popBlock();
+        ChainEngineTestAccess.popBlock(engine);
         assertEquals(null, contracts.getCode(contract), "deploy reverted");
     }
 
@@ -206,7 +207,7 @@ class ContractConsensusTest {
         assertArrayEquals(le64(1), logs.get(0).data());
 
         // Reverting the call block drops its logs.
-        engine.popBlock();
+        ChainEngineTestAccess.popBlock(engine);
         assertTrue(processor.logs(callHeight).isEmpty());
     }
 

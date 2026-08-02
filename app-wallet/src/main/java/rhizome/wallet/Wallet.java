@@ -196,6 +196,10 @@ public final class Wallet {
         byte[] seed = privateKey.toBytes();
         char[] seedHex = new char[seed.length * 2];
         try {
+            // UPPERCASE digits, matching Hex.bytesToHex (which renders publicKey/address below
+            // and every other hex string in the codebase): the key file used to mix lowercase
+            // privateKey with UPPERCASE public fields (audit INF-5). Parsing is case-insensitive
+            // (HexFormat.parseHex), so older mixed-case files keep loading.
             for (int i = 0; i < seed.length; i++) {
                 seedHex[2 * i] = HEX_DIGITS[(seed[i] >> 4) & 0xF];
                 seedHex[2 * i + 1] = HEX_DIGITS[seed[i] & 0xF];
@@ -219,7 +223,8 @@ public final class Wallet {
         }
     }
 
-    private static final char[] HEX_DIGITS = "0123456789abcdef".toCharArray();
+    /** UPPERCASE digits, matching Hex.bytesToHex — see {@link #seedJsonChars}. */
+    private static final char[] HEX_DIGITS = "0123456789ABCDEF".toCharArray();
 
     /**
      * The node URL reduced to characters that survive this file's escape-free JSON reader

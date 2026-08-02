@@ -319,6 +319,30 @@ public final class NetworkParameters {
         if (consensusV2Height < 0) {
             throw new IllegalArgumentException("consensusV2Height must be >= 0");
         }
+        // Degenerate consensus constants must fail fast at build time, not mid-chain under the
+        // engine lock (audit: unvalidated params): a zero lookback divides by zero on every
+        // retarget boundary, a negative one loops the difficulty fold, a non-positive window or
+        // block time degenerates the retarget/MTP math, and an inverted difficulty range pins
+        // the chain at the floor.
+        if (difficultyLookback <= 0) {
+            throw new IllegalArgumentException("difficultyLookback must be > 0");
+        }
+        if (medianTimeWindow <= 0) {
+            throw new IllegalArgumentException("medianTimeWindow must be > 0");
+        }
+        if (desiredBlockTimeSec <= 0) {
+            throw new IllegalArgumentException("desiredBlockTimeSec must be > 0");
+        }
+        if (minDifficulty < 0 || maxDifficulty < minDifficulty) {
+            throw new IllegalArgumentException("require 0 <= minDifficulty <= maxDifficulty");
+        }
+        // Divisors used by the integer-only reward math below.
+        if (rewardEpochBlocks <= 0) {
+            throw new IllegalArgumentException("rewardEpochBlocks must be > 0");
+        }
+        if (rewardDecayDen <= 0 || uncleRewardDen <= 0 || nephewRewardDivisor <= 0) {
+            throw new IllegalArgumentException("reward denominators must be > 0");
+        }
         this.chainId = chainId;
         this.networkName = networkName;
         this.powAlgorithm = powAlgorithm;
@@ -399,7 +423,10 @@ public final class NetworkParameters {
 
     /** Reward paid to an included uncle's miner at {@code height}. */
     public long uncleReward(long height) {
-        return miningReward(height) * uncleRewardNum / uncleRewardDen;
+        // multiplyExact, not a silent wrap: with the shipped values the product cannot overflow,
+        // but an extreme custom configuration must fail loud instead of emitting erratic rewards
+        // (audit: multiply-then-divide overflow).
+        return Math.multiplyExact(miningReward(height), uncleRewardNum) / uncleRewardDen;
     }
 
     /** Bonus paid to the nephew (including block) miner per included uncle at {@code height}. */
@@ -422,7 +449,9 @@ public final class NetworkParameters {
         long reward = initialReward;
         long epochs = height / rewardEpochBlocks;
         for (long i = 0; i < epochs && reward > 0; i++) {
-            reward = reward * rewardDecayNum / rewardDecayDen;
+            // multiplyExact: overflow means a misconfigured emission curve — fail loud, never wrap
+            // (audit: multiply-then-divide overflow).
+            reward = Math.multiplyExact(reward, rewardDecayNum) / rewardDecayDen;
         }
         return reward;
     }

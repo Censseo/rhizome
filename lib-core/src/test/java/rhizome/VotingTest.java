@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Test;
 
 import rhizome.core.block.BlockImpl;
 import rhizome.core.blockchain.ChainEngine;
+import rhizome.core.blockchain.ChainEngineTestAccess;
 import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
@@ -119,7 +120,7 @@ class VotingTest {
         mine(VoteableParams.STORAGE_FEE_FACTOR); // height 4 -> boundary, param 5 -> 6
         assertEquals(6, engine.voteableParams()[0]);
 
-        engine.popBlock(); // pop the boundary block -> its tally is dropped
+        ChainEngineTestAccess.popBlock(engine); // pop the boundary block -> its tally is dropped
         assertEquals(5, engine.voteableParams()[0]);
         assertEquals(5, boxes.voteableParams().storageFeeFactor());
     }

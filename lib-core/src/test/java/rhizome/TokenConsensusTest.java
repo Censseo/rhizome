@@ -14,6 +14,7 @@ import org.junit.jupiter.api.Test;
 
 import rhizome.core.block.BlockImpl;
 import rhizome.core.blockchain.ChainEngine;
+import rhizome.core.blockchain.ChainEngineTestAccess;
 import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
@@ -115,15 +116,15 @@ class TokenConsensusTest {
         assertEquals(500, engine.tokenBalance(id, sender.toBytes()));
         assertEquals(900, engine.tokenMeta(id).totalSupply());
 
-        engine.popBlock(); // undo burn
+        ChainEngineTestAccess.popBlock(engine); // undo burn
         assertEquals(600, engine.tokenBalance(id, sender.toBytes()));
         assertEquals(1_000, engine.tokenMeta(id).totalSupply());
 
-        engine.popBlock(); // undo transfer
+        ChainEngineTestAccess.popBlock(engine); // undo transfer
         assertEquals(0, engine.tokenBalance(id, bob.toBytes()));
         assertEquals(1_000, engine.tokenBalance(id, sender.toBytes()));
 
-        engine.popBlock(); // undo mint
+        ChainEngineTestAccess.popBlock(engine); // undo mint
         assertNull(engine.tokenMeta(id));
     }
 }

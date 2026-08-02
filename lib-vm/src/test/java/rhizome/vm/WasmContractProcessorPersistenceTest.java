@@ -127,6 +127,10 @@ class WasmContractProcessorPersistenceTest {
                 restore.applyTo(delegate);
             }
             deleteJournal(height);
+            // The store-level contract: receipts ride the SAME atomic unit as the restore and
+            // the journal drop (audit: revert-path tear) — the processor no longer deletes them
+            // separately.
+            deleteReceipts(height);
         }
     }
 
@@ -225,6 +229,42 @@ class WasmContractProcessorPersistenceTest {
 
         WasmContractProcessor restarted = new WasmContractProcessor(new WasmVm(), store);
         assertEquals(List.of(), restarted.receipts(1), "a missing blob reads back as no receipts");
+    }
+
+    @Test
+    void revertDropsReceiptsWhenNoJournalExistsForTheHeight() {
+        // Receipts WITHOUT a journal — the shape a receipts-only block commits (a reverting CALL
+        // that touched no storage), or a tear that lost the journal but kept the receipts.
+        // revertBlock must still route through the store's atomic revert unit to drop them:
+        // returning early stranded the receipts, and the executor's rollback guard then aborted
+        // every later reorg attempt over this height (audit 17th pass: this branch of
+        // WasmContractProcessor.revertBlock was exercised by nothing).
+        DurableTestStore store = new DurableTestStore();
+        WasmContractProcessor processor = new WasmContractProcessor(new WasmVm(), store);
+        processor.begin();
+        var result = processor.run(PublicAddress.random(), TransactionKind.DEPLOY,
+            PublicAddress.empty(), COUNTER, 0, GAS_LIMIT, 0);
+        assertTrue(result.success());
+        processor.commit(1);
+        assertNotNull(store.getReceipts(1));
+        assertNotNull(store.getJournal(1));
+
+        // Remove only the journal, then revert through a FRESH processor (a restarted node: no
+        // RAM maps) so the durable columns decide the path.
+        store.deleteJournal(1);
+        WasmContractProcessor restarted = new WasmContractProcessor(new WasmVm(), store);
+        restarted.revertBlock(1);
+
+        assertEquals(1, store.revertBlockCalls,
+            "the receipts drop rides the store's atomic revert unit, not a separate delete");
+        assertNull(store.getReceipts(1), "receipts without a journal are still dropped");
+        assertNotNull(store.getCode(result.contractAddress()),
+            "with no journal there is nothing to restore — state is left as committed");
+
+        // Idempotent: a second revert over the same height (boot recovery replaying the sweep)
+        // is a no-op, not an error.
+        restarted.revertBlock(1);
+        assertEquals(1, store.revertBlockCalls, "nothing left at the height: no second revert unit");
     }
 
     @Test

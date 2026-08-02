@@ -259,12 +259,18 @@ public final class MemPool {
             // Cumulative spend across this sender's pending set + candidate. A contract
             // transaction can spend its attached value plus the whole gas budget. A replaced
             // transaction's spend is excluded — it leaves the pool in the same insert below.
+            // addExact makes the overflow rejection structural (audit: unchecked accumulation):
+            // any wrap means the true sum exceeds every possible balance.
             long spend = maxSpend(tx);
             if (pending != null) {
-                for (Transaction p : pending.values()) {
-                    if (p != replaced) {
-                        spend += maxSpend((TransactionImpl) p);
+                try {
+                    for (Transaction p : pending.values()) {
+                        if (p != replaced) {
+                            spend = Math.addExact(spend, maxSpend((TransactionImpl) p));
+                        }
                     }
+                } catch (ArithmeticException overflow) {
+                    return BALANCE_TOO_LOW;
                 }
             }
             if (spend < 0 || spend > accounts.confirmedBalance(from)) {

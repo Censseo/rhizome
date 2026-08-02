@@ -10,6 +10,14 @@ import rhizome.core.ledger.PublicAddress;
  * In-memory {@link NonceStore} — the default for tests and non-persistent nodes.
  * Not durable, so an engine built on it reconstructs nonces from block bodies at
  * boot (harmless: such a node keeps every body anyway).
+ *
+ * <p>Staging contract note (audit: unstaged nonce writes): {@link #set} applies immediately —
+ * it does NOT participate in {@link ChainStore#beginBlockCommit()} staging like the durable
+ * stores do. The engine writes nonces before {@code store.append}/{@code store.pop}, so a
+ * failure there would leave the nonces ahead of a block that never landed. That is provably
+ * unreachable with the shipped pairing ({@link InMemoryChainStore} cannot fail past the
+ * engine's own validation), but a custom {@link ChainStore} that can fail inside
+ * {@code append}/{@code pop} must be paired with a staging {@link NonceStore} instead.
  */
 public final class InMemoryNonceStore implements NonceStore {
 

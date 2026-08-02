@@ -470,6 +470,46 @@ class ChainSynchronizerTest {
         assertEquals(1, local.height(), "genesis only: nothing was applied");
     }
 
+    @Test
+    void extensionWindowIsCappedDespiteAnOverReportingPeer() {
+        // peer.height() is self-reported: a peer that agrees with our tip but claims a far
+        // greater height must not size the fetch loop — the extension window is capped at
+        // HeaderSynchronizer.MAX_HEADER_WINDOW (20_000; package-private, pinned here by value)
+        // and the round returns EXTENDED so the next round continues (audit: sync window).
+        AtomicLong peerClock = new AtomicLong(0);
+        ChainEngine full = newEngine();
+        mineBlocks(full, PublicAddress.random(), peerClock, 6); // real heights 2..7
+
+        ChainEngine local = newEngine();
+        // Give local the SAME prefix up to height 6, so the peer purely extends it (fork = tip).
+        for (int h = 2; h <= 6; h++) {
+            assertEquals(ExecutionStatus.SUCCESS, local.addBlock(full.blockAt(h)));
+        }
+        long fork = local.height();
+        long claimed = fork + 20_000L + 10_000L; // the lie: far beyond the real 7
+        AtomicLong maxRequestedEnd = new AtomicLong();
+        PeerSource liar = new PeerSource() {
+            public long height() { return claimed; }
+            public BigInteger totalWork() { return full.totalWork(); }
+            public SHA256Hash blockHash(long h) { return full.blockAt(h).hash(); }
+            public List<Block> blocks(long start, long end) {
+                maxRequestedEnd.set(Math.max(maxRequestedEnd.get(), end));
+                List<Block> out = new ArrayList<>();
+                for (long h = start; h <= Math.min(end, full.height()); h++) {
+                    out.add(full.blockAt(h));
+                }
+                return out;
+            }
+        };
+
+        Result result = new ChainSynchronizer(local).syncFrom(liar);
+
+        assertEquals(Result.EXTENDED, result, "a capped window reports progress, not failure");
+        assertEquals(full.height(), local.height(), "every real block was applied");
+        assertEquals(fork + 20_000L, maxRequestedEnd.get(),
+            "the fetch window is capped, never sized by the peer's self-reported height");
+    }
+
     /** A {@link ChainStore} that counts pops, proving a gate rejected before any local mutation. */
     private static final class PopCountingStore implements ChainStore {
         private final InMemoryChainStore delegate = new InMemoryChainStore();

@@ -13,6 +13,15 @@ import rhizome.crypto.SimpleHashType;
 public record PublicAddress(byte[] address) implements SimpleHashType {
     public PublicAddress {
         checkSize(address);
+        // Own the array on the way IN, mirroring toBytes()'s defensive copy on the way OUT
+        // (audit B-3): a caller retaining the passed reference could otherwise mutate this
+        // address, silently corrupting equals/hashCode of every map keyed on it. The clone is
+        // redundant where the caller hands over a fresh array (RocksDB JNI key()/value() already
+        // allocate per call), so hot iteration loops pay one extra 25-byte copy per entry —
+        // accepted: a record cannot distinguish trusted from untrusted arrays, and on those
+        // paths (state-root export, balance scans) the copy is dwarfed by the JNI crossing and
+        // the per-entry hashing (audit 17th pass, perf note).
+        address = address.clone();
     }
 
     public static PublicAddress empty() {

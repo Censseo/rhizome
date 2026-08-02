@@ -17,6 +17,7 @@ import rhizome.core.block.Block;
 import rhizome.core.block.BlockImpl;
 import rhizome.core.blockchain.BlockAssembler;
 import rhizome.core.blockchain.ChainEngine;
+import rhizome.core.blockchain.ChainEngineTestAccess;
 import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
@@ -147,11 +148,11 @@ class BoxConsensusTest {
             BoxPayload.encodeUpdate(id, List.of(BoxRegister.string("v2"))), 1000, 1))));
         assertEquals(6000, engine.box(id).value());
 
-        engine.popBlock(); // undo the update
+        ChainEngineTestAccess.popBlock(engine); // undo the update
         assertEquals(5000, engine.box(id).value());
         assertEquals(List.of(BoxRegister.string("v1")), engine.box(id).registers());
 
-        engine.popBlock(); // undo the create
+        ChainEngineTestAccess.popBlock(engine); // undo the create
         assertNull(engine.box(id));
     }
 
@@ -217,7 +218,7 @@ class BoxConsensusTest {
         snapshot.put(sender, new TransactionAmount(10_000_000L));
         ChainEngine restartedEngine = ChainEngine.init(params, ledger, store, snapshot, null,
             clock::get, null, null, restarted);
-        restartedEngine.popBlock();
+        ChainEngineTestAccess.popBlock(restartedEngine);
         assertNull(restartedEngine.box(id));
         assertEquals(start, ledger.getWalletValue(sender).amount());
     }

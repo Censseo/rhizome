@@ -305,7 +305,8 @@ public final class DefaultBoxProcessor implements BoxProcessor {
         receiptsByHeight.remove(blockHeight);
         eventsByHeight.remove(blockHeight);
         changesByHeight.remove(blockHeight);
-        store.deleteReceipts(blockHeight);
+        // The store drops the block's receipts in the SAME atomic unit as the journal-driven
+        // restore (audit: revert-path tear) — no separate deleteReceipts call here.
         store.revertBlock(blockHeight);
     }
 

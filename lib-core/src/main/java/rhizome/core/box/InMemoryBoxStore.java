@@ -46,6 +46,9 @@ public final class InMemoryBoxStore implements BoxStore {
 
     @Override
     public void revertBlock(long height) {
+        // Receipts die with the reverted block — the same unit as the restore on durable
+        // stores (audit: revert-path tear), mirrored here so both backends behave identically.
+        receipts.remove(height);
         List<Undo> journal = journals.remove(height);
         if (journal == null) {
             return;

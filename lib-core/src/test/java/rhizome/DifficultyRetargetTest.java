@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 import rhizome.core.block.Block;
 import rhizome.core.block.BlockImpl;
 import rhizome.core.blockchain.ChainEngine;
+import rhizome.core.blockchain.ChainEngineTestAccess;
 import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
@@ -87,7 +88,7 @@ class DifficultyRetargetTest {
         assertTrue(engine.difficulty() > 4, "difficulty should have risen on the fast branch");
 
         while (engine.height() > 8) {
-            engine.popBlock(); // back below boundary 10
+            ChainEngineTestAccess.popBlock(engine); // back below boundary 10
         }
         long ts = 20_000_000L;
         while (engine.height() < PARAMS.difficultyLookback() + 5) {

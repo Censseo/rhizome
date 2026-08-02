@@ -13,6 +13,7 @@ import rhizome.core.block.BlockHeader;
 import rhizome.core.block.BlockImpl;
 import rhizome.core.block.UncleRef;
 import rhizome.core.blockchain.ChainEngine;
+import rhizome.core.blockchain.ChainEngineTestAccess;
 import rhizome.core.blockchain.ChainStore;
 import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.Miner;
@@ -106,7 +107,7 @@ class HeaderDerivedStateTest {
         assertTrue(engine.difficulty() >= 4);
 
         // A pop recomputes difficulty from headers too; still no historical body read.
-        engine.popBlock();
+        ChainEngineTestAccess.popBlock(engine);
         assertEquals(12, engine.height());
     }
 

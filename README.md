@@ -31,6 +31,8 @@ Configured via environment variables:
 | `RHIZOME_MINER` | — | reward address (enables block production) |
 | `RHIZOME_PEERS` | — | comma-separated initial peers |
 | `RHIZOME_ADVERTISE` | — | public URL advertised to peers; must be an `http(s)` URL with a host (a malformed value used to silently break self-pairing refusal, PEX and the `Host` allowlist) |
+| `RHIZOME_PROTECT_READS` | `false` | with `RHIZOME_API_TOKEN`, extends the bearer gate to **every** route (reads included) — the private-node/private-explorer switch. The static SPA/docs shell (`/`, `/dashboard/*`, `/docs/*`) stays open so a browser can load the explorer; the SPA's own API fetches carry the token. Peering then requires every peer to present the token (see `RHIZOME_PEER_TOKEN`), so this suits private clusters, not public relays |
+| `RHIZOME_TRUST_XFF` | `false` | key rate limits, push-strike tables and scan ownership on the first `X-Forwarded-For` hop instead of the socket address — required behind a reverse proxy. The hop is accepted only as an IP literal (parsed without any DNS lookup, so a spoofed header cannot stall the event loop). **Dangerous when the port is directly reachable** — clients could spoof the header to evade per-IP limits; enable only when the socket can solely be reached from the trusted proxy |
 | `RHIZOME_ALLOWED_HOSTS` | loopback + advertised + LAN addresses | comma-separated extra `Host` authorities for the DNS-rebinding guard (e.g. a reverse proxy's public name or a Docker/NAT address, each as `name` or `name:port`); the literal value `off` disables the Host allowlist entirely (only the Origin/marker CSRF guard remains — not recommended) |
 | `RHIZOME_BLOCK_INTERVAL_MS` | block target | producer pacing override (local devnets). Pacing only — it does **not** move the retarget target, so pacing far below the network's `desiredBlockTimeSec` makes every window look too fast and difficulty runs away until the chain stalls. Use `RHIZOME_NETWORK=devnet`, whose target already is 5 s, instead of pacing a testnet at 5 s |
 
@@ -46,8 +48,13 @@ RHIZOME_NETWORK=devnet RHIZOME_MINER=<address> ./gradlew :app-node:run
   one header window of 20 000 blocks). While it is open the node keeps serving the pre-reorg
   tip, rejects incoming tip blocks with `IS_SYNCING`, and **block production pauses** — a
   miner that stops producing during a deep resync is usually in this state, not broken.
-- `degraded` (`string|null`) — set only when a reorg restore *failed* (the node is running
-  truncated and needs attention). `null` means healthy.
+- `degraded` (`string|null`) — set when chain integrity is suspect: a reorg restore *failed*,
+  or a peripheral store failed to revert during a pop. This is a hard barrier, not a hint:
+  the node refuses every new-tip block (including direct extension) and pauses production,
+  so **it stops progressing entirely**. A restore failure heals automatically once a full
+  restore succeeds; a torn pop only heals via an operator restart (boot recovery rewinds the
+  peripheral). `null` means healthy — alert on non-null, otherwise a frozen node goes
+  unnoticed.
 
 Snapshot spools (`rhizome-snapshot-*.chunks`) live under `$RHIZOME_DATA/snapshots` — not the
 OS temp dir, which is commonly a tmpfs — and stale spools from an unclean shutdown are swept

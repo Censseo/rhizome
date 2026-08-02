@@ -345,9 +345,26 @@ public final class RhizomeNode implements AutoCloseable {
         // Surface the effective DNS-rebinding allowlist at startup: it now also covers the
         // host's LAN interface addresses (audit F9), which are otherwise invisible to the operator.
         log.info("API allowed Host authorities (DNS-rebinding guard): {}", allowedHosts);
+        // Opt-in hardening switches (both default off — see NodeApi for the full semantics):
+        // RHIZOME_PROTECT_READS gates EVERY route (not just POSTs) behind RHIZOME_API_TOKEN,
+        // for private nodes/explorers — except the static SPA/docs shell, which a plain browser
+        // navigation cannot bear a token for; RHIZOME_TRUST_XFF keys rate limits and scan
+        // ownership on the first X-Forwarded-For hop, for nodes only reachable through a
+        // trusted proxy.
+        boolean protectReads = "true".equalsIgnoreCase(System.getenv("RHIZOME_PROTECT_READS"));
+        boolean trustXff = "true".equalsIgnoreCase(System.getenv("RHIZOME_TRUST_XFF"));
+        if (protectReads && config.apiToken().isEmpty()) {
+            log.warn("RHIZOME_PROTECT_READS=true without RHIZOME_API_TOKEN has no effect:"
+                + " there is no token to gate reads behind.");
+        }
+        if (trustXff) {
+            log.warn("RHIZOME_TRUST_XFF=true: rate limits and scan ownership key on the"
+                + " X-Forwarded-For header. If this port is reachable WITHOUT passing through"
+                + " the trusted proxy, clients can spoof it and evade per-IP limits.");
+        }
         httpServer = HttpServer.builder(eventloop,
                 NodeApi.servlet(eventloop, service, limiter, sseHub, allowedHosts,
-                    config.apiToken().orElse(null), apiWorkers))
+                    config.apiToken().orElse(null), apiWorkers, protectReads, trustXff))
             .withListenAddress(new java.net.InetSocketAddress(config.bindAddress(), config.apiPort()))
             // Bound how long a connection may stall a read or write: body sizes are capped, but
             // without an inactivity deadline a client can trickle a POST body one byte at a time

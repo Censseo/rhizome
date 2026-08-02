@@ -36,6 +36,7 @@ public final class PersistentHostState implements HostState {
     private final Map<ByteKey, byte[]> pending = new LinkedHashMap<>();
     private final java.util.List<LogEntry> logs = new java.util.ArrayList<>();
     private byte[] output = new byte[0];
+    private java.util.function.BiConsumer<byte[], byte[]> logSink;
 
     /** Immutable storage-key wrapper with value-based equals/hashCode, for use as a map key. */
     private record ByteKey(byte[] bytes) {
@@ -126,7 +127,23 @@ public final class PersistentHostState implements HostState {
 
     @Override
     public void emitLog(byte[] topic, byte[] data) {
-        logs.add(new LogEntry(topic, data));
+        LogEntry entry = new LogEntry(topic, data);
+        logs.add(entry);
+        // Live sink, when wired: the consumer sees the log AT EMISSION TIME, so logs of a
+        // call tree can be collected in exact causal order — buffering them per-frame and
+        // appending after each execution inverts parents against nested calls (audit: log
+        // ordering).
+        if (logSink != null) {
+            logSink.accept(entry.topic(), entry.data());
+        }
+    }
+
+    /**
+     * Optional live log sink (see {@link #emitLog}). Used by the contract processor to collect
+     * a call tree's logs in emission order; {@link #logs()} keeps working unchanged.
+     */
+    void setLogSink(java.util.function.BiConsumer<byte[], byte[]> sink) {
+        this.logSink = sink;
     }
 
     @Override

@@ -206,9 +206,12 @@ public final class WasmContractProcessor implements ContractProcessor {
         // anything (unknown contract, or a gasLimit too small to cover even the module-parse
         // charge) still costs the node real work — a fixed-stack execution thread, a code-store
         // lookup, the enclosing transaction's signature check and block space. Without this a
-        // gasLimit=0 / missing-contract call returned gasUsed=0 and paid NO fee at all (audit
-        // H2), letting a miner fill blocks with zero-cost executions. DEPLOY already charges its
-        // base even on failure; this is the symmetric CALL charge.
+        // missing-contract call returned gasUsed=0 and paid NO fee at all (audit H2), letting a
+        // miner fill blocks with zero-cost executions. DEPLOY already charges its base even on
+        // failure; this is the symmetric CALL charge. Edge case: gasLimit=0 still pays nothing
+        // (charge saturates at used=limit=0 — there is no budget to take a fee FROM), which is
+        // harmless: no execution happens and the sender gains nothing. Changing that would
+        // alter historical fees — a consensus change, not a fix.
         try {
             meter.charge(GasSchedule.CALL_BASE);
         } catch (OutOfGasException e) {
@@ -330,6 +333,12 @@ public final class WasmContractProcessor implements ContractProcessor {
         PersistentHostState host =
             new PersistentHostState(frame, contract, callerBytes, input, value, boxReader, xfer);
         List<ContractLog> collected = new java.util.ArrayList<>();
+        // Logs are collected in EMISSION order: this frame's own logs flow through the live
+        // sink as the contract emits them, and a nested call's logs are spliced in at the exact
+        // point of the call below. Buffering this frame's logs and appending them after the
+        // execution put every parent log behind every nested log regardless of the real
+        // interleaving (audit: inter-contract log ordering).
+        host.setLogSink((topic, data) -> collected.add(new ContractLog(contract, topic, data)));
         int transferMark = transfers.size();
 
         stack.push(contract);
@@ -359,8 +368,11 @@ public final class WasmContractProcessor implements ContractProcessor {
             // of the surviving `transfers` (the reserved sum is what the next transfer_value checks).
             List<ContractProcessor.NativeTransfer> discarded = transfers.subList(transferMark, transfers.size());
             for (ContractProcessor.NativeTransfer t : discarded) {
+                // remaining is 0+ by construction (every addition was bounded by spendable) — the
+                // <= clamp makes that invariant self-defending: a negative entry would INFLATE
+                // spendable beyond the balance (audit: reserved-mirror guard).
                 long remaining = reservedByContract.getOrDefault(t.from(), 0L) - t.amount();
-                if (remaining == 0) {
+                if (remaining <= 0) {
                     reservedByContract.remove(t.from());
                 } else {
                     reservedByContract.put(t.from(), remaining);
@@ -371,9 +383,8 @@ public final class WasmContractProcessor implements ContractProcessor {
         }
         host.commit();                 // this call's own writes into its frame...
         frame.flushWithJournal();      // ...and the frame (incl. sub-calls) into the parent
-        for (LogEntry log : result.logs()) {
-            collected.add(new ContractLog(contract, log.topic(), log.data()));
-        }
+        // No end-of-call log splice: this frame's logs already reached `collected` via the live
+        // sink, in emission order (audit: inter-contract log ordering).
         return new CallOutcome(true, result.output(), collected, null);
     }
 
@@ -616,7 +627,6 @@ public final class WasmContractProcessor implements ContractProcessor {
                 retainedJournalBytes -= journalBytes(journal);
             }
         }
-        baseStore.deleteReceipts(blockHeight);
         synchronized (logRetentionLock) {
             List<ContractLog> removedLogs = logsByHeight.remove(blockHeight);
             if (removedLogs != null) {
@@ -629,25 +639,34 @@ public final class WasmContractProcessor implements ContractProcessor {
             // reversed exactly (audit M9).
             byte[] persisted = baseStore.getJournal(blockHeight);
             if (persisted == null) {
-                return; // nothing was committed for this height (e.g. a transfer-only block)
+                if (baseStore.getReceipts(blockHeight) == null) {
+                    return; // nothing committed for this height (e.g. a transfer-only block)
+                }
+                // Receipts without a journal: a receipts-only block (a reverting CALL that
+                // touched no storage). Drop them through the same atomic revert unit.
+            } else {
+                journal = decodeJournal(persisted);
             }
-            journal = decodeJournal(persisted);
         }
         // Map the journal back to restore mutations — a null prior means the key did not exist
         // before the block, so the restore is a delete — applied in reverse so repeated writes to
-        // the same key restore the earliest prior. The restores and the journal drop commit as
-        // one atomic unit where the store supports it (audit store F1).
-        List<StorageChange> restores = new java.util.ArrayList<>(journal.size());
-        for (int i = journal.size() - 1; i >= 0; i--) {
-            ContractUndo u = journal.get(i);
-            if (u.isCode()) {
-                restores.add(u.prior() == null
-                    ? StorageChange.deleteCode(u.contract())
-                    : StorageChange.putCode(u.contract(), u.prior()));
-            } else {
-                restores.add(u.prior() == null
-                    ? StorageChange.deleteStorage(u.contract(), u.key())
-                    : StorageChange.putStorage(u.contract(), u.key(), u.prior()));
+        // the same key restore the earliest prior. The restores, the journal drop AND the receipts
+        // drop commit as one atomic unit where the store supports it (audit store F1, revert tear):
+        // deleting the receipts separately and first let a crash strand the journal without the
+        // receipts, which wedged every later reorg attempt on the rollback guard.
+        List<StorageChange> restores = new java.util.ArrayList<>(journal == null ? 0 : journal.size());
+        if (journal != null) {
+            for (int i = journal.size() - 1; i >= 0; i--) {
+                ContractUndo u = journal.get(i);
+                if (u.isCode()) {
+                    restores.add(u.prior() == null
+                        ? StorageChange.deleteCode(u.contract())
+                        : StorageChange.putCode(u.contract(), u.prior()));
+                } else {
+                    restores.add(u.prior() == null
+                        ? StorageChange.deleteStorage(u.contract(), u.key())
+                        : StorageChange.putStorage(u.contract(), u.key(), u.prior()));
+                }
             }
         }
         baseStore.revertBlock(blockHeight, restores);

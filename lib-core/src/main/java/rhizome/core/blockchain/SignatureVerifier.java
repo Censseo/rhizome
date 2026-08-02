@@ -89,7 +89,15 @@ public final class SignatureVerifier {
         return verified.containsKey(key(t));
     }
 
-    /** Verifies one transaction, consulting and populating the cache. Coinbase is always valid. */
+    /**
+     * Verifies one transaction, consulting and populating the cache. Coinbase is always valid.
+     *
+     * <p>Only POSITIVE verdicts are cached — deliberately: caching a negative would let an
+     * attacker evict useful entries with garbage. The consequence (an invalid signature costs
+     * a full ~100 µs Ed25519 check per resubmission) must be bounded by the CALLER: the HTTP
+     * layer consumes an aggregated signature budget before decoding (audit F7). Any direct,
+     * non-HTTP {@code MemPool} caller must provide an equivalent gate.
+     */
     public boolean verify(Transaction t) {
         if (((TransactionImpl) t).isTransactionFee()) {
             return true;

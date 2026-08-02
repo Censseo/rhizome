@@ -71,7 +71,14 @@ public final class ContractExecutor {
         // must crash rather than become a node-dependent "invalid code" verdict (consensus
         // fork class — see WasmContractProcessor.deploy).
         try {
-            WasmVm.validateCode(code);
+            // On the fixed-stack worker, exactly like the production processor's deploy: the
+            // parser's recursion depth on the caller's thread is JIT/-Xss-dependent, so even
+            // this test-only path keeps the fatal path a network constant (audit: deploy
+            // validation stack).
+            WasmVm.onBoundedStack(() -> {
+                WasmVm.validateCode(code);
+                return null;
+            });
         } catch (RuntimeException e) {
             return new DeployOutcome(address, fee, false, "invalid contract code: " + e.getMessage());
         }

@@ -2,6 +2,7 @@ package rhizome.vm;
 
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 import rhizome.core.ledger.PublicAddress;
@@ -9,8 +10,11 @@ import rhizome.core.ledger.PublicAddress;
 /** In-memory {@link ContractStore} — the reference implementation and test backend. */
 public final class InMemoryContractStore implements ContractStore {
 
-    private final Map<PublicAddress, byte[]> code = new HashMap<>();
-    private final Map<Slot, byte[]> storage = new HashMap<>();
+    // LinkedHashMap, not HashMap: the forEach* enumeration paths feed the state-snapshot
+    // export, whose iteration order must not depend on JVM hash placement (audit: deterministic
+    // enumeration). Insertion order is well-defined for every operation sequence.
+    private final Map<PublicAddress, byte[]> code = new LinkedHashMap<>();
+    private final Map<Slot, byte[]> storage = new LinkedHashMap<>();
     // Journal/receipt columns, mirroring the durable store's hooks: the processor's RAM maps
     // are byte-budgeted caches that load through these on a miss (eviction, or a revert after
     // simulated restart), so the fallback must exist even in this non-durable configuration

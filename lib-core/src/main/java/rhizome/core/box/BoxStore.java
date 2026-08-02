@@ -38,7 +38,14 @@ public interface BoxStore {
         }
     }
 
-    /** Reverts the box changes committed for {@code height} using the persisted journal. */
+    /**
+     * Reverts the box changes committed for {@code height} using the persisted journal, and
+     * drops the block's receipts — as one atomic unit where the store supports it. The receipts
+     * MUST travel with the restore: deleted separately and first, a crash between the two
+     * writes left the journal present but the receipts gone, and the rollback guard then
+     * aborted every reorg retry (audit: revert-path tear). A receipts-only block (no journal)
+     * must still have its receipts dropped.
+     */
     void revertBlock(long height);
 
     /**

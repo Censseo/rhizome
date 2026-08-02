@@ -188,18 +188,22 @@ public class LevelDBBlockPersistence extends LevelDBDataStore implements BlockPe
         // transaction — commits in ONE synced WriteBatch: a crash can never leave a partially
         // indexed block, and 1 + 3N individual fsyncs become one (audit F2).
         try (WriteBatch batch = db().createWriteBatch()) {
-            batch.put(rhizome.core.common.Utils.intToBytes(block.id()), block.serialize().toBuffer());
-
-            for (int i = 0; i < block.transactions().size(); i++) {
-                var transaction = block.transactions().get(i);
-                var transactionDto = transaction.serialize();
-                batch.put(composeKey(block.id(), i), transactionDto.toBuffer());
-                batch.put(composeKey(PublicAddress.of(transactionDto.signingKey).toBytes(), transaction.hashContents().toBytes()), new byte[0]);
-                batch.put(composeKey(transactionDto.to.toBytes(), transaction.hashContents().toBytes()), new byte[0]);
-            }
+            stageBlock(batch, block);
             db().write(batch, new WriteOptions().sync(true));
         } catch (DBException | IOException e) { // IOException from WriteBatch.close()
             throw new LevelDBException("Could not add block to blockstore db: " + e.getMessage(), e);
+        }
+    }
+
+    /** Stages the block record, its transaction records and the wallet-index entries. */
+    private void stageBlock(WriteBatch batch, Block block) throws IOException {
+        batch.put(rhizome.core.common.Utils.intToBytes(block.id()), block.serialize().toBuffer());
+        for (int i = 0; i < block.transactions().size(); i++) {
+            var transaction = block.transactions().get(i);
+            var transactionDto = transaction.serialize();
+            batch.put(composeKey(block.id(), i), transactionDto.toBuffer());
+            batch.put(composeKey(PublicAddress.of(transactionDto.signingKey).toBytes(), transaction.hashContents().toBytes()), new byte[0]);
+            batch.put(composeKey(transactionDto.to.toBytes(), transaction.hashContents().toBytes()), new byte[0]);
         }
     }
 

@@ -17,6 +17,7 @@ import org.junit.jupiter.api.Test;
 
 import rhizome.core.block.BlockImpl;
 import rhizome.core.blockchain.ChainEngine;
+import rhizome.core.blockchain.ChainEngineTestAccess;
 import rhizome.core.blockchain.Contracts;
 import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.Miner;
@@ -160,7 +161,7 @@ class ContractStateRootTest {
             StateKeys.valueHash(le64(1)), storageProof));
 
         // Popping the call rewinds the committed root; the storage proof no longer matches.
-        engine.popBlock();
+        ChainEngineTestAccess.popBlock(engine);
         byte[] rootAfterPop = engine.stateRoot();
         assertTrue(!java.util.Arrays.equals(root, rootAfterPop));
     }

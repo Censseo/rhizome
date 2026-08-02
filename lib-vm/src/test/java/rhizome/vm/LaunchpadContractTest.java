@@ -16,6 +16,7 @@ import org.junit.jupiter.api.Test;
 
 import rhizome.core.block.BlockImpl;
 import rhizome.core.blockchain.ChainEngine;
+import rhizome.core.blockchain.ChainEngineTestAccess;
 import rhizome.core.blockchain.ContractProcessor.ContractLog;
 import rhizome.core.blockchain.Contracts;
 import rhizome.core.blockchain.InMemoryChainStore;
@@ -219,7 +220,7 @@ class LaunchpadContractTest {
         assertEquals(value, nativeBalance(recipient), "recipient received the proceeds");
 
         // A reorg that pops the withdraw block must reverse the native payout exactly.
-        engine.popBlock();
+        ChainEngineTestAccess.popBlock(engine);
         assertEquals(value, nativeBalance(pad), "withdraw reversed: proceeds back on the launchpad");
         assertEquals(0, nativeBalance(recipient), "withdraw reversed: recipient debited");
     }

@@ -71,8 +71,10 @@ public final class BlockProducer {
         // A non-atomic reorg window is open (headers-first sync): the chain may sit truncated at a
         // fork height, and a block mined on it would be refused (or destroyed by the restore).
         // Stand down for the round rather than burning PoW on a candidate that cannot land —
-        // addBlock's reorg-window guard closes the residual race.
-        if (engine.isReorgInProgress()) {
+        // addBlock's reorg-window guard closes the residual race. Likewise a DEGRADED engine
+        // (failed post-pop peripheral revert or failed restore): local state is suspect, addBlock
+        // would refuse the block with NODE_DEGRADED anyway, and mining on it would waste the PoW.
+        if (engine.isReorgInProgress() || engine.isDegraded()) {
             return Optional.empty();
         }
         Block candidate = BlockAssembler.assemble(engine, mempool, miner, nowMillis.getAsLong());

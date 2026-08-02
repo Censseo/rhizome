@@ -429,7 +429,7 @@ public final class HeaderSynchronizer {
                 // silent restore failure) — cleared below once a restore fully succeeds.
                 String reason = "failed to restore local branch at " + ((BlockImpl) block).id()
                     + " after a rejected reorg: " + status + " — a full resync is required";
-                engine.markDegraded(reason);
+                engine.markDegraded(reason, false); // a later full restore genuinely heals this
                 log.error("{}", reason);
                 throw new IllegalStateException(reason);
             }

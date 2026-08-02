@@ -173,20 +173,28 @@ public interface ContractStore {
     /**
      * Reverts one block: applies {@code restores} (the block's undo journal turned back into
      * mutations — each entry's <em>prior</em> value, or a delete where the key did not exist
-     * before the block) and drops the persisted journal at {@code height}, as a single atomic
-     * unit where the store supports it.
+     * before the block), drops the persisted journal at {@code height}, AND drops the block's
+     * persisted receipts, as a single atomic unit where the store supports it.
      *
      * <p>{@code restores} must already be in final application order (the caller applies its
      * journal in reverse, so that repeated writes to the same key restore the earliest prior).
+     * An empty list still drops the journal and receipts: a receipts-carrying block can have
+     * no journal (e.g. a reverting CALL that touched no storage).
      *
-     * <p>The default implementation loops the per-operation methods and then
-     * {@link #deleteJournal} — correct, just not atomic.
+     * <p>The receipts MUST travel in the same unit as the restores: deleted separately and
+     * first, a crash between the two writes left the journal present but the receipts gone, so
+     * the rollback guard aborted every subsequent reorg attempt and wedged the node on its
+     * fork (audit: revert-path tear).
+     *
+     * <p>The default implementation loops the per-operation methods, then
+     * {@link #deleteJournal}, then {@link #deleteReceipts} — correct, just not atomic.
      */
     default void revertBlock(long height, java.util.List<StorageChange> restores) {
         for (StorageChange restore : restores) {
             restore.applyTo(this);
         }
         deleteJournal(height);
+        deleteReceipts(height);
     }
 
     @FunctionalInterface

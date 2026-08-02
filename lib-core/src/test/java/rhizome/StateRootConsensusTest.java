@@ -18,6 +18,7 @@ import org.junit.jupiter.api.Test;
 import rhizome.core.block.Block;
 import rhizome.core.block.BlockImpl;
 import rhizome.core.blockchain.ChainEngine;
+import rhizome.core.blockchain.ChainEngineTestAccess;
 import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
@@ -229,7 +230,7 @@ class StateRootConsensusTest {
         assertEquals(ExecutionStatus.SUCCESS, engine.addBlock(mine(List.of(transfer(500, 1)))));
         assertFalse(java.util.Arrays.equals(rootAt2, engine.stateRoot()));
 
-        engine.popBlock();
+        ChainEngineTestAccess.popBlock(engine);
         assertArrayEquals(rootAt2, engine.stateRoot()); // root rewound with the block
     }
 
@@ -290,7 +291,7 @@ class StateRootConsensusTest {
             StateKeys.valueHash(Utils.longToBytes(2L)), nonceProof));
 
         // A pop rewinds the nonce leaf with the block: next nonce and the committed value both drop.
-        engine.popBlock();
+        ChainEngineTestAccess.popBlock(engine);
         assertEquals(2L, engine.nextNonce(sender));
         StateProof after = engine.stateProof(StateKeys.ACCOUNT_NONCE, sender.toBytes());
         assertArrayEquals(StateKeys.valueHash(Utils.longToBytes(2L)), after.valueHash());

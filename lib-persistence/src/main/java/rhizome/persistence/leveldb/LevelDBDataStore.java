@@ -145,6 +145,13 @@ public class LevelDBDataStore {
         if(type == String.class) {
             return new String(value, UTF_8);
         } else if (type == Integer.class) {
+            // Same width discipline as the Long path below: a truncated/corrupt record must
+            // fail with a diagnosable LevelDBException, not a raw BufferUnderflowException
+            // (audit: integer decode width).
+            if (value.length != Integer.BYTES) {
+                throw new LevelDBException("Integer record has " + value.length
+                    + " bytes, expected " + Integer.BYTES);
+            }
             return ByteBuffer.wrap(value).getInt();
         } else if (type == Long.class && value.length == Long.BYTES) {
             return ByteBuffer.wrap(value).getLong();

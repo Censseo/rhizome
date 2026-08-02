@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Test;
 
 import rhizome.core.block.BlockImpl;
 import rhizome.core.blockchain.ChainEngine;
+import rhizome.core.blockchain.ChainEngineTestAccess;
 import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
@@ -83,7 +84,7 @@ class MedianTimePastRingTest {
 
         // Pop 8 — slides the window back down across its own size, exercising the front re-entry.
         for (int i = 0; i < 8; i++) {
-            engine.popBlock();
+            ChainEngineTestAccess.popBlock(engine);
             assertEquals(expectedMtp(), engine.medianTimePastForTest(), "after pop to height " + engine.height());
         }
 

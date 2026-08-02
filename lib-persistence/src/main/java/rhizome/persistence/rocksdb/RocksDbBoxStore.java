@@ -143,6 +143,12 @@ public final class RocksDbBoxStore implements BoxStore, AutoCloseable {
     public void revertBlock(long height) {
         byte[] journalBytes = raw(journalCf, longToBytes(height));
         if (journalBytes == null) {
+            // Nothing to restore — but receipts can exist without a journal (they persist on
+            // their own schedule). Drop them too, or skip the synced write entirely when this
+            // height committed nothing (the common boot-recovery sweep case).
+            if (raw(receiptsCf, longToBytes(height)) != null) {
+                deleteReceipts(height);
+            }
             return;
         }
         try (WriteBatch batch = new WriteBatch()) {
@@ -159,6 +165,10 @@ public final class RocksDbBoxStore implements BoxStore, AutoCloseable {
                 }
             }
             batch.delete(journalCf, longToBytes(height));
+            // The receipts ride the same atomic unit (audit: revert-path tear): deleted
+            // separately and first, a crash stranded the journal without the receipts and the
+            // rollback guard wedged every later reorg attempt.
+            batch.delete(receiptsCf, longToBytes(height));
             db.write(writeOptions, batch);
         } catch (RocksDBException e) {
             throw new IllegalStateException("box store revertBlock failed", e);
@@ -239,7 +249,10 @@ public final class RocksDbBoxStore implements BoxStore, AutoCloseable {
             for (; it.isValid() && out.size() < limit; it.next()) {
                 byte[] key = it.key();
                 if (key.length < owner.length || !startsWith(key, owner)) {
-                    break;
+                    break; // past the owner prefix
+                }
+                if (key.length != owner.length + 32) {
+                    continue; // foreign record under the prefix: skip it, don't truncate the page
                 }
                 out.add(Arrays.copyOfRange(key, owner.length, key.length));
             }
@@ -362,6 +375,13 @@ public final class RocksDbBoxStore implements BoxStore, AutoCloseable {
     }
 
     private static long bytesToLong(byte[] b, int offset) {
+        // Fixed-width values are auto-written (8 bytes): a short record means store corruption —
+        // fail with a diagnosable IllegalStateException, not a raw ArrayIndexOutOfBoundsException
+        // (audit: fixed-width decode).
+        if (b.length < offset + 8) {
+            throw new IllegalStateException("corrupt box store: expected 8-byte value at offset "
+                + offset + ", array length " + b.length);
+        }
         long v = 0;
         for (int i = 0; i < 8; i++) {
             v = (v << 8) | (b[offset + i] & 0xFFL);

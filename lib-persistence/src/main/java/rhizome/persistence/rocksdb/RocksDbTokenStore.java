@@ -163,6 +163,13 @@ public final class RocksDbTokenStore implements TokenStore, AutoCloseable {
     /** Sets a balance and keeps the holder index consistent (present iff amount &gt; 0). */
     private void setBalance(WriteBatch batch, byte[] tokenId, byte[] address, long amount)
             throws RocksDBException {
+        // The store is the last line of defence: a negative balance persisted here would read
+        // back as a real (debt) balance on every later lookup. Every producer path validates
+        // upstream (audit: negative balance guard), so a negative here means corruption or a
+        // bug — fail loud rather than persist it.
+        if (amount < 0) {
+            throw new IllegalStateException("negative token balance refused: " + amount);
+        }
         byte[] key = concat(tokenId, address);
         byte[] holderKey = concat(address, tokenId);
         if (amount == 0) {
@@ -213,8 +220,11 @@ public final class RocksDbTokenStore implements TokenStore, AutoCloseable {
             }
             for (; it.isValid() && out.size() < limit; it.next()) {
                 byte[] key = it.key();
-                if (key.length != prefix.length + 32 || !startsWith(key, prefix)) {
-                    break;
+                if (key.length < prefix.length || !startsWith(key, prefix)) {
+                    break; // past the prefix
+                }
+                if (key.length != prefix.length + 32) {
+                    continue; // foreign record under the prefix: skip it, don't truncate the page
                 }
                 out.add(Arrays.copyOfRange(key, prefix.length, key.length));
             }
@@ -325,6 +335,13 @@ public final class RocksDbTokenStore implements TokenStore, AutoCloseable {
     }
 
     private static long bytesToLong(byte[] b, int offset) {
+        // Fixed-width values are auto-written (8 bytes): a short record means store corruption —
+        // fail with a diagnosable IllegalStateException, not a raw ArrayIndexOutOfBoundsException
+        // (audit: fixed-width decode).
+        if (b.length < offset + 8) {
+            throw new IllegalStateException("corrupt token store: expected 8-byte value at offset "
+                + offset + ", array length " + b.length);
+        }
         long v = 0;
         for (int i = 0; i < 8; i++) {
             v = (v << 8) | (b[offset + i] & 0xFFL);

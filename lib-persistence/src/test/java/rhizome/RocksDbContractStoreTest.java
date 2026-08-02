@@ -152,4 +152,44 @@ class RocksDbContractStoreTest {
             assertNull(store.getJournal(10));
         }
     }
+
+    @Test
+    void revertBlockDropsReceiptsInTheSameAtomicUnit(@TempDir Path dir) throws Exception {
+        // The receipts must ride the revert's WriteBatch (audit: revert-path tear): deleted
+        // separately and first, a crash between the two writes stranded the journal without the
+        // receipts, and the executor's rollback guard then wedged every reorg retry over the
+        // height. Plant the full triple (state + journal + receipts), revert, and re-open:
+        // restores, journal drop AND receipts drop must all be durable together.
+        PublicAddress contract = PublicAddress.random();
+        byte[] key = {0};
+        try (var store = new RocksDbContractStore(dir.toString())) {
+            store.putStorage(contract, key, new byte[] {1});
+            store.applyBlock(10, List.of(StorageChange.putStorage(contract, key, new byte[] {2})),
+                new byte[] {9});
+            store.putReceipts(10, new byte[] {7, 7, 7});
+            store.revertBlock(10, List.of(StorageChange.putStorage(contract, key, new byte[] {1})));
+            assertArrayEquals(new byte[] {1}, store.getStorage(contract, key));
+            assertNull(store.getJournal(10));
+            assertNull(store.getReceipts(10), "receipts drop with the revert, not separately");
+        }
+        try (var store = new RocksDbContractStore(dir.toString())) {
+            assertArrayEquals(new byte[] {1}, store.getStorage(contract, key));
+            assertNull(store.getJournal(10));
+            assertNull(store.getReceipts(10));
+        }
+    }
+
+    @Test
+    void revertBlockWithReceiptsAndNoJournalStillDropsThem(@TempDir Path dir) throws Exception {
+        // A receipts-only height (a reverting CALL that touched no storage commits receipts but
+        // no journal): the store-level revert must accept an empty restore list and still drop
+        // the receipts — the processor's "receipts without journal" branch depends on it
+        // (audit 17th pass).
+        try (var store = new RocksDbContractStore(dir.toString())) {
+            store.putReceipts(11, new byte[] {1, 2, 3});
+            store.revertBlock(11, List.of());
+            assertNull(store.getReceipts(11));
+            assertNull(store.getJournal(11));
+        }
+    }
 }

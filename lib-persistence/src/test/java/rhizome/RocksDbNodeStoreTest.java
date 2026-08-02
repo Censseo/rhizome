@@ -21,6 +21,7 @@ import rhizome.core.block.BlockCodec;
 import rhizome.core.block.BlockHeader;
 import rhizome.core.block.BlockImpl;
 import rhizome.core.blockchain.ChainEngine;
+import rhizome.core.blockchain.ChainEngineTestAccess;
 import rhizome.core.blockchain.ChainStore;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
@@ -112,7 +113,7 @@ class RocksDbNodeStoreTest {
             assertTrue(chain.hasTransaction(send.hashContents()));
             assertEquals(100_000L, ledger.getWalletValue(recipient).amount());
 
-            engine.popBlock();
+            ChainEngineTestAccess.popBlock(engine);
             assertEquals(1, chain.height());
             assertFalse(chain.hasTransaction(send.hashContents()));
             assertEquals(1_000_000L, ledger.getWalletValue(sender).amount());
@@ -417,7 +418,7 @@ class RocksDbNodeStoreTest {
             assertEquals(3L, engine.nextNonce(sender));
 
             // pop then re-add: the persisted nonce must track exactly (3 → 2 → 3).
-            engine.popBlock();
+            ChainEngineTestAccess.popBlock(engine);
             assertEquals(2L, engine.nextNonce(sender));
             Transaction resend = Transaction.of(sender, PublicAddress.random(), new TransactionAmount(1_000),
                 key, new TransactionAmount(0), clock.get(), params.chainId(), 2);

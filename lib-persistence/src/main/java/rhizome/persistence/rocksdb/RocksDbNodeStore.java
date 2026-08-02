@@ -225,7 +225,7 @@ public final class RocksDbNodeStore implements AutoCloseable {
         long height;
         try {
             byte[] value = db.get(metaCf, HEIGHT_KEY);
-            height = value == null ? 0 : bytesToLong(value);
+            height = value == null ? 0 : checkedLong(value);
         } catch (RocksDBException e) {
             throw new IOException("Failed to read chain height during header backfill", e);
         }
@@ -235,7 +235,7 @@ public final class RocksDbNodeStore implements AutoCloseable {
         }
         try {
             byte[] done = db.get(metaCf, HEADERS_BACKFILLED_KEY);
-            if (done != null && bytesToLong(done) >= height) {
+            if (done != null && checkedLong(done) >= height) {
                 return; // already backfilled through the tip; appends since kept the header CF complete
             }
         } catch (RocksDBException e) {
@@ -544,7 +544,7 @@ public final class RocksDbNodeStore implements AutoCloseable {
         public long prunedBelow() {
             try {
                 byte[] value = db.get(metaCf, PRUNED_BELOW_KEY);
-                return value == null ? 0 : bytesToLong(value);
+                return value == null ? 0 : checkedLong(value);
             } catch (RocksDBException e) {
                 throw new LedgerException("Failed to read prune watermark", e);
             }
@@ -636,7 +636,7 @@ public final class RocksDbNodeStore implements AutoCloseable {
         public Long transactionHeight(SHA256Hash contentHash) {
             try {
                 byte[] value = db.get(txIndexCf, contentHash.raw());
-                return value == null ? null : bytesToLong(value);
+                return value == null ? null : checkedLong(value);
             } catch (RocksDBException e) {
                 throw new LedgerException("Failed to read tx index", e);
             }
@@ -666,14 +666,14 @@ public final class RocksDbNodeStore implements AutoCloseable {
             if (value == null) {
                 throw new LedgerException("Tried fetching wallet value for non-existent wallet");
             }
-            return new TransactionAmount(bytesToLong(value));
+            return new TransactionAmount(checkedLong(value));
         }
 
         @Override
         public long balanceOrZero(PublicAddress wallet) {
             // Single point-get instead of the probe+get pair of the default (audit perf).
             byte[] value = rawValue(wallet);
-            return value == null ? 0L : bytesToLong(value);
+            return value == null ? 0L : checkedLong(value);
         }
 
         @Override
@@ -754,7 +754,7 @@ public final class RocksDbNodeStore implements AutoCloseable {
         public void forEachBalance(java.util.function.ObjLongConsumer<PublicAddress> consumer) {
             try (RocksIterator it = db.newIterator(ledgerCf)) {
                 for (it.seekToFirst(); it.isValid(); it.next()) {
-                    consumer.accept(PublicAddress.of(it.key()), bytesToLong(it.value()));
+                    consumer.accept(PublicAddress.of(it.key()), checkedLong(it.value()));
                 }
             }
         }
@@ -777,7 +777,7 @@ public final class RocksDbNodeStore implements AutoCloseable {
             }
             try {
                 byte[] value = db.get(noncesCf, sender.toBytes());
-                return value == null ? 0L : bytesToLong(value);
+                return value == null ? 0L : checkedLong(value);
             } catch (RocksDBException e) {
                 throw new LedgerException("Failed to read account nonce", e);
             }
@@ -810,7 +810,7 @@ public final class RocksDbNodeStore implements AutoCloseable {
         public long syncedThroughHeight() {
             try {
                 byte[] value = db.get(metaCf, NONCE_HEIGHT_KEY);
-                return value == null ? 0 : bytesToLong(value);
+                return value == null ? 0 : checkedLong(value);
             } catch (RocksDBException e) {
                 throw new LedgerException("Failed to read nonce sync height", e);
             }
@@ -835,9 +835,23 @@ public final class RocksDbNodeStore implements AutoCloseable {
         public void forEach(java.util.function.ObjLongConsumer<PublicAddress> consumer) {
             try (RocksIterator it = db.newIterator(noncesCf)) {
                 for (it.seekToFirst(); it.isValid(); it.next()) {
-                    consumer.accept(PublicAddress.of(it.key()), bytesToLong(it.value()));
+                    consumer.accept(PublicAddress.of(it.key()), checkedLong(it.value()));
                 }
             }
         }
+    }
+
+    /**
+     * Reads a fixed-width 8-byte big-endian value written by this store (heights, balances,
+     * nonces, works). A short record means store corruption — fail with a diagnosable
+     * IllegalStateException instead of the raw BufferUnderflowException the ByteBuffer decode
+     * would throw (audit: fixed-width decode).
+     */
+    private static long checkedLong(byte[] value) {
+        if (value.length != Long.BYTES) {
+            throw new IllegalStateException("corrupt node store: expected 8-byte value, got "
+                + value.length);
+        }
+        return bytesToLong(value);
     }
 }

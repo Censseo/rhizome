@@ -188,6 +188,33 @@ public final class NodeApi {
     public static AsyncServlet servlet(Reactor reactor, NodeService node, RateLimiter limiter, SseLogHub sse,
                                        java.util.Set<String> allowedHosts, String apiToken,
                                        java.util.concurrent.Executor blocking) {
+        return servlet(reactor, node, limiter, sse, allowedHosts, apiToken, blocking, false, false);
+    }
+
+    /**
+     * As above, with two opt-in hardening flags (env-only; both default off):
+     *
+     * <p>{@code protectReads} ({@code RHIZOME_PROTECT_READS}) extends the bearer-token gate to
+     * EVERY route, not just the state-changing POSTs — the "private node / private explorer"
+     * switch (audit: no read protection). Without it a token-configured node still serves
+     * {@code /stats}, balances and {@code /logs/stream} to anyone who can reach the port. With
+     * it, peering requires every peer to present a matching bearer (via their
+     * {@code RHIZOME_PEER_TOKEN} to this node), so it suits private clusters, not public relays.
+     * The static SPA/docs shell ({@code /}, {@code /dashboard/*}, {@code /docs/*}) stays open:
+     * a browser cannot attach a bearer to a plain navigation, and the shell is static content
+     * with no chain data — the SPA's own API fetches carry the token and stay gated.
+     *
+     * <p>{@code trustXff} ({@code RHIZOME_TRUST_XFF}) keys rate limits, push-strike tables and
+     * scan ownership on the FIRST {@code X-Forwarded-For} hop instead of the socket address —
+     * required when the node sits behind a reverse proxy, without which every client shares the
+     * proxy's budget and scan namespace (audit: no reverse-proxy support). DANGEROUS when the
+     * port is directly reachable: clients could then spoof the header and evade per-IP limits.
+     * Only enable it when the socket can ONLY be reached from the trusted proxy.
+     */
+    public static AsyncServlet servlet(Reactor reactor, NodeService node, RateLimiter limiter, SseLogHub sse,
+                                       java.util.Set<String> allowedHosts, String apiToken,
+                                       java.util.concurrent.Executor blocking,
+                                       boolean protectReads, boolean trustXff) {
         int maxBlockBody = node.params().maxBlockSizeBytes() + 1024;
         DashboardAssets dashboard = DashboardAssets.load();
         DocsAssets docs = DocsAssets.load();
@@ -241,16 +268,16 @@ public final class NodeApi {
             .with(GET, "/box", req -> offload(blocking, () -> BoxApi.box(node, req)))
             .with(GET, "/boxes", req -> offload(blocking, () -> BoxApi.boxes(node, req)))
             .with(POST, "/scan/register", req -> req.loadBody(SMALL_BODY).map(body -> guardedResponse(() -> {
-                int id = node.registerScan(scanOwner(req), rhizome.core.box.ScanPredicate.fromJson(
+                int id = node.registerScan(scanOwner(req, trustXff), rhizome.core.box.ScanPredicate.fromJson(
                     parseJson(body.getString(StandardCharsets.UTF_8))));
                 return json(new JSONObject().put("scanId", id));
             })))
             .with(POST, "/scan/deregister", req -> req.loadBody(SMALL_BODY).map(body -> guardedResponse(() -> {
                 int id = parseJson(body.getString(StandardCharsets.UTF_8)).getInt("scanId");
-                return json(new JSONObject().put("removed", node.deregisterScan(scanOwner(req), id)));
+                return json(new JSONObject().put("removed", node.deregisterScan(scanOwner(req, trustXff), id)));
             })))
-            .with(GET, "/scan/list", req -> offload(blocking, () -> BoxApi.scanList(node, scanOwner(req))))
-            .with(GET, "/scan/boxes", req -> offload(blocking, () -> BoxApi.scanBoxes(node, scanOwner(req), req)))
+            .with(GET, "/scan/list", req -> offload(blocking, () -> BoxApi.scanList(node, scanOwner(req, trustXff))))
+            .with(GET, "/scan/boxes", req -> offload(blocking, () -> BoxApi.scanBoxes(node, scanOwner(req, trustXff), req)))
             // ---- tokens ----
             .with(GET, "/token", req -> offload(blocking, () -> TokenApi.token(node, req)))
             .with(GET, "/token_balance", req -> offload(blocking, () -> TokenApi.tokenBalance(node, req)))
@@ -263,7 +290,7 @@ public final class NodeApi {
             .with(GET, "/state/snapshot/chunk", req -> offload(blocking, () -> SyncApi.snapshotChunk(node, req)))
             // ---- contract logs / dry run ----
             .with(GET, "/logs", req -> offload(blocking, () -> ContractApi.logs(node, req)))
-            .with(GET, "/logs/stream", req -> guarded(() -> ContractApi.logStream(sse, clientKey(req), clientSubnetKey(req))))
+            .with(GET, "/logs/stream", req -> guarded(() -> ContractApi.logStream(sse, clientKey(req, trustXff), clientSubnetKey(req, trustXff))))
             .with(POST, "/call_readonly", req -> req.loadBody(TX_BODY).then(body -> offload(blocking, () ->
                 ContractApi.callReadonly(node, parseJson(body.getString(StandardCharsets.UTF_8))))))
             // ---- peer sync / gossip ingest ----
@@ -272,21 +299,21 @@ public final class NodeApi {
             .with(GET, "/orphan", req -> offload(blocking, () -> SyncApi.orphan(node, req)))
             .with(POST, "/add_transaction_json", req -> req.loadBody(JSON_TX_BODY).then(body -> offload(blocking, () -> {
                 Transaction t = Transaction.of(parseJson(body.getString(StandardCharsets.UTF_8)));
-                return statusResponse(node.submitTransaction(t, clientKey(req)));
+                return statusResponse(node.submitTransaction(t, clientKey(req, trustXff)));
             })))
             .with(POST, "/add_transaction", req -> req.loadBody(TX_BODY).then(body -> offload(blocking, () -> {
                 Transaction t = Transaction.of(BinarySerializable.fromBuffer(body.getArray(), TransactionDto.class));
-                return statusResponse(node.submitTransaction(t, clientKey(req)));
+                return statusResponse(node.submitTransaction(t, clientKey(req, trustXff)));
             })))
             .with(POST, "/submit", req -> req.loadBody(maxBlockBody).then(body -> offload(blocking, () -> {
                 Block block = BlockCodec.decode(body.getArray());
-                return statusResponse(node.submitBlock(block, clientKey(req)));
+                return statusResponse(node.submitBlock(block, clientKey(req, trustXff)));
             })))
             .build();
 
         return request -> {
             int cost = requestCost(node, request);
-            if (!limiter.allow(clientKey(request), cost)) {
+            if (!limiter.allow(clientKey(request, trustXff), cost)) {
                 return HttpResponse.ofCode(429)
                     .withJson(new JSONObject().put("error", "rate limited").toString())
                     .toPromise();
@@ -295,7 +322,7 @@ public final class NodeApi {
             // feeding invalid blocks / corrupt-signature transactions is refused BEFORE the
             // token check and the body decode, for the strike window. A per-client-key shed
             // like the limiter above — never an aggregate gate, so honest peers are unaffected.
-            if ((isSubmitPost(request) || isAddTransactionPost(request)) && node.isPushShed(clientKey(request))) {
+            if ((isSubmitPost(request) || isAddTransactionPost(request)) && node.isPushShed(clientKey(request, trustXff))) {
                 return HttpResponse.ofCode(429)
                     .withJson(new JSONObject().put("error", "push temporarily refused").toString())
                     .toPromise();
@@ -305,7 +332,10 @@ public final class NodeApi {
             // flood must not burn the shared submit/mempool budgets that gated (authenticated)
             // peers depend on — a 401 is cheap, a global budget is not (audit: auth after
             // budgets). The P2P protocol endpoints stay open so peering keeps working (audit F4).
-            if (apiToken != null && isTokenProtectedRoute(request) && !bearerMatches(request, apiToken)) {
+            // With protectReads (RHIZOME_PROTECT_READS) EVERY route is gated instead — the
+            // private-node/private-explorer switch (audit: no read protection) — except the
+            // static SPA/docs shell, which a plain browser navigation cannot bear a token for.
+            if (apiToken != null && isTokenProtectedRoute(request, protectReads) && !bearerMatches(request, apiToken)) {
                 return HttpResponse.ofCode(401)
                     .withJson(new JSONObject().put("error", "unauthorized").toString())
                     .toPromise();
@@ -682,6 +712,24 @@ public final class NodeApi {
      * an operator enabling the token on a gossiping node must have peers present it too.
      */
     private static boolean isTokenProtectedRoute(HttpRequest request) {
+        return isTokenProtectedRoute(request, false);
+    }
+
+    /**
+     * As {@link #isTokenProtectedRoute(HttpRequest)}, but with {@code protectReads} gating
+     * EVERY route (any method) — the RHIZOME_PROTECT_READS private-node switch: the read
+     * surface (stats, balances, SSE logs) is otherwise public by design even with a token
+     * configured (audit: no read protection). The static SPA/docs shell is EXEMPT
+     * ({@link #isSpaShell}): a browser cannot attach a bearer to a plain navigation, so
+     * gating {@code /} or {@code /dashboard/app.js} would make the embedded explorer
+     * unreachable (audit 17th pass). The shell is static content identical for every
+     * client; the SPA's own fetches ({@code /stats}, {@code /blocks}, …) carry the bearer
+     * and stay gated.
+     */
+    private static boolean isTokenProtectedRoute(HttpRequest request, boolean protectReads) {
+        if (protectReads) {
+            return !isSpaShell(request); // private node: everything but the static SPA shell
+        }
         if (request.getMethod() != POST) {
             return false;
         }
@@ -696,6 +744,26 @@ public final class NodeApi {
                  "/add_transaction", "/add_transaction_json", "/submit", "/call_readonly" -> true;
             default -> false;
         };
+    }
+
+    /**
+     * True for the static SPA/docs shell served to browsers: {@code GET /}, {@code /dashboard}
+     * and the asset trees under {@code /dashboard/} and {@code /docs/}. These paths serve only
+     * bundled static files (no chain data), so exempting them from the protectReads bearer
+     * leaks nothing a client could not read out of the jar.
+     */
+    private static boolean isSpaShell(HttpRequest request) {
+        if (request.getMethod() != GET) {
+            return false;
+        }
+        String path;
+        try {
+            path = request.getPath();
+        } catch (RuntimeException e) {
+            return false;
+        }
+        return "/".equals(path) || "/dashboard".equals(path)
+            || path.startsWith("/dashboard/") || path.startsWith("/docs/");
     }
 
     /** Constant-time check of {@code Authorization: Bearer <token>} against the configured token. */
@@ -795,6 +863,11 @@ public final class NodeApi {
      * strings end up in access logs, proxies and browser history.
      */
     private static ScanRegistry.Owner scanOwner(HttpRequest request) {
+        return scanOwner(request, false);
+    }
+
+    /** As {@link #scanOwner(HttpRequest)}, honouring the trusted-proxy XFF hop. */
+    private static ScanRegistry.Owner scanOwner(HttpRequest request, boolean trustXff) {
         String secret;
         try {
             secret = request.getHeader(H_SCAN_OWNER);
@@ -804,15 +877,28 @@ public final class NodeApi {
         if (secret != null && secret.length() > SCAN_OWNER_MAX_CHARS) {
             secret = secret.substring(0, SCAN_OWNER_MAX_CHARS);
         }
-        return ScanRegistry.Owner.of(clientKey(request), secret);
+        return ScanRegistry.Owner.of(clientKey(request, trustXff), secret);
     }
 
     private static String clientKey(HttpRequest request) {
+        return clientKey(request, false);
+    }
+
+    /**
+     * As {@link #clientKey(HttpRequest)}, but when {@code trustXff} the FIRST
+     * {@code X-Forwarded-For} hop replaces the socket address — for nodes only reachable
+     * through a trusted reverse proxy (audit: no reverse-proxy support). The header value is
+     * parsed as an IP LITERAL ONLY (never via a DNS lookup, which a spoofed hostname would
+     * otherwise trigger on the event loop); anything unparsable falls back to the socket
+     * address, so a forged header can only miskey its own sender, never target a victim's
+     * budget.
+     */
+    private static String clientKey(HttpRequest request, boolean trustXff) {
         // getRemoteAddress() runs a checkNotNull under ActiveJ's CHECKS flag, so a
         // request with no live connection (tests, in-process calls) throws instead
         // of returning null; treat any such request as a single "local" bucket.
         try {
-            java.net.InetAddress addr = request.getRemoteAddress();
+            java.net.InetAddress addr = clientAddress(request, trustXff);
             if (addr == null) {
                 return "local";
             }
@@ -842,8 +928,13 @@ public final class NodeApi {
      * the site in aggregate on both families (audit F5; v4 gap closed in the SSE-cap pass).
      */
     private static String clientSubnetKey(HttpRequest request) {
+        return clientSubnetKey(request, false);
+    }
+
+    /** As {@link #clientSubnetKey(HttpRequest)}, honouring the trusted-proxy XFF hop. */
+    private static String clientSubnetKey(HttpRequest request, boolean trustXff) {
         try {
-            java.net.InetAddress addr = request.getRemoteAddress();
+            java.net.InetAddress addr = clientAddress(request, trustXff);
             if (addr == null) {
                 return "local";
             }
@@ -859,5 +950,91 @@ public final class NodeApi {
         } catch (RuntimeException e) {
             return "local";
         }
+    }
+
+    private static final HttpHeader H_X_FORWARDED_FOR = HttpHeaders.of("X-Forwarded-For");
+
+    /**
+     * The address identifying this request's client: the socket address, or — when
+     * {@code trustXff} and an {@code X-Forwarded-For} header is present — the FIRST hop of
+     * that header, resolved by {@link #resolveXffHop} as an IP LITERAL only (never a hostname,
+     * so no DNS lookup can be triggered on the event loop by a spoofed header). An absent or
+     * unparsable hop falls back to the socket address: a client can then only miskey itself.
+     */
+    static java.net.InetAddress clientAddress(HttpRequest request, boolean trustXff) { // package-private for tests
+        java.net.InetAddress socket = request.getRemoteAddress();
+        if (!trustXff) {
+            return socket;
+        }
+        String xff;
+        try {
+            xff = request.getHeader(H_X_FORWARDED_FOR);
+        } catch (RuntimeException e) {
+            return socket;
+        }
+        return resolveXffHop(socket, xff);
+    }
+
+    /**
+     * The XFF first hop resolved to an address, or {@code socket} when the header is absent or
+     * carries no usable literal (package-private for tests). IPv4 hops are parsed octet-by-octet
+     * with a 0..255 range check and built via {@link java.net.InetAddress#getByAddress(byte[])}:
+     * a dotted quad with an overflowing octet ({@code 300.1.1.1}) is NOT an IPv4 literal, and
+     * handing it to {@code getByName} would fall back to a BLOCKING resolver lookup of it as a
+     * hostname — seconds of event-loop stall per spoofed request, a worse DoS than the
+     * rate-limit evasion this flag exists to prevent (audit 17th pass). Values containing
+     * {@code ':'} go through {@code getByName}: the JDK only accepts those as IPv6 literals and
+     * throws immediately on anything else, never consulting DNS.
+     */
+    static java.net.InetAddress resolveXffHop(java.net.InetAddress socket, String xff) {
+        if (xff == null) {
+            return socket;
+        }
+        try {
+            int comma = xff.indexOf(',');
+            String first = (comma < 0 ? xff : xff.substring(0, comma)).trim();
+            if (first.indexOf(':') >= 0) {
+                // IPv6 literal only: invalid forms throw fast, with no resolver round-trip.
+                return java.net.InetAddress.getByName(first);
+            }
+            byte[] v4 = parseIpv4Literal(first);
+            if (v4 == null) {
+                return socket; // hostname or junk: never resolved (no DNS on the loop)
+            }
+            return java.net.InetAddress.getByAddress(v4);
+        } catch (RuntimeException | java.net.UnknownHostException e) {
+            return socket;
+        }
+    }
+
+    /**
+     * Parses {@code a.b.c.d} — four decimal octets, each 0..255 — into 4 bytes, or returns
+     * {@code null} when the value is not a valid dotted quad. Leading zeros parse as decimal
+     * ({@code 010.0.0.1} → {@code 10.0.0.1}), exactly like the JDK literal parser; hex and
+     * shorthand forms are rejected.
+     */
+    static byte[] parseIpv4Literal(String s) { // package-private for tests
+        byte[] out = new byte[4];
+        int start = 0;
+        for (int i = 0; i < 4; i++) {
+            int end = i < 3 ? s.indexOf('.', start) : s.length();
+            if (end < 0 || end - start < 1 || end - start > 3) {
+                return null; // missing dot, or an empty / over-long octet
+            }
+            int value = 0;
+            for (int j = start; j < end; j++) {
+                char c = s.charAt(j);
+                if (c < '0' || c > '9') {
+                    return null;
+                }
+                value = value * 10 + (c - '0');
+            }
+            if (value > 255) {
+                return null; // octet overflow: not a literal — getByName would DNS-resolve it
+            }
+            out[i] = (byte) value;
+            start = end + 1;
+        }
+        return out;
     }
 }

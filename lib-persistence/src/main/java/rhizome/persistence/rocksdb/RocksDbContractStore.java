@@ -27,6 +27,14 @@ public final class RocksDbContractStore implements ContractStore, AutoCloseable 
 
     private static final Logger log = LoggerFactory.getLogger(RocksDbContractStore.class);
 
+    static {
+        // The WriteOptions field initializers below call native methods at construction time:
+        // without this, a JVM that opens a contract store BEFORE any other store crashed with
+        // UnsatisfiedLinkError — long masked in the test suite by another store loading the
+        // library first into the shared test JVM (audit 17th pass, latent).
+        RocksDB.loadLibrary();
+    }
+
     private static final byte[] CF_CODE = "contract_code".getBytes();
     private static final byte[] CF_STORAGE = "contract_storage".getBytes();
     // Persisted per-block undo journal (height BE(8) -> serialized journal), so a reorg after a
@@ -236,12 +244,16 @@ public final class RocksDbContractStore implements ContractStore, AutoCloseable 
 
     @Override
     public void revertBlock(long height, List<StorageChange> restores) {
-        // The restores and the journal drop commit as one atomic unit (audit F1).
+        // The restores, the journal drop AND the receipts drop commit as one atomic unit
+        // (audit F1). The receipts must ride this batch: deleted separately and first, a crash
+        // between the two writes left the journal present but the receipts gone, and the
+        // rollback guard then aborted every reorg retry — the node wedged on its fork.
         try (WriteBatch batch = new WriteBatch()) {
             for (StorageChange restore : restores) {
                 stage(batch, restore);
             }
             batch.delete(journalCf, heightKey(height));
+            batch.delete(receiptsCf, heightKey(height));
             db.write(writeOptions, batch);
         } catch (RocksDBException e) {
             throw new IllegalStateException("contract store revertBlock failed", e);
@@ -319,10 +331,16 @@ public final class RocksDbContractStore implements ContractStore, AutoCloseable 
 
     @Override
     public void forEachStorage(StorageConsumer consumer) {
-        // Storage keys are contract address(25) ‖ key.
+        // Storage keys are contract address(25) ‖ key. This export feeds the state root peers
+        // download, so a truncated key must fail LOUD here — zero-padding it would fabricate a
+        // state entry that never existed (audit: storage-key decode).
         try (org.rocksdb.RocksIterator it = db.newIterator(storageCf)) {
             for (it.seekToFirst(); it.isValid(); it.next()) {
                 byte[] slot = it.key();
+                if (slot.length < PublicAddress.SIZE) {
+                    throw new IllegalStateException("corrupt contract storage key: " + slot.length
+                        + " bytes, expected at least " + PublicAddress.SIZE);
+                }
                 consumer.accept(PublicAddress.of(java.util.Arrays.copyOfRange(slot, 0, PublicAddress.SIZE)),
                     java.util.Arrays.copyOfRange(slot, PublicAddress.SIZE, slot.length), it.value());
             }

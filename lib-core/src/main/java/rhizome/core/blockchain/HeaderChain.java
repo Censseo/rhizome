@@ -136,9 +136,9 @@ public final class HeaderChain {
             if (Math.abs((long) header.vote()) > 2) {
                 return Result.reject(Rejection.INVALID_VOTE, h);
             }
-            if (!header.verifyNonce(params.powAlgorithm(), params.powCostsAt(header.id()))) {
-                return Result.reject(Rejection.INVALID_POW, h);
-            }
+            // Cheapest-first, mirroring ChainEngine.addBlock (audit: validation order): the
+            // timestamp bounds are pure comparisons, so they run BEFORE the memory-hard PoW —
+            // a forged window then costs the verifier zero hashes instead of one.
             if (header.timestamp() <= medianTimePast(params, at, h - 1)) {
                 return Result.reject(Rejection.TIMESTAMP_TOO_OLD, h);
             }
@@ -147,6 +147,9 @@ public final class HeaderChain {
             }
             if (header.timestamp() > nowMillis + params.maxFutureBlockTimeSec() * 1000L) {
                 return Result.reject(Rejection.TIMESTAMP_IN_FUTURE, h);
+            }
+            if (!header.verifyNonce(params.powAlgorithm(), params.powCostsAt(header.id()))) {
+                return Result.reject(Rejection.INVALID_POW, h);
             }
             // Validate the uncle references structurally (count, no dups, difficulty in range) but
             // do NOT fold their claimed work into the total used by the reorg gate. The uncles are

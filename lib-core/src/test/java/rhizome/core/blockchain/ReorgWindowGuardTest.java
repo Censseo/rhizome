@@ -149,11 +149,18 @@ class ReorgWindowGuardTest {
     void degradedStateIsObservableAndClearable() {
         assertNull(engine.degradedState());
         assertFalse(engine.isDegraded());
-        engine.markDegraded("test reason");
+        engine.markDegraded("test reason", false);
         assertTrue(engine.isDegraded());
         assertEquals("test reason", engine.degradedState());
         engine.clearDegraded();
         assertNull(engine.degradedState());
         assertFalse(engine.isDegraded());
+
+        // A restart-required mark (torn pop) survives clearDegraded AND cannot be downgraded
+        // by a later restore-failure mark — only a restart into boot recovery lifts it.
+        engine.markDegraded("torn pop", true);
+        engine.markDegraded("restore failure on top", false);
+        engine.clearDegraded();
+        assertTrue(engine.isDegraded());
     }
 }
