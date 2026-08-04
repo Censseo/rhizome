@@ -8,12 +8,12 @@ dependencies {
     implementation project(':lib-persistence')
     implementation project(':lib-vm')
 
-    implementation "io.activej:activej-http:${activejVersion}"
+    implementation "${activejGroup}:activej-http:${activejVersion}"
     // activej-eventloop also provides the io.activej.reactor package.
-    implementation "io.activej:activej-eventloop:${activejVersion}"
-    implementation "io.activej:activej-promise:${activejVersion}"
-    implementation "io.activej:activej-csp:${activejVersion}"
-    implementation "io.activej:activej-bytebuf:${activejVersion}"
+    implementation "${activejGroup}:activej-eventloop:${activejVersion}"
+    implementation "${activejGroup}:activej-promise:${activejVersion}"
+    implementation "${activejGroup}:activej-csp:${activejVersion}"
+    implementation "${activejGroup}:activej-bytebuf:${activejVersion}"
 
     implementation "org.json:json:${jsonVersion}"
 
@@ -110,7 +110,7 @@ tasks.named('test') {
 // GraalVM native-image build of the node. Reachability metadata (RocksDB JNI
 // resource, logback configurators, dashboard assets) ships inside the jar under
 // META-INF/native-image/rhizome/rhizome-node/ and is picked up automatically.
-// Gradle 8.5 itself must run on JDK 21 (e.g. JAVA_HOME=~/.sdkman/candidates/java/21.0.7-tem);
+// Gradle itself must run on JDK 21 (e.g. JAVA_HOME=~/.sdkman/candidates/java/21.0.7-tem);
 // native-image is resolved from PATH, so use a GraalVM as the sdkman/current JDK.
 def nativeImageOut = layout.buildDirectory.dir('native')
 
