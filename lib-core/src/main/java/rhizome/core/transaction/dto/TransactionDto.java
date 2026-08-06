@@ -7,25 +7,39 @@ import org.jetbrains.annotations.NotNull;
 import lombok.Getter;
 import lombok.experimental.Accessors;
 import rhizome.crypto.PublicKey;
+import rhizome.crypto.SignatureScheme;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.serialization.BinaryIO;
 import rhizome.core.serialization.BinarySerializable;
 import rhizome.core.transaction.TransactionSignature;
 
 /**
- * Wire/storage form of a transaction. The fixed prefix ({@link #FIXED_SIZE} bytes)
- * is unchanged from the transfer-only layout:
- * {@code signature(64) || signingKey(32) || timestamp(8) || to(25) || amount(8)
- * || fee(8) || isTransactionFee(1) || chainId(4) || nonce(8)}. It is followed by a
- * one-byte {@code kind}; for a contract transaction (kind != TRANSFER) that byte is
- * followed by {@code gasLimit(8) || gasPrice(8) || dataLen(4) || data}. A transfer
- * therefore adds exactly one byte over the old format, and every transaction is
+ * Wire/storage form of a transaction:
+ * {@code scheme(1) || signature(scheme) || signingKey(scheme) || pqCommitment(scheme) ||
+ * timestamp(8) || to(25) || amount(8) || fee(8) || isTransactionFee(1) || chainId(4) || nonce(8)},
+ * followed by a one-byte {@code kind}; for a contract transaction (kind != TRANSFER) that byte is
+ * followed by {@code gasLimit(8) || gasPrice(8) || dataLen(4) || data}. Every transaction is
  * self-delimiting so a block can pack variable-length transactions back to back.
+ *
+ * <h2>The leading scheme byte</h2>
+ * The authorisation fields are the only variable-width part of the fixed prefix, and their widths
+ * come from the leading {@link SignatureScheme} byte — never from a length field on the wire, which
+ * would hand an attacker an allocation size on an untrusted decode path. This byte is what lets the
+ * chain adopt a post-quantum signature scheme later without a format break: today it always reads
+ * {@code 0x00} (Ed25519) or {@code 0x01} (Ed25519 with a post-quantum key commitment), and
+ * {@code 0x02..0x0F} are reserved for the NIST schemes. See {@link SignatureScheme} and
+ * WHITEPAPER §5.9.
+ *
+ * <p>An Ed25519 transfer is therefore one byte longer than the pre-agility format; a
+ * post-quantum-committed one is 33 bytes longer.
  */
 @Accessors(fluent = true) @Getter
 public class TransactionDto implements BinarySerializable {
+    public final SignatureScheme scheme;
     public final TransactionSignature signature;
     public final PublicKey signingKey;
+    /** Empty unless {@link #scheme} commits to a post-quantum key; then exactly 32 bytes. */
+    public final byte[] pqCommitment;
     public final long timestamp;
     public final PublicAddress to;
     public final long amount;
@@ -38,18 +52,30 @@ public class TransactionDto implements BinarySerializable {
     public final long gasPrice;
     public final byte[] data;
 
-    /** Size of the fixed transfer prefix (excludes the kind byte and any contract suffix). */
-    public static final int FIXED_SIZE =
-        TransactionSignature.SIZE + PublicKey.SIZE + Long.BYTES + PublicAddress.SIZE
-        + Long.BYTES + Long.BYTES + 1 + Integer.BYTES + Long.BYTES;
+    /** Scheme-independent part of the fixed prefix: everything after the authorisation fields. */
+    private static final int COMMON_SIZE =
+        Long.BYTES + PublicAddress.SIZE + Long.BYTES + Long.BYTES + 1 + Integer.BYTES + Long.BYTES;
 
-    /** Back-compat alias: the fixed prefix size, used by callers sizing buffers/caps. */
-    public static final int BUFFER_SIZE = FIXED_SIZE;
+    /** Fixed prefix for {@code scheme} (excludes the kind byte and any contract suffix). */
+    public static int fixedSize(SignatureScheme scheme) {
+        return scheme.wireAuthBytes() + COMMON_SIZE;
+    }
+
+    /** Fixed prefix of a default (Ed25519) transaction — the common case, 159 bytes. */
+    public static final int FIXED_SIZE = fixedSize(SignatureScheme.ED25519);
+
+    /**
+     * Widest fixed prefix across all implemented schemes. Buffer and request-body caps size against
+     * this so they stay correct as schemes are added — deriving it from {@link SignatureScheme}
+     * rather than hard-coding it means a new scheme cannot leave a stale bound behind.
+     */
+    public static final int MAX_FIXED_SIZE = SignatureScheme.MAX_WIRE_AUTH_BYTES + COMMON_SIZE;
 
     /** Hard cap on contract payload bytes on the wire. */
     public static final int MAX_DATA = 128 * 1024;
 
     private static final byte KIND_TRANSFER = 0;
+    private static final byte[] NO_COMMITMENT = new byte[0];
 
     public TransactionDto(
         TransactionSignature signature,
@@ -61,13 +87,15 @@ public class TransactionDto implements BinarySerializable {
         boolean isTransactionFee,
         int chainId,
         long nonce) {
-        this(signature, signingKey, timestamp, to, amount, fee, isTransactionFee, chainId, nonce,
-            KIND_TRANSFER, 0, 0, new byte[0]);
+        this(SignatureScheme.ED25519, signature, signingKey, NO_COMMITMENT, timestamp, to, amount, fee,
+            isTransactionFee, chainId, nonce, KIND_TRANSFER, 0, 0, new byte[0]);
     }
 
     public TransactionDto(
+        SignatureScheme scheme,
         TransactionSignature signature,
         PublicKey signingKey,
+        byte[] pqCommitment,
         long timestamp,
         PublicAddress to,
         long amount,
@@ -80,8 +108,10 @@ public class TransactionDto implements BinarySerializable {
         long gasPrice,
         byte[] data) {
 
+        this.scheme = scheme == null ? SignatureScheme.ED25519 : scheme;
         this.signature = signature;
         this.signingKey = signingKey;
+        this.pqCommitment = pqCommitment == null ? NO_COMMITMENT : pqCommitment;
         this.timestamp = timestamp;
         this.to = to;
         this.amount = amount;
@@ -97,8 +127,10 @@ public class TransactionDto implements BinarySerializable {
 
     @Override
     public void writeTo(ByteBuffer buffer) {
-        BinaryIO.putFixed(buffer, signature.toBytes(), TransactionSignature.SIZE);
-        BinaryIO.putFixed(buffer, signingKey.toBytes(), PublicKey.SIZE);
+        buffer.put(scheme.code());
+        BinaryIO.putFixed(buffer, signature.toBytes(), scheme.signatureBytes());
+        BinaryIO.putFixed(buffer, signingKey.toBytes(), scheme.publicKeyBytes());
+        BinaryIO.putFixed(buffer, pqCommitment, scheme.commitmentBytes());
         buffer.putLong(timestamp);
         BinaryIO.putFixed(buffer, to.toBytes(), PublicAddress.SIZE);
         buffer.putLong(amount);
@@ -116,8 +148,13 @@ public class TransactionDto implements BinarySerializable {
     }
 
     public static TransactionDto readFrom(ByteBuffer buffer) {
-        TransactionSignature signature = TransactionSignature.of(BinaryIO.getFixed(buffer, TransactionSignature.SIZE));
-        PublicKey signingKey = PublicKey.of(BinaryIO.getFixed(buffer, PublicKey.SIZE));
+        // Fails closed on any code that is not an implemented scheme, including the reserved
+        // post-quantum block: silently treating an unknown scheme as Ed25519 would read the
+        // following fields at the wrong widths and split consensus (see SignatureScheme.fromCode).
+        SignatureScheme scheme = SignatureScheme.fromCode(buffer.get());
+        TransactionSignature signature = TransactionSignature.of(BinaryIO.getFixed(buffer, scheme.signatureBytes()));
+        PublicKey signingKey = PublicKey.of(BinaryIO.getFixed(buffer, scheme.publicKeyBytes()));
+        byte[] pqCommitment = BinaryIO.getFixed(buffer, scheme.commitmentBytes());
         long timestamp = buffer.getLong();
         PublicAddress to = PublicAddress.of(BinaryIO.getFixed(buffer, PublicAddress.SIZE));
         long amount = buffer.getLong();
@@ -131,6 +168,13 @@ public class TransactionDto implements BinarySerializable {
             throw new IllegalArgumentException("non-canonical isTransactionFee byte: " + feeFlag);
         }
         boolean isTransactionFee = feeFlag != 0;
+        // Coinbase and rent collection are minted by the block producer and carry no signature, so
+        // any scheme other than the default would be pure malleability: a free 32-byte commitment
+        // field on an unsigned transaction, changing its wire bytes without changing its meaning.
+        if (isTransactionFee && scheme != SignatureScheme.ED25519) {
+            throw new IllegalArgumentException("self-authorized transaction must use "
+                + SignatureScheme.ED25519 + ", got " + scheme);
+        }
         int chainId = buffer.getInt();
         long nonce = buffer.getLong();
         byte kind = buffer.get();
@@ -147,13 +191,13 @@ public class TransactionDto implements BinarySerializable {
             data = new byte[len];
             buffer.get(data);
         }
-        return new TransactionDto(signature, signingKey, timestamp, to, amount, fee, isTransactionFee,
-            chainId, nonce, kind, gasLimit, gasPrice, data);
+        return new TransactionDto(scheme, signature, signingKey, pqCommitment, timestamp, to, amount, fee,
+            isTransactionFee, chainId, nonce, kind, gasLimit, gasPrice, data);
     }
 
     @Override
     public @NotNull int getSize() {
-        int size = FIXED_SIZE + 1;
+        int size = fixedSize(scheme) + 1;
         if (kind != KIND_TRANSFER) {
             size += Long.BYTES + Long.BYTES + Integer.BYTES + data.length;
         }

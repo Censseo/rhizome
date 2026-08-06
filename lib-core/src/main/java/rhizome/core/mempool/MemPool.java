@@ -196,7 +196,7 @@ public final class MemPool {
             && confirmedHeight < params.tokenActivationHeight() - 1) {
             return TOKEN_UNAVAILABLE;
         }
-        if (!PublicAddress.of(tx.signingKey()).equals(tx.from())) {
+        if (!tx.senderBindingValid()) {
             return WALLET_SIGNATURE_MISMATCH;
         }
         // Timestamp sanity window: the field is signed but otherwise unconstrained, so a tx

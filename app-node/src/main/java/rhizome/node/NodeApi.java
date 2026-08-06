@@ -56,12 +56,12 @@ public final class NodeApi {
     private static final int SMALL_BODY = 8 * 1024;                 // tx / peer announcements
     // A single transaction body may be a contract deploy/call carrying up to MAX_DATA
     // bytes of payload (plus the kind tag and gas fields), so size the cap for that.
-    private static final int TX_BODY = TransactionDto.BUFFER_SIZE + 1 + 20 + TransactionDto.MAX_DATA + 1024;
+    private static final int TX_BODY = TransactionDto.MAX_FIXED_SIZE + 1 + 20 + TransactionDto.MAX_DATA + 1024;
     // The JSON form of the same transaction hex-encodes the payload (2 chars per byte), so a
     // deploy/call near MAX_DATA is ~2x the binary size; capping it at SMALL_BODY rejected JSON
     // transactions whose binary equivalent passes (audit: JSON/binary tx cap asymmetry).
     private static final int JSON_TX_BODY =
-        TransactionDto.BUFFER_SIZE + 2 * TransactionDto.MAX_DATA + 2048;
+        TransactionDto.MAX_FIXED_SIZE + 2 * TransactionDto.MAX_DATA + 2048;
 
     // Well-known ActiveJ header tokens: the HTTP parser interns incoming Origin/Host under these, and
     // a custom HttpHeaders.of("Origin"/"Host") token no longer matches them (it did in 6.0-beta2, but

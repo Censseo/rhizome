@@ -1,19 +1,36 @@
 /*
  * Rhizome transaction building, byte-for-byte the node's formats:
- *  - address     = 0x00 || RIPEMD160(SHA256(pubkey)) || SHA256(SHA256(ripemd))[0..4]   (PublicAddress.of)
+ *  - address     = scheme(1) || RIPEMD160(SHA256(pubkey [|| pqCommitment]))
+ *                  || SHA256(SHA256(scheme || ripemd))[0..4]                        (PublicAddress.of)
  *  - preimage    = to(25) || from(25) || fee(8 BE) || amount(8 BE) || timestamp(8 BE)
  *                  || chainId(4 BE) || nonce(8 BE) [|| kind(1) || gasLimit(8) || gasPrice(8) || data]
  *  - txid        = SHA256(preimage)  (TransactionImpl.hashContents)
  *  - signature   = Ed25519(seed, txid)
- *  - wire (POST /add_transaction) = signature(64) || signingKey(32) || timestamp(8)
+ *  - wire (POST /add_transaction) = scheme(1) || signature(64) || signingKey(32)
+ *                  || pqCommitment(32, ED25519_PQC only) || timestamp(8)
  *                  || to(25) || amount(8) || fee(8) || isTransactionFee(1) || chainId(4)
  *                  || nonce(8) || kind(1) [|| gasLimit(8) || gasPrice(8) || dataLen(4) || data]
  * The binary endpoint is used (not the JSON one) so 64-bit amounts survive intact.
+ *
+ * The checksum covers the scheme byte as well as the body, so a flipped version byte is a detectably
+ * invalid address rather than a valid address of another scheme (see PublicAddress.isValidChecksum).
  */
 'use strict';
 
 const RzTx = (() => {
   const C = typeof RzCrypto !== 'undefined' ? RzCrypto : require('./crypto.js');
+
+  /**
+   * Signature scheme discriminant — the address version byte and the transaction's leading wire
+   * byte (SignatureScheme.java). ED25519_PQC signs with Ed25519 exactly like ED25519, but its
+   * address also commits to SHA-256 of a future post-quantum public key, so the holder can migrate
+   * to a post-quantum scheme later without the address paying for a large signature today.
+   * Codes 0x02..0x0F are reserved on the node side for the NIST schemes.
+   */
+  const SCHEME = { ED25519: 0x00, ED25519_PQC: 0x01 };
+
+  /** Width of the post-quantum key commitment (one SHA-256 digest). */
+  const PQ_COMMITMENT_SIZE = 32;
 
   const KIND = {
     TRANSFER: 0, DEPLOY: 1, CALL: 2,
@@ -56,11 +73,27 @@ const RzTx = (() => {
     return out;
   }
 
-  /** 25-byte Rhizome address from a 32-byte Ed25519 public key. */
-  function addressFromPublicKey(pub) {
-    const ripemd = C.ripemd160(C.sha256(pub));
-    const checksum = C.sha256(C.sha256(ripemd)).slice(0, 4);
-    return C.concat(new Uint8Array([0]), ripemd, checksum);
+  /**
+   * 25-byte Rhizome address from a 32-byte Ed25519 public key. Passing a 32-byte `pqCommitment`
+   * derives the ED25519_PQC form instead, whose body absorbs the commitment — the address then
+   * records, at creation time, which post-quantum key may later take it over.
+   */
+  function addressFromPublicKey(pub, pqCommitment) {
+    const scheme = pqCommitment ? SCHEME.ED25519_PQC : SCHEME.ED25519;
+    const preimage = pqCommitment ? C.concat(pub, pqCommitment) : pub;
+    const versionAndBody = C.concat(new Uint8Array([scheme]), C.ripemd160(C.sha256(preimage)));
+    const checksum = C.sha256(C.sha256(versionAndBody)).slice(0, 4);
+    return C.concat(versionAndBody, checksum);
+  }
+
+  /** Normalises an optional post-quantum commitment to 32 bytes, or null when absent. */
+  function pqCommitmentBytes(value) {
+    if (value === null || value === undefined || value === '') return null;
+    const bytes = value instanceof Uint8Array ? value : hexToBytes(value);
+    if (bytes.length !== PQ_COMMITMENT_SIZE) {
+      throw new Error('pqCommitment: ' + PQ_COMMITMENT_SIZE + ' octets attendus');
+    }
+    return bytes;
   }
 
   function addressBytes(hex) {
@@ -76,7 +109,9 @@ const RzTx = (() => {
    */
   function buildSigned(tx, seed) {
     const pub = C.ed25519Public(seed);
-    const from = addressFromPublicKey(pub);
+    const pqCommitment = pqCommitmentBytes(tx.pqCommitment);
+    const scheme = pqCommitment ? SCHEME.ED25519_PQC : SCHEME.ED25519;
+    const from = addressFromPublicKey(pub, pqCommitment);
     const to = addressBytes(tx.to);
     const kind = tx.kind || KIND.TRANSFER;
     const data = tx.data instanceof Uint8Array ? tx.data : hexToBytes(tx.data || '');
@@ -93,12 +128,16 @@ const RzTx = (() => {
     const signature = C.ed25519Sign(seed, txid);
 
     const wire = [
-      signature, pub, be(tx.timestamp, 8), to,
+      new Uint8Array([scheme]), signature, pub,
+    ];
+    if (pqCommitment) wire.push(pqCommitment);
+    wire.push(
+      be(tx.timestamp, 8), to,
       be(tx.amount || 0, 8), be(tx.fee || 0, 8),
       new Uint8Array([0]), // isTransactionFee
       be(tx.chainId, 4), be(tx.nonce, 8),
       new Uint8Array([kind]),
-    ];
+    );
     if (kind !== KIND.TRANSFER) {
       wire.push(be(tx.gasLimit || 0, 8), be(tx.gasPrice || 0, 8), be(data.length, 4), data);
     }
@@ -220,7 +259,7 @@ const RzTx = (() => {
   }
 
   return {
-    KIND, REGISTER, hexToBytes, bytesToHex, be, le64,
+    KIND, REGISTER, SCHEME, PQ_COMMITMENT_SIZE, hexToBytes, bytesToHex, be, le64,
     addressFromPublicKey, addressBytes, buildSigned, deriveContractAddress, buildCallPayload,
     encodeBoxCreate, encodeBoxUpdate, encodeBoxTarget, deriveBoxId, boxSerializedSize,
     encodeTokenMint, encodeTokenAmount, deriveTokenId,

@@ -11,6 +11,7 @@ import lombok.experimental.Accessors;
 import rhizome.crypto.PrivateKey;
 import rhizome.crypto.PublicKey;
 import rhizome.crypto.SHA256Hash;
+import rhizome.crypto.SignatureScheme;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.transaction.dto.TransactionDto;
 
@@ -62,6 +63,23 @@ public final class TransactionImpl implements Transaction, Comparable<Transactio
 
     @Builder.Default
     private TransactionSignature signature = TransactionSignature.empty();
+
+    /**
+     * Which signature scheme authorises this transaction, and therefore how {@link #from} is
+     * derived from {@link #signingKey}. Defaults to Ed25519, so an ordinary transaction is
+     * unchanged. See {@link SignatureScheme} for why the discriminant exists before any
+     * post-quantum scheme is implemented.
+     */
+    @Builder.Default
+    private SignatureScheme scheme = SignatureScheme.ED25519;
+
+    /**
+     * 32-byte digest of the holder's future post-quantum public key, for a scheme that
+     * {@link SignatureScheme#commitsToPostQuantumKey() commits to one}; empty otherwise. It is not
+     * itself signed — it is folded into {@link #from}, which is in the signed preimage.
+     */
+    @Builder.Default
+    private byte[] pqCommitment = new byte[0];
 
     /** What the transaction does. TRANSFER (default) keeps existing behaviour. */
     @Builder.Default
@@ -123,6 +141,41 @@ public final class TransactionImpl implements Transaction, Comparable<Transactio
     public TransactionImpl gasPrice(long gasPrice) { this.gasPrice = gasPrice; invalidateContentHash(); return this; }
     public TransactionImpl data(byte[] data) { this.data = data; invalidateContentHash(); return this; }
     public TransactionImpl signature(TransactionSignature signature) { this.signature = signature; this.cachedFullHash = null; return this; }
+    // scheme/pqCommitment are not themselves in the preimage — they are bound through `from` (see
+    // hashContents) — but they change the derived sender address and the serialized size, so they
+    // invalidate the memos on the same principle as every other non-signature setter.
+    public TransactionImpl scheme(SignatureScheme scheme) { this.scheme = scheme; invalidateContentHash(); return this; }
+    public TransactionImpl pqCommitment(byte[] pqCommitment) { this.pqCommitment = pqCommitment == null ? new byte[0] : pqCommitment; invalidateContentHash(); return this; }
+
+    /**
+     * The address this transaction's public key actually derives under its declared scheme — the
+     * single place that recomputes a sender address, so consensus and mempool cannot drift apart on
+     * it. Returns {@link PublicAddress#empty()} rather than throwing when the scheme and commitment
+     * are inconsistent (possible on the JSON path and for in-memory builders, never for a
+     * wire-decoded transaction): callers use it in an equality check, and failing closed turns a
+     * malformed transaction into a clean rejection instead of an exception on a consensus path.
+     */
+    public PublicAddress derivedSenderAddress() {
+        try {
+            return PublicAddress.of(signingKey, scheme, pqCommitment);
+        } catch (IllegalArgumentException e) {
+            return PublicAddress.empty();
+        }
+    }
+
+    /**
+     * Whether {@link #from} is genuinely the address of {@link #signingKey} under {@link #scheme}.
+     *
+     * <p>This is the load-bearing check for scheme agility. Because {@code from} is in the signed
+     * preimage and the address folds in the scheme (as its version byte, and through the checksum),
+     * a signature transitively commits to the scheme and to any post-quantum commitment: an attacker
+     * who re-encodes a transaction under a different scheme changes the address recomputed here, and
+     * the transaction is rejected. That is why no separate scheme field appears in
+     * {@link #hashContents()} — and why one must not be added without revisiting this reasoning.
+     */
+    public boolean senderBindingValid() {
+        return derivedSenderAddress().equals(from);
+    }
 
     /**
      * Serialization
@@ -139,7 +192,8 @@ public final class TransactionImpl implements Transaction, Comparable<Transactio
      * the block-size cap wrong, so it is pinned by a test asserting equality for every kind.
      */
     public int sizeBytes() {
-        int size = TransactionDto.FIXED_SIZE + 1; // fixed transfer prefix + the kind byte
+        // Scheme-dependent: the authorisation fields are the variable-width part of the prefix.
+        int size = TransactionDto.fixedSize(scheme) + 1; // fixed transfer prefix + the kind byte
         if (kind != TransactionKind.TRANSFER) {
             // contract/box/token suffix: gasLimit(8) + gasPrice(8) + dataLen(4) + data
             size += Long.BYTES + Long.BYTES + Integer.BYTES + data.length;
@@ -186,6 +240,14 @@ public final class TransactionImpl implements Transaction, Comparable<Transactio
      * <p>Preimage: {@code to || from(if not coinbase) || fee || amount ||
      * timestamp || chainId || nonce} (integers big-endian). Chain-id and account
      * nonce are clean-chain additions for replay protection.
+     *
+     * <p><strong>Signature-scheme binding.</strong> The preimage carries no scheme field, and must
+     * not grow one: {@code from} is in it, and {@code from} is the address derived from the public
+     * key <em>under the scheme</em> (the scheme is the address version byte, and is covered by the
+     * address checksum). A signature therefore already commits to the scheme and to any
+     * post-quantum key commitment, provided {@link #senderBindingValid()} is enforced — which
+     * Executor pass 1 and MemPool admission both do. Adding the scheme to the preimage would be
+     * redundant and would change every existing txid for no security gain.
      */
     public SHA256Hash hashContents() {
         SHA256Hash cached = this.cachedContentHash;
@@ -252,6 +314,8 @@ public final class TransactionImpl implements Transaction, Comparable<Transactio
             kind == that.kind &&
             gasLimit == that.gasLimit &&
             gasPrice == that.gasPrice &&
+            scheme == that.scheme &&
+            Arrays.equals(this.pqCommitment, that.pqCommitment) &&
             Objects.equals(from, that.from) &&
             Objects.equals(to, that.to) &&
             Objects.equals(amount, that.amount) &&
@@ -264,6 +328,6 @@ public final class TransactionImpl implements Transaction, Comparable<Transactio
     @Override
     public int hashCode() {
         return Objects.hash(from, to, amount, isTransactionFee, timestamp, fee, chainId, nonce, signingKey,
-            signature, kind, gasLimit, gasPrice, Arrays.hashCode(data));
+            signature, kind, gasLimit, gasPrice, Arrays.hashCode(data), scheme, Arrays.hashCode(pqCommitment));
     }
 }

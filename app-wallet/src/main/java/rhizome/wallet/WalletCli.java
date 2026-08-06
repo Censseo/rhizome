@@ -494,11 +494,14 @@ public final class WalletCli {
      * Parses a recipient <em>wallet</em> address and enforces its 4-byte checksum: a mistyped but
      * well-formed address has no corresponding key, so value sent to it is unspendable forever
      * (audit M10). Contract/box/token addresses are hash-derived and carry no checksum, so the
-     * check applies only to version-0 (key-derived) addresses; {@code --force} sends anyway.
+     * check applies only to key-derived addresses — those whose version byte names a known
+     * {@link rhizome.crypto.SignatureScheme}, not just version 0, so a post-quantum-committed
+     * recipient is checked too; {@code --force} sends anyway.
      */
     private static PublicAddress checkedRecipient(String hex, String[] args) {
         PublicAddress addr = PublicAddress.of(hex);
-        if (addr.toBytes()[0] == 0 && !addr.isValidChecksum() && !hasFlag(args, "--force")) {
+        if (rhizome.crypto.SignatureScheme.isKnown(addr.version())
+            && !addr.isValidChecksum() && !hasFlag(args, "--force")) {
             throw new IllegalArgumentException("recipient address has an invalid checksum "
                 + "(likely a typo — funds would be unspendable); pass --force to send anyway");
         }

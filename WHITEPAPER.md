@@ -608,6 +608,95 @@ execution time, so every node validates a block with the parameters in force at 
 `GET /info` reports them, and a miner sets its vote with `RHIZOME_VOTE`. Only economic
 parameters are votable (not supply or the PoW) — governance over fees, not money.
 
+### 5.9 Post-quantum posture
+
+**Rhizome is not quantum-resistant, and does not claim to be.** Transactions are authorised by
+Ed25519, which Shor's algorithm breaks outright on a cryptographically relevant quantum computer
+(CRQC). This section states what is exposed, what is not, and what the chain does *today* so that
+a migration remains possible later.
+
+**What breaks.** Only the signature scheme. Every other cryptographic component is either already
+quantum-safe or degrades gracefully:
+
+| Component | Primitive | Under a CRQC |
+| --- | --- | --- |
+| Transaction authorisation | Ed25519 | **Broken** (Shor) |
+| Proof of work | Pufferfish2 → SHA-256 | Grover's quadratic speedup, largely consumed by error-correction overhead and the fact that Grover does not parallelise; memory-hardness penalises it further |
+| Merkle tree, txids, state root | SHA-256 | ~128-bit security |
+| Address body | RIPEMD-160 | ~80-bit preimage security |
+| Peer authentication | Bearer tokens (symmetric) | Unaffected |
+| Block authentication | Proof of work only — blocks are **not signed** | Unaffected |
+
+The blast radius inside the code is correspondingly small: there is exactly **one** signature
+verification site in production code (`TransactionImpl.signatureValid`). Rhizome has no validator
+keys, no signed peer handshake and no signed snapshots, so a scheme migration touches the
+transaction format and nothing else in consensus.
+
+**What the account model costs us.** Addresses are hashes of public keys, so an address that has
+never spent does not reveal its key. But Rhizome is account-based: the balance stays at the same
+address after a spend, and every transaction publishes `signingKey` on-chain permanently. **From
+its first outgoing transaction, an account is exposed forever.** This is structurally weaker than
+a UTXO chain, where value migrates to a fresh change address. There is no code fix for it; the
+mitigation is migrating before a CRQC exists.
+
+**Why we are not switching schemes now.** Signature agility is cheap; post-quantum signatures are
+not. Against the 4 MiB block cap and the 90-second target interval:
+
+| Scheme | Signature | Public key | Transaction | Tx/block | Tx/s |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Ed25519 (current) | 64 | 32 | 159 B | 25 000 | 277.8 |
+| FN-DSA-512 (FIPS 206, draft) | 666 | 897 | 1 626 B | 2 579 | 28.7 |
+| ML-DSA-44 (FIPS 204) | 2 420 | 1 312 | 3 795 B | 1 105 | 12.3 |
+| SLH-DSA-128s (FIPS 205) | 7 856 | 32 | 7 951 B | 527 | 5.9 |
+
+A migration costs a factor of 10 to 23 in throughput, and the binding constraint moves from
+`MAX_TRANSACTIONS_PER_BLOCK` to `MAX_BLOCK_SIZE_BYTES`. Meanwhile the threat is not imminent:
+digital signatures — unlike encryption — face no "harvest now, decrypt later" attack, since a
+signature only becomes forgeable *after* a CRQC exists. The regulatory clock is the nearer one:
+NIST IR 8547 deprecates elliptic-curve signatures after 2030 and disallows them after 2035.
+
+**What we do today: buy agility, not migration.** Three format decisions, each costing a byte or a
+hash, that would be a hard fork to retrofit once a live chain has frozen the wire format:
+
+1. **A signature-scheme discriminant.** One byte leads every transaction on the wire and selects
+   the signature/public-key widths (`SignatureScheme`). Widths are derived from the scheme, never
+   read from a length field, so a hostile transaction can pick a scheme but never an allocation
+   size. Codes `0x02..0x0F` are reserved for the NIST schemes; an unknown code is **rejected**, not
+   defaulted to Ed25519 — defaulting would read the following fields at the wrong widths and split
+   consensus.
+
+2. **A checksummed version byte in the address.** The same discriminant is the address's leading
+   byte, and the checksum covers it: `SHA256(SHA256(version ‖ body))[0:4]`. Covering only the body
+   — the original layout — would let one body validate under several version bytes, which becomes a
+   downgrade primitive the moment the byte means anything.
+
+3. **A post-quantum key pre-commitment.** Scheme `ED25519_PQC` (`0x01`) derives its address as
+   `RIPEMD160(SHA256(pubkey ‖ pqCommitment))`, where `pqCommitment` is a 32-byte digest of the
+   holder's chosen post-quantum public key. Spending still uses Ed25519, so the cost today is 32
+   bytes and one hash — no new cryptography. What it buys is a migration path: when a post-quantum
+   scheme activates, the holder reveals a key hashing to a commitment recorded *before* any quantum
+   adversary existed. This is Bitcoin's BIP-360 Pay-to-Merkle-Root idea reduced to the single
+   spending path Rhizome needs. The commitment's contents are deliberately unconstrained by
+   consensus — fixing the key format now would defeat the point of committing before it is chosen.
+
+**Why the signature already covers the scheme.** The signed preimage contains `from`; `from` is the
+address derived from the public key *under its scheme* (the scheme being the version byte, folded
+into the checksum); and both mempool admission and `Executor` pass 1 enforce that `from` really is
+that derived address. A signature therefore transitively commits to the scheme and to any
+post-quantum commitment: re-labelling a signed transaction under another scheme leaves the
+signature valid but changes the address recomputed from the key, and the transaction is rejected.
+**No scheme field belongs in the preimage** — adding one would change every existing txid for no
+security gain.
+
+**What is deliberately left undone.** No post-quantum signature scheme is implemented, and none
+should be until a scheme is chosen and its throughput cost is accepted at the network level via a
+coordinated activation height (the mechanism already used for `powUpgradeHeight` and
+`consensusV2Height`). Two problems have no answer in this design and are recorded as open:
+migrating accounts whose keys are *already* exposed needs a proof of knowledge of the old private
+key that a quantum adversary cannot front-run (zk-STARK approaches exist and are hash-based, hence
+themselves quantum-safe); and abandoned accounts cannot be migrated at all, because migration
+cannot be passive. Implementation security remains the nearer risk, and takes priority.
+
 ---
 
 ## 6. Networking and performance

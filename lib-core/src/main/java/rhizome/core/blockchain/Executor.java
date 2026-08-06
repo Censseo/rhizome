@@ -286,7 +286,7 @@ public final class Executor {
             if (!seenInBlock.add(id) || alreadyExecuted.test(id)) {
                 return EXPIRED_TRANSACTION;
             }
-            if (!PublicAddress.of(tx.signingKey()).equals(tx.from())) {
+            if (!tx.senderBindingValid()) {
                 return WALLET_SIGNATURE_MISMATCH;
             }
             if (verifier == null && !t.signatureValid()) {

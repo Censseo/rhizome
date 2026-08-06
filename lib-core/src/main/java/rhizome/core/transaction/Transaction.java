@@ -118,6 +118,14 @@ public sealed interface Transaction permits TransactionImpl {
 
     public Transaction sign(PrivateKey privateKey);
     public boolean signatureValid();
+
+    /**
+     * Whether {@code from} really is the address of {@code signingKey} under the declared signature
+     * scheme — see {@link TransactionImpl#senderBindingValid()}. Enforced identically by mempool
+     * admission and by consensus validation; the two must never diverge, which is why the derivation
+     * lives in one place rather than being open-coded at each call site.
+     */
+    public boolean senderBindingValid();
     public SHA256Hash hashContents();
     public SHA256Hash hash();
     public PublicAddress from();
@@ -150,6 +158,8 @@ public sealed interface Transaction permits TransactionImpl {
         static final String DATA = "data";
         static final String GAS_LIMIT = "gasLimit";
         static final String GAS_PRICE = "gasPrice";
+        static final String SIG_SCHEME = "sigScheme";
+        static final String PQ_COMMITMENT = "pqCommitment";
 
         static TransactionSerializer instance = new TransactionSerializer();
 
@@ -157,8 +167,10 @@ public sealed interface Transaction permits TransactionImpl {
         public TransactionDto serialize(Transaction transaction) {
             var transactionImpl = (TransactionImpl) transaction;
             return new TransactionDto(
+                transactionImpl.scheme(),
                 transactionImpl.signature(),
                 transactionImpl.signingKey(),
+                transactionImpl.pqCommitment(),
                 transactionImpl.timestamp(),
                 transactionImpl.to(),
                 transactionImpl.amount().amount(),
@@ -176,7 +188,14 @@ public sealed interface Transaction permits TransactionImpl {
         @Override
         public Transaction deserialize(TransactionDto transactionDto) {
             return TransactionImpl.builder()
-                .from(transactionDto.isTransactionFee ? PublicAddress.empty() : PublicAddress.of(transactionDto.signingKey))
+                // `from` is derived, never read off the wire: under scheme agility it is the only
+                // field that binds the public key, the scheme and the post-quantum commitment
+                // together, so deriving it here makes a binary-decoded transaction consistent by
+                // construction (the JSON path reads `from` and is checked by senderBindingValid).
+                .from(transactionDto.isTransactionFee ? PublicAddress.empty()
+                    : PublicAddress.of(transactionDto.signingKey, transactionDto.scheme, transactionDto.pqCommitment))
+                .scheme(transactionDto.scheme)
+                .pqCommitment(transactionDto.pqCommitment)
                 .to(transactionDto.to)
                 .amount(new TransactionAmount(transactionDto.amount))
                 .isTransactionFee(transactionDto.isTransactionFee)
@@ -216,6 +235,14 @@ public sealed interface Transaction permits TransactionImpl {
                 result.put(FROM, transactionImpl.from().toHexString());
                 result.put(SIGNING_KEY, transactionImpl.signingKey().toHexString());
                 result.put(SIGNATURE, transactionImpl.signature().toHexString());
+                // Emitted only when non-default, so the JSON of an ordinary Ed25519 transaction is
+                // byte-for-byte what it was before scheme agility existed and no API consumer
+                // (dashboard, explorer, wallet CLI) has to learn a new field to keep working.
+                if (transactionImpl.scheme() != rhizome.crypto.SignatureScheme.ED25519) {
+                    result.put(SIG_SCHEME, transactionImpl.scheme().name());
+                    result.put(PQ_COMMITMENT,
+                        rhizome.core.common.Utils.bytesToHex(transactionImpl.pqCommitment()));
+                }
             } else {
                 result.put(TXID, transactionImpl.hashContents().toHexString());
                 result.put(FROM, "");
@@ -251,14 +278,42 @@ public sealed interface Transaction permits TransactionImpl {
                 builder.amount(new TransactionAmount(json.getLong(AMOUNT)))
                     .isTransactionFee(true);
             } else {
+                // Scheme agility on the JSON path, with the same canonicality parity the payload cap
+                // gets (audit F5): an absent field means Ed25519, an unknown scheme name is rejected
+                // rather than defaulted, and the commitment width must match the scheme — otherwise a
+                // JSON-sourced transaction could name a shape a binary peer would have refused.
+                rhizome.crypto.SignatureScheme scheme = json.has(SIG_SCHEME)
+                    ? parseScheme(json.getString(SIG_SCHEME))
+                    : rhizome.crypto.SignatureScheme.ED25519;
+                byte[] commitment = rhizome.core.common.Utils.hexStringToByteArray(
+                    json.optString(PQ_COMMITMENT, ""));
+                if (commitment.length != scheme.commitmentBytes()) {
+                    throw new IllegalArgumentException(scheme + " requires a "
+                        + scheme.commitmentBytes() + "-byte post-quantum commitment, got " + commitment.length);
+                }
                 builder.from(PublicAddress.of(json.getString(FROM)))
                     .signature(TransactionSignature.of(json.getString(SIGNATURE)))
                     .amount(new TransactionAmount(json.getLong(AMOUNT)))
                     .isTransactionFee(false)
+                    .scheme(scheme)
+                    .pqCommitment(commitment)
                     .signingKey(PublicKey.of(json.getString(SIGNING_KEY)));
-            }   
+            }
             
             return builder.build();
+        }
+
+        /**
+         * Resolves a scheme name from JSON, failing closed on anything unrecognised.
+         * {@code valueOf} would throw {@link IllegalArgumentException} anyway; this wraps it so the
+         * message names the offending value the way the binary decoder's does.
+         */
+        private static rhizome.crypto.SignatureScheme parseScheme(String name) {
+            try {
+                return rhizome.crypto.SignatureScheme.valueOf(name);
+            } catch (IllegalArgumentException e) {
+                throw new IllegalArgumentException("unknown signature scheme: " + name, e);
+            }
         }
     }
 }

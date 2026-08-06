@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static rhizome.crypto.Crypto.generateKeyPair;
 
 import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters;
@@ -15,6 +16,7 @@ import rhizome.core.block.dto.BlockDto;
 import rhizome.crypto.PrivateKey;
 import rhizome.crypto.PublicKey;
 import rhizome.crypto.SHA256Hash;
+import rhizome.crypto.SignatureScheme;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.serialization.BinarySerializable;
 import rhizome.core.transaction.Transaction;
@@ -30,8 +32,24 @@ class BinaryCodecTest {
 
     @Test
     void fixedBufferSizes() {
-        assertEquals(64 + 32 + 8 + 25 + 8 + 8 + 1 + 4 + 8, TransactionDto.BUFFER_SIZE);
+        // scheme(1) + signature(64) + signingKey(32) + the scheme-independent common fields.
+        assertEquals(1 + 64 + 32 + 8 + 25 + 8 + 8 + 1 + 4 + 8, TransactionDto.FIXED_SIZE);
         assertEquals(4 + 8 + 4 + 4 + 32 + 32 + 32 + 32 + 4, BlockDto.BUFFER_SIZE); // + stateRoot(32) + vote(4)
+    }
+
+    /**
+     * The widest prefix must cover every implemented scheme, so buffer and request-body caps sized
+     * against it cannot under-allocate. Locks the derivation rather than a literal: adding a scheme
+     * with larger fields must move this bound automatically, not silently leave it stale.
+     */
+    @Test
+    void maxFixedSizeCoversEveryScheme() {
+        for (SignatureScheme scheme : SignatureScheme.values()) {
+            assertTrue(TransactionDto.fixedSize(scheme) <= TransactionDto.MAX_FIXED_SIZE,
+                scheme + " exceeds MAX_FIXED_SIZE");
+        }
+        assertEquals(1 + 64 + 32 + 32 + 8 + 25 + 8 + 8 + 1 + 4 + 8,
+            TransactionDto.fixedSize(SignatureScheme.ED25519_PQC));
     }
 
     @Test
@@ -45,7 +63,7 @@ class BinaryCodecTest {
         TransactionDto dto = t.serialize();
         byte[] bytes = dto.toBuffer();
         // A transfer is the fixed prefix plus the one-byte kind tag.
-        assertEquals(TransactionDto.BUFFER_SIZE + 1, bytes.length);
+        assertEquals(TransactionDto.FIXED_SIZE + 1, bytes.length);
 
         TransactionDto restored = BinarySerializable.fromBuffer(bytes, TransactionDto.class);
         assertArrayEquals(bytes, restored.toBuffer());
@@ -94,7 +112,7 @@ class BinaryCodecTest {
 
         // Wire round-trip: variable length, self-delimiting, byte-exact.
         byte[] bytes = t.serialize().toBuffer();
-        assertEquals(TransactionDto.BUFFER_SIZE + 1 + 8 + 8 + 4 + code.length, bytes.length);
+        assertEquals(TransactionDto.FIXED_SIZE + 1 + 8 + 8 + 4 + code.length, bytes.length);
         var restoredDto = BinarySerializable.fromBuffer(bytes, TransactionDto.class);
         var restored = (rhizome.core.transaction.TransactionImpl) Transaction.of(restoredDto);
         assertEquals(rhizome.core.transaction.TransactionKind.DEPLOY, restored.kind());
@@ -115,7 +133,7 @@ class BinaryCodecTest {
         Transaction coinbase = Transaction.of(PublicAddress.random(), new TransactionAmount(50_0000));
         TransactionDto dto = coinbase.serialize();
         byte[] bytes = dto.toBuffer();
-        assertEquals(TransactionDto.BUFFER_SIZE + 1, bytes.length);
+        assertEquals(TransactionDto.FIXED_SIZE + 1, bytes.length);
 
         TransactionDto restored = BinarySerializable.fromBuffer(bytes, TransactionDto.class);
         assertEquals(true, restored.isTransactionFee());
