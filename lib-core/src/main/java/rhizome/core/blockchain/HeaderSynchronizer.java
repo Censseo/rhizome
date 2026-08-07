@@ -13,6 +13,7 @@ import rhizome.core.block.BlockHeader;
 import rhizome.core.block.BlockImpl;
 import rhizome.core.common.Constants;
 import rhizome.core.mempool.ExecutionStatus;
+import rhizome.crypto.SHA256Hash;
 
 /**
  * Headers-first synchroniser. It subsumes {@link ChainSynchronizer}: before any
@@ -75,20 +76,27 @@ public final class HeaderSynchronizer {
         // look at a peer whose base work would win adoption — the two gates disagreeing produced a
         // stable partition after a healed split (audit 5th-pass, reorg-gate metric). peer.totalWork()
         // is self-reported but is an upper bound on the peer's base work, so skipping only when it
-        // cannot beat our base work never skips a peer the adoption gate would accept — and a peer that
-        // over-reports still can't force a pop/restore, which stays gated on validated base work.
-        if (peer.totalWork().compareTo(engine.baseWork()) <= 0) {
+        // cannot beat our base work never skips a peer the adoption gate would accept — and a peer
+        // that over-reports still can't force a pop/restore, which stays gated on validated base
+        // work. A STRICT skip (peerTotal < baseWork): a peer at exactly our base work may still win
+        // the adoption gate's deterministic tiebreak (equal base, equal total, smaller tip hash),
+        // so it must reach the gate, which re-checks everything cheaply on downloaded headers.
+        BigInteger peerTotal = peer.totalWork();
+        if (peerTotal.compareTo(engine.baseWork()) < 0) {
             return ChainSynchronizer.Result.NO_CHANGE;
         }
         try {
-            return headersFirstSync(peer);
+            // peerTotal is read ONCE per round and carried down: the tiebreak below compares it
+            // against our total, and a second HTTP read here could race our own chain advancing
+            // between the two calls. One read, one consistent decision (and no extra round-trip).
+            return headersFirstSync(peer, peerTotal);
         } catch (UnsupportedOperationException headersUnsupported) {
             // Older peer without /headers: fall back to the full-block path.
             return fallback.syncFrom(peer);
         }
     }
 
-    private ChainSynchronizer.Result headersFirstSync(PeerSource peer) {
+    private ChainSynchronizer.Result headersFirstSync(PeerSource peer, BigInteger peerTotal) {
         long forkHeight;
         try {
             forkHeight = findCommonAncestor(peer); // first call touches peer.headers → may fall back
@@ -96,6 +104,13 @@ public final class HeaderSynchronizer {
             throw headersUnsupported; // peer lacks /headers: let syncFrom fall back to full blocks
         } catch (LocalSaturationException e) {
             throw e; // local backpressure, not a peer fault: syncFrom maps it to NO_CHANGE
+        } catch (PeerUnavailableException e) {
+            // Transport failure while probing (e.g. the peer answered 503 because it is itself
+            // mid-reorg and has nothing coherent to serve): NOT invalid — the peer gave us no
+            // data to judge. Re-throw so the sync round logs it at DEBUG and retries next
+            // round, never a ban (testnet campaign S5: a transiently-truncated chain used to
+            // read as PEER_INVALID and eclipse an honest peer).
+            throw e;
         } catch (RuntimeException e) {
             // A peer that throws or returns an empty/garbage response while we probe for the common
             // ancestor is invalid, exactly like the fetch phases below — it must not propagate out of
@@ -133,12 +148,36 @@ public final class HeaderSynchronizer {
         if (!validated.valid()) {
             return ChainSynchronizer.Result.PEER_INVALID;
         }
-        if (validated.work().compareTo(localWorkAboveFork(forkHeight)) <= 0) {
+        int cmp = validated.work().compareTo(localWorkAboveFork(forkHeight));
+        if (cmp < 0) {
             // Claimed heavy, proved light: the branch is structurally valid (PoW/continuity/difficulty
             // all held) but not base-heavier, so it simply loses the fork race — NOT a protocol
             // violation. Returning PEER_INVALID here banned honest total-heavier/base-lighter peers on
             // the first strike, entrenching a split; NO_CHANGE leaves the peer connected (audit 5th-pass).
             return ChainSynchronizer.Result.NO_CHANGE;
+        }
+        if (cmp == 0) {
+            // A base-work TIE (the metastable-split scenario, testnet campaign S7): descend to phase 3
+            // only when there is an arbitration worth rendering. With a difficulty floor and
+            // synchronized miners, two branches can hold EXACTLY equal base work above the fork while
+            // differing only in real uncle work (2^difficulty per uncle, genuine PoW); the GHOST vote
+            // in phase 3 — the one place validated uncle work is authoritative — is the arbiter. So:
+            //  - unequal totals: descend when the peer's self-reported total (uncles included, an
+            //    upper bound) could win — the GHOST vote then confirms or restores on validated data;
+            //  - EQUAL totals: the asymmetry alone would leave the tie forever unbroken — measured in
+            //    the replay as two equal-rate mining camps stuck for hours, and once past finality the
+            //    loser could never rejoin at all. Break exact ties DETERMINISTICALLY instead: adopt the
+            //    branch whose tip hash is lexicographically smaller. Every node computes the same
+            //    verdict, so the camps converge in one round; the outcome cannot oscillate (the winner
+            //    is canonical everywhere afterwards), and only an exactly-equal branch — real PoW at
+            //    base parity — can force even this pop/restore, so M4's bar is unchanged.
+            int totalCmp = peerTotal.compareTo(engine.totalWork());
+            if (totalCmp < 0) {
+                return ChainSynchronizer.Result.NO_CHANGE;
+            }
+            if (totalCmp == 0 && !peerTipWinsTiebreak(branch, peer)) {
+                return ChainSynchronizer.Result.NO_CHANGE;
+            }
         }
 
         // The headers prove the peer is heavier, but if it has pruned the bodies we need there
@@ -231,6 +270,8 @@ public final class HeaderSynchronizer {
             throw e; // let syncFrom fall back to full-block sync
         } catch (LocalSaturationException e) {
             throw e; // local backpressure, not a peer fault: null would read as PEER_INVALID
+        } catch (PeerUnavailableException e) {
+            throw e; // transport failure: retried next round, never PEER_INVALID (see headersFirstSync)
         } catch (RuntimeException e) {
             return null;
         }
@@ -269,6 +310,11 @@ public final class HeaderSynchronizer {
                 } catch (ExecutionException e) {
                     if (e.getCause() instanceof LocalSaturationException saturated) {
                         throw saturated; // local backpressure, not a peer fault (see fetchHeaders)
+                    }
+                    if (e.getCause() instanceof PeerUnavailableException unavailable) {
+                        // Transport failure mid-body (the peer 503'd because it is itself
+                        // reorging): not invalid, retried next round — never a ban.
+                        throw unavailable;
                     }
                     return false; // transport/decode failure fetching this window (was a RuntimeException)
                 }
@@ -332,6 +378,7 @@ public final class HeaderSynchronizer {
         // by design).
         List<Block> localBranch = new ArrayList<>();
         BigInteger[] capturedTotal = new BigInteger[1];
+        SHA256Hash[] capturedTip = new SHA256Hash[1];
         boolean[] opened = new boolean[1];
         ChainSynchronizer.Result early;
         try {
@@ -349,6 +396,10 @@ public final class HeaderSynchronizer {
                 }
                 opened[0] = true;
                 capturedTotal[0] = engine.totalWork();
+                // The local tip is captured alongside the total: the phase-3 GHOST vote breaks an
+                // exact-total tie by comparing tip hashes, and it must compare the state as it was
+                // atomically with the pop, not a tip that the producer raced past.
+                capturedTip[0] = engine.tipHash();
                 for (long h = forkHeight + 1; h <= engine.height(); h++) {
                     localBranch.add(engine.blockAt(h));
                 }
@@ -371,7 +422,7 @@ public final class HeaderSynchronizer {
             return early;
         }
         try {
-            return applyAndAdopt(peer, forkHeight, branch, localBranch, capturedTotal[0]);
+            return applyAndAdopt(peer, forkHeight, branch, localBranch, capturedTotal[0], capturedTip[0]);
         } finally {
             engine.endReorgWindow();
         }
@@ -379,9 +430,32 @@ public final class HeaderSynchronizer {
 
     private ChainSynchronizer.Result applyAndAdopt(PeerSource peer, long forkHeight,
                                                    List<BlockHeader> branch, List<Block> localBranch,
-                                                   BigInteger localTotal) {
+                                                   BigInteger localTotal, SHA256Hash localTip) {
         // Phase 2 — fetch and apply the peer bodies. Network I/O, so deliberately OUTSIDE the lock.
-        boolean applied = applyBodies(peer, forkHeight, branch);
+        boolean applied;
+        try {
+            applied = applyBodies(peer, forkHeight, branch);
+        } catch (RuntimeException | Error abandoned) {
+            // applyBodies RE-THROWS the failures that are not the peer's protocol fault — local
+            // transport saturation, and (since the reorg-window 503) a peer that goes mid-reorg
+            // while we stream its bodies. Those escape phase 2 with the chain already popped to
+            // the fork and the local branch held only in this frame: without the restore below
+            // the node would keep a PARTIAL peer branch that never faced the phase-3 GHOST vote,
+            // and would silently drop its own branch — locally mined blocks no peer holds
+            // included — with no degraded marker to show for it. Put the chain back exactly as
+            // phase 1 found it, then let the failure propagate (retried next round, never a ban).
+            try {
+                engine.withConsistentView(() -> {
+                    restore(forkHeight, localBranch);
+                    return null;
+                });
+            } catch (RuntimeException | Error restoreFailure) {
+                // restore() already marked the engine degraded and logged; keep the original
+                // cause as the thrown one so the round still reads "unavailable, retry".
+                abandoned.addSuppressed(restoreFailure);
+            }
+            throw abandoned;
+        }
 
         // Phase 3 — adopt or restore, atomically so restore cannot race a producer/submit add.
         return engine.withConsistentView(() -> {
@@ -395,8 +469,14 @@ public final class HeaderSynchronizer {
             // here after the bodies applied, weights genuine uncle work: engine.totalWork() now folds in
             // each uncle addBlock proved eligible. Adopt only if the peer's uncle-inclusive total strictly
             // exceeds ours — a branch with more BASE work but a lighter subtree must not displace the
-            // heavier subtree. The uncle work counted here is validated, not the gate's claim, so no M4 lever.
-            if (engine.totalWork().compareTo(localTotal) <= 0) {
+            // heavier subtree. The uncle work counted here is validated, not the gate's claim, so no M4
+            // lever. An EXACT total tie — the metastable-camp case the gate already recognised — is
+            // decided by the same deterministic tip-hash tiebreak the gate applied (smaller hex wins),
+            // so the adopted side is the one every node agrees on; a liar whose validated total came
+            // out equal but whose tip loses is restored exactly as before.
+            int totalCmp = engine.totalWork().compareTo(localTotal);
+            if (totalCmp < 0 || (totalCmp == 0 && engine.tipHash().toHexString()
+                    .compareTo(localTip.toHexString()) >= 0)) {
                 restore(forkHeight, localBranch);
                 return ChainSynchronizer.Result.NO_CHANGE;
             }
@@ -447,5 +527,22 @@ public final class HeaderSynchronizer {
             work = work.add(BlockWork.of(engine.headerAt(h).difficulty()));
         }
         return work;
+    }
+
+    /**
+     * The deterministic tiebreak for an EXACT tie — equal base work above the fork AND equal
+     * uncle-inclusive totals: the branch whose tip hash is lexicographically smaller wins
+     * (testnet campaign S5/S7 replay: equal-rate mining camps held equal base AND equal totals
+     * for hours; the asymmetric total-only tiebreak never fired, and once past finality the
+     * loser could never rejoin). Every node computes the same verdict, so the camps converge in
+     * one round and the outcome cannot oscillate — the winner is canonical everywhere afterwards.
+     * Only applied when both branches reach the same height (the tie's own shape: equal base work
+     * above a constant-difficulty fork implies equal heights); otherwise the peer loses, keeping
+     * the gate's decision cheap and the comparison meaningful.
+     */
+    private boolean peerTipWinsTiebreak(List<BlockHeader> branch, PeerSource peer) {
+        BlockHeader branchTip = branch.get(branch.size() - 1);
+        return branchTip.id() == peer.height()
+            && branchTip.hash().toHexString().compareTo(engine.tipHash().toHexString()) < 0;
     }
 }

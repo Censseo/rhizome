@@ -35,8 +35,22 @@ function toast(message, isError) {
   setTimeout(() => t.remove(), isError ? 9000 : 5000);
 }
 
+// The chain routes answer 503 + Retry-After while a reorg window is open: the node's canonical
+// chain sits truncated at the fork height, so it has nothing coherent to serve. That is a normal
+// pause, not a failure — and no longer a rare one, since an equal-work tip race is now settled by
+// a deterministic reorg rather than left to the next block. Ride out one window before surfacing
+// it as an error. The wait is capped well under the header's value (meant for peers, which can
+// afford to wait a full round): a page that hangs for seconds is worse than one that says why.
+const REORG_RETRY_CAP_MS = 1500;
+
 async function api(path) {
-  const res = await fetch(path);
+  let res = await fetch(path);
+  if (res.status === 503) {
+    const after = parseInt(res.headers.get('Retry-After'), 10);
+    const waitMs = Math.min(Number.isFinite(after) ? after * 1000 : 500, REORG_RETRY_CAP_MS);
+    await new Promise(resolve => setTimeout(resolve, waitMs));
+    res = await fetch(path);
+  }
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(body.error || ('HTTP ' + res.status));
   return body;

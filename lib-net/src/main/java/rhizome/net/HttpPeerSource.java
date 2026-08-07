@@ -379,8 +379,13 @@ public final class HttpPeerSource implements PeerSource {
         }
     }
 
-    /** Signals a transport-level failure talking to the peer (distinct from a bad chain). */
-    public static final class PeerUnavailableException extends RuntimeException {
+    /**
+     * Signals a transport-level failure talking to the peer (distinct from a bad chain).
+     * Extends the lib-core type so the synchronizers — which must not depend on the HTTP
+     * transport — can re-throw it out of their phases as "unavailable, retry later"
+     * instead of mapping it to a ban-earning PEER_INVALID.
+     */
+    public static final class PeerUnavailableException extends rhizome.core.blockchain.PeerUnavailableException {
         public PeerUnavailableException(String message, Throwable cause) {
             super(message, cause);
         }

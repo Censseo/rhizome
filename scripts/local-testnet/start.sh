@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+# Lance le testnet local : N nœuds devnet (16 par défaut), 4 mineurs, anneau de peering.
+# Usage : start.sh                  tout le réseau
+#         start.sh -n <idx>         un seul nœud (redémarrage, cf. S6)
+#         start.sh -p <lo>-<hi>     une moitié isolée, seedée UNIQUEMENT en interne (S7)
+#         start.sh -n <idx> -p a-b  un nœud, seedé uniquement dans [a..b]
+set -euo pipefail
+source "$(dirname "$0")/common.sh"
+
+cd "$ROOT"
+
+single=-1
+part_lo=0
+part_hi=$((NODES - 1))
+while getopts "n:p:" opt; do
+  case "$opt" in
+    n) single=$OPTARG ;;
+    p) part_lo=${OPTARG%-*}; part_hi=${OPTARG#*-} ;;
+    *) echo "usage: $0 [-n <idx>] [-p <lo>-<hi>]" >&2; exit 2 ;;
+  esac
+done
+
+if (( part_lo < 0 || part_hi >= NODES || part_lo > part_hi )); then
+  echo "plage de partition hors borne: $part_lo-$part_hi (0..$((NODES - 1)))" >&2; exit 2
+fi
+
+# 1. Un seul build : les nœuds tournent via build/install (pas N daemons Gradle).
+ensure_jdk21
+if [[ ! -x "$NODE_BIN" || ! -x "$WALLET_BIN" ]]; then
+  ./gradlew :app-node:installDist :app-wallet:installDist
+fi
+
+mkdir -p "$BASE_DIR/logs" "$KEYS_DIR" "$PID_DIR"
+
+# Pré-vol : ne pas lancer N JVMs si un port est déjà pris, ni si la RAM ne suit pas
+# (mode -n : seulement le port du nœud concerné).
+check_ports_free "$single"
+if (( single < 0 )); then
+  check_memory
+fi
+
+# 2. Clés des mineurs (plaintext, non interactif) + adresses.
+declare -A MINER_ADDR
+for i in "${MINERS[@]}"; do
+  key="$KEYS_DIR/miner-$i.key"
+  if [[ ! -f "$key" ]]; then
+    "$WALLET_BIN" keygen "$key" --plaintext >/dev/null
+  fi
+  MINER_ADDR[$i]="$("$WALLET_BIN" address "$key")"
+done
+
+# 3. Lancement.
+#
+# setsid : le nœud doit survivre à la mort du shell qui le lance. Sans lui, un orchestrateur
+# (ou un simple Ctrl-C) qui tue le groupe de processus au premier plan emporte les nœuds avec
+# lui — c'est exactement ce qui a saboté le rejeu S7 de la campagne précédente. Le PID écrit
+# est celui du nœud lui-même (`exec` depuis un sous-shell qui s'annonce d'abord), pas celui
+# d'un wrapper : stop.sh peut donc signaler proprement.
+launch() {
+  local i=$1
+  local env_vars=(RHIZOME_NETWORK=devnet RHIZOME_PORT="$(node_port "$i")"
+    RHIZOME_DATA="$(data_dir "$i")" RHIZOME_ALLOW_PRIVATE_PEERS=true
+    APP_NODE_OPTS="-Xmx$NODE_HEAP")
+  if [[ -n "${MINER_ADDR[$i]:-}" ]]; then
+    env_vars+=(RHIZOME_MINER="${MINER_ADDR[$i]}")
+  fi
+  env_vars+=(RHIZOME_PEERS="$(node_seeds "$i" "$part_lo" "$part_hi")")
+  setsid bash -c 'echo $$ > "$1"; shift; exec env "$@"' _ \
+    "$(pid_file "$i")" "${env_vars[@]}" "$NODE_BIN" \
+    >> "$(log_file "$i")" 2>&1 &
+  # Laisse le sous-shell écrire son PID avant que stop.sh ne puisse le lire.
+  for _ in $(seq 1 20); do [[ -s "$(pid_file "$i")" ]] && break; sleep 0.1; done
+  printf 'node %d -> %s (%s, data %s, log %s)\n' \
+    "$i" "$(node_url "$i")" "$(is_miner "$i" && echo mineur || echo observateur)" \
+    "$(data_dir "$i")" "$(log_file "$i")"
+}
+
+if [[ "$single" -ge 0 ]]; then
+  if (( single >= NODES )); then
+    echo "index hors borne: $single (0..$((NODES - 1)))" >&2; exit 2
+  fi
+  launch "$single"
+  nodes=("$single")
+else
+  rm -f "$PID_DIR"/*.pid
+  nodes=($(seq "$part_lo" "$part_hi"))
+  for i in "${nodes[@]}"; do launch "$i"; done
+fi
+
+# 4. Attente que chaque nœud lancé réponde sur /stats (démarrage + sync). En mode -n ou -p,
+#    seuls les nœuds effectivement lancés sont vérifiés : les autres peuvent être
+#    volontairement down (partition S7).
+echo "attente de la convergence /stats ..."
+deadline=$((SECONDS + 180))
+for i in "${nodes[@]}"; do
+  while [[ -z "$(node_stats "$i")" && $SECONDS -lt $deadline ]]; do sleep 1; done
+  s="$(node_stats "$i")"
+  if [[ -z "$s" ]]; then
+    echo "ERREUR: node $i ne répond pas — voir $(log_file "$i")" >&2
+    exit 1
+  fi
+  echo "node $i up: hauteur $(json_get "$s" height), pairs $(json_get "$s" peers)"
+done
+
+if (( part_lo != 0 || part_hi != NODES - 1 )); then
+  echo "moitié $part_lo-$part_hi lancée (isolée : seeds internes uniquement)."
+else
+  echo "testnet lancé ($NODES nœuds, ports $BASE_PORT..$((BASE_PORT + NODES - 1)), tas $NODE_HEAP/nœud)."
+  echo "mineurs: ${MINERS[*]}"
+fi
+echo "status.sh pour l'état, stop.sh pour arrêter, monitor.sh pour la supervision."

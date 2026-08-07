@@ -235,15 +235,18 @@ public final class NodeApi {
             // ---- dashboard/explorer API ----
             .with(GET, "/stats", req -> offload(blocking, () -> DashboardApi.stats(node)))
             .with(GET, "/features", req -> guarded(() -> DashboardApi.features(node, sse)))
-            .with(GET, "/blocks", req -> offload(blocking, () -> ExplorerApi.blocks(node, req)))
-            .with(GET, "/block", req -> offload(blocking, () -> ExplorerApi.block(node, req)))
+            .with(GET, "/blocks", req -> offload(blocking, () -> whenNotReorging(node, () -> ExplorerApi.blocks(node, req))))
+            .with(GET, "/block", req -> offload(blocking, () -> whenNotReorging(node, () -> ExplorerApi.block(node, req))))
             .with(GET, "/transaction", req -> offload(blocking, () -> ExplorerApi.findTransaction(node, req)))
             .with(GET, "/address_txs", req -> offload(blocking, () -> ExplorerApi.addressTransactions(node, req)))
             .with(GET, "/contract", req -> offload(blocking, () -> ExplorerApi.contractInfo(node, req)))
             .with(GET, "/wallet", req -> offload(blocking, () -> ExplorerApi.wallet(node, req)))
             // ---- chain scalars ----
-            .with(GET, "/block_count", req -> ok(text(String.valueOf(node.blockCount()))))
-            .with(GET, "/total_work", req -> ok(json(new JSONObject().put("totalWork", node.totalWork().toString()))))
+            // /block_count and /total_work are what peers read first in a sync round; during a
+            // reorg window they answer 503 like the other chain routes so a peer never sees the
+            // "height before the pop, headers after it" inconsistency (testnet campaign S5).
+            .with(GET, "/block_count", req -> ok(whenNotReorging(node, () -> text(String.valueOf(node.blockCount())))))
+            .with(GET, "/total_work", req -> ok(whenNotReorging(node, () -> json(new JSONObject().put("totalWork", node.totalWork().toString())))))
             .with(GET, "/difficulty", req -> ok(text(String.valueOf(node.difficulty()))))
             .with(GET, "/mempool", req -> ok(json(new JSONObject().put("size", node.mempoolSize()))))
             .with(GET, "/info", req -> ok(json(new JSONObject()
@@ -407,6 +410,23 @@ public final class NodeApi {
     }
 
     // ---- middleware: cost model, budgets and the browser guard ----
+
+    /**
+     * Reorg-window gate for the chain-serving routes (/blocks, /block, /block_count,
+     * /total_work — plus /sync and /headers in {@link SyncApi}): while the node's canonical
+     * chain sits truncated at a fork height it must not serve the chain as authoritative —
+     * the same doctrine the write side already enforces (beginReorgWindow → new-tip addBlock
+     * fails IS_SYNCING). A peer reads these routes during a reorg window and gets a
+     * transport failure (retried, never penalized) instead of a truncated view it could
+     * misread as a protocol violation and ban the node for (testnet campaign S5).
+     */
+    private static HttpResponse whenNotReorging(NodeService node,
+                                                java.util.function.Supplier<HttpResponse> serve) {
+        if (node.isReorgInProgress()) {
+            return SyncApi.busyDuringReorg();
+        }
+        return serve.get();
+    }
 
     /**
      * Runs a consensus-heavy handler on the bounded worker pool (when wired) instead of the

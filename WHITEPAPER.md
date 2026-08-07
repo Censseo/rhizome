@@ -205,8 +205,33 @@ content-hash deduplication.
 ### 3.7 Fork choice and finality
 
 Fork choice is objective: a peer's chain is adopted **only if its cumulative work is
-strictly greater** (2^difficulty per block, summed as `BigInteger`). Pandanite forked
-repeatedly for lack of such a rule.
+strictly greater** (2^difficulty per block, summed as `BigInteger`), with one explicit
+tiebreak for the case "strictly greater" cannot decide. Pandanite forked repeatedly for
+lack of such a rule.
+
+**Deterministic tiebreak on an exact tie.** Strict comparison alone leaves an *exact* tie —
+equal base work above the fork **and** equal uncle-inclusive totals — permanently unresolved,
+because both sides refuse to move. That is not a corner case: two branches at the same height
+and difficulty tie by construction, so every ordinary one-block race between miners is one,
+and with a difficulty floor two equal-rate camps can hold the tie indefinitely (measured in
+the local-testnet campaign: camps split for hours, and past the finality window the loser
+could never rejoin at all). On an exact tie the branch whose **tip hash is lexicographically
+smaller** wins. Every node computes the same verdict from data both already hold, so the camps
+converge in a single round and the outcome cannot oscillate — the winner is canonical
+everywhere afterwards, and a re-sync is a quiet no-op. Two consequences are deliberate:
+
+- The tiebreak is applied at the header gate on the peer's *self-reported* total and again,
+  authoritatively, after the bodies apply, on *validated* work — so it never widens what a
+  lying peer can force. Only a branch that is exactly equal on real PoW reaches it, which is
+  the same bar as the base-work gate itself.
+- It costs a reorg on the losing side of every tie, including one the node itself just mined.
+  That is the price of converging in one round instead of waiting for the next block to break
+  the tie, and it is bounded: a tie is depth-1 in the common case, and the replaced blocks are
+  kept as orphans, so their work is still credited through GHOST (§9).
+
+The tiebreak only fires when both branches are fully in view — the peer's branch must reach
+its advertised height within the header window (20 000 blocks). A tie deeper than that window
+is left unbroken rather than decided on a truncated view.
 
 Synchronisation is hardened against hostile peers:
 
@@ -226,7 +251,17 @@ Synchronisation is hardened against hostile peers:
   a lost fork race, not a protocol violation, so the peer is left connected rather than
   banned.
 - **Restore on failure** — if the stateful apply still fails, the local chain is
-  restored exactly.
+  restored exactly. "Fails" includes *abandoning*: the body download runs inside the reorg
+  window, so a peer that becomes unavailable mid-stream (see below) leaves the chain popped
+  to the fork with only a partial peer branch applied. That path restores too, before the
+  failure propagates — otherwise a transport hiccup would silently drop the node's own
+  branch, locally mined blocks included.
+- **A reorging node serves no chain** — while its window is open a node answers `503`
+  + `Retry-After` on the chain routes instead of a truncated view, and a peer reads that as
+  *unavailable, retry* rather than as a protocol violation. Transport failures never earn ban
+  score; only protocol violations do. Nor does a too-deep reorg: a branch past the finality
+  window is a fork, not misbehaviour, and scoring it locked forked camps into a renewed
+  mutual ban that prevented the natural heal.
 
 ---
 

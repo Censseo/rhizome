@@ -818,15 +818,49 @@ public final class NodeService {
     }
 
     /**
-     * True while a reorg window is open (pop → body-apply → restore): the node serves the
-     * pre-reorg tip and block production pauses. Surfaced on /stats so an operator can tell
-     * a normal reorg pause from a degraded node.
+     * True while a reorg window is open (pop → body-apply → restore): the node's canonical
+     * chain sits truncated at the fork height, so it must not serve the chain to peers as
+     * authoritative — the peer sync endpoints answer 503 (Retry-After) for the window — and
+     * block production pauses. Surfaced on /stats so an operator can tell a normal reorg
+     * pause from a degraded node.
      */
     public boolean isReorgInProgress() {
         return engine.isReorgInProgress();
     }
     public java.math.BigInteger totalWork() {
         return engine.totalWork();
+    }
+
+    /**
+     * Per-round sync observability: how many peers the round knew of, how many it actually
+     * tried, how many it skipped because they are banned, how many consecutive rounds made no
+     * progress AT ALL — no sync extension AND no height advance (a gossip-fed healthy node
+     * legitimately idle-syncs its rounds, so only a node whose chain is frozen AND whose sync
+     * does nothing climbs this counter) — and whether the round had no usable sync source at
+     * all. Surfaced on /stats so a wedged or eclipsed node is visible in seconds instead of
+     * reading logs (testnet campaign S5: a node kept 9 healthy peers while syncing from none,
+     * with no log line and no degraded marker).
+     *
+     * <p>{@code eclipsed} is a first-class field rather than something to infer from the two
+     * peer counts: bans EVICT (PeerRegistry.penalize), so the real eclipse is usually
+     * {@code peersKnown == 0}, which no combination of "tried vs skipped" distinguishes from a
+     * node that simply has not discovered anyone yet on its first round.
+     */
+    public record SyncHealth(int peersKnown, int peersTried, int peersSkippedBanned,
+                             long roundsWithoutProgress, boolean eclipsed) {}
+
+    private volatile SyncHealth syncHealth = new SyncHealth(0, 0, 0, 0, false);
+
+    /** Records the counters of one just-finished sync round (written by the sync loop). */
+    public void recordSyncRound(int peersKnown, int peersTried, int peersSkippedBanned,
+                                long roundsWithoutProgress, boolean eclipsed) {
+        syncHealth = new SyncHealth(peersKnown, peersTried, peersSkippedBanned,
+            roundsWithoutProgress, eclipsed);
+    }
+
+    /** The last sync round's counters (never null; zeros before the first round). */
+    public SyncHealth syncHealth() {
+        return syncHealth;
     }
 
     public int difficulty() {

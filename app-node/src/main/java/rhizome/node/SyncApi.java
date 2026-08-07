@@ -17,12 +17,32 @@ import static rhizome.node.ApiResponses.parseLong;
 /**
  * Peer-facing sync endpoints: streamed block and header windows plus the
  * materialised state-snapshot advertisement and chunk download (snap sync).
+ *
+ * <p><b>Reorg window semantics:</b> while the node's canonical chain sits truncated at a
+ * fork height (non-atomic reorg, pop → body-apply → restore), the chain-serving endpoints
+ * answer 503 + Retry-After instead of serving a truncated view. A peer that read a height
+ * just before the pop would otherwise fetch an empty / gapped window after it and read the
+ * transient truncation as a protocol violation (PEER_INVALID → ban, testnet campaign S5).
+ * A non-200 response is a transport failure on the caller's side — retried, never penalized —
+ * and mirrors the write-side doctrine: beginReorgWindow already refuses new-tip addBlock
+ * (IS_SYNCING) for the same window, because a node mid-reorg must not act authoritative.
  */
 final class SyncApi {
 
     private SyncApi() {}
 
+    /** 503 for the reorg window: the node has nothing coherent to serve right now. */
+    static HttpResponse busyDuringReorg() {
+        return HttpResponse.ofCode(503)
+            .withHeader(HttpHeaders.RETRY_AFTER, "5")
+            .withJson(new JSONObject().put("error", "reorg in progress; retry shortly").toString())
+            .build();
+    }
+
     static HttpResponse sync(NodeService node, HttpRequest req) {
+        if (node.isReorgInProgress()) {
+            return busyDuringReorg();
+        }
         long start = parseLong(req.getQueryParameter("start"));
         long end = parseLong(req.getQueryParameter("end"));
         if (start < 1 || end < start) {
@@ -67,6 +87,9 @@ final class SyncApi {
      * {@code BLOCK_HEADERS_PER_FETCH}.
      */
     static HttpResponse headers(NodeService node, HttpRequest req) {
+        if (node.isReorgInProgress()) {
+            return busyDuringReorg();
+        }
         long start = parseLong(req.getQueryParameter("start"));
         long end = parseLong(req.getQueryParameter("end"));
         if (start < 1 || end < start) {

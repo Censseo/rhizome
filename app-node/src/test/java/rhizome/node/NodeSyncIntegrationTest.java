@@ -25,6 +25,7 @@ import rhizome.core.blockchain.HeaderSynchronizer;
 import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
+import rhizome.core.blockchain.ReorgWindowTestAccess;
 import rhizome.core.blockchain.SignatureVerifier;
 import rhizome.crypto.PowAlgorithm;
 import rhizome.core.ledger.InMemoryLedger;
@@ -47,6 +48,8 @@ class NodeSyncIntegrationTest {
     private Thread eventloopThread;
     private HttpServer server;
     private int port;
+    /** The serving engine, kept so tests can drive the (package-private) reorg window. */
+    private ChainEngine servingEngine;
 
     private static ChainEngine newEngine() {
         LedgerSnapshot snapshot = new LedgerSnapshot("test", 0, PARAMS.chainId());
@@ -74,6 +77,7 @@ class NodeSyncIntegrationTest {
         // Peer node with a mined chain, served over HTTP.
         ChainEngine peerEngine = newEngine();
         mine(peerEngine, PublicAddress.random(), new AtomicLong(0), 5);
+        servingEngine = peerEngine;
         var verifier = new SignatureVerifier();
         MemPool mempool = new MemPool(PARAMS, verifier, peerEngine, 1000);
         var node = new NodeService(peerEngine, mempool);
@@ -143,5 +147,45 @@ class NodeSyncIntegrationTest {
         }
         // Range is clamped to the tip, so an over-reaching request just returns what exists.
         assertEquals(6, peer.headers(1, 999).size());
+    }
+
+    @Test
+    void aReorgingPeerServes503AndReadsAsUnavailableNotInvalid() {
+        // Testnet campaign S5: a node mid-reorg sits truncated at the fork height. A peer that
+        // reads height() just before the pop and headers() just after would see a transiently
+        // empty / gapped chain and ban it for "serving an invalid chain" — one strike on the
+        // old PENALTY_INVALID = BAN_THRESHOLD eclipsed a healthy node for an hour. The chain
+        // endpoints answer 503 + Retry-After for the window, which the caller's transport maps
+        // to PeerUnavailableException: retried next round, never a ban.
+        try {
+            assertTrue(ReorgWindowTestAccess.begin(servingEngine), "reorg window opens");
+
+            var peer = new HttpPeerSource("http://localhost:" + port);
+            try {
+                peer.height();
+                org.junit.jupiter.api.Assertions.fail("/block_count must 503 during a reorg window");
+            } catch (HttpPeerSource.PeerUnavailableException expected) {
+                // 503 → transport failure, as designed.
+            }
+            try {
+                peer.headers(1, 6);
+                org.junit.jupiter.api.Assertions.fail("/headers must 503 during a reorg window");
+            } catch (HttpPeerSource.PeerUnavailableException expected) {
+                // 503 → transport failure, as designed.
+            }
+
+            // A fresh node syncing from the reorging peer must get the transport failure, NOT a
+            // ban-earning PEER_INVALID verdict (the whole point of the 503 gate).
+            ChainEngine local = newEngine();
+            try {
+                new HeaderSynchronizer(local).syncFrom(peer);
+                org.junit.jupiter.api.Assertions.fail("sync from a reorging peer must be unavailable");
+            } catch (HttpPeerSource.PeerUnavailableException expected) {
+                // Retried next round; no ban score was earned.
+            }
+            assertEquals(1, local.height(), "nothing applied from an unavailable peer");
+        } finally {
+            ReorgWindowTestAccess.end(servingEngine); // never leave the window open for the next test
+        }
     }
 }

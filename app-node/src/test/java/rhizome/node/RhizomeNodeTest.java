@@ -45,10 +45,11 @@ class RhizomeNodeTest {
     void aHostThatNeverSpokeTheProtocolIsDroppedNotBanned() throws Exception {
         // Ban by proxy (audit B-3): on an open node /add_peer is unauthenticated, so an attacker
         // could enqueue ANY public host. An ordinary web server answering 200 to everything makes
-        // /block_count unparseable — worth a full 100-point penalty, i.e. an immediate 1 h ban of
-        // that host's IP, renewable for as long as the attacker keeps re-adding it. The victim's
-        // own honest node would then be refused by this one. A host that never completed a
-        // protocol exchange is a wrong address, not a misbehaving peer: drop it, never ban it.
+        // /block_count unparseable — worth a full protocol-violation penalty (PENALTY_INVALID,
+        // three strikes before a ban) renewable for as long as the attacker keeps re-adding it.
+        // The victim's own honest node would then be refused by this one. A host that never
+        // completed a protocol exchange is a wrong address, not a misbehaving peer: drop it,
+        // never ban it.
         var victim = com.sun.net.httpserver.HttpServer.create(
             new java.net.InetSocketAddress("127.0.0.1", 0), 0);
         victim.createContext("/", exchange -> {
@@ -124,6 +125,115 @@ class RhizomeNodeTest {
                 assertTrue(nodeB.engine().height() >= 5, "B should catch up to A");
                 assertEquals(nodeA.engine().blockAt(nodeB.engine().height()).hash(),
                     nodeB.engine().tipHash());
+            }
+        }
+    }
+
+    @Test
+    void allPeersBannedIsObservedAsAnEclipsedSync() throws Exception {
+        // Testnet campaign S5: a node whose every known peer is banned keeps a full-height
+        // silence (no log line, no degraded marker) while syncing from none of them. The sync
+        // round must surface that state — peersSkippedBanned == all peers, rounds-without-
+        // progress climbing, and the eclipsed flag set — so /stats shows it in seconds.
+        NodeConfig config = NodeConfig.defaults(FAST, tempDir.resolve("eclipsed").toString(), freePort())
+            .withAllowPrivatePeers(true);
+        try (RhizomeNode node = new RhizomeNode(config)) {
+            node.start();
+            // A peer admitted and then banned OUTRIGHT (banList.ban, not penalize): this is the
+            // registry-keeps-it shape, where the round can still see it and skip it. The other
+            // shape — penalize, which evicts — is covered by noPeerAtAllIsAlsoAnEclipse below.
+            String peerUrl = "http://127.0.0.1:9";
+            node.service().addPeer(peerUrl); // admission runs off-loop (DNS)
+            long deadline = System.currentTimeMillis() + 10_000;
+            while (!node.knownPeers().contains(peerUrl) && System.currentTimeMillis() < deadline) {
+                Thread.sleep(20);
+            }
+            assertTrue(node.knownPeers().contains(peerUrl), "peer admitted");
+            node.banList().ban(peerUrl);
+
+            node.syncRound();
+
+            assertEquals(1, node.service().syncHealth().peersKnown());
+            assertEquals(0, node.service().syncHealth().peersTried(),
+                "the banned peer must not be tried");
+            assertEquals(1, node.service().syncHealth().peersSkippedBanned(),
+                "the banned peer must be counted as skipped");
+            assertTrue(node.service().syncHealth().eclipsed(),
+                "every known peer banned is an eclipse");
+            assertEquals(0, node.service().syncHealth().roundsWithoutProgress(),
+                "the first round is the stall baseline (nothing to compare against)");
+
+            node.syncRound();
+            node.syncRound();
+            assertTrue(node.service().syncHealth().roundsWithoutProgress() >= 2,
+                "an eclipsed round must keep accumulating the stall counter");
+        }
+    }
+
+    @Test
+    void noPeerAtAllIsAlsoAnEclipse() throws Exception {
+        // Review follow-up: an EMPTY registry is the shape the eclipse actually takes, because
+        // PeerRegistry.penalize evicts on ban — "every peer banned" collapses to "no peer left",
+        // not to a registry full of banned entries. The round used to return before publishing
+        // anything in that state, so /stats froze on the previous round's numbers and no WARN
+        // ever fired: the metric was blind in exactly the case it exists for.
+        NodeConfig config = NodeConfig.defaults(FAST, tempDir.resolve("no-peers").toString(), freePort());
+        try (RhizomeNode node = new RhizomeNode(config)) {
+            node.start();
+            assertTrue(node.knownPeers().isEmpty(), "no peer configured");
+
+            node.syncRound();
+            node.syncRound();
+
+            var health = node.service().syncHealth();
+            assertEquals(0, health.peersKnown());
+            assertEquals(0, health.peersTried());
+            assertTrue(health.eclipsed(), "a round with no sync source at all is an eclipse");
+            assertTrue(health.roundsWithoutProgress() >= 1,
+                "the stall counter must climb with no peer to sync from");
+        }
+    }
+
+    @Test
+    void aDeepForkedPeerIsRefusedButNeverBanned() throws Exception {
+        // Testnet campaign replay defect: a branch past the reorg horizon is not misbehaviour,
+        // yet REORG_TOO_DEEP used to accumulate +25/strike — four rounds earned a 1 h ban,
+        // renewed hourly, so two forked camps locked each other out permanently and the
+        // natural heal (one camp out-pacing the other) could never happen. A deep-forked peer
+        // must stay connected and unbanned: the verdict is refused, the peer is retried later.
+        //
+        // The finality window is shrunk to 8 for the test: the rule under test is "a fork DEEPER
+        // than maxReorgDepth earns no ban", which 12 mined blocks prove exactly as well as the
+        // 270 the production 120-block window would need — at a twentieth of the wall clock.
+        NetworkParameters shallowFinality = FAST.toBuilder().maxReorgDepth(8).build();
+        int portA = freePort();
+        NodeConfig configA = NodeConfig.defaults(shallowFinality, tempDir.resolve("deepfork-a").toString(), portA)
+            .withMiner(PublicAddress.random()).withBlockIntervalMs(30);
+        try (RhizomeNode nodeA = new RhizomeNode(configA)) {
+            nodeA.start();
+            awaitHeight(nodeA, 14, 30_000);
+
+            int portB = freePort();
+            NodeConfig configB = NodeConfig.defaults(shallowFinality, tempDir.resolve("deepfork-b").toString(), portB)
+                .withMiner(PublicAddress.random()).withBlockIntervalMs(30)
+                .withPeers(java.util.List.of("http://localhost:" + portA));
+            try (RhizomeNode nodeB = new RhizomeNode(configB)) {
+                nodeB.start();
+                // B mines its OWN branch from genesis (different miner than A, and A never
+                // learns of B to gossip into it): when B syncs, the two chains share only
+                // genesis, and B's fork depth is past maxReorgDepth by construction.
+                awaitHeight(nodeB, 12, 30_000);
+                long heightB = nodeB.engine().height();
+                assertTrue(heightB - 1 > shallowFinality.maxReorgDepth(), "the fork must be past finality");
+
+                nodeB.syncRound();
+
+                assertEquals(heightB, nodeB.engine().height(),
+                    "nothing adopted from a branch past finality");
+                assertFalse(nodeB.banList().isBanned("http://localhost:" + portA),
+                    "a deep-forked peer is not misbehaving: it must never be banned");
+                assertTrue(nodeB.knownPeers().contains("http://localhost:" + portA),
+                    "the deep-forked peer stays in the registry");
             }
         }
     }

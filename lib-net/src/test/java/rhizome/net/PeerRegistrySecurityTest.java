@@ -56,17 +56,22 @@ class PeerRegistrySecurityTest {
     }
 
     @Test
-    void removalCooldownIsKeyedByHostNotFullUrl() {
+    void removalCooldownIsKeyedByEndpointNotFullUrl() {
         // The cooldown used to key on the full canonical URL, so a removed peer dodged it by
-        // rotating its port or path. It is now keyed by host, like the ban list (audit follow-up).
+        // rotating its path; it is now keyed by endpoint (host + port), like the ban list — a
+        // PATH rotation cannot dodge it, while a sibling PORT on a shared host stays clear
+        // (testnet campaign S5: one node's failure must not lock out its siblings, the same
+        // port-scoping PeerBanList applies).
         java.util.concurrent.atomic.AtomicLong clock = new java.util.concurrent.atomic.AtomicLong(0);
         var reg = new PeerRegistry("http://self:3000", 500, null, false, clock::get);
         assertTrue(reg.add("http://93.184.216.34:3000"));
         reg.remove("http://93.184.216.34:3000");
-        assertFalse(reg.add("http://93.184.216.34:4000"), "port rotation must not dodge the cooldown");
+        assertFalse(reg.add("http://93.184.216.34:3000"), "same endpoint must cool down");
         assertFalse(reg.add("http://93.184.216.34:3000/node"), "path rotation must not dodge the cooldown");
+        assertTrue(reg.add("http://93.184.216.34:4000"), "a sibling port is a different endpoint");
+        reg.remove("http://93.184.216.34:4000");
         clock.set(6 * 60_000L); // past the 5-minute cooldown
-        assertTrue(reg.add("http://93.184.216.34:4000"), "cooldown lapsed: eligible again");
+        assertTrue(reg.add("http://93.184.216.34:3000"), "cooldown lapsed: eligible again");
     }
 
     @Test
@@ -79,9 +84,10 @@ class PeerRegistrySecurityTest {
         }
         assertFalse(reg.add("http://93.184.216.34:5000"), "bucket full");
         reg.remove("http://93.184.216.34:4000");
-        // The freed slot goes to a DIFFERENT host in the same /16: the removed host itself is
-        // under the (now host-keyed) removal cooldown — port rotation no longer dodges it.
-        assertFalse(reg.add("http://93.184.216.34:5000"), "same host cools down (host-keyed)");
+        // The removed endpoint itself is under the (now endpoint-keyed) removal cooldown — but
+        // a DIFFERENT host in the same /16 takes the freed slot (the sibling-port rejoin after
+        // its own removal is exercised by removalCooldownIsKeyedByEndpointNotFullUrl).
+        assertFalse(reg.add("http://93.184.216.34:4000"), "same endpoint cools down");
         assertTrue(reg.add("http://93.184.0.1:5000"), "removal must free the bucket slot");
     }
 

@@ -16,9 +16,13 @@ import rhizome.crypto.SHA256Hash;
  * id continuity, hash chaining, proof-of-work, the difficulty recomputed from
  * header timestamps ({@link DifficultyAdjustment}), the median-time-past and
  * min-block-time rules, the future bound, and structural uncle limits. The
- * cumulative work (each header's {@code 2^difficulty} plus its committed uncle
- * difficulties) is returned so the synchronizer can compare branches by proven
- * PoW before downloading a single body.
+ * returned cumulative work is each header's {@code 2^difficulty} — BASE work
+ * only, deliberately excluding the committed uncle difficulties: uncle refs
+ * cannot be confirmed as real, pooled, eligible orphans until the bodies arrive,
+ * so folding their claimed work into the gate would let a cheap branch inflate
+ * its proof ~maxUnclesPerBlock× and force a pop/restore on every node (audit M4).
+ * Genuine uncle work still decides fork choice authoritatively in the
+ * synchronizer's phase-3 GHOST vote, after the bodies validated every ref.
  *
  * <p>What is <b>not</b> checked here — and must wait for the bodies in BODY_SYNC —
  * is uncle <em>eligibility</em> (that a referenced uncle is a real, recent,

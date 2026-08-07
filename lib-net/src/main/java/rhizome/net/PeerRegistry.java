@@ -68,9 +68,12 @@ public final class PeerRegistry {
     private final Map<String, Integer> subnetCounts = new ConcurrentHashMap<>();
     /**
      * Recently removed (failed / evicted) discovered peers, with the earliest re-admission
-     * time. Keyed by HOST (not the full canonical URL), so a removed peer cannot dodge the
-     * window by rotating its port or path. Bounded LRU; a peer dropped for repeated failures
-     * cannot be instantly re-added via PEX to squat its bucket slot again (audit F5).
+     * time. Keyed by ENDPOINT (host + port), so a removed peer cannot dodge the window by
+     * rotating its path while a collision on a shared host (all testnet peers on
+     * {@code localhost}) does not make one peer's failure lock out its siblings — the same
+     * port-scoping PeerBanList applies to its ban keys (testnet campaign S5). Bounded LRU;
+     * a peer dropped for repeated failures cannot be instantly re-added via PEX to squat its
+     * bucket slot again (audit F5).
      */
     private final Map<String, Long> removalCooldowns = Collections.synchronizedMap(
         new LinkedHashMap<String, Long>(64, 0.75f, false) {
@@ -150,14 +153,16 @@ public final class PeerRegistry {
         }
         String host = hostOf(u);
         // A peer recently removed as failed/evicted is refused re-admission for a short window,
-        // so it cannot flap straight back into its bucket slot (audit F5). Keyed by HOST: a
-        // full-URL key was dodgeable by rotating the port or path (audit follow-up).
-        Long cooldownUntil = removalCooldowns.get(host);
+        // so it cannot flap straight back into its bucket slot (audit F5). Keyed by ENDPOINT
+        // (host + port): a full-URL key was dodgeable by rotating the port or path, and a
+        // bare-host key let one peer's failure lock out sibling ports on a shared host
+        // (audit follow-up; testnet campaign S5 — same port-scoping as PeerBanList).
+        Long cooldownUntil = removalCooldowns.get(endpointOf(u));
         if (cooldownUntil != null) {
             if (nowMillis.getAsLong() < cooldownUntil) {
                 return false;
             }
-            removalCooldowns.remove(host); // window expired: eligible again
+            removalCooldowns.remove(endpointOf(u)); // window expired: eligible again
         }
         // Cheap rejections BEFORE the blocking DNS resolution below: an exact duplicate or a
         // full table is decided on the live map directly (both are re-checked authoritatively
@@ -256,7 +261,10 @@ public final class PeerRegistry {
                 // Decrement the bucket recorded at ADMISSION — never re-resolve DNS at removal,
                 // so a DNS flip between add and remove cannot corrupt the accounting (audit F5).
                 subnetCounts.computeIfPresent(entry.subnetBucket(), (k, v) -> v <= 1 ? null : v - 1);
-                removalCooldowns.put(hostOf(u), nowMillis.getAsLong() + REMOVAL_COOLDOWN_MILLIS);
+                String endpoint = endpointOf(u);
+                if (endpoint != null) {
+                    removalCooldowns.put(endpoint, nowMillis.getAsLong() + REMOVAL_COOLDOWN_MILLIS);
+                }
             }
         }
     }
@@ -316,9 +324,32 @@ public final class PeerRegistry {
         }
     }
 
+    /** Host-only extraction (no port): feeds the SSRF routability check and subnet bucketing. */
     private static String hostOf(String url) {
         try {
             return URI.create(url).getHost();
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    /** Endpoint key for the removal-cooldown table: host + port, so one peer's failure cannot
+     *  lock out its sibling ports on a shared host (same port-scoping as PeerBanList). The
+     *  scheme's default port folds to the absent form, exactly as PeerUrls.canonicalize emits
+     *  it, so {@code http://h:80} and {@code http://h} can never key two cooldown entries. */
+    private static String endpointOf(String url) {
+        try {
+            URI uri = URI.create(url);
+            String host = uri.getHost();
+            if (host == null) {
+                return null;
+            }
+            int port = uri.getPort();
+            String scheme = uri.getScheme() == null ? "" : uri.getScheme().toLowerCase(java.util.Locale.ROOT);
+            if (("http".equals(scheme) && port == 80) || ("https".equals(scheme) && port == 443)) {
+                port = -1;
+            }
+            return host.toLowerCase(java.util.Locale.ROOT) + ":" + port;
         } catch (IllegalArgumentException e) {
             return null;
         }

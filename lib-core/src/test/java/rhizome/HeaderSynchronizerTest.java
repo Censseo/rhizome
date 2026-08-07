@@ -83,6 +83,41 @@ class HeaderSynchronizerTest {
             for (long h = start; h <= Math.min(end, e.height()); h++) out.add(e.headerAt(h));
             return out;
         }
+        @Override public Block orphan(SHA256Hash hash) { return e.orphanBlock(hash); }
+    }
+
+    /** Mines and gossips an orphan sibling of the current tip (not part of the canonical chain). */
+    private static BlockImpl mineOrphan(ChainEngine engine, PublicAddress miner, AtomicLong clock) {
+        long tipHeight = engine.height();
+        SHA256Hash grandparent = engine.blockAt(tipHeight - 1).hash();
+        var orphan = (BlockImpl) BlockImpl.builder().id((int) tipHeight)
+            .timestamp(clock.addAndGet(500)).difficulty(engine.difficulty())
+            .lastBlockHash(grandparent).uncles(new ArrayList<>()).build();
+        orphan.addTransaction(Transaction.of(miner, new TransactionAmount(PARAMS.miningReward(tipHeight))));
+        var tree = new MerkleTree();
+        tree.setItems(orphan.transactions());
+        orphan.merkleRoot(tree.getRootHash());
+        orphan.nonce(Miner.mineNonce(orphan.hash(), orphan.difficulty(), PARAMS.powAlgorithm()));
+        engine.registerOrphan(orphan);
+        return orphan;
+    }
+
+    /** Mines the next canonical block citing {@code orphan} as an uncle (protocol-incentivised). */
+    private static BlockImpl mineNephew(ChainEngine engine, BlockImpl orphan, AtomicLong clock) {
+        long height = engine.height() + 1;
+        var ref = new rhizome.core.block.UncleRef(orphan.hash(), orphan.difficulty(),
+            ((rhizome.core.transaction.TransactionImpl) orphan.transactions().get(0)).to());
+        var b = (BlockImpl) BlockImpl.builder().id((int) height)
+            .timestamp(clock.addAndGet(1000)).difficulty(engine.difficulty())
+            .lastBlockHash(engine.tipHash()).uncles(new ArrayList<>(List.of(ref))).build();
+        b.addTransaction(Transaction.of(PublicAddress.random(),
+            new TransactionAmount(PARAMS.miningReward(height))));
+        var tree = new MerkleTree();
+        tree.setItems(b.transactions());
+        b.merkleRoot(tree.getRootHash());
+        b.nonce(Miner.mineNonce(b.hash(), b.difficulty(), PARAMS.powAlgorithm()));
+        assertEquals(ExecutionStatus.SUCCESS, engine.addBlock(b));
+        return b;
     }
 
     @Test
@@ -240,5 +275,170 @@ class HeaderSynchronizerTest {
         assertEquals(5, local.height());
         assertTrue(local.tipHash().equals(peer.tipHash()));
         assertTrue(legacy.blockFetches > 0, "fallback path downloads full blocks");
+    }
+
+    // ---- metastable-split regression (testnet campaign S7) ----
+    //
+    // Two branches with EXACTLY equal base work above the fork (same heights, constant
+    // difficulty) can differ only in genuine uncle work. The reorg gate used to treat the
+    // base-work tie as a loss for the peer (validated.work() <= local -> NO_CHANGE), so the
+    // GHOST vote — the one place validated uncle work is authoritative — was never reached
+    // and the heavier-subtree branch could never win: a healed partition stayed silently
+    // split for as long as the miners kept heights equal (measured: 6+ minutes, constant
+    // work gap of exactly 2^difficulty). Fix 4 descends to phase 3 on a base-work TIE when
+    // the peer's self-reported total could actually win; the GHOST vote then decides on
+    // validated data.
+
+    /** Local and peer fork at height 2 (different miners), then both mine blocks up to height 4:
+     *  h2, h3, and an h4 that either carries one of their own orphans as an uncle
+     *  ({@code localGetsAnUncleToo}) or is plain. The peer ALWAYS cites one uncle, so
+     *  {@code false} gives "equal base, peer heavier total" and {@code true} gives "equal base,
+     *  equal total" — the two S7 tie shapes. */
+    private static ChainEngine[] equalBaseFork(boolean localGetsAnUncleToo) {
+        AtomicLong clock = new AtomicLong(1000);
+        PublicAddress minerA = PublicAddress.random();
+        PublicAddress minerB = PublicAddress.random();
+
+        ChainEngine local = newEngine();
+        mine(local, minerA, clock, 2); // h2, h3
+        if (localGetsAnUncleToo) {
+            BlockImpl orphan = mineOrphan(local, minerA, clock);
+            mineNephew(local, orphan, clock); // h4 cites the uncle
+        } else {
+            mine(local, minerA, clock, 1); // h4, plain
+        }
+
+        ChainEngine peer = newEngine();
+        mine(peer, minerB, clock, 2); // h2, h3
+        BlockImpl peerOrphan = mineOrphan(peer, minerB, clock);
+        mineNephew(peer, peerOrphan, clock); // h4 cites the uncle
+
+        return new ChainEngine[] {local, peer};
+    }
+
+    @Test
+    void equalBaseWorkWithHeavierUncleSubtreeWinsViaGhost() {
+        // S7: the peer's branch has the same base work but one more validated uncle — it must
+        // win the fork race, breaking the metastable split, instead of being stuck at NO_CHANGE.
+        ChainEngine[] engines = equalBaseFork(false);
+        ChainEngine local = engines[0], peer = engines[1];
+        // Sanity: this really is the S7 shape — equal heights, equal base work, heavier total.
+        assertEquals(peer.height(), local.height());
+        assertEquals(local.baseWork(), peer.baseWork());
+        assertTrue(peer.totalWork().compareTo(local.totalWork()) > 0,
+            "the peer's uncle must make its subtree heavier");
+
+        ChainSynchronizer.Result r = new HeaderSynchronizer(local).syncFrom(new EnginePeer(peer));
+
+        assertEquals(ChainSynchronizer.Result.REORGED, r,
+            "a base-work tie with a heavier uncle subtree must resolve via the GHOST vote");
+        assertEquals(peer.height(), local.height());
+        assertTrue(local.tipHash().equals(peer.tipHash()), "the heavier subtree is adopted");
+        assertEquals(peer.totalWork(), local.totalWork());
+    }
+
+    @Test
+    void equalBaseWorkAndEqualTotalResolvesDeterministically() {
+        // Anti-thrash + convergence (testnet campaign S5/S7 replay): two equal-rate camps hold
+        // EXACTLY equal base work AND equal totals (one uncle each). The asymmetric total-only
+        // gate leaves this forever unbroken; the deterministic tiebreak (smaller tip hash wins)
+        // must converge both sides in one round — each side reaches the same verdict — and a
+        // re-sync afterwards must be a quiet NO_CHANGE (no pop/restore oscillation).
+        ChainEngine[] engines = equalBaseFork(true);
+        ChainEngine a = engines[0], b = engines[1];
+        assertEquals(a.baseWork(), b.baseWork(), "the S7 shape: equal base work");
+        assertEquals(b.totalWork(), a.totalWork(), "the S7 shape: equal totals (one uncle each)");
+
+        EnginePeer bView = new EnginePeer(b);
+        ChainSynchronizer.Result r = new HeaderSynchronizer(a).syncFrom(bView);
+        EnginePeer aView = new EnginePeer(a);
+        ChainSynchronizer.Result r2 = new HeaderSynchronizer(b).syncFrom(aView);
+
+        // Whichever branch won, both nodes now agree on one tip (the deterministic verdict is
+        // the same on both sides), and exactly one side did the reorg work.
+        assertEquals(a.tipHash(), b.tipHash(),
+            "the deterministic tiebreak converges both camps on the same branch");
+        int reorgs = (r == ChainSynchronizer.Result.REORGED ? 1 : 0)
+            + (r2 == ChainSynchronizer.Result.REORGED ? 1 : 0);
+        assertEquals(1, reorgs, "exactly the losing camp reorgs (the winning camp keeps its branch)");
+
+        // Anti-thrash: once converged, another round from both sides must do nothing and must
+        // not download a single body.
+        ChainSynchronizer.Result after1 = new HeaderSynchronizer(a).syncFrom(new EnginePeer(b));
+        ChainSynchronizer.Result after2 = new HeaderSynchronizer(b).syncFrom(new EnginePeer(a));
+        assertEquals(ChainSynchronizer.Result.NO_CHANGE, after1);
+        assertEquals(ChainSynchronizer.Result.NO_CHANGE, after2);
+        assertEquals(a.tipHash(), b.tipHash(), "converged state is stable");
+    }
+
+    @Test
+    void equalTotalTiebreakAlsoConvergesViaTheLegacyBlockFallback() {
+        // The ChainSynchronizer fallback (legacy peers without /headers) applies the same
+        // deterministic tiebreak: through the fallback path, the equal-base/equal-total camps
+        // must also converge on one tip instead of staying split.
+        ChainEngine[] engines = equalBaseFork(true);
+        ChainEngine a = engines[0], b = engines[1];
+        assertEquals(a.baseWork(), b.baseWork());
+
+        EnginePeer legacyB = new EnginePeer(b) {
+            @Override public List<BlockHeader> headers(long start, long end) {
+                throw new UnsupportedOperationException("no /headers");
+            }
+        };
+        new HeaderSynchronizer(a).syncFrom(legacyB);
+        EnginePeer legacyA = new EnginePeer(a) {
+            @Override public List<BlockHeader> headers(long start, long end) {
+                throw new UnsupportedOperationException("no /headers");
+            }
+        };
+        new HeaderSynchronizer(b).syncFrom(legacyA);
+
+        assertEquals(a.tipHash(), b.tipHash(),
+            "the legacy full-block path converges on the same deterministic branch");
+    }
+
+    @Test
+    void aPeerThatGoesUnavailableMidBodyLeavesTheLocalBranchIntact() {
+        // Review follow-up to the reorg-window 503. The body download runs INSIDE the reorg
+        // window: the chain is already popped to the fork and the local branch is held only in
+        // the synchronizer's frame. applyBodies re-throws a transport failure (rather than
+        // returning false) so it is never read as PEER_INVALID — but that re-throw skipped the
+        // restore on its way out, leaving the node truncated at the fork with a PARTIAL peer
+        // branch that never faced the GHOST vote, and its own blocks — including any it mined
+        // that no peer holds — silently gone. The failure must propagate AND the chain must be
+        // exactly what it was.
+        //
+        // Not a corner case since the 503 gate: a peer entering its own reorg mid-stream is the
+        // expected way for this to fire, and equal-work tips now reorg by construction.
+        ChainEngine local = newEngine();
+        AtomicLong clock = new AtomicLong(1000);
+        PublicAddress minerA = PublicAddress.random();
+        mine(local, minerA, clock, 2); // fork at h1, local branch = h2..h3
+
+        ChainEngine peerEngine = newEngine();
+        mine(peerEngine, PublicAddress.random(), clock, 4); // strictly heavier: h2..h5
+
+        long heightBefore = local.height();
+        SHA256Hash tipBefore = local.tipHash();
+        BigInteger workBefore = local.totalWork();
+
+        // Answers the header gate in full, then dies on the first BODY fetch — the exact shape of
+        // a peer that opens its own reorg window between our header phase and our body phase.
+        EnginePeer dyingMidBody = new EnginePeer(peerEngine) {
+            @Override public List<Block> blocks(long start, long end) {
+                throw new rhizome.core.blockchain.PeerUnavailableException("503 mid-body", null);
+            }
+        };
+
+        org.junit.jupiter.api.Assertions.assertThrows(
+            rhizome.core.blockchain.PeerUnavailableException.class,
+            () -> new HeaderSynchronizer(local).syncFrom(dyingMidBody),
+            "a transport failure must stay a transport failure: retried, never PEER_INVALID");
+
+        assertEquals(heightBefore, local.height(), "the local branch must be restored, not dropped");
+        assertEquals(tipBefore, local.tipHash(), "…to the exact tip it had before the attempt");
+        assertEquals(workBefore, local.totalWork(), "…with its work intact");
+        org.junit.jupiter.api.Assertions.assertFalse(local.isReorgInProgress(),
+            "the reorg window must be closed, so the chain accepts new tips again");
     }
 }

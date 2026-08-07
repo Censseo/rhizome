@@ -86,7 +86,17 @@ final class DashboardApi {
             // Operator-visible degraded marker (e.g. failed reorg restore); null when healthy.
             .put("degraded", node.degradedState() == null ? JSONObject.NULL : node.degradedState())
             // A normal reorg window also pauses block production — distinguishable from degraded.
-            .put("reorgInProgress", node.isReorgInProgress()));
+            .put("reorgInProgress", node.isReorgInProgress())
+            // Sync observability (testnet campaign S5): rounds with neither sync progress nor a
+            // height advance, how many peers the last round skipped as banned, and whether it had
+            // any usable sync source at all. A node wedged at a height with healthy peers shows a
+            // climbing rounds-without-progress here in seconds instead of in a log post-mortem (a
+            // gossip-fed healthy node stays at 0). syncEclipsed is reported separately because the
+            // usual eclipse empties the registry (bans evict) rather than filling it with banned
+            // entries, so the peer counts alone cannot tell it apart from a node still bootstrapping.
+            .put("syncRoundsWithoutProgress", node.syncHealth().roundsWithoutProgress())
+            .put("syncPeersBanned", node.syncHealth().peersSkippedBanned())
+            .put("syncEclipsed", node.syncHealth().eclipsed()));
     }
 
     /**
