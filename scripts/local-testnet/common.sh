@@ -25,6 +25,7 @@ MINERS=(0 1 "$((NODES / 2))" "$((NODES / 2 + 1))")
 NODE_HEAP="${RHIZOME_TESTNET_HEAP:-384m}"
 
 KEYS_DIR="$ROOT/scripts/local-testnet/keys"
+CHAIN_CHECK="$ROOT/scripts/local-testnet/chaincheck.py"
 PID_DIR="$BASE_DIR/pids"
 PY="$(command -v python3 || command -v python)"
 
@@ -50,6 +51,14 @@ ensure_jdk21() {
 
 node_port() { printf '%d' "$((BASE_PORT + $1))"; }
 node_url()  { printf 'http://127.0.0.1:%s' "$(node_port "$1")"; }
+
+# URL utilisée pour SEEDER un nœud — délibérément `localhost`, pas `127.0.0.1`.
+# Un nœud s'annonce en `http://localhost:<port>` (NodeConfig.selfUrl), et
+# PeerUrls.canonicalize normalise la casse mais NE RÉSOUT PAS le nom : `127.0.0.1:4704` et
+# `localhost:4704` sont donc deux entrées de registre pour un seul nœud. Seeder sous la forme
+# annoncée les fait coalescer — sinon `peers` compte double et le critère « ≥ 3 pairs » ne
+# mesure plus rien (observé au smoke test : peers=4 pour 2 pairs réels).
+node_seed_url() { printf 'http://localhost:%s' "$(node_port "$1")"; }
 data_dir()  { printf '%s/node-%d' "$BASE_DIR" "$1"; }
 log_file()  { printf '%s/logs/node-%d.log' "$BASE_DIR" "$1"; }
 pid_file()  { printf '%s/node-%d.pid' "$PID_DIR" "$1"; }
@@ -74,20 +83,28 @@ node_seeds() {
   if (( span <= 1 )); then
     printf ''
   elif (( span == 2 )); then
-    printf '%s' "$(node_url "$prev")"
+    printf '%s' "$(node_seed_url "$prev")"
   else
-    printf '%s,%s' "$(node_url "$prev")" "$(node_url "$next")"
+    printf '%s,%s' "$(node_seed_url "$prev")" "$(node_seed_url "$next")"
   fi
 }
 
 # Extrait une clé JSON de /stats sans dépendre de jq. Les booléens sortent normalisés en
 # "true"/"false" (Python imprimerait "True"), une clé absente en chaîne vide : les scripts
-# peuvent comparer directement sans se soucier de la casse.
+# peuvent comparer directement sans se soucier de la casse. Toute réponse inattendue (JSON
+# invalide, structure non-{}) sort aussi en chaîne vide : un /stats étrange pendant un boot
+# ou un reorg ne doit JAMAIS tuer le script appelant via `set -e` (deux morts de monitor.sh
+# en campagne, au milieu d'un cycle, pendant un démarrage de réseau).
 json_get() {
   local json=$1 key=$2
   "$PY" -c '
 import json, sys
-data = json.load(sys.stdin)
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+if not isinstance(data, dict):
+    sys.exit(0)
 v = data.get(sys.argv[1])
 if isinstance(v, bool):
     print("true" if v else "false")
@@ -97,7 +114,7 @@ elif v is None:
     print("")
 else:
     print(v)
-' <<<"$json" "$key"
+' <<<"$json" "$key" 2>/dev/null || true
 }
 
 # /stats d'un nœud, vide si le nœud ne répond pas.
@@ -105,15 +122,45 @@ node_stats() {
   curl -sf --max-time 3 "$(node_url "$1")/stats" 2>/dev/null || true
 }
 
-# Vérifie que les ports de la plage sont libres avant de lancer les JVMs.
-# Arg optionnel : en mode nœud unique (-n <idx>), seul ce port est vérifié.
+# Présente le nœud `peer` au nœud `i` via /add_peer.
+add_peer() {
+  local i=$1 peer=$2
+  curl -sf --max-time 5 -X POST -H 'X-Rhizome-Request: 1' \
+    -d "{\"url\":\"$(node_seed_url "$peer")\"}" \
+    "$(node_url "$i")/add_peer" >/dev/null 2>&1 || true
+}
+
+# Amorce le PEX sur la plage [lo..hi].
+#
+# Nécessaire parce qu'un anneau PUR ne peut pas s'amorcer : `GET /peers` retire délibérément
+# les seeds (audit S-6 — un seed peut être l'infrastructure privée d'un opérateur), or dans
+# un anneau l'intégralité des pairs de chaque nœud SONT ses seeds. Chacun annonce donc une
+# liste vide et le maillage ne dépasse jamais 2. Sur un vrai réseau le problème ne se pose
+# pas : les seeds publics portent déjà des pairs non-seed appris ailleurs.
+#
+# On reproduit cette condition en désignant `lo` comme hub : tous les autres lui sont
+# présentés via /add_peer, ce qui crée chez lui des entrées NON-seed, donc annonçables, et
+# le PEX se propage à partir de là.
+#
+# (La campagne 1 ne voyait pas le problème : ses seeds étaient en `127.0.0.1` et le PEX
+# annonçait `localhost`, donc chaque nœud existait en double au registre — les « 10-12
+# pairs » mesurés comptaient ce doublon, pas un vrai maillage.)
+bootstrap_pex() {
+  local lo=${1:-0} hi=${2:-$((NODES - 1))} i
+  for i in $(seq $((lo + 1)) "$hi"); do
+    add_peer "$lo" "$i"
+    add_peer "$i" "$lo"
+  done
+}
+
+# Vérifie que les ports des nœuds RÉELLEMENT lancés sont libres avant de démarrer les JVMs.
+# Args : lo hi — la plage effectivement lancée (un seul nœud en -n, une moitié en -p, tout
+# le réseau sinon). Vérifier au-delà refuserait de relancer une moitié pendant que l'autre
+# tourne, c'est-à-dire précisément le scénario de partition S7.
 check_ports_free() {
-  local single=${1:--1}
+  local lo=${1:-0} hi=${2:-$((NODES - 1))}
   local i port
-  for i in $(seq 0 $((NODES - 1))); do
-    if (( single >= 0 )) && (( i != single )); then
-      continue
-    fi
+  for i in $(seq "$lo" "$hi"); do
     port="$(node_port "$i")"
     if ss -ltn 2>/dev/null | grep -qE "[:.]$port\b"; then
       echo "ERREUR: port $port déjà occupé — libérez-le ou relancez avec RHIZOME_TESTNET_BASE_PORT=<base>" >&2
@@ -123,20 +170,22 @@ check_ports_free() {
   return 0
 }
 
-# Garde-fou mémoire : N × NODE_HEAP doit tenir dans la RAM disponible, avec ~40 % de marge
-# pour le hors-tas (metaspace, piles, cache de blocs RocksDB). Une campagne qui meurt d'un
-# OOM-killer à mi-parcours coûte plus cher que ce test.
+# Garde-fou mémoire : count × NODE_HEAP doit tenir dans la RAM disponible, avec ~40 % de
+# marge pour le hors-tas (metaspace, piles, cache de blocs RocksDB). Une campagne qui meurt
+# d'un OOM-killer à mi-parcours coûte plus cher que ce pré-vol.
+# Arg : nombre de nœuds à lancer (défaut : tout le réseau).
 check_memory() {
+  local count=${1:-$NODES}
   local heap_mb avail_mb needed_mb
   case "$NODE_HEAP" in
     *g|*G) heap_mb=$(( ${NODE_HEAP%[gG]} * 1024 )) ;;
     *m|*M) heap_mb=${NODE_HEAP%[mM]} ;;
     *)     heap_mb=$(( NODE_HEAP / 1024 / 1024 )) ;;
   esac
-  needed_mb=$(( NODES * heap_mb * 14 / 10 ))
+  needed_mb=$(( count * heap_mb * 14 / 10 ))
   avail_mb=$(awk '/MemAvailable/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)
   if (( avail_mb > 0 && needed_mb > avail_mb )); then
-    echo "ERREUR: $NODES nœuds × $NODE_HEAP ≈ ${needed_mb} Mo requis, ${avail_mb} Mo disponibles." >&2
+    echo "ERREUR: $count nœuds × $NODE_HEAP ≈ ${needed_mb} Mo requis, ${avail_mb} Mo disponibles." >&2
     echo "        Réduire RHIZOME_TESTNET_NODES ou RHIZOME_TESTNET_HEAP." >&2
     return 1
   fi

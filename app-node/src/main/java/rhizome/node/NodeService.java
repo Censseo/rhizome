@@ -366,6 +366,18 @@ public final class NodeService {
         return engine.stateRoot();
     }
 
+    /**
+     * Hash of the current chain tip — the branch a node is actually on. Surfaced on /stats
+     * because height alone cannot tell a united network from a SPLIT one: two camps mining at
+     * the same rate hold equal heights, equal difficulty and (the metastable case) equal total
+     * work while sitting on different branches, and nothing else in /stats differs. That split
+     * ran undetected for hours in the local-testnet campaign; one tip per height makes it a
+     * one-line check for an operator or a monitoring script.
+     */
+    public rhizome.crypto.SHA256Hash tipHash() {
+        return engine.tipHash();
+    }
+
     /** A membership proof for a state entry at the current root, or {@code null} if absent / off. */
     public rhizome.core.state.StateProof stateProof(byte domain, byte[] rawKey) {
         return engine.stateProof(domain, rawKey);

@@ -32,11 +32,15 @@ fi
 
 mkdir -p "$BASE_DIR/logs" "$KEYS_DIR" "$PID_DIR"
 
-# Pré-vol : ne pas lancer N JVMs si un port est déjà pris, ni si la RAM ne suit pas
-# (mode -n : seulement le port du nœud concerné).
-check_ports_free "$single"
-if (( single < 0 )); then
-  check_memory
+# Pré-vol : ne pas lancer les JVMs si un port est déjà pris ou si la RAM ne suit pas. Les
+# deux contrôles portent EXACTEMENT sur les nœuds à lancer — un contrôle sur tout le réseau
+# refuserait de relancer une moitié pendant que l'autre tourne, c'est-à-dire S7.
+if (( single >= 0 )); then
+  check_ports_free "$single" "$single"
+  check_memory 1
+else
+  check_ports_free "$part_lo" "$part_hi"
+  check_memory "$((part_hi - part_lo + 1))"
 fi
 
 # 2. Clés des mineurs (plaintext, non interactif) + adresses.
@@ -82,8 +86,10 @@ if [[ "$single" -ge 0 ]]; then
   launch "$single"
   nodes=("$single")
 else
-  rm -f "$PID_DIR"/*.pid
   nodes=($(seq "$part_lo" "$part_hi"))
+  # Ne purger QUE les pid de la plage lancée : en mode -p, effacer tout le répertoire
+  # rendait l'autre moitié — bien vivante — invisible à stop.sh, qui la laissait tourner.
+  for i in "${nodes[@]}"; do rm -f "$(pid_file "$i")"; done
   for i in "${nodes[@]}"; do launch "$i"; done
 fi
 
@@ -101,6 +107,14 @@ for i in "${nodes[@]}"; do
   fi
   echo "node $i up: hauteur $(json_get "$s" height), pairs $(json_get "$s" peers)"
 done
+
+# 5. Amorçage du PEX : sans lui le maillage reste bloqué à 2 pairs par nœud (voir
+#    bootstrap_pex). En mode -n on ne réamorce rien : le nœud relancé retrouve le maillage
+#    par ses seeds et par les pairs qui le connaissent déjà.
+if (( single < 0 )); then
+  echo "amorçage PEX (hub $part_lo) ..."
+  bootstrap_pex "$part_lo" "$part_hi"
+fi
 
 if (( part_lo != 0 || part_hi != NODES - 1 )); then
   echo "moitié $part_lo-$part_hi lancée (isolée : seeds internes uniquement)."

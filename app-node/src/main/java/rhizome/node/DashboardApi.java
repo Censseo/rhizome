@@ -65,6 +65,10 @@ final class DashboardApi {
             .put("chainId", node.chainId())
             .put("network", node.networkName())
             .put("height", height)
+            // The branch this node is on. Height, difficulty and (on a metastable split) total
+            // work are all equal across camps mining at the same rate — the tip is the only
+            // field that differs, so it is what makes a silent split observable.
+            .put("tipHash", node.tipHash().toHexString())
             .put("difficulty", node.difficulty())
             .put("totalWork", node.totalWork().toString())
             .put("mempool", node.mempoolSize())

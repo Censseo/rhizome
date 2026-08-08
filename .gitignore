@@ -25,3 +25,7 @@ AGENTS.md
 ideas/
 specs/
 .testnet/
+# Clés de mineur du testnet local : générées par start.sh, écrites EN CLAIR (--plaintext,
+# le lancement doit rester non interactif). Sans valeur — devnet jetable — mais une clé
+# privée n'a rien à faire dans l'historique du dépôt.
+scripts/local-testnet/keys/
