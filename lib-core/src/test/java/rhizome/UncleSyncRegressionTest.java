@@ -311,4 +311,50 @@ class UncleSyncRegressionTest {
         assertEquals(5, freshNode.height());
         assertEquals(restarted.tipHash(), freshNode.tipHash());
     }
+
+    @Test
+    void syncingNodeHoldingThePersistedUncleItselfCanStillAdoptTheBranch() {
+        // Campaign-2 S7 shape: a node applied the uncle-bearing blocks BEFORE a restart, so its
+        // STORE holds the orphan bodies (addBlock persists referenced uncles) while its in-memory
+        // pool is empty. Later it must adopt a peer branch that cites the SAME uncle. The sync
+        // paths' uncle-resolve skips the fetch when the body is "already known" — and "known"
+        // includes the persisted store — so without a store fallback in validateUncles the retry
+        // found an empty pool and failed with INVALID_UNCLES every round: PEER_INVALID, a ban of
+        // an honest peer, and a wedge that no restart healed (node 5 froze at height 820 with
+        // healthy peers, 90 penalties on a seed peer over 16 minutes).
+        AtomicLong clock = new AtomicLong(1000);
+        LedgerSnapshot snapshot = new LedgerSnapshot("test", 0, PARAMS.chainId());
+        Ledger ledger = new InMemoryLedger();
+        ChainStore store = new InMemoryChainStore();
+        ChainEngine node = ChainEngine.init(PARAMS, ledger, store, snapshot, null, () -> NOW);
+        PublicAddress miner = PublicAddress.random();
+        mineBlock(node, miner, clock);                              // height 2
+        BlockImpl orphan = mineOrphan(node, clock);                 // orphan @ height 2
+        mineNephew(node, orphan, clock);                            // height 3, cites the uncle
+        mineBlock(node, PublicAddress.random(), clock);             // height 4
+        mineBlock(node, PublicAddress.random(), clock);             // height 5
+        assertNotNull(node.orphanBlock(orphan.hash()),
+            "the applied nephew persisted the orphan body into the store");
+
+        // A competing, LONGER branch that cites the SAME orphan: fork at genesis, then a sibling
+        // nephew at height 3 referencing it, extended to height 6.
+        ChainEngine peer = newEngine();
+        AtomicLong peerClock = new AtomicLong(2000);
+        mineBlock(peer, PublicAddress.random(), peerClock);         // height 2 (different block)
+        peer.registerOrphan(orphan);
+        mineNephew(peer, orphan, peerClock);                        // height 3, cites the same uncle
+        mineBlock(peer, PublicAddress.random(), peerClock);         // height 4
+        mineBlock(peer, PublicAddress.random(), peerClock);         // height 5
+        mineBlock(peer, PublicAddress.random(), peerClock);         // height 6
+        assertEquals(6, peer.height());
+
+        // Logical restart: same store, empty pool — the persisted uncle is the only source.
+        ChainEngine restarted = ChainEngine.init(PARAMS, ledger, store, snapshot, null, () -> NOW);
+        Result result = new HeaderSynchronizer(restarted).syncFrom(new FullPeer(peer));
+
+        assertEquals(Result.REORGED, result,
+            "the node that itself holds the persisted uncle still adopts the heavier branch");
+        assertEquals(6, restarted.height());
+        assertEquals(peer.tipHash(), restarted.tipHash());
+    }
 }

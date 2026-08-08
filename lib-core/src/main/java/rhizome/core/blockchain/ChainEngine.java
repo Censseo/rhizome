@@ -1824,6 +1824,18 @@ public final class ChainEngine implements Blockchain, rhizome.core.mempool.Accou
             }
             Block uncle = orphans.get(u);
             if (uncle == null) {
+                // The sync paths' uncle-resolve skips a fetch when the body is already known, and
+                // "known" includes the PERSISTED uncle bodies (addBlock persists referenced uncles
+                // so fresh nodes can fetch them later). A node that applied the referencing block
+                // before a restart therefore holds the body in the store but NOT in the in-memory
+                // pool: the retry after the resolve would fail right here — INVALID_UNCLES every
+                // round, a PEER_INVALID ban of an honest peer (campaign 2, S7: a wedged cluster
+                // that froze at the first block referencing a persisted uncle). The persisted body
+                // was fully validated when first applied and its eligibility is re-checked below
+                // against the live context, so falling back to it is exact.
+                uncle = store.uncleAt(u);
+            }
+            if (uncle == null) {
                 return null; // unknown orphan
             }
             if (((BlockImpl) uncle).difficulty() != ref.difficulty()) {

@@ -334,8 +334,10 @@ public final class HeaderSynchronizer {
                     // On INVALID_UNCLES the missing orphan bodies are fetched from the peer and the
                     // apply retried once (audit: uncle-sync blocker); applyBodies holds no lock, so
                     // the fetch is legal network I/O here.
-                    if (ChainSynchronizer.applyWithUncleFetch(engine, peer, block, engine::addValidatedBody)
-                            != ExecutionStatus.SUCCESS) {
+                    ExecutionStatus applyStatus =
+                        ChainSynchronizer.applyWithUncleFetch(engine, peer, block, engine::addValidatedBody);
+                    if (applyStatus != ExecutionStatus.SUCCESS) {
+                        log.warn("body apply rejected at height {}: {}", ((BlockImpl) block).id(), applyStatus);
                         return false;
                     }
                 }
