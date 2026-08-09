@@ -25,12 +25,14 @@ truth: what each area does, what it owns, and which invariants must never regres
 | [dashboard](dashboard/spec.md) | Embedded zero-dependency web UI — 6 pages, browser key custody | `app-node/resources/dashboard` | Draft |
 | [wallet](wallet/spec.md) | CLI wallet, encrypted keystore, chain-id pin, local signing | `app-wallet` | Draft |
 | [crypto](crypto/spec.md) | Ed25519, Pufferfish2 PoW, hashes | `lib-crypto` | Draft |
+| [platform](platform/spec.md) | Java 25 toolchain, Gradle wrapper, dependency pins & rationale, native image, lint gate | *(build-wide)* | Draft |
 
 ## Reading order
 
 New to the codebase? **consensus → transactions → state** covers the core loop. Then branch by
 interest: `contracts` + `boxes` for the agent story, `networking` + `persistence` for node
-operation, `node-api` + `dashboard` + `wallet` for the surfaces.
+operation, `node-api` + `dashboard` + `wallet` for the surfaces. `platform` is the one to read
+before touching `build.gradle` — every pin there is load-bearing and carries a reason.
 
 ## Cross-domain invariants
 
@@ -50,6 +52,10 @@ These span domains and are restated in each spec that carries part of them:
   route meters before it works.
 - **Single writer.** All public `ChainEngine` methods serialise on one lock; reorg phases are
   individually atomic.
+- **Explicit wiring.** No DI container, no reflection-based wiring, no runtime codegen anywhere —
+  the node is assembled with plain constructors. This is what keeps the GraalVM native image
+  buildable and the dependency graph readable; it is an architectural constraint, not a style
+  preference. See [platform](platform/spec.md) P-5.
 
 ## Quick links
 

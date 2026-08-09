@@ -163,6 +163,35 @@ them list, query and deregister each other's scans. Both halves must match — t
 different address does not carry ownership either. The node stores only its SHA-256. A client that
 sends no header keeps the address-only behaviour, which is all a single-tenant deployment needs.
 
+### A-12 — ActiveJ v7 server defaults *(implemented)*
+
+> Added: 2026-08-09 | Source: feature `001-activej-v7-java25`
+
+The server runs on the **ActiveJ v7.0.0 fork** (pin rationale → [platform](../platform/spec.md)
+P-3). v7 ships hardening defaults that sit *underneath* this spec's own bounds. The rule is that
+**Rhizome's explicit configuration governs and the v7 defaults are a strict superset** — a backstop
+that catches anything a route forgets, never the primary bound.
+
+| Concern | v7 default | What actually governs |
+|---|---|---|
+| Read/write inactivity timeout | 60 s | The explicit **30 s** `withReadWriteTimeout` on the HTTP server — A-7's slow-loris bound. Tighter than the default, so the default never fires first. |
+| Request body ceiling | 100 MB | Per-route `loadBody(...)` caps, all far below 100 MB. No `withMaxBodySize` is set; the ceiling is a backstop for a route that ever ships without a cap. |
+| Head parsing | strict RFC 7230 | Already the expected behaviour — malformed request heads answer **400**. |
+| `ByteBufPool` retention | changed in v7 | Not reachable. `lib-persistence` abandoned pooled buffers deliberately (leak, audit F12) and uses plain allocations; the single explicit `ByteBuf.recycle()` in the repo is in test code. |
+
+Consequences for the streaming routes, which are the timeout-sensitive ones — `GET /logs/stream`
+(SSE), `GET /sync`, `GET /headers`:
+
+- The SSE **15 s heartbeat** is what keeps `/logs/stream` alive across both the 30 s explicit
+  timeout and the 60 s v7 default. It is a correctness requirement of the timeout interplay, not a
+  cosmetic keep-alive — removing it closes idle streams.
+- No `-Dactivej.*` system-property override is set anywhere, and no route relies on an implicit
+  timeout or on the 100 MB ceiling as its only bound.
+
+Two long-standing workaround comments were re-verified against v7 and still hold: the interned-header
+lookup and the `Promise.ofBlocking` offload path (which swallows `RejectedExecutionException`) in
+`NodeApi.java`.
+
 ## Known limits (accepted, not defects)
 
 Deployment-shaped gaps that no code change inside the node closes. Stated here so an operator can
@@ -200,4 +229,5 @@ decide rather than discover.
 
 - `WHITEPAPER.md` §6.1 (transport), §7.3 (resource-exhaustion bounds), §7.4 (network security)
 - `README.md` — the operator-facing configuration table
+- [platform](../platform/spec.md) P-3 — why the ActiveJ pin is what it is
 - Skill: `activej-http-patterns`
