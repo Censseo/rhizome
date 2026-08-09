@@ -89,12 +89,12 @@ chargée — tous les scripts et scénarios suivent la variable.
 
 ## Prérequis
 
-1. JDK 21 (`java -version`), vérifié par le toolchain Gradle.
+1. JDK 25 (`java -version`), vérifié par le toolchain Gradle.
 2. `./gradlew build` — la suite (798 tests) passe avant de tester le réseau.
 3. `./gradlew :app-node:installDist :app-wallet:installDist` — un seul build, les 16 nœuds
    tournent en direct via `app-node/build/install/app-node/bin/app-node` (pas 16 daemons
    Gradle). `start.sh` le fait lui-même si le binaire manque (et force `JAVA_HOME` vers un
-   JDK 21 trouvé dans sdkman si `JAVA_HOME` pointe sur un JDK > 24 que Gradle refuse).
+   JDK 25 trouvé dans sdkman si `JAVA_HOME` pointe sur un JDK < 25 que Gradle refuse).
    **`installDist` est obligatoire après chaque correctif** : la campagne 1 a perdu une
    exécution entière (7 h) faute de l'avoir relancé.
 4. Clés mineurs : générées automatiquement par `start.sh` (`--plaintext`, non interactif)

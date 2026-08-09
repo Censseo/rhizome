@@ -29,22 +29,22 @@ CHAIN_CHECK="$ROOT/scripts/local-testnet/chaincheck.py"
 PID_DIR="$BASE_DIR/pids"
 PY="$(command -v python3 || command -v python)"
 
-# Gradle (8.14) doit tourner sur un JDK ≤ 24 ; le toolchain impose 21 pour compiler.
-# Si JAVA_HOME pointe sur un JDK trop récent, on tente le JDK 21 de sdkman.
-ensure_jdk21() {
+# Gradle 9.6.1 et le toolchain imposent 25 pour compiler ; Gradle 9.6.1 tourne sur JDK 25.
+# Si JAVA_HOME pointe sur un JDK trop vieux, on tente le JDK 25 de sdkman.
+ensure_jdk25() {
   local maj
   if [[ -n "${JAVA_HOME:-}" && -x "$JAVA_HOME/bin/java" ]]; then
     maj="$("$JAVA_HOME/bin/java" -version 2>&1 | head -1 | sed -E 's/.*version "([0-9]+).*/\1/')"
   fi
-  if [[ -z "${maj:-}" || "$maj" -gt 24 ]]; then
-    for cand in "$HOME"/.sdkman/candidates/java/21*; do
+  if [[ -z "${maj:-}" || "$maj" -lt 25 ]]; then
+    for cand in "$HOME"/.sdkman/candidates/java/25*; do
       if [[ -x "$cand/bin/java" ]]; then
         export JAVA_HOME="$cand"
-        echo "JAVA_HOME forcé vers $cand (Gradle exige un JDK ≤ 24)" >&2
+        echo "JAVA_HOME forcé vers $cand (Gradle exige un JDK ≥ 25)" >&2
         return 0
       fi
     done
-    echo "JDK 21 requis pour Gradle (JAVA_HOME=$JAVA_HOME invalide)" >&2
+    echo "JDK 25 requis pour Gradle (JAVA_HOME=$JAVA_HOME invalide)" >&2
     exit 1
   fi
 }

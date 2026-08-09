@@ -25,7 +25,7 @@ if (( part_lo < 0 || part_hi >= NODES || part_lo > part_hi )); then
 fi
 
 # 1. Un seul build : les nœuds tournent via build/install (pas N daemons Gradle).
-ensure_jdk21
+ensure_jdk25
 if [[ ! -x "$NODE_BIN" || ! -x "$WALLET_BIN" ]]; then
   ./gradlew :app-node:installDist :app-wallet:installDist
 fi

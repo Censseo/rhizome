@@ -65,8 +65,9 @@ public final class NodeApi {
 
     // Well-known ActiveJ header tokens: the HTTP parser interns incoming Origin/Host under these, and
     // a custom HttpHeaders.of("Origin"/"Host") token no longer matches them (it did in 6.0-beta2, but
-    // 6.0-rc2 tightened the lookup) — so reading the CSRF/rebinding guard's Origin/Host through of(...)
-    // silently returned null and fail-opened. Use the interned constants so the guard sees the values.
+    // 6.0-rc2 tightened the lookup; v7.0.0 keeps the interned lookup) — so reading the CSRF/rebinding
+    // guard's Origin/Host through of(...) silently returned null and fail-opened. Use the interned
+    // constants so the guard sees the values (re-verified on v7.0.0 via NodeApiHardeningFlagsTest).
     private static final HttpHeader H_ORIGIN = HttpHeaders.ORIGIN;
     private static final HttpHeader H_HOST = HttpHeaders.HOST;
     /** Non-simple header the dashboard sends on every state-changing POST; forces a CORS preflight
@@ -444,6 +445,7 @@ public final class NodeApi {
         // the intended 429 (audit review). The completion below mirrors ofBlocking's protocol
         // exactly: the promise is completed ON the reactor (never from the worker thread) and
         // the external-task counter keeps the eventloop alive while the job runs.
+        // (v7.0.0 keeps ofBlocking's signature and semantics; verified via NodeApiTest 429 path.)
         SettablePromise<HttpResponse> result = new SettablePromise<>();
         Reactor reactor = Reactor.getCurrentReactor();
         reactor.startExternalTask();

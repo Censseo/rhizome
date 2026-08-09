@@ -12,11 +12,11 @@ exists (usually a specific Pandanite bug being fixed).
 
 ## Commands
 
-Requires JDK 21 (Gradle toolchain enforces it).
+Requires JDK 25 (Gradle toolchain enforces it).
 
 ```bash
 ./gradlew build                 # build + lint + all tests
-./gradlew test                  # all tests (~531)
+./gradlew test                  # all tests (~799)
 ./gradlew :lib-core:test        # one module's tests
 ./gradlew :lib-core:test --tests "rhizome.ChainEngineTest"                    # one class
 ./gradlew :lib-core:test --tests "rhizome.ChainEngineTest.someTestMethod"     # one method
@@ -33,9 +33,9 @@ RHIZOME_NETWORK=testnet RHIZOME_MINER=<address> RHIZOME_BLOCK_INTERVAL_MS=1000 .
 Wallet CLI: `./gradlew :app-wallet:run --args="keygen <keyfile>"` (also `address`, `balance`,
 `send`, `deploy`, `call`).
 
-GraalVM native binary: `./gradlew :app-node:nativeImage` — Gradle itself must run on JDK 21 while
-`native-image` comes from a GraalVM on PATH (e.g. `sdk use java 25.0.2-graal` with
-`JAVA_HOME=~/.sdkman/candidates/java/21.0.7-tem`). Reachability metadata lives in
+GraalVM native binary: `./gradlew :app-node:nativeImage` — Gradle 9.6.1 runs on JDK 25, so one
+JDK suffices: use a GraalVM as the current SDK (e.g. `sdk use java 25.0.2-graal`) and
+`native-image` is resolved from PATH. Reachability metadata lives in
 `app-node/src/main/resources/META-INF/native-image/`.
 
 Benchmarks: JVM properties starting with `bench` are forwarded to the test JVM
@@ -95,9 +95,10 @@ a `.rs` template, the corresponding checked-in `.wasm` must be rebuilt to match.
 
 ## Dependency pins (deliberate — see comments in build.gradle)
 
-- ActiveJ `6.0-rc2` is the newest published release; do not "downgrade to stable" 5.x.
-- BouncyCastle ≥ 1.78 (CVE-2024-30172), logback ≥ 1.5.13 (CVE-2024-12798/12801).
-- ASM forced to 9.7 because ActiveJ pulls 9.4, which can't read Java 21 bytecode.
+- ActiveJ `v7.0.0` (Java 25-baseline fork; do not "downgrade to stable" 5.x or upstream 6.x).
+- BouncyCastle 1.85.2 (CVE-2024-30172), logback ≥ 1.5.13 (CVE-2024-12798/12801).
+- ASM: no force — neither ActiveJ graph resolves an `org.ow2.asm` artifact (verified
+  empirically); re-add with ≥ 9.8 if a resolution ever proves otherwise.
 - Nebula lint runs with the `all-dependency` rule: each module declares exactly what it uses
   (`api` only when the type appears in public signatures — existing build.gradle comments show
   the pattern).
