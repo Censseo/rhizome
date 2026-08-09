@@ -38,6 +38,7 @@ def docPages = [
     [slug: 'readme',       group: 'Vue d\'ensemble', source: 'README.md'],
     [slug: 'whitepaper',   group: 'Vue d\'ensemble', source: 'WHITEPAPER.md'],
     [slug: 'index',        group: 'Vue d\'ensemble', source: 'docs/README.md'],
+    [slug: 'platform',     group: 'Vue d\'ensemble', source: 'docs/platform/spec.md'],
     [slug: 'consensus',    group: 'Protocole',       source: 'docs/consensus/spec.md'],
     [slug: 'transactions', group: 'Protocole',       source: 'docs/transactions/spec.md'],
     [slug: 'state',        group: 'Protocole',       source: 'docs/state/spec.md'],
