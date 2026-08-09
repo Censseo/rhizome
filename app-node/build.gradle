@@ -110,8 +110,8 @@ tasks.named('test') {
 // GraalVM native-image build of the node. Reachability metadata (RocksDB JNI
 // resource, logback configurators, dashboard assets) ships inside the jar under
 // META-INF/native-image/rhizome/rhizome-node/ and is picked up automatically.
-// Gradle itself must run on JDK 21 (e.g. JAVA_HOME=~/.sdkman/candidates/java/21.0.7-tem);
-// native-image is resolved from PATH, so use a GraalVM as the sdkman/current JDK.
+// Gradle 9.6.1 runs on JDK 25, so one JDK suffices: use a GraalVM as the sdkman/current
+// JDK (e.g. 25.0.2-graal) and native-image is resolved from PATH.
 def nativeImageOut = layout.buildDirectory.dir('native')
 
 tasks.register('nativeImage', Exec) {
@@ -129,8 +129,8 @@ tasks.register('nativeImage', Exec) {
                 .find { it.isFile() && it.canExecute() }
         if (nativeImageBin == null) {
             throw new GradleException('native-image not found on PATH. Use a GraalVM JDK as the ' +
-                    'current SDK (e.g. "sdk use java 25.0.2-graal") while keeping Gradle on JDK 21 ' +
-                    '(JAVA_HOME=~/.sdkman/candidates/java/21.0.7-tem ./gradlew :app-node:nativeImage).')
+                    'current SDK (e.g. "sdk use java 25.0.2-graal") and run ' +
+                    './gradlew :app-node:nativeImage.')
         }
         def classpath = installLib.get().asFile
                 .listFiles({ f -> f.name.endsWith('.jar') } as FileFilter)*.absolutePath

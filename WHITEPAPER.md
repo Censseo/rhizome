@@ -95,7 +95,7 @@ native compilation.
 consensus core dispatches contracts without ever depending on the WASM runtime.
 `lib-net` implements lib-core's `PeerSource` abstraction over HTTP, so sync logic never
 depends on a transport. `lib-crypto` holds the primitives (Ed25519, Pufferfish2, hashes,
-hex) with BouncyCastle as its only dependency. Gradle multi-module project (Java 21):
+hex) with BouncyCastle as its only dependency. Gradle multi-module project (Java 25):
 `lib-crypto`, `lib-core`, `lib-net`, `lib-vm`, `lib-persistence`, `app-node`,
 `app-wallet`.
 

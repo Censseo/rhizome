@@ -1,6 +1,6 @@
 plugins{
-    id 'io.freefair.lombok' version '8.6'
-    id 'nebula.lint' version "19.0.2"
+    id 'io.freefair.lombok' version '9.5.0'
+    id 'nebula.lint' version "21.2.1"
 }
 
 allprojects {
@@ -19,12 +19,12 @@ gradleLint {
 // uses in its own build.gradle; nothing is injected globally anymore.
 ext {
     // Custom activej build published from the Censseo/activej fork via JitPack
-    // (group com.github.Censseo.activej), tracking the upstream 6.0 line. The last
-    // stable upstream line is 5.5, so this is still the latest API, not a stale pin.
-    // Do not downgrade to 5.x — that is a breaking API change.
+    // (group com.github.Censseo.activej). Fork v7.0.0: Java 25 baseline, HTTP
+    // hardening (60 s timeout default, 100 MB body cap, strict RFC 7230), upstream
+    // unmaintained since 2026-01. Do not downgrade to 5.x — that is a breaking API change.
     activejGroup = 'com.github.Censseo.activej'
-    activejVersion = 'v6.0-ce1'
-    bouncycastleVersion = '1.78.1'  // 1.76 is vulnerable to CVE-2024-30172 — do not downgrade.
+    activejVersion = 'v7.0.0'
+    bouncycastleVersion = '1.85.2'  // 1.76 is vulnerable to CVE-2024-30172 — do not downgrade. 1.81+ required for Java 25 runtime.
     jsonVersion = '20240303'
     slf4jVersion = '2.0.12'
     // Runtime-only logging backend. Kept on the latest 1.5.x patch: 1.5.13 fixed CVE-2024-12798 /
@@ -50,26 +50,23 @@ subprojects {
         maven { url 'https://jitpack.io' }
     }
 
-    // The ActiveJ 6.0 line pulls ASM 9.4, which cannot read Java 21 bytecode
-    // (class file major version 65). Force a version that supports it so the
-    // ActiveJ serializer codegen works on the toolchain JDK.
-    configurations.all {
-        resolutionStrategy.eachDependency { details ->
-            if (details.requested.group == 'org.ow2.asm') {
-                details.useVersion '9.7'
-            }
-        }
-    }
-
     dependencies {
         // Use JUnit Jupiter for testing.
         testImplementation 'org.junit.jupiter:junit-jupiter:5.9.1'
+        // Gradle 9 no longer auto-detects the launcher; required to run tests.
+        testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
     }
 
     java {
         toolchain {
-            languageVersion = JavaLanguageVersion.of(21)
+            languageVersion = JavaLanguageVersion.of(25)
         }
+    }
+
+    tasks.withType(JavaCompile).configureEach {
+        // Pin the API surface too (release 25): a NoSuchMethodError class of escapes
+        // arises when toolchain and release diverge.
+        options.release = 25
     }
 
     tasks.named('test') {

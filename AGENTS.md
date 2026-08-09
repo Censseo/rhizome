@@ -4,7 +4,7 @@ Read `CLAUDE.md` first — it covers architecture, module boundaries, and consen
 Read `WHITEPAPER.md` before touching anything consensus-related (difficulty, PoW, uncles,
 reorgs); each rule exists to fix a specific Pandanite bug.
 
-## Commands (JDK 21 required, Gradle toolchain enforces it)
+## Commands (JDK 25 required, Gradle toolchain enforces it)
 
 ```bash
 ./gradlew build                                                   # build + lint + all tests
@@ -27,9 +27,9 @@ No CI is active — `.github/ci-workflow.yml.example` must be copied into
   compiled fixtures, not the Rust sources.
 - Nebula lint runs with the `all-dependency` rule: every module's `build.gradle` must declare
   exactly what it uses. `./gradlew build` fails on unused/missing declarations.
-- Dependency pins in root `build.gradle` are deliberate (ActiveJ 6.0-rc2, BouncyCastle ≥1.78,
-  logback ≥1.5.13, ASM forced to 9.7 for Java 21 bytecode). Do not "upgrade/downgrade to
-  stable" — the comments explain why.
+- Dependency pins in root `build.gradle` are deliberate (ActiveJ v7.0.0, BouncyCastle 1.85.2,
+  logback ≥1.5.13 — the legacy ASM force is gone, neither ActiveJ graph resolves one).
+  Do not "upgrade/downgrade to stable" — the comments explain why.
 - Node config is environment variables only (`RHIZOME_*`, table in README.md) — there is no
   config file. `RHIZOME_PEER_TOKEN` is sent only to explicitly configured `https://` peers.
 - `addBlock` validates cheapest-first with PoW last; that ordering is DoS protection, not
