@@ -2,15 +2,20 @@ package rhizome.node;
 
 import io.activej.bytebuf.ByteBuf;
 import io.activej.csp.supplier.ChannelSuppliers;
+import io.activej.http.ContentTypes;
+import io.activej.http.HttpHeaderValue;
 import io.activej.http.HttpHeaders;
 import io.activej.http.HttpRequest;
 import io.activej.http.HttpResponse;
-import org.json.JSONObject;
 
 import rhizome.core.block.BlockCodec;
 import rhizome.core.common.Constants;
+import rhizome.core.serialization.JsonSink;
+import rhizome.core.serialization.JsonSink.Key;
 
 import static rhizome.node.ApiResponses.badRequest;
+import static rhizome.node.ApiResponses.errorJson;
+import static rhizome.node.ApiResponses.gone;
 import static rhizome.node.ApiResponses.json;
 import static rhizome.node.ApiResponses.parseLong;
 
@@ -26,16 +31,40 @@ import static rhizome.node.ApiResponses.parseLong;
  * A non-200 response is a transport failure on the caller's side — retried, never penalized —
  * and mirrors the write-side doctrine: beginReorgWindow already refuses new-tip addBlock
  * (IS_SYNCING) for the same window, because a node mid-reorg must not act authoritative.
+ *
+ * <p>Bodies are written with {@link JsonSink} instead of an {@code org.json} tree — see that
+ * class's Javadoc. This file's own 404 bodies go through {@link ApiResponses#errorJson};
+ * {@link #busyDuringReorg()} keeps its own inline body since it needs an extra
+ * {@code Retry-After} header {@code errorJson} does not take. {@code /state/snapshot/info} is
+ * the highest-caution body here: it is read by other nodes with typed accessors
+ * ({@code HttpPeerSource.snapshotInfo()} — {@code getLong}/{@code getString}/{@code getInt}),
+ * preserved exactly below.
  */
 final class SyncApi {
+
+    // -- JsonSink field keys, pre-encoded once per call site (see JsonSink's class Javadoc) ----
+    private static final Key K_ERROR = Key.of("error");
+    private static final Key K_PIVOT_HEIGHT = Key.of("pivotHeight");
+    private static final Key K_STATE_ROOT = Key.of("stateRoot");
+    private static final Key K_CHUNKS = Key.of("chunks");
+
+    // -- JsonSink size hints (see class javadoc on JsonSink) -------------------------------------
+    private static final int ERROR_SIZE_HINT = 96;
+    private static final int SNAPSHOT_INFO_SIZE_HINT = 128;
 
     private SyncApi() {}
 
     /** 503 for the reorg window: the node has nothing coherent to serve right now. */
     static HttpResponse busyDuringReorg() {
+        JsonSink sink = JsonSink.create(ERROR_SIZE_HINT);
+        sink.beginObject();
+        sink.field(K_ERROR, "reorg in progress; retry shortly");
+        sink.endObject();
         return HttpResponse.ofCode(503)
             .withHeader(HttpHeaders.RETRY_AFTER, "5")
-            .withJson(new JSONObject().put("error", "reorg in progress; retry shortly").toString())
+            .withHeader(HttpHeaders.CONTENT_TYPE, HttpHeaderValue.ofContentType(ContentTypes.JSON_UTF_8))
+            .withHeader(ApiResponses.H_XCTO, "nosniff")
+            .withBody(ByteBuf.wrap(sink.array(), 0, sink.length()))
             .build();
     }
 
@@ -55,9 +84,7 @@ final class SyncApi {
         // with the watermark so the caller sources these blocks (or a snapshot) from an archive.
         long prunedBelow = node.prunedBelow();
         if (prunedBelow > 0 && start < prunedBelow) {
-            return HttpResponse.ofCode(410)
-                .withJson(new JSONObject().put("error", "pruned").put("prunedBelow", prunedBelow).toString())
-                .build();
+            return gone(prunedBelow);
         }
         long cappedEnd = Math.min(end, node.blockCount());
         // Stream the window block-by-block instead of buffering it (audit M5): materialising up to
@@ -119,18 +146,25 @@ final class SyncApi {
             .build();
     }
 
-    /** Advertises the materialised state snapshot ({@code 404} when none has been captured). */
+    /**
+     * Advertises the materialised state snapshot ({@code 404} when none has been captured).
+     * {@code pivotHeight} (long), {@code stateRoot} (uppercase hex string — mirrors
+     * {@code Utils.bytesToHex}'s case) and {@code chunks} (int) are read with typed accessors by
+     * {@code HttpPeerSource.snapshotInfo()} ({@code getLong}/{@code getString}/{@code getInt}):
+     * the exact type of each field is preserved here.
+     */
     static HttpResponse snapshotInfo(NodeService node) {
         var snap = node.materializedSnapshot();
         if (snap == null) {
-            return HttpResponse.ofCode(404)
-                .withJson(new JSONObject().put("error", "no snapshot materialized").toString())
-                .build();
+            return errorJson(404, "no snapshot materialized");
         }
-        return json(new JSONObject()
-            .put("pivotHeight", snap.pivotHeight())
-            .put("stateRoot", rhizome.core.common.Utils.bytesToHex(snap.stateRoot()))
-            .put("chunks", snap.chunkCount()));
+        JsonSink sink = JsonSink.create(SNAPSHOT_INFO_SIZE_HINT);
+        sink.beginObject();
+        sink.field(K_PIVOT_HEIGHT, snap.pivotHeight());
+        sink.hexUpper(K_STATE_ROOT, snap.stateRoot());
+        sink.field(K_CHUNKS, snap.chunkCount());
+        sink.endObject();
+        return json(sink);
     }
 
     /** One binary snapshot chunk by index (bounds-checked against the current materialisation). */
@@ -144,9 +178,7 @@ final class SyncApi {
         }
         int index = (int) rawIndex;
         if (snap == null || index >= snap.chunkCount()) {
-            return HttpResponse.ofCode(404)
-                .withJson(new JSONObject().put("error", "no such snapshot chunk").toString())
-                .build();
+            return errorJson(404, "no such snapshot chunk");
         }
         try {
             return HttpResponse.ok200()
@@ -158,9 +190,7 @@ final class SyncApi {
             // materializedSnapshot() read and the chunk read. It is not a client fault (→ not
             // the global mapper's 400): tell the peer to re-read /state/snapshot/info.
             if (e.getCause() instanceof java.nio.channels.ClosedChannelException) {
-                return HttpResponse.ofCode(404)
-                    .withJson(new JSONObject().put("error", "snapshot rotated").toString())
-                    .build();
+                return errorJson(404, "snapshot rotated");
             }
             throw e;
         }
@@ -179,9 +209,7 @@ final class SyncApi {
         }
         var block = node.orphanBlock(rhizome.crypto.SHA256Hash.of(hash));
         if (block == null) {
-            return HttpResponse.ofCode(404)
-                .withJson(new JSONObject().put("error", "no such orphan").toString())
-                .build();
+            return errorJson(404, "no such orphan");
         }
         return HttpResponse.ok200()
             .withHeader(HttpHeaders.CONTENT_TYPE, "application/octet-stream")

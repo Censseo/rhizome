@@ -6,6 +6,8 @@ import rhizome.crypto.PrivateKey;
 import rhizome.crypto.PublicKey;
 import rhizome.crypto.SHA256Hash;
 import rhizome.core.ledger.PublicAddress;
+import rhizome.core.serialization.JsonSink;
+import rhizome.core.serialization.JsonSink.Key;
 import rhizome.core.serialization.Serializable;
 import rhizome.core.transaction.dto.TransactionDto;
 
@@ -116,6 +118,25 @@ public sealed interface Transaction permits TransactionImpl {
         return serializer().toJson(transaction);
     }
 
+    /** Key/value pairs only — no surrounding braces. See {@link #writeJson(JsonSink)}. */
+    public void writeJsonBody(JsonSink sink);
+    default void writeJsonBody(JsonSink sink, Transaction transaction) {
+        serializer().writeJsonBody(sink, transaction);
+    }
+
+    /**
+     * Same field set, types and conditions as {@link #toJson()}, written directly into
+     * {@code sink} instead of building an {@code org.json} tree first — see {@code JsonSink}'s
+     * class Javadoc for why. {@code toJson()} stays: {@link #of(JSONObject)} still parses the
+     * tree form, and {@code JsonWriterEquivalenceTest} uses it as the equivalence-test oracle
+     * this writer is checked against.
+     */
+    default void writeJson(JsonSink sink) {
+        sink.beginObject();
+        writeJsonBody(sink);
+        sink.endObject();
+    }
+
     public Transaction sign(PrivateKey privateKey);
     public boolean signatureValid();
 
@@ -160,6 +181,26 @@ public sealed interface Transaction permits TransactionImpl {
         static final String GAS_PRICE = "gasPrice";
         static final String SIG_SCHEME = "sigScheme";
         static final String PQ_COMMITMENT = "pqCommitment";
+
+        // Pre-encoded "name": keys for the JsonSink writer (see JsonSink's class Javadoc for why
+        // these are built once per call site rather than encoded per response). Names mirror the
+        // String constants above field-for-field, so NONCE's key stays "accountNonce".
+        static final Key K_TO = Key.of(TO);
+        static final Key K_AMOUNT = Key.of(AMOUNT);
+        static final Key K_TIMESTAMP = Key.of(TIMESTAMP);
+        static final Key K_FEE = Key.of(FEE);
+        static final Key K_TXID = Key.of(TXID);
+        static final Key K_FROM = Key.of(FROM);
+        static final Key K_SIGNING_KEY = Key.of(SIGNING_KEY);
+        static final Key K_SIGNATURE = Key.of(SIGNATURE);
+        static final Key K_CHAIN_ID = Key.of(CHAIN_ID);
+        static final Key K_NONCE = Key.of(NONCE);
+        static final Key K_KIND = Key.of(KIND);
+        static final Key K_DATA = Key.of(DATA);
+        static final Key K_GAS_LIMIT = Key.of(GAS_LIMIT);
+        static final Key K_GAS_PRICE = Key.of(GAS_PRICE);
+        static final Key K_SIG_SCHEME = Key.of(SIG_SCHEME);
+        static final Key K_PQ_COMMITMENT = Key.of(PQ_COMMITMENT);
 
         static TransactionSerializer instance = new TransactionSerializer();
 
@@ -247,10 +288,57 @@ public sealed interface Transaction permits TransactionImpl {
                 result.put(TXID, transactionImpl.hashContents().toHexString());
                 result.put(FROM, "");
             }
-            
+
             return result;
         }
-    
+
+        /**
+         * Same field set, types and conditions as {@link #toJson(Transaction)} above, written
+         * directly into {@code sink} instead of building an {@code org.json} tree — see
+         * {@code JsonWriterEquivalenceTest} for the byte-level equivalence proof.
+         */
+        public void writeJsonBody(JsonSink sink, Transaction transaction) {
+            var transactionImpl = (TransactionImpl) transaction;
+            sink.hexUpper(K_TO, transactionImpl.to().toBytes());
+            sink.field(K_AMOUNT, transactionImpl.amount().amount());
+            sink.fieldLongAsString(K_TIMESTAMP, transactionImpl.timestamp());
+            sink.field(K_FEE, transactionImpl.fee().amount());
+            sink.field(K_CHAIN_ID, transactionImpl.chainId());
+            sink.field(K_NONCE, transactionImpl.nonce());
+
+            if (transactionImpl.kind().hasPayload()) {
+                sink.field(K_KIND, transactionImpl.kind().name());
+                sink.field(K_GAS_LIMIT, transactionImpl.gasLimit());
+                sink.field(K_GAS_PRICE, transactionImpl.gasPrice());
+                sink.hexUpper(K_DATA, transactionImpl.data());
+            }
+
+            if (!transactionImpl.isTransactionFee()) {
+                sink.hexUpper(K_TXID, transactionImpl.hashContents().toBytes());
+                sink.hexUpper(K_FROM, transactionImpl.from().toBytes());
+                // PublicKey.toHexString() returns "" when no key is present (the unsigned
+                // BOX_COLLECT minted by BlockAssembler) rather than hex of the zero-filled
+                // encoding toBytes() falls back to — the two disagree in that one case, so
+                // toBytes() cannot be fed to hexUpper() unconditionally here.
+                if (transactionImpl.signingKey().key().isPresent()) {
+                    sink.hexUpper(K_SIGNING_KEY, transactionImpl.signingKey().toBytes());
+                } else {
+                    sink.field(K_SIGNING_KEY, "");
+                }
+                sink.hexUpper(K_SIGNATURE, transactionImpl.signature().toBytes());
+                // Emitted only when non-default, so the JSON of an ordinary Ed25519 transaction is
+                // byte-for-byte what it was before scheme agility existed and no API consumer
+                // (dashboard, explorer, wallet CLI) has to learn a new field to keep working.
+                if (transactionImpl.scheme() != rhizome.crypto.SignatureScheme.ED25519) {
+                    sink.field(K_SIG_SCHEME, transactionImpl.scheme().name());
+                    sink.hexUpper(K_PQ_COMMITMENT, transactionImpl.pqCommitment());
+                }
+            } else {
+                sink.hexUpper(K_TXID, transactionImpl.hashContents().toBytes());
+                sink.field(K_FROM, "");
+            }
+        }
+
         public Transaction fromJson(JSONObject json) {
             var builder = TransactionImpl.builder()
                 .timestamp(json.getLong(TIMESTAMP))

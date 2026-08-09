@@ -6,6 +6,8 @@ import org.json.JSONObject;
 
 import rhizome.core.block.dto.BlockDto;
 import rhizome.crypto.SHA256Hash;
+import rhizome.core.serialization.JsonSink;
+import rhizome.core.serialization.JsonSink.Key;
 import rhizome.core.serialization.Serializable;
 import rhizome.core.transaction.Transaction;
 
@@ -68,6 +70,26 @@ public sealed interface Block permits BlockImpl {
         return serializer().toJson(block);
     }
 
+    /** Key/value pairs only — no surrounding braces. See {@link #writeJson(JsonSink)}. */
+    public void writeJsonBody(JsonSink sink);
+    default void writeJsonBody(JsonSink sink, Block block) {
+        serializer().writeJsonBody(sink, block);
+    }
+
+    /**
+     * Same field set, types and conditions as {@link #toJson()}, written directly into
+     * {@code sink} instead of building an {@code org.json} tree first — see {@code JsonSink}'s
+     * class Javadoc for why. {@code toJson()} stays: {@link #of(JSONObject)} still parses the
+     * tree form (including {@code HttpPeerSource}'s peer-JSON fallback path), and
+     * {@code JsonWriterEquivalenceTest} uses it as the equivalence-test oracle this writer is
+     * checked against.
+     */
+    default void writeJson(JsonSink sink) {
+        sink.beginObject();
+        writeJsonBody(sink);
+        sink.endObject();
+    }
+
     public int id();
     public Block id(int id);
     public void addTransaction(Transaction t);
@@ -103,6 +125,22 @@ public sealed interface Block permits BlockImpl {
         static final String LAST_BLOCK_HASH = "lastBlockHash";
         static final String TRANSACTIONS = "transactions";
         static final String UNCLES = "uncles";
+        static final String MINER = "miner";
+
+        // Pre-encoded "name": keys for the JsonSink writer (see JsonSink's class Javadoc for why
+        // these are built once per call site rather than encoded per response).
+        static final Key K_ID = Key.of(ID);
+        static final Key K_HASH = Key.of(HASH);
+        static final Key K_TIMESTAMP = Key.of(TIMESTAMP);
+        static final Key K_DIFFICULTY = Key.of(DIFFICULTY);
+        static final Key K_NONCE = Key.of(NONCE);
+        static final Key K_STATE_ROOT = Key.of(STATE_ROOT);
+        static final Key K_VOTE = Key.of(VOTE);
+        static final Key K_MERKLE_ROOT = Key.of(MERKLE_ROOT);
+        static final Key K_LAST_BLOCK_HASH = Key.of(LAST_BLOCK_HASH);
+        static final Key K_TRANSACTIONS = Key.of(TRANSACTIONS);
+        static final Key K_UNCLES = Key.of(UNCLES);
+        static final Key K_MINER = Key.of(MINER);
 
         static BlockSerializer instance = new BlockSerializer();
 
@@ -167,7 +205,51 @@ public sealed interface Block permits BlockImpl {
             }
             return result;
         }
-    
+
+        /**
+         * Same field set, types and conditions as {@link #toJson(Block)} above, written
+         * directly into {@code sink} instead of building an {@code org.json} tree — see
+         * {@code JsonWriterEquivalenceTest} for the byte-level equivalence proof, including the
+         * hash round-trip invariant this shape must preserve for {@code ChainSynchronizer}'s
+         * fork-point bisection.
+         */
+        public void writeJsonBody(JsonSink sink, Block block) {
+            var blockImpl = (BlockImpl) block;
+            sink.field(K_ID, blockImpl.id());
+            sink.hexUpper(K_HASH, blockImpl.hash().toBytes());
+            sink.field(K_DIFFICULTY, blockImpl.difficulty());
+            sink.hexUpper(K_NONCE, blockImpl.nonce().toBytes());
+            sink.fieldLongAsString(K_TIMESTAMP, blockImpl.timestamp());
+            sink.hexUpper(K_MERKLE_ROOT, blockImpl.merkleRoot().toBytes());
+            sink.hexUpper(K_LAST_BLOCK_HASH, blockImpl.lastBlockHash().toBytes());
+            // Committed only when set, mirroring the header hash, so a stateless block's
+            // JSON (and the hash a peer recomputes from it) is unchanged.
+            if (!blockImpl.stateRoot().equals(SHA256Hash.empty())) {
+                sink.hexUpper(K_STATE_ROOT, blockImpl.stateRoot().toBytes());
+            }
+            if (blockImpl.vote() != 0) {
+                sink.field(K_VOTE, blockImpl.vote());
+            }
+            sink.name(K_TRANSACTIONS);
+            sink.beginArray();
+            for (Transaction transaction : blockImpl.transactions()) {
+                transaction.writeJson(sink);
+            }
+            sink.endArray();
+            if (!blockImpl.uncles().isEmpty()) {
+                sink.name(K_UNCLES);
+                sink.beginArray();
+                for (UncleRef uncle : blockImpl.uncles()) {
+                    sink.beginObject();
+                    sink.hexUpper(K_HASH, uncle.hash().toBytes());
+                    sink.field(K_DIFFICULTY, uncle.difficulty());
+                    sink.hexUpper(K_MINER, uncle.miner().toBytes());
+                    sink.endObject();
+                }
+                sink.endArray();
+            }
+        }
+
         public Block fromJson(JSONObject json) {
             // Canonicality parity with the binary codecs (audit F5, F1): the JSON decode path must
             // reject exactly what BlockDto/HeaderCodec/BlockCodec reject on the wire, so a

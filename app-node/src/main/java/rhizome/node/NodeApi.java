@@ -13,7 +13,6 @@ import io.activej.http.RoutingServlet;
 import io.activej.promise.Promise;
 import io.activej.promise.SettablePromise;
 import io.activej.reactor.Reactor;
-import org.json.JSONObject;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -21,12 +20,15 @@ import rhizome.core.block.Block;
 import rhizome.core.block.BlockCodec;
 import rhizome.core.common.Constants;
 import rhizome.core.serialization.BinarySerializable;
+import rhizome.core.serialization.JsonSink;
+import rhizome.core.serialization.JsonSink.Key;
 import rhizome.core.transaction.Transaction;
 import rhizome.core.transaction.dto.TransactionDto;
 
 import static io.activej.http.HttpMethod.GET;
 import static io.activej.http.HttpMethod.POST;
 import static rhizome.node.ApiResponses.badRequest;
+import static rhizome.node.ApiResponses.errorJson;
 import static rhizome.node.ApiResponses.guarded;
 import static rhizome.node.ApiResponses.guardedResponse;
 import static rhizome.node.ApiResponses.json;
@@ -132,6 +134,33 @@ public final class NodeApi {
      * block-serving reads (~1 unit per block) with a small surcharge for the hash-keyed lookup.
      */
     private static final int ORPHAN_COST = 2;
+
+    // -- JsonSink field keys, pre-encoded once per call site (see JsonSink's class Javadoc) ----
+    private static final Key K_TOTAL_WORK = Key.of("totalWork");
+    private static final Key K_SIZE = Key.of("size");
+    private static final Key K_CHAIN_ID = Key.of("chainId");
+    private static final Key K_NETWORK = Key.of("network");
+    private static final Key K_HEIGHT = Key.of("height");
+    private static final Key K_DIFFICULTY = Key.of("difficulty");
+    private static final Key K_MEMPOOL = Key.of("mempool");
+    private static final Key K_PRUNED_BELOW = Key.of("prunedBelow");
+    private static final Key K_SNAPSHOT_PIVOT = Key.of("snapshotPivot");
+    private static final Key K_STORAGE_FEE_FACTOR = Key.of("storageFeeFactor");
+    private static final Key K_MIN_VALUE_PER_BYTE = Key.of("minValuePerByte");
+    private static final Key K_PEERS = Key.of("peers");
+    private static final Key K_STATUS = Key.of("status");
+    private static final Key K_SCAN_ID = Key.of("scanId");
+    private static final Key K_REMOVED = Key.of("removed");
+
+    // -- JsonSink size hints (see class javadoc on JsonSink) -------------------------------------
+    private static final int TOTAL_WORK_SIZE_HINT = 96;
+    private static final int MEMPOOL_SIZE_HINT = 32;
+    private static final int INFO_SIZE_HINT = 256;
+    private static final int PEERS_BASE_SIZE_HINT = 64;
+    private static final int PEER_ENTRY_SIZE_HINT = 48;
+    private static final int STATUS_OK_SIZE_HINT = 32;
+    private static final int SCAN_ID_SIZE_HINT = 32;
+    private static final int REMOVED_SIZE_HINT = 32;
 
     private NodeApi() {}
 
@@ -247,26 +276,16 @@ public final class NodeApi {
             // reorg window they answer 503 like the other chain routes so a peer never sees the
             // "height before the pop, headers after it" inconsistency (testnet campaign S5).
             .with(GET, "/block_count", req -> ok(whenNotReorging(node, () -> text(String.valueOf(node.blockCount())))))
-            .with(GET, "/total_work", req -> ok(whenNotReorging(node, () -> json(new JSONObject().put("totalWork", node.totalWork().toString())))))
+            .with(GET, "/total_work", req -> ok(whenNotReorging(node, () -> totalWorkResponse(node))))
             .with(GET, "/difficulty", req -> ok(text(String.valueOf(node.difficulty()))))
-            .with(GET, "/mempool", req -> ok(json(new JSONObject().put("size", node.mempoolSize()))))
-            .with(GET, "/info", req -> ok(json(new JSONObject()
-                .put("chainId", node.chainId())
-                .put("network", node.networkName())
-                .put("height", node.blockCount())
-                .put("difficulty", node.difficulty())
-                .put("mempool", node.mempoolSize())
-                .put("prunedBelow", node.prunedBelow())
-                .put("snapshotPivot", node.snapshotPivot())
-                .put("storageFeeFactor", node.voteableParams()[0])
-                .put("minValuePerByte", node.voteableParams()[1]))))
+            .with(GET, "/mempool", req -> ok(mempoolResponse(node)))
+            .with(GET, "/info", req -> ok(infoResponse(node)))
             // ---- peer registry ----
-            .with(GET, "/peers", req -> ok(json(new JSONObject()
-                .put("peers", new org.json.JSONArray(node.publicPeers())))))
+            .with(GET, "/peers", req -> ok(peersResponse(node)))
             .with(POST, "/add_peer", req -> req.loadBody(SMALL_BODY).map(body -> guardedResponse(() -> {
                 String url = parseJson(body.getString(StandardCharsets.UTF_8)).getString("url");
                 node.addPeer(url);
-                return json(new JSONObject().put("status", "OK"));
+                return statusOkResponse();
             })))
             // ---- boxes / scans ----
             .with(GET, "/box", req -> offload(blocking, () -> BoxApi.box(node, req)))
@@ -274,11 +293,11 @@ public final class NodeApi {
             .with(POST, "/scan/register", req -> req.loadBody(SMALL_BODY).map(body -> guardedResponse(() -> {
                 int id = node.registerScan(scanOwner(req, trustXff), rhizome.core.box.ScanPredicate.fromJson(
                     parseJson(body.getString(StandardCharsets.UTF_8))));
-                return json(new JSONObject().put("scanId", id));
+                return scanIdResponse(id);
             })))
             .with(POST, "/scan/deregister", req -> req.loadBody(SMALL_BODY).map(body -> guardedResponse(() -> {
                 int id = parseJson(body.getString(StandardCharsets.UTF_8)).getInt("scanId");
-                return json(new JSONObject().put("removed", node.deregisterScan(scanOwner(req, trustXff), id)));
+                return removedResponse(node.deregisterScan(scanOwner(req, trustXff), id));
             })))
             .with(GET, "/scan/list", req -> offload(blocking, () -> BoxApi.scanList(node, scanOwner(req, trustXff))))
             .with(GET, "/scan/boxes", req -> offload(blocking, () -> BoxApi.scanBoxes(node, scanOwner(req, trustXff), req)))
@@ -318,18 +337,14 @@ public final class NodeApi {
         return request -> {
             int cost = requestCost(node, request);
             if (!limiter.allow(clientKey(request, trustXff), cost)) {
-                return HttpResponse.ofCode(429)
-                    .withJson(new JSONObject().put("error", "rate limited").toString())
-                    .toPromise();
+                return errorJson(429, "rate limited").toPromise();
             }
             // Early shed of push-abusers (audit: gossip push ban-score): a client that kept
             // feeding invalid blocks / corrupt-signature transactions is refused BEFORE the
             // token check and the body decode, for the strike window. A per-client-key shed
             // like the limiter above — never an aggregate gate, so honest peers are unaffected.
             if ((isSubmitPost(request) || isAddTransactionPost(request)) && node.isPushShed(clientKey(request, trustXff))) {
-                return HttpResponse.ofCode(429)
-                    .withJson(new JSONObject().put("error", "push temporarily refused").toString())
-                    .toPromise();
+                return errorJson(429, "push temporarily refused").toPromise();
             }
             // Optional bearer-token gate (RHIZOME_API_TOKEN) on the state-changing/operator
             // routes, checked BEFORE the aggregate gates below are consumed: an unauthenticated
@@ -340,18 +355,14 @@ public final class NodeApi {
             // private-node/private-explorer switch (audit: no read protection) — except the
             // static SPA/docs shell, which a plain browser navigation cannot bear a token for.
             if (apiToken != null && isTokenProtectedRoute(request, protectReads) && !bearerMatches(request, apiToken)) {
-                return HttpResponse.ofCode(401)
-                    .withJson(new JSONObject().put("error", "unauthorized").toString())
-                    .toPromise();
+                return errorJson(401, "unauthorized").toPromise();
             }
             // Aggregate (all-IP) budget for the explorer reads that decode blocks under the consensus
             // lock: the per-IP limiter above cannot stop a distributed flood from summing past it, so a
             // process-wide bucket bounds the total lock-guarded decode work on the event-loop thread
             // (audit 5th-pass, net Finding 2). Shed over-budget reads before they touch the store.
             if (isConsensusLockRead(request) && !node.tryReadBudget(cost)) {
-                return HttpResponse.ofCode(429)
-                    .withJson(new JSONObject().put("error", "read budget exceeded").toString())
-                    .toPromise();
+                return errorJson(429, "read budget exceeded").toPromise();
             }
             // Aggregate submit gate, consumed BEFORE the /submit handler decodes the block body. The
             // decode (up to maxBlockSizeBytes, ~25 000 tx allocations) and the memory-hard PoW hash it
@@ -359,9 +370,7 @@ public final class NodeApi {
             // flood from summing past it. Shedding here — rather than inside submitBlock, after the
             // decode already ran — closes the decode-before-gate asymmetry (audit S6).
             if (isSubmitPost(request) && !node.trySubmitBudget()) {
-                return HttpResponse.ofCode(429)
-                    .withJson(new JSONObject().put("error", "submit throttled").toString())
-                    .toPromise();
+                return errorJson(429, "submit throttled").toPromise();
             }
             // Aggregate mempool-admission gate, consumed BEFORE the tx body is decoded — symmetric
             // to the /submit gate above. /add_transaction runs one Ed25519 verify per admission on
@@ -369,9 +378,7 @@ public final class NodeApi {
             // a distributed corrupt-signature flood sums past the per-IP limiter and pins the loop
             // (audit M1).
             if (isAddTransactionPost(request) && !node.tryMempoolSigBudget()) {
-                return HttpResponse.ofCode(429)
-                    .withJson(new JSONObject().put("error", "transaction throttled").toString())
-                    .toPromise();
+                return errorJson(429, "transaction throttled").toPromise();
             }
             // DNS-rebinding Host check for ALL browser-reachable requests when an allowlist is
             // configured — not just POSTs: a rebound page can otherwise READ every data endpoint
@@ -382,9 +389,7 @@ public final class NodeApi {
                 String host = request.getHeader(H_HOST);
                 if (host != null && !host.isEmpty()
                     && !allowedHosts.contains(host.toLowerCase(java.util.Locale.ROOT))) {
-                    return HttpResponse.ofCode(403)
-                        .withJson(new JSONObject().put("error", "host not allowed").toString())
-                        .toPromise();
+                    return errorJson(403, "host not allowed").toPromise();
                 }
             }
             // CSRF / DNS-rebinding guard on state-changing requests. A browser attaches an Origin
@@ -396,9 +401,7 @@ public final class NodeApi {
             // response), so the browser blocks the request. Peer and CLI clients send no Origin and
             // are unaffected, so P2P submit/gossip keeps working.
             if (request.getMethod() == POST && isForbiddenBrowserPost(request, allowedHosts)) {
-                return HttpResponse.ofCode(403)
-                    .withJson(new JSONObject().put("error", "cross-origin request refused").toString())
-                    .toPromise();
+                return errorJson(403, "cross-origin request refused").toPromise();
             }
             // Convert any handler failure (incl. body-size overflow) into a clean, generic
             // response; the detail is logged server-side only, never reflected to the client
@@ -408,6 +411,94 @@ public final class NodeApi {
                 return badRequest("bad request");
             });
         };
+    }
+
+    // ---- response bodies (JsonSink) ------------------------------------------------------------
+    //
+    // /total_work, /info and /peers are the highest-caution bodies in this file: they are read by
+    // OTHER NODES over the sync/gossip protocol and by the wallet CLI with STRICT typed parsing,
+    // not just by the dashboard — see each method's javadoc for the exact consumer and read.
+
+    /** {@code totalWork} stays a JSON STRING (mirrors {@code DashboardApi#stats}): it is a
+     *  {@code BigInteger} that can exceed 2^53, and {@code HttpPeerSource.totalWork()} does a
+     *  strict {@code getString("totalWork")} read on it. */
+    private static HttpResponse totalWorkResponse(NodeService node) {
+        JsonSink sink = JsonSink.create(TOTAL_WORK_SIZE_HINT);
+        sink.beginObject();
+        sink.field(K_TOTAL_WORK, node.totalWork().toString());
+        sink.endObject();
+        return json(sink);
+    }
+
+    private static HttpResponse mempoolResponse(NodeService node) {
+        JsonSink sink = JsonSink.create(MEMPOOL_SIZE_HINT);
+        sink.beginObject();
+        sink.field(K_SIZE, node.mempoolSize());
+        sink.endObject();
+        return json(sink);
+    }
+
+    /**
+     * Peer/wallet identity and sync scalars. {@code chainId} stays a JSON NUMBER:
+     * {@code WalletClient.chainId()} does a strict {@code getInt("chainId")} read that rejects a
+     * quoted string. {@code prunedBelow} stays a JSON NUMBER too: {@code HttpPeerSource.prunedBelow()}
+     * reads it with {@code optLong("prunedBelow", 0)}, and {@code PrunedNodeApiTest} asserts
+     * {@code getLong} on it directly.
+     */
+    private static HttpResponse infoResponse(NodeService node) {
+        JsonSink sink = JsonSink.create(INFO_SIZE_HINT);
+        sink.beginObject();
+        sink.field(K_CHAIN_ID, node.chainId());
+        sink.field(K_NETWORK, node.networkName());
+        sink.field(K_HEIGHT, node.blockCount());
+        sink.field(K_DIFFICULTY, node.difficulty());
+        sink.field(K_MEMPOOL, node.mempoolSize());
+        sink.field(K_PRUNED_BELOW, node.prunedBelow());
+        sink.field(K_SNAPSHOT_PIVOT, node.snapshotPivot());
+        sink.field(K_STORAGE_FEE_FACTOR, node.voteableParams()[0]);
+        sink.field(K_MIN_VALUE_PER_BYTE, node.voteableParams()[1]);
+        sink.endObject();
+        return json(sink);
+    }
+
+    /** {@code peers} stays a JSON array of STRINGS: {@code PeerDiscovery#fetchPeersPinned} reads
+     *  it with {@code getJSONArray("peers")} and stringifies each element. */
+    private static HttpResponse peersResponse(NodeService node) {
+        java.util.List<String> peers = node.publicPeers();
+        JsonSink sink = JsonSink.create(PEERS_BASE_SIZE_HINT + peers.size() * PEER_ENTRY_SIZE_HINT);
+        sink.beginObject();
+        sink.name(K_PEERS);
+        sink.beginArray();
+        for (String peer : peers) {
+            sink.value(peer);
+        }
+        sink.endArray();
+        sink.endObject();
+        return json(sink);
+    }
+
+    private static HttpResponse statusOkResponse() {
+        JsonSink sink = JsonSink.create(STATUS_OK_SIZE_HINT);
+        sink.beginObject();
+        sink.field(K_STATUS, "OK");
+        sink.endObject();
+        return json(sink);
+    }
+
+    private static HttpResponse scanIdResponse(int id) {
+        JsonSink sink = JsonSink.create(SCAN_ID_SIZE_HINT);
+        sink.beginObject();
+        sink.field(K_SCAN_ID, id);
+        sink.endObject();
+        return json(sink);
+    }
+
+    private static HttpResponse removedResponse(boolean removed) {
+        JsonSink sink = JsonSink.create(REMOVED_SIZE_HINT);
+        sink.beginObject();
+        sink.field(K_REMOVED, removed);
+        sink.endObject();
+        return json(sink);
     }
 
     // ---- middleware: cost model, budgets and the browser guard ----
@@ -463,9 +554,7 @@ public final class NodeApi {
             });
         } catch (java.util.concurrent.RejectedExecutionException e) {
             reactor.completeExternalTask();
-            return HttpResponse.ofCode(429)
-                .withJson(new JSONObject().put("error", "server busy").toString())
-                .toPromise();
+            return errorJson(429, "server busy").toPromise();
         }
         return result;
     }

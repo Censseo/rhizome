@@ -2,15 +2,16 @@ package rhizome.node;
 
 import io.activej.http.HttpRequest;
 import io.activej.http.HttpResponse;
-import org.json.JSONObject;
 
+import rhizome.core.block.Block;
 import rhizome.core.ledger.PublicAddress;
+import rhizome.core.serialization.JsonSink;
+import rhizome.core.serialization.JsonSink.Key;
 import rhizome.core.transaction.Transaction;
 import rhizome.crypto.SHA256Hash;
 
 import static rhizome.node.ApiResponses.badRequest;
 import static rhizome.node.ApiResponses.gone;
-import static rhizome.node.ApiResponses.hex;
 import static rhizome.node.ApiResponses.json;
 import static rhizome.node.ApiResponses.notFound;
 import static rhizome.node.ApiResponses.parseLong;
@@ -20,6 +21,11 @@ import static rhizome.node.ApiResponses.parseLong;
  * transaction scans, address history and contract inspection. These fully decode
  * blocks under the consensus lock, so their rate-limit weighting lives in
  * {@link NodeApi#requestCost}.
+ *
+ * <p>Bodies are written with {@link JsonSink} instead of an {@code org.json} tree — see that
+ * class's Javadoc. The size-hint constants below are allocation hints only: {@link JsonSink}
+ * grows its buffer automatically ({@code ensureCapacity}), so an under-estimate just costs a
+ * doubling, not a correctness bug.
  */
 final class ExplorerApi {
 
@@ -33,6 +39,32 @@ final class ExplorerApi {
     static final int ADDRESS_TXS_MAX = 100;
     /** Block-range size cap for /blocks. */
     static final int BLOCKS_RANGE_MAX = 50;
+
+    // -- JsonSink field keys, pre-encoded once per call site (see JsonSink's class Javadoc) ----
+    private static final Key K_BLOCKS = Key.of("blocks");
+    private static final Key K_HEIGHT = Key.of("height");
+    private static final Key K_HASH = Key.of("hash");
+    private static final Key K_TIMESTAMP = Key.of("timestamp");
+    private static final Key K_DIFFICULTY = Key.of("difficulty");
+    private static final Key K_TX_COUNT = Key.of("txCount");
+    private static final Key K_UNCLES = Key.of("uncles");
+    private static final Key K_ADDRESS = Key.of("address");
+    private static final Key K_BALANCE = Key.of("balance");
+    private static final Key K_NEXT_NONCE = Key.of("nextNonce");
+    private static final Key K_TRANSACTION = Key.of("transaction");
+    private static final Key K_SCANNED_FROM = Key.of("scannedFrom");
+    private static final Key K_SCANNED_TO = Key.of("scannedTo");
+    private static final Key K_TRANSACTIONS = Key.of("transactions");
+    private static final Key K_EXISTS = Key.of("exists");
+    private static final Key K_CODE_SIZE = Key.of("codeSize");
+    private static final Key K_CODE_HASH = Key.of("codeHash");
+
+    // -- JsonSink size hints (see class javadoc) -----------------------------------------------
+    private static final int BLOCKS_SIZE_HINT = 256 + BLOCKS_RANGE_MAX * 200;
+    private static final int WALLET_SIZE_HINT = 128;
+    private static final int TRANSACTION_SIZE_HINT = 512;
+    private static final int ADDRESS_TXS_SIZE_HINT = 512 + ADDRESS_TXS_MAX * 200;
+    private static final int CONTRACT_SIZE_HINT = 192;
 
     private ExplorerApi() {}
 
@@ -53,18 +85,28 @@ final class ExplorerApi {
             return gone(prunedBelow);
         }
         long cappedEnd = Math.min(end, node.blockCount());
-        org.json.JSONArray arr = new org.json.JSONArray();
+        JsonSink sink = JsonSink.create(BLOCKS_SIZE_HINT);
+        sink.beginObject();
+        sink.name(K_BLOCKS);
+        sink.beginArray();
         for (long h = start; h <= cappedEnd; h++) {
             var block = (rhizome.core.block.BlockImpl) node.block(h);
-            arr.put(new JSONObject()
-                .put("height", h)
-                .put("hash", block.hash().toHexString())
-                .put("timestamp", block.timestamp())
-                .put("difficulty", block.difficulty())
-                .put("txCount", block.transactions().size())
-                .put("uncles", block.uncles().size()));
+            sink.beginObject();
+            sink.field(K_HEIGHT, h);
+            sink.hexUpper(K_HASH, block.hash().toBytes());
+            // Note: this per-block summary emits timestamp as a NUMBER, unlike the full
+            // Transaction/Block writers which emit it as a string (values can exceed 2^53) —
+            // a preexisting divergence this migration preserves rather than harmonizes.
+            sink.field(K_TIMESTAMP, block.timestamp());
+            sink.field(K_DIFFICULTY, block.difficulty());
+            sink.field(K_TX_COUNT, block.transactions().size());
+            sink.field(K_UNCLES, block.uncles().size());
+            sink.endObject();
         }
-        return json(new JSONObject().put("blocks", arr).put("height", node.blockCount()));
+        sink.endArray();
+        sink.field(K_HEIGHT, node.blockCount());
+        sink.endObject();
+        return json(sink);
     }
 
     /** A single full block by height: {@code GET /block?blockId=N}. */
@@ -77,16 +119,26 @@ final class ExplorerApi {
         if (prunedBelow > 0 && id < prunedBelow) {
             return gone(prunedBelow); // body discarded by pruning — source it from an archive
         }
-        return json(node.block(id).toJson());
+        Block found = node.block(id);
+        // Sized from this specific block's shape rather than the network's worst-case
+        // maxBlockSizeBytes, so a typical small block doesn't pay for a multi-MB allocation
+        // it will never use.
+        int sizeHint = 512 + found.transactions().size() * 400 + found.uncles().size() * 128;
+        JsonSink sink = JsonSink.create(sizeHint);
+        found.writeJson(sink);
+        return json(sink);
     }
 
     /** Balance and next nonce of an address: {@code GET /wallet?address=<hex50>}. */
     static HttpResponse wallet(NodeService node, HttpRequest req) {
         PublicAddress wallet = PublicAddress.of(req.getQueryParameter("address"));
-        return json(new JSONObject()
-            .put("address", wallet.toHexString())
-            .put("balance", node.balance(wallet))
-            .put("nextNonce", node.nextNonce(wallet)));
+        JsonSink sink = JsonSink.create(WALLET_SIZE_HINT);
+        sink.beginObject();
+        sink.hexUpper(K_ADDRESS, wallet.toBytes());
+        sink.field(K_BALANCE, node.balance(wallet));
+        sink.field(K_NEXT_NONCE, node.nextNonce(wallet));
+        sink.endObject();
+        return json(sink);
     }
 
     /**
@@ -106,9 +158,7 @@ final class ExplorerApi {
         if (indexed != null && indexed >= Math.max(1, node.prunedBelow())) {
             for (Transaction t : node.block(indexed).transactions()) {
                 if (t.hashContents().equals(contentHash)) {
-                    return json(new JSONObject()
-                        .put("height", (long) indexed)
-                        .put("transaction", t.toJson()));
+                    return transactionFound(indexed, t);
                 }
             }
         }
@@ -119,13 +169,23 @@ final class ExplorerApi {
         for (long h = tip; h >= floor; h--) {
             for (Transaction t : node.block(h).transactions()) {
                 if (t.hashContents().equals(contentHash)) {
-                    return json(new JSONObject()
-                        .put("height", h)
-                        .put("transaction", t.toJson()));
+                    return transactionFound(h, t);
                 }
             }
         }
         return notFound("transaction not found in scanned range (deepen with ?depth=)");
+    }
+
+    /** {@code {"height": ..., "transaction": {...}}} envelope shared by both {@link
+     *  #findTransaction} return sites — the indexed lookup and the tip-backward scan fallback. */
+    private static HttpResponse transactionFound(long height, Transaction t) {
+        JsonSink sink = JsonSink.create(TRANSACTION_SIZE_HINT);
+        sink.beginObject();
+        sink.field(K_HEIGHT, height);
+        sink.name(K_TRANSACTION);
+        t.writeJson(sink);
+        sink.endObject();
+        return json(sink);
     }
 
     /** Transactions touching an address (as sender or recipient), bounded scan as above. */
@@ -135,19 +195,32 @@ final class ExplorerApi {
         long tip = node.blockCount();
         // Never scan below the prune watermark: those bodies are gone and node.block() would throw.
         long floor = Math.max(Math.max(1, tip - depth + 1), node.prunedBelow());
-        org.json.JSONArray arr = new org.json.JSONArray();
-        for (long h = tip; h >= floor && arr.length() < ADDRESS_TXS_MAX; h--) {
+        JsonSink sink = JsonSink.create(ADDRESS_TXS_SIZE_HINT);
+        sink.beginObject();
+        sink.hexUpper(K_ADDRESS, address.toBytes());
+        sink.field(K_SCANNED_FROM, floor);
+        sink.field(K_SCANNED_TO, tip);
+        sink.name(K_TRANSACTIONS);
+        sink.beginArray();
+        int matched = 0;
+        for (long h = tip; h >= floor && matched < ADDRESS_TXS_MAX; h--) {
             for (Transaction t : node.block(h).transactions()) {
-                if ((address.equals(t.from()) || address.equals(t.to())) && arr.length() < ADDRESS_TXS_MAX) {
-                    arr.put(t.toJson().put("height", h));
+                if ((address.equals(t.from()) || address.equals(t.to())) && matched < ADDRESS_TXS_MAX) {
+                    // height is not part of Transaction's own JSON shape, so it is written here
+                    // as an extra field on this projection instead of mutating the shared
+                    // toJson()/writeJsonBody() result (the old code mutated a toJson() tree to
+                    // splice this in).
+                    sink.beginObject();
+                    t.writeJsonBody(sink);
+                    sink.field(K_HEIGHT, h);
+                    sink.endObject();
+                    matched++;
                 }
             }
         }
-        return json(new JSONObject()
-            .put("address", address.toHexString())
-            .put("scannedFrom", floor)
-            .put("scannedTo", tip)
-            .put("transactions", arr));
+        sink.endArray();
+        sink.endObject();
+        return json(sink);
     }
 
     private static long scanDepth(HttpRequest req) {
@@ -163,19 +236,25 @@ final class ExplorerApi {
     static HttpResponse contractInfo(NodeService node, HttpRequest req) {
         PublicAddress address = PublicAddress.of(req.getQueryParameter("address"));
         byte[] code = node.contractCode(address);
-        JSONObject out = new JSONObject()
-            .put("address", address.toHexString())
-            .put("exists", code != null)
-            .put("balance", node.balance(address));
+        JsonSink sink = JsonSink.create(CONTRACT_SIZE_HINT);
+        sink.beginObject();
+        sink.hexUpper(K_ADDRESS, address.toBytes());
+        sink.field(K_EXISTS, code != null);
+        sink.field(K_BALANCE, node.balance(address));
         if (code != null) {
-            out.put("codeSize", code.length).put("codeHash", sha256Hex(code));
+            sink.field(K_CODE_SIZE, code.length);
+            // Lowercase, unlike the address above: ApiResponses.hex (Character.forDigit) is the
+            // legacy encoder this mirrors, and the node deliberately emits both hex cases across
+            // its JSON surface — see JsonSink's class Javadoc.
+            sink.hexLower(K_CODE_HASH, sha256(code));
         }
-        return json(out);
+        sink.endObject();
+        return json(sink);
     }
 
-    private static String sha256Hex(byte[] bytes) {
+    private static byte[] sha256(byte[] bytes) {
         try {
-            return hex(java.security.MessageDigest.getInstance("SHA-256").digest(bytes));
+            return java.security.MessageDigest.getInstance("SHA-256").digest(bytes);
         } catch (java.security.NoSuchAlgorithmException e) {
             throw new IllegalStateException("SHA-256 unavailable", e);
         }

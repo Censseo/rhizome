@@ -8,6 +8,8 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import rhizome.core.common.Utils;
+import rhizome.core.serialization.JsonSink;
+import rhizome.core.serialization.JsonSink.Key;
 
 /**
  * A declarative filter over {@link Box data boxes} (EIP-1 style), so an app or agent can
@@ -28,6 +30,24 @@ public sealed interface ScanPredicate {
     boolean test(Box box);
 
     JSONObject toJson();
+
+    /**
+     * Same field set and types as {@link #toJson()}, written directly into {@code sink} instead
+     * of building an {@code org.json} tree first — see {@code JsonSink}'s class Javadoc.
+     * {@code toJson()} stays: {@link #fromJson(JSONObject)} still parses the tree form, and
+     * existing tests still exercise it.
+     */
+    void writeJson(JsonSink sink);
+
+    // Pre-encoded "name": keys for the JsonSink writer, shared by every variant below (see
+    // JsonSink's class Javadoc for why these are built once per call site rather than encoded
+    // per response). Private to the interface: nest-based access lets the nested record/method
+    // bodies below reach them without exposing them beyond this file.
+    Key K_TYPE = Key.of("type");
+    Key K_OWNER = Key.of("owner");
+    Key K_INDEX = Key.of("index");
+    Key K_VALUE = Key.of("value");
+    Key K_PARTS = Key.of("parts");
 
     /** The owner this predicate constrains a match to, if any (enables the owner-index fast path). */
     default byte[] ownerAnchor() {
@@ -94,6 +114,15 @@ public sealed interface ScanPredicate {
         public JSONObject toJson() {
             return new JSONObject().put("type", "owner").put("owner", Utils.bytesToHex(owner));
         }
+
+        @Override
+        public void writeJson(JsonSink sink) {
+            sink.beginObject();
+            sink.field(K_TYPE, "owner");
+            // Utils.bytesToHex is uppercase (HexFormat.of().withUpperCase()) — mirrored exactly.
+            sink.hexUpper(K_OWNER, owner);
+            sink.endObject();
+        }
     }
 
     /** Matches boxes whose register at {@code index} equals {@code value} exactly. */
@@ -108,6 +137,15 @@ public sealed interface ScanPredicate {
         public JSONObject toJson() {
             return new JSONObject().put("type", "registerEquals")
                 .put("index", index).put("value", Utils.bytesToHex(value));
+        }
+
+        @Override
+        public void writeJson(JsonSink sink) {
+            sink.beginObject();
+            sink.field(K_TYPE, "registerEquals");
+            sink.field(K_INDEX, index);
+            sink.hexUpper(K_VALUE, value);
+            sink.endObject();
         }
     }
 
@@ -125,6 +163,15 @@ public sealed interface ScanPredicate {
         public JSONObject toJson() {
             return new JSONObject().put("type", "registerContains")
                 .put("index", index).put("value", Utils.bytesToHex(value));
+        }
+
+        @Override
+        public void writeJson(JsonSink sink) {
+            sink.beginObject();
+            sink.field(K_TYPE, "registerContains");
+            sink.field(K_INDEX, index);
+            sink.hexUpper(K_VALUE, value);
+            sink.endObject();
         }
     }
 
@@ -150,6 +197,11 @@ public sealed interface ScanPredicate {
         public JSONObject toJson() {
             return combinator("and", parts);
         }
+
+        @Override
+        public void writeJson(JsonSink sink) {
+            writeCombinator(sink, "and", parts);
+        }
     }
 
     /** Disjunction: a box matches when any part matches. */
@@ -163,12 +215,30 @@ public sealed interface ScanPredicate {
         public JSONObject toJson() {
             return combinator("or", parts);
         }
+
+        @Override
+        public void writeJson(JsonSink sink) {
+            writeCombinator(sink, "or", parts);
+        }
     }
 
     private static JSONObject combinator(String type, List<ScanPredicate> parts) {
         JSONArray arr = new JSONArray();
         parts.forEach(p -> arr.put(p.toJson()));
         return new JSONObject().put("type", type).put("parts", arr);
+    }
+
+    /** Same field set and types as {@link #combinator(String, List)}, written directly into
+     *  {@code sink} — each part is itself a full {@code {...}} object, written by recursing into
+     *  its own {@link #writeJson(JsonSink)}. */
+    private static void writeCombinator(JsonSink sink, String type, List<ScanPredicate> parts) {
+        sink.beginObject();
+        sink.field(K_TYPE, type);
+        sink.name(K_PARTS);
+        sink.beginArray();
+        parts.forEach(p -> p.writeJson(sink));
+        sink.endArray();
+        sink.endObject();
     }
 
     private static int indexOf(byte[] haystack, byte[] needle) {

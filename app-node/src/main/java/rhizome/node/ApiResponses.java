@@ -2,7 +2,10 @@ package rhizome.node;
 
 import java.util.concurrent.Callable;
 
+import io.activej.bytebuf.ByteBuf;
+import io.activej.http.ContentTypes;
 import io.activej.http.HttpHeader;
+import io.activej.http.HttpHeaderValue;
 import io.activej.http.HttpHeaders;
 import io.activej.http.HttpResponse;
 import io.activej.promise.Promise;
@@ -11,6 +14,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import rhizome.core.mempool.ExecutionStatus;
+import rhizome.core.serialization.JsonSink;
+import rhizome.core.serialization.JsonSink.Key;
 
 /**
  * Shared response builders and parsing helpers for the node API handlers.
@@ -22,6 +27,16 @@ final class ApiResponses {
     private static final Logger log = LoggerFactory.getLogger(NodeApi.class);
 
     static final HttpHeader H_XCTO = HttpHeaders.of("X-Content-Type-Options");
+
+    // -- JsonSink field keys, pre-encoded once per call site (see JsonSink's class Javadoc) ----
+    private static final Key K_STATUS = Key.of("status");
+    private static final Key K_ERROR = Key.of("error");
+    private static final Key K_PRUNED_BELOW = Key.of("prunedBelow");
+
+    // -- JsonSink size hints (see class javadoc on JsonSink) ------------------------------------
+    private static final int STATUS_SIZE_HINT = 48;
+    private static final int ERROR_SIZE_HINT = 96;
+    private static final int GONE_SIZE_HINT = 64;
 
     private ApiResponses() {}
 
@@ -69,9 +84,13 @@ final class ApiResponses {
             case SUBMIT_THROTTLED -> 429; // anti-DoS shed, not a validity error — tell the peer to retry
             default -> 400;
         };
-        return HttpResponse.ofCode(code)
-            .withJson(new JSONObject().put("status", status.name()).toString())
-            .build();
+        // "status" stays a JSON STRING (enum name): WalletClient.submit's strict getString read
+        // (the wallet CLI's own consumer) and NodeApiTest both depend on the exact enum name.
+        JsonSink sink = JsonSink.create(STATUS_SIZE_HINT);
+        sink.beginObject();
+        sink.field(K_STATUS, status.name());
+        sink.endObject();
+        return jsonAtCode(code, sink);
     }
 
     /** Deepest bracket nesting accepted in a JSON request body. org.json parses recursively, so a
@@ -132,24 +151,71 @@ final class ApiResponses {
         return HttpResponse.ok200().withHeader(H_XCTO, "nosniff").withJson(body.toString()).build();
     }
 
-    static HttpResponse badRequest(String message) {
-        return HttpResponse.ofCode(400)
-            .withJson(new JSONObject().put("error", message).toString())
+    /**
+     * {@link JsonSink} counterpart of {@link #json(JSONObject)} — same headers
+     * ({@code Content-Type: application/json; charset=utf-8} via {@link ContentTypes#JSON_UTF_8},
+     * plus {@link #H_XCTO}), but the body is handed to ActiveJ as a zero-copy wrap of the sink's
+     * own backing array (bounded to {@code [0, sink.length())}) instead of a {@code String} that
+     * gets re-encoded to UTF-8.
+     */
+    static HttpResponse json(JsonSink sink) {
+        return jsonAtCode(200, sink);
+    }
+
+    /**
+     * {@link #json(JsonSink)}'s headers (the same {@code Content-Type}/{@link #H_XCTO} pair, and
+     * the same zero-copy body wrap) at an arbitrary status code — {@code json(JsonSink)} itself is
+     * hardcoded to 200. {@link #badRequest}, {@link #notFound}, {@link #gone},
+     * {@link #statusResponse} and {@link #errorJson} all share this instead of each re-deriving
+     * the wrapping.
+     */
+    private static HttpResponse jsonAtCode(int code, JsonSink sink) {
+        return HttpResponse.ofCode(code)
+            .withHeader(HttpHeaders.CONTENT_TYPE, HttpHeaderValue.ofContentType(ContentTypes.JSON_UTF_8))
+            .withHeader(H_XCTO, "nosniff")
+            .withBody(ByteBuf.wrap(sink.array(), 0, sink.length()))
             .build();
     }
 
+    /**
+     * A one-field {@code {"error": message}} body at an arbitrary status code — the shape every
+     * endpoint-local 503/429/404/401/403 body in the package needs. Package-visible so
+     * {@code ContractApi}, {@code StateApi}, {@code SyncApi} and {@code NodeApi} can call it
+     * directly for their own non-200 bodies instead of each keeping a private mirror of it.
+     */
+    static HttpResponse errorJson(int code, String message) {
+        JsonSink sink = JsonSink.create(ERROR_SIZE_HINT);
+        sink.beginObject();
+        sink.field(K_ERROR, message);
+        sink.endObject();
+        return jsonAtCode(code, sink);
+    }
+
+    static HttpResponse badRequest(String message) {
+        JsonSink sink = JsonSink.create(ERROR_SIZE_HINT);
+        sink.beginObject();
+        sink.field(K_ERROR, message);
+        sink.endObject();
+        return jsonAtCode(400, sink);
+    }
+
     static HttpResponse notFound(String message) {
-        return HttpResponse.ofCode(404)
-            .withJson(new JSONObject().put("error", message).toString())
-            .build();
+        JsonSink sink = JsonSink.create(ERROR_SIZE_HINT);
+        sink.beginObject();
+        sink.field(K_ERROR, message);
+        sink.endObject();
+        return jsonAtCode(404, sink);
     }
 
     /** 410 GONE with the prune watermark, matching /sync, so a client knows to source the block
      *  (or a snapshot) from an archive node rather than treating a pruned height as a bad request. */
     static HttpResponse gone(long prunedBelow) {
-        return HttpResponse.ofCode(410)
-            .withJson(new JSONObject().put("error", "pruned").put("prunedBelow", prunedBelow).toString())
-            .build();
+        JsonSink sink = JsonSink.create(GONE_SIZE_HINT);
+        sink.beginObject();
+        sink.field(K_ERROR, "pruned");
+        sink.field(K_PRUNED_BELOW, prunedBelow);
+        sink.endObject();
+        return jsonAtCode(410, sink);
     }
 
     static String hex(byte[] bytes) {

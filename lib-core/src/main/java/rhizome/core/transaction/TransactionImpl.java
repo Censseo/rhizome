@@ -13,6 +13,7 @@ import rhizome.crypto.PublicKey;
 import rhizome.crypto.SHA256Hash;
 import rhizome.crypto.SignatureScheme;
 import rhizome.core.ledger.PublicAddress;
+import rhizome.core.serialization.JsonSink;
 import rhizome.core.transaction.dto.TransactionDto;
 
 import static rhizome.crypto.Crypto.signWithPrivateKey;
@@ -204,7 +205,11 @@ public final class TransactionImpl implements Transaction, Comparable<Transactio
     public JSONObject toJson() {
         return toJson(this);
     }
-    
+
+    public void writeJsonBody(JsonSink sink) {
+        writeJsonBody(sink, this);
+    }
+
     public boolean signatureValid() {
         // Coinbase and rent collection (BOX_COLLECT) are self-authorized: minted by the
         // block producer, carrying no signature, validated by consensus rules instead.

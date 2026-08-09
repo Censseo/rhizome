@@ -5,16 +5,24 @@ import io.activej.http.HttpResponse;
 import io.activej.http.HttpRequest;
 import org.json.JSONObject;
 
+import rhizome.core.blockchain.ContractProcessor.ContractLog;
 import rhizome.core.ledger.PublicAddress;
+import rhizome.core.serialization.JsonSink;
+import rhizome.core.serialization.JsonSink.Key;
 
 import static rhizome.node.ApiResponses.badRequest;
-import static rhizome.node.ApiResponses.hex;
+import static rhizome.node.ApiResponses.errorJson;
 import static rhizome.node.ApiResponses.json;
 import static rhizome.node.ApiResponses.parseLong;
 
 /**
  * Smart-contract observability and querying: event logs (poll and SSE stream)
  * and the read-only dry-run endpoint.
+ *
+ * <p>Bodies are written with {@link JsonSink} instead of an {@code org.json} tree — see that
+ * class's Javadoc, including this file's own small error bodies (503/429), which mirror
+ * {@link ApiResponses#json(JsonSink)}'s headers at a non-200 status code since that helper is
+ * hardcoded to 200.
  */
 final class ContractApi {
 
@@ -31,6 +39,24 @@ final class ContractApi {
      * overflow — and negative values are rejected outright (audit: readonly input validation).
      */
     private static final long MAX_READONLY_VALUE = 1L << 62;
+
+    // -- JsonSink field keys, pre-encoded once per call site (see JsonSink's class Javadoc) ----
+    private static final Key K_HEIGHT = Key.of("height");
+    private static final Key K_LOGS = Key.of("logs");
+    private static final Key K_FROM_HEIGHT = Key.of("fromHeight");
+    private static final Key K_TO_HEIGHT = Key.of("toHeight");
+    private static final Key K_CONTRACT = Key.of("contract");
+    private static final Key K_TOPIC = Key.of("topic");
+    private static final Key K_DATA = Key.of("data");
+    private static final Key K_SUCCESS = Key.of("success");
+    private static final Key K_OUTPUT = Key.of("output");
+    private static final Key K_GAS_USED = Key.of("gasUsed");
+    private static final Key K_ERROR = Key.of("error");
+
+    // -- JsonSink size hints (see class javadoc) -----------------------------------------------
+    private static final int LOG_ENTRY_SIZE_HINT = 160;
+    private static final int LOGS_SIZE_HINT = 128;
+    private static final int CALL_READONLY_SIZE_HINT = 256;
 
     private ContractApi() {}
 
@@ -50,25 +76,41 @@ final class ContractApi {
             if (height < 1 || height > node.blockCount()) {
                 return badRequest("height out of range");
             }
-            org.json.JSONArray arr = new org.json.JSONArray();
-            for (var log : node.logsAt(height)) {
-                arr.put(logJson(log));
+            var logs = node.logsAt(height);
+            JsonSink sink = JsonSink.create(LOGS_SIZE_HINT + logs.size() * LOG_ENTRY_SIZE_HINT);
+            sink.beginObject();
+            sink.field(K_HEIGHT, height);
+            sink.name(K_LOGS);
+            sink.beginArray();
+            for (var log : logs) {
+                sink.beginObject();
+                writeLogBody(sink, log);
+                sink.endObject();
             }
-            return json(new JSONObject().put("height", height).put("logs", arr));
+            sink.endArray();
+            sink.endObject();
+            return json(sink);
         }
         long fromHeight = parseLong(req.getQueryParameter("fromHeight"));
         if (fromHeight < 1) {
             return badRequest("fromHeight must be >= 1");
         }
         NodeService.LogPage page = node.logsFrom(fromHeight);
-        org.json.JSONArray arr = new org.json.JSONArray();
+        JsonSink sink = JsonSink.create(LOGS_SIZE_HINT + page.logs().size() * LOG_ENTRY_SIZE_HINT);
+        sink.beginObject();
+        sink.field(K_FROM_HEIGHT, page.fromHeight());
+        sink.field(K_TO_HEIGHT, page.toHeight());
+        sink.name(K_LOGS);
+        sink.beginArray();
         for (var entry : page.logs()) {
-            arr.put(logJson(entry.log()).put("height", entry.height()));
+            sink.beginObject();
+            writeLogBody(sink, entry.log());
+            sink.field(K_HEIGHT, entry.height());
+            sink.endObject();
         }
-        return json(new JSONObject()
-            .put("fromHeight", page.fromHeight())
-            .put("toHeight", page.toHeight())
-            .put("logs", arr));
+        sink.endArray();
+        sink.endObject();
+        return json(sink);
     }
 
     /**
@@ -85,9 +127,7 @@ final class ContractApi {
     static HttpResponse logStream(SseLogHub sse, String clientKey, String subnetKey) {
         var stream = sse == null ? null : sse.subscribe(clientKey, subnetKey);
         if (stream == null) {
-            return HttpResponse.ofCode(503)
-                .withJson(new JSONObject().put("error", "streaming unavailable").toString())
-                .build();
+            return errorJson(503, "streaming unavailable");
         }
         return HttpResponse.ok200()
             .withHeader(HttpHeaders.CONTENT_TYPE, "text/event-stream")
@@ -114,8 +154,7 @@ final class ContractApi {
             return badRequest("from must be a 25-byte address (50 hex chars)");
         }
         if (!node.dryRunAvailable()) {
-            return HttpResponse.ofCode(503)
-                .withJson(new JSONObject().put("error", "contracts unavailable").toString()).build();
+            return errorJson(503, "contracts unavailable");
         }
         PublicAddress to = PublicAddress.of(body.getString("to"));
         PublicAddress from = body.has("from") && !body.getString("from").isEmpty()
@@ -130,8 +169,7 @@ final class ContractApi {
         // from pinning the event loop with back-to-back max-gas sink runs, so shed the call before it
         // reaches the VM once the global budget is spent (audit 5th-pass, net Finding 1).
         if (!node.tryReadonlyGasBudget(gasLimit)) {
-            return HttpResponse.ofCode(429)
-                .withJson(new JSONObject().put("error", "readonly compute budget exceeded").toString()).build();
+            return errorJson(429, "readonly compute budget exceeded");
         }
 
         final rhizome.core.blockchain.ContractProcessor.ContractResult result;
@@ -140,27 +178,43 @@ final class ContractApi {
             // Too many dry-runs already running or parked on the consensus lock: shed with 503
             // (retryable) instead of queueing another blocking-pool thread behind it (audit:
             // dry-run backlog bounded at admission, NodeService.MAX_CONCURRENT_DRY_RUNS).
-            return HttpResponse.ofCode(503)
-                .withJson(new JSONObject().put("error", "dry-run busy, retry later").toString()).build();
+            return errorJson(503, "dry-run busy, retry later");
         }
         result = dryRun.get();
-        org.json.JSONArray logs = new org.json.JSONArray();
-        for (var log : result.logs()) {
-            logs.put(logJson(log));
+        JsonSink sink = JsonSink.create(CALL_READONLY_SIZE_HINT
+            + result.output().length * 2 + result.logs().size() * LOG_ENTRY_SIZE_HINT);
+        sink.beginObject();
+        sink.field(K_SUCCESS, result.success());
+        sink.hexLower(K_OUTPUT, result.output());
+        sink.field(K_GAS_USED, result.gasUsed());
+        // Attacker/contract-controlled text (a VM revert/trap message) — routed through
+        // JsonSink's normal string escaping like any other string field, not special-cased.
+        if (result.error() == null) {
+            sink.fieldNull(K_ERROR);
+        } else {
+            sink.field(K_ERROR, result.error());
         }
-        return json(new JSONObject()
-            .put("success", result.success())
-            .put("output", hex(result.output()))
-            .put("gasUsed", result.gasUsed())
-            .put("error", result.error() == null ? JSONObject.NULL : result.error())
-            .put("logs", logs));
+        sink.name(K_LOGS);
+        sink.beginArray();
+        for (var log : result.logs()) {
+            sink.beginObject();
+            writeLogBody(sink, log);
+            sink.endObject();
+        }
+        sink.endArray();
+        sink.endObject();
+        return json(sink);
     }
 
-    static JSONObject logJson(rhizome.core.blockchain.ContractProcessor.ContractLog log) {
-        return new JSONObject()
-            .put("contract", log.contract().toHexString())
-            .put("topic", hex(log.topic()))
-            .put("data", hex(log.data()));
+    /** Writes one contract log's fields (no surrounding object) — {@code contract} in the
+     *  node's uppercase hex convention ({@link PublicAddress#toHexString()}), {@code topic}/
+     *  {@code data} in the lowercase convention {@link ApiResponses#hex} used elsewhere on this
+     *  endpoint's payload. Split out (mirroring lib-core's {@code writeJsonBody}) so callers can
+     *  splice in an extra field (the cursor scan's {@code height}) without a second object. */
+    private static void writeLogBody(JsonSink sink, ContractLog log) {
+        sink.hexUpper(K_CONTRACT, log.contract().toBytes());
+        sink.hexLower(K_TOPIC, log.topic());
+        sink.hexLower(K_DATA, log.data());
     }
 
     /** Strict hex-address shape check (50 hex chars) — the parser alone maps some non-hex
@@ -177,4 +231,5 @@ final class ContractApi {
         }
         return true;
     }
+
 }

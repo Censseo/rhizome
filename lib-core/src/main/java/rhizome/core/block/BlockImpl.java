@@ -13,6 +13,7 @@ import lombok.Data;
 import rhizome.core.block.dto.BlockDto;
 import rhizome.crypto.PowAlgorithm;
 import rhizome.crypto.SHA256Hash;
+import rhizome.core.serialization.JsonSink;
 import rhizome.core.transaction.Transaction;
 
 @Data @Builder
@@ -77,6 +78,10 @@ public final class BlockImpl implements Block {
 
     public JSONObject toJson() {
         return toJson(this);
+    }
+
+    public void writeJsonBody(JsonSink sink) {
+        writeJsonBody(sink, this);
     }
 
     /**

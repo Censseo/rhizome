@@ -2,21 +2,45 @@ package rhizome.node;
 
 import io.activej.http.HttpRequest;
 import io.activej.http.HttpResponse;
-import org.json.JSONObject;
+
+import rhizome.core.serialization.JsonSink;
+import rhizome.core.serialization.JsonSink.Key;
 
 import static rhizome.node.ApiResponses.badRequest;
-import static rhizome.node.ApiResponses.hex;
+import static rhizome.node.ApiResponses.errorJson;
 import static rhizome.node.ApiResponses.json;
 
-/** Authenticated-state endpoints: the current state root and SMT membership proofs. */
+/**
+ * Authenticated-state endpoints: the current state root and SMT membership proofs.
+ *
+ * <p>Bodies are written with {@link JsonSink} instead of an {@code org.json} tree — see that
+ * class's Javadoc. Its own 503/404 bodies go through {@link ApiResponses#errorJson}.
+ */
 final class StateApi {
+
+    // -- JsonSink field keys, pre-encoded once per call site (see JsonSink's class Javadoc) ----
+    private static final Key K_STATE_ROOT = Key.of("stateRoot");
+    private static final Key K_ROOT = Key.of("root");
+    private static final Key K_VALUE_HASH = Key.of("valueHash");
+    private static final Key K_SIBLINGS = Key.of("siblings");
+
+    // -- JsonSink size hints (see class javadoc) -----------------------------------------------
+    private static final int STATE_SIZE_HINT = 96;
 
     private StateApi() {}
 
     /** The current authenticated state root: {@code GET /state}. */
     static HttpResponse state(NodeService node) {
         byte[] root = node.stateRoot();
-        return json(new JSONObject().put("stateRoot", root == null ? JSONObject.NULL : hex(root)));
+        JsonSink sink = JsonSink.create(STATE_SIZE_HINT);
+        sink.beginObject();
+        if (root == null) {
+            sink.fieldNull(K_STATE_ROOT);
+        } else {
+            sink.hexLower(K_STATE_ROOT, root);
+        }
+        sink.endObject();
+        return json(sink);
     }
 
     /**
@@ -28,8 +52,7 @@ final class StateApi {
     static HttpResponse stateProof(NodeService node, HttpRequest req) {
         byte[] root = node.stateRoot();
         if (root == null) {
-            return HttpResponse.ofCode(503)
-                .withJson(new JSONObject().put("error", "state root unavailable").toString()).build();
+            return errorJson(503, "state root unavailable");
         }
         Byte domain = stateDomain(req.getQueryParameter("domain"));
         if (domain == null) {
@@ -38,17 +61,20 @@ final class StateApi {
         byte[] key = rhizome.core.common.Utils.hexStringToByteArray(req.getQueryParameter("key"));
         rhizome.core.state.StateProof proof = node.stateProof(domain, key);
         if (proof == null) {
-            return HttpResponse.ofCode(404)
-                .withJson(new JSONObject().put("error", "no such state entry").toString()).build();
+            return errorJson(404, "no such state entry");
         }
-        org.json.JSONArray siblings = new org.json.JSONArray();
+        JsonSink sink = JsonSink.create(STATE_SIZE_HINT + proof.siblings().size() * 70);
+        sink.beginObject();
+        sink.hexLower(K_ROOT, root);
+        sink.hexLower(K_VALUE_HASH, proof.valueHash());
+        sink.name(K_SIBLINGS);
+        sink.beginArray();
         for (byte[] s : proof.siblings()) {
-            siblings.put(hex(s));
+            sink.hexLower(s);
         }
-        return json(new JSONObject()
-            .put("root", hex(root))
-            .put("valueHash", hex(proof.valueHash()))
-            .put("siblings", siblings));
+        sink.endArray();
+        sink.endObject();
+        return json(sink);
     }
 
     private static Byte stateDomain(String name) {
