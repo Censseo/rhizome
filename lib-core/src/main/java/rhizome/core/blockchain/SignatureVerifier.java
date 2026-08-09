@@ -1,9 +1,8 @@
 package rhizome.core.blockchain;
 
-import java.util.Collections;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ForkJoinPool;
 import java.util.stream.IntStream;
@@ -34,13 +33,20 @@ import rhizome.core.transaction.TransactionImpl;
 public final class SignatureVerifier {
 
     private final ForkJoinPool pool;
-    private final int cacheCapacity;
-    // Access-order LRU with eldest-entry eviction: a ConcurrentHashMap's partial eviction walks
-    // bucket order, so the same hash-bucket region is evicted at every saturation — entries
-    // landing there are re-verified on each resubmission while cold entries elsewhere survive
-    // forever (audit review). Evicted entries are re-verifiable, so eviction only ever costs a
-    // recompute, never correctness.
-    private final Map<CacheKey, Boolean> verified;
+    // Two-generation ("clock") cache instead of an access-order LRU: a ConcurrentHashMap's
+    // partial eviction walks bucket order, so a single global monitor (synchronizedMap +
+    // LinkedHashMap access-order) was needed to get true LRU semantics — but that monitor mutates
+    // on every read, which throttled parallel scaling to 43-54% of the raw Ed25519 ceiling (audit
+    // review; see Ed25519ScalingBenchmark). Reads check `young` then `old`; an `old` hit is
+    // promoted into `young` so hot entries survive the swap. `young` fills to `generation`
+    // entries, then `rotate()` retires `old` and starts a fresh `young` — so an entry is only
+    // evicted after two full generations without a touch. Bounded, approximately-LRU, lock-free
+    // on the read/insert path; `rotate()` is the only synchronized section and it is rare.
+    // Evicted entries are re-verifiable, so eviction only ever costs a recompute, never
+    // correctness.
+    private volatile Map<CacheKey, Boolean> young = new ConcurrentHashMap<>();
+    private volatile Map<CacheKey, Boolean> old = new ConcurrentHashMap<>();
+    private final int generation;
 
     /**
      * Cache identity: content hash + signature bytes + the signing public key. Including the
@@ -68,15 +74,10 @@ public final class SignatureVerifier {
         this(Math.max(1, Runtime.getRuntime().availableProcessors()), 1 << 20);
     }
 
+    /** {@code cacheCapacity} is the total entry budget across both generations. */
     public SignatureVerifier(int parallelism, int cacheCapacity) {
         this.pool = new ForkJoinPool(parallelism);
-        this.cacheCapacity = cacheCapacity;
-        this.verified = Collections.synchronizedMap(new LinkedHashMap<>(16, 0.75f, true) {
-            @Override
-            protected boolean removeEldestEntry(Map.Entry<CacheKey, Boolean> eldest) {
-                return size() > cacheCapacity;
-            }
-        });
+        this.generation = cacheCapacity / 2;
     }
 
     private static CacheKey key(Transaction t) {
@@ -84,9 +85,10 @@ public final class SignatureVerifier {
         return new CacheKey(t.hashContents(), new Bytes(tx.signature().toBytes()), new Bytes(tx.signingKey().toBytes()));
     }
 
-    /** True if this exact transaction (content + signature) was already verified. */
+    /** True if this exact transaction (content + signature) was already verified, in either generation. */
     public boolean isCached(Transaction t) {
-        return verified.containsKey(key(t));
+        CacheKey key = key(t);
+        return young.containsKey(key) || old.containsKey(key);
     }
 
     /**
@@ -103,9 +105,12 @@ public final class SignatureVerifier {
             return true;
         }
         CacheKey key = key(t);
-        Boolean cached = verified.get(key);
-        if (cached != null) {
-            return cached;
+        if (young.containsKey(key)) {
+            return true;
+        }
+        if (old.containsKey(key)) {
+            young.put(key, Boolean.TRUE); // promote: survives the next rotate()
+            return true;
         }
         boolean ok = t.signatureValid();
         if (ok) {
@@ -152,7 +157,19 @@ public final class SignatureVerifier {
     }
 
     private void remember(CacheKey key) {
-        verified.put(key, Boolean.TRUE); // eldest-entry eviction keeps the map bounded
+        young.put(key, Boolean.TRUE);
+        if (young.size() > generation) {
+            rotate();
+        }
+    }
+
+    /** Retires {@code old} and starts a fresh {@code young}. Re-checks the size under the lock
+     *  because multiple threads can race past the unsynchronized size check in {@link #remember}. */
+    private synchronized void rotate() {
+        if (young.size() > generation) {
+            old = young;
+            young = new ConcurrentHashMap<>();
+        }
     }
 
     /**
@@ -167,7 +184,7 @@ public final class SignatureVerifier {
     }
 
     public int cacheSize() {
-        return verified.size();
+        return young.size() + old.size();
     }
 
     public void shutdown() {

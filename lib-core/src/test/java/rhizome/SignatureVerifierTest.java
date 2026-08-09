@@ -114,4 +114,23 @@ class SignatureVerifierTest {
         assertFalse(verifier.isCached(sameContent));
         verifier.shutdown();
     }
+
+    @Test
+    void cacheKeyBindsSigningKeySoDifferentSignerMisses() {
+        // Same content hash and same signature bytes but a different signing key must not be a
+        // cache hit (audit L5: the cached verdict is bound to the exact key that produced it).
+        var verifier = new SignatureVerifier();
+        Transaction t = signed(0);
+        verifier.verify(t);
+        assertTrue(verifier.isCached(t));
+
+        var otherPair = generateKeyPair();
+        var otherKey = PublicKey.of(otherPair.getPublic());
+        Transaction sameSignature = Transaction.of(t);
+        ((TransactionImpl) sameSignature).signingKey(otherKey);
+        ((TransactionImpl) sameSignature).signature(((TransactionImpl) t).signature());
+        assertEquals(t.hashContents(), sameSignature.hashContents());
+        assertFalse(verifier.isCached(sameSignature));
+        verifier.shutdown();
+    }
 }
