@@ -33,6 +33,8 @@ import rhizome.crypto.SHA256Hash;
  */
 public final class HttpPeerSource implements PeerSource {
 
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(HttpPeerSource.class);
+
     // Per-endpoint response caps: a hostile peer must never be able to hand us an
     // unbounded body. The scalar endpoints are tiny (a height, a ~78-digit work
     // value) — capping them small also kills the O(n^2) BigInteger-parse DoS on a
@@ -70,6 +72,20 @@ public final class HttpPeerSource implements PeerSource {
      * /submit body cap allows. Bounds a hostile peer's reply before the codec parses it.
      */
     private static final long ORPHAN_CAP = Constants.MAX_BLOCK_SIZE_BYTES + 1024L;
+    /**
+     * Extra sends allowed after a 429 before the exchange gives up. Two is enough to ride out a
+     * peer's one-second budget window without letting a peer that refuses everything hold the
+     * sync thread: worst case is {@link #THROTTLE_BACKOFF_MILLIS} summed, well inside one
+     * {@link #REQUEST_DEADLINE}.
+     */
+    private static final int MAX_THROTTLE_RETRIES = 2;
+    /** Waits before each retry. Sized against the node's 1 s sliding rate-limit window. */
+    private static final long[] THROTTLE_BACKOFF_MILLIS = {250L, 500L};
+    /**
+     * Ceiling on an honoured {@code Retry-After}. The header is peer-controlled, so an
+     * unclamped value would let a peer park our sync thread for as long as it likes.
+     */
+    private static final long MAX_THROTTLE_WAIT_MILLIS = 1000L;
 
     private final String baseUrl;
     /** The ORIGINAL (pre-DNS-pin) base URL, used for the {@link PeerTokenPolicy} trust check:
@@ -175,35 +191,43 @@ public final class HttpPeerSource implements PeerSource {
         HttpRequest request = PeerAuth.withToken(HttpRequest.newBuilder(URI.create(baseUrl + path)),
                 tokenPolicy.tokenFor(originalUrl))
             .timeout(requestDeadline).GET().build();
-        try {
-            // The request timeout only covers up to the response headers; bound the exchange
-            // with an IDLE deadline (audit F1 + fixed-window fix): the /sync window is
-            // legitimately huge, so a fixed whole-exchange deadline never converges on a slow
-            // link. Every chunk read stamps forward progress; only a stalled drip dies.
-            AtomicReference<AutoCloseable> openBody = new AtomicReference<>();
-            AtomicLong lastActivity = new AtomicLong(System.nanoTime());
-            return BodyReadDeadline.callIdle(requestDeadline, openBody, lastActivity, () -> {
-                HttpResponse<InputStream> response = client.send(request, HttpResponse.BodyHandlers.ofInputStream());
-                if (response.statusCode() != 200) {
-                    response.body().close();
-                    throw new IOException("peer " + path + " returned " + response.statusCode());
+        // Retry OUTSIDE the deadline wrapper (see backoffBeforeRetry): each attempt gets its own
+        // whole-exchange budget, and the wait never eats into the previous one.
+        for (int attempt = 0; ; attempt++) {
+            try {
+                // The request timeout only covers up to the response headers; bound the exchange
+                // with an IDLE deadline (audit F1 + fixed-window fix): the /sync window is
+                // legitimately huge, so a fixed whole-exchange deadline never converges on a slow
+                // link. Every chunk read stamps forward progress; only a stalled drip dies.
+                AtomicReference<AutoCloseable> openBody = new AtomicReference<>();
+                AtomicLong lastActivity = new AtomicLong(System.nanoTime());
+                return BodyReadDeadline.callIdle(requestDeadline, openBody, lastActivity, () -> {
+                    HttpResponse<InputStream> response = client.send(request, HttpResponse.BodyHandlers.ofInputStream());
+                    if (response.statusCode() != 200) {
+                        response.body().close();
+                        throw statusFailure(path, response);
+                    }
+                    InputStream in = new ProgressInputStream(response.body(), lastActivity);
+                    openBody.set(in); // publish so a deadline expiry can cancel the JDK exchange
+                    try (in) {
+                        return BlockCodec.decodeStreamed(in, Constants.BLOCKS_PER_FETCH, Constants.MAX_BLOCK_SIZE_BYTES);
+                    }
+                });
+            } catch (ThrottledException throttled) {
+                if (!backoffBeforeRetry(path, attempt, throttled)) {
+                    throw new PeerUnavailableException("peer request failed: " + path, throttled);
                 }
-                InputStream in = new ProgressInputStream(response.body(), lastActivity);
-                openBody.set(in); // publish so a deadline expiry can cancel the JDK exchange
-                try (in) {
-                    return BlockCodec.decodeStreamed(in, Constants.BLOCKS_PER_FETCH, Constants.MAX_BLOCK_SIZE_BYTES);
-                }
-            });
-        } catch (BodyReadSaturatedException e) {
-            // LOCAL backpressure, before any I/O reached the peer: distinct from
-            // PeerUnavailableException so the sync round cannot read it as a peer failure
-            // and penalise an honest peer for our own load.
-            throw new LocalSaturationException("local body-read pool saturated: " + path, e);
-        } catch (IOException e) {
-            throw new PeerUnavailableException("peer request failed: " + path, e);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new PeerUnavailableException("interrupted: " + path, e);
+            } catch (BodyReadSaturatedException e) {
+                // LOCAL backpressure, before any I/O reached the peer: distinct from
+                // PeerUnavailableException so the sync round cannot read it as a peer failure
+                // and penalise an honest peer for our own load.
+                throw new LocalSaturationException("local body-read pool saturated: " + path, e);
+            } catch (IOException e) {
+                throw new PeerUnavailableException("peer request failed: " + path, e);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new PeerUnavailableException("interrupted: " + path, e);
+            }
         }
     }
 
@@ -304,37 +328,101 @@ public final class HttpPeerSource implements PeerSource {
             .timeout(requestDeadline)
             .GET()
             .build();
+        for (int attempt = 0; ; attempt++) {
+            try {
+                // Same whole-exchange deadline as blocks(): the request timeout alone would let a
+                // slow-drip peer hang the sync thread mid-body (audit F1).
+                AtomicReference<AutoCloseable> openBody = new AtomicReference<>();
+                return BodyReadDeadline.call(requestDeadline, openBody, () -> {
+                    HttpResponse<InputStream> response = client.send(request, HttpResponse.BodyHandlers.ofInputStream());
+                    if (response.statusCode() != 200) {
+                        response.body().close();
+                        if (response.statusCode() == 404 && notFound == NotFound.UNSUPPORTED) {
+                            throw new UnsupportedOperationException("peer lacks " + path);
+                        }
+                        if (response.statusCode() == 404 && notFound == NotFound.NULL) {
+                            return null;
+                        }
+                        throw statusFailure(path, response);
+                    }
+                    InputStream in = response.body();
+                    openBody.set(in); // publish so a deadline expiry can cancel the JDK exchange
+                    try (in) {
+                        return readBounded(in, maxBytes, path);
+                    }
+                });
+            } catch (ThrottledException throttled) {
+                if (!backoffBeforeRetry(path, attempt, throttled)) {
+                    throw new PeerUnavailableException("peer request failed: " + path, throttled);
+                }
+            } catch (BodyReadSaturatedException e) {
+                // LOCAL backpressure (see blocks()): never a peer fault.
+                throw new LocalSaturationException("local body-read pool saturated: " + path, e);
+            } catch (IOException e) {
+                throw new PeerUnavailableException("peer request failed: " + path, e);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new PeerUnavailableException("interrupted: " + path, e);
+            }
+        }
+    }
+
+    /**
+     * Maps a non-200 to the exception the caller's retry policy keys on: {@link ThrottledException}
+     * for 429 (pacing — retryable), a plain {@link IOException} for everything else (including the
+     * 503 a peer serves while it is itself reorging, which must stay a one-shot "unavailable" so
+     * the round moves on rather than waiting on a peer that is busy for seconds).
+     */
+    private static IOException statusFailure(String path, HttpResponse<InputStream> response) {
+        String message = "peer " + path + " returned " + response.statusCode();
+        if (response.statusCode() != 429) {
+            return new IOException(message);
+        }
+        return new ThrottledException(message, retryAfterMillis(response));
+    }
+
+    /**
+     * Parses {@code Retry-After} as delta-seconds, clamped to {@link #MAX_THROTTLE_WAIT_MILLIS};
+     * {@code -1} when absent or unparseable. The HTTP-date form is not honoured: it needs a clock
+     * comparison against a peer-supplied timestamp, and Rhizome's own nodes never send it.
+     */
+    private static long retryAfterMillis(HttpResponse<InputStream> response) {
+        return response.headers().firstValue("Retry-After").map(raw -> {
+            try {
+                long seconds = Long.parseLong(raw.trim());
+                return seconds < 0 ? -1L : Math.min(seconds * 1000L, MAX_THROTTLE_WAIT_MILLIS);
+            } catch (NumberFormatException e) {
+                return -1L;
+            }
+        }).orElse(-1L);
+    }
+
+    /**
+     * Waits out a peer's rate-limit window, returning false once the retry budget is spent (the
+     * caller then fails the exchange as unavailable, exactly as it did before backoff existed —
+     * so a 429 still never earns ban score).
+     *
+     * <p>Called OUTSIDE {@link BodyReadDeadline}: the wait must not consume the whole-exchange
+     * deadline of either the attempt that was refused or the one that follows. The refused
+     * response carried no body, so nothing is left open across the wait.
+     */
+    private static boolean backoffBeforeRetry(String path, int attempt, ThrottledException throttled) {
+        if (attempt >= MAX_THROTTLE_RETRIES) {
+            log.debug("peer kept throttling {} after {} retries; treating as unavailable",
+                path, MAX_THROTTLE_RETRIES);
+            return false;
+        }
+        long wait = throttled.retryAfterMillis >= 0
+            ? throttled.retryAfterMillis
+            : THROTTLE_BACKOFF_MILLIS[attempt];
+        log.debug("peer throttled {}; waiting {} ms before retry {}", path, wait, attempt + 1);
         try {
-            // Same whole-exchange deadline as blocks(): the request timeout alone would let a
-            // slow-drip peer hang the sync thread mid-body (audit F1).
-            AtomicReference<AutoCloseable> openBody = new AtomicReference<>();
-            return BodyReadDeadline.call(requestDeadline, openBody, () -> {
-                HttpResponse<InputStream> response = client.send(request, HttpResponse.BodyHandlers.ofInputStream());
-                if (response.statusCode() != 200) {
-                    response.body().close();
-                    if (response.statusCode() == 404 && notFound == NotFound.UNSUPPORTED) {
-                        throw new UnsupportedOperationException("peer lacks " + path);
-                    }
-                    if (response.statusCode() == 404 && notFound == NotFound.NULL) {
-                        return null;
-                    }
-                    throw new IOException("peer " + path + " returned " + response.statusCode());
-                }
-                InputStream in = response.body();
-                openBody.set(in); // publish so a deadline expiry can cancel the JDK exchange
-                try (in) {
-                    return readBounded(in, maxBytes, path);
-                }
-            });
-        } catch (BodyReadSaturatedException e) {
-            // LOCAL backpressure (see blocks()): never a peer fault.
-            throw new LocalSaturationException("local body-read pool saturated: " + path, e);
-        } catch (IOException e) {
-            throw new PeerUnavailableException("peer request failed: " + path, e);
+            Thread.sleep(wait);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new PeerUnavailableException("interrupted: " + path, e);
+            return false; // shutting down: give up rather than swallow the interrupt
         }
+        return true;
     }
 
     /** Reads the stream, aborting if it would exceed {@code maxBytes} (never buffers past the cap). */
@@ -376,6 +464,26 @@ public final class HttpPeerSource implements PeerSource {
                 lastActivityNanos.set(System.nanoTime());
             }
             return n;
+        }
+    }
+
+    /**
+     * A peer answered 429: it is PACING us, not failing. The node weights {@code /sync} at one
+     * unit per block requested against a per-IP budget (1000 units per sliding second), so a
+     * syncing node that applies blocks faster than ~1000/s out-runs its peer's budget and gets
+     * refused — the peer is healthy and the range is valid. Surfacing that as
+     * {@link PeerUnavailableException} aborts the whole round for that peer and forfeits ~10 s
+     * until the next one, where waiting out the peer's window costs a fraction of a second.
+     * Package-private and never escapes: {@link #backoffBeforeRetry} either consumes it or the
+     * exchange ends as {@code PeerUnavailableException}, exactly as before.
+     */
+    static final class ThrottledException extends IOException {
+        /** Peer-requested wait, or -1 when it sent no (parseable) {@code Retry-After}. */
+        private final transient long retryAfterMillis;
+
+        ThrottledException(String message, long retryAfterMillis) {
+            super(message);
+            this.retryAfterMillis = retryAfterMillis;
         }
     }
 
