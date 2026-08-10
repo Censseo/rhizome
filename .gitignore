@@ -14,8 +14,9 @@ hs_err_pid*.log
 replay_pid*.log
 app-node/data/
 
-# Benchmark artifact (./gradlew :lib-core:test -Dbench=on writes bench.txt to the module dir)
-bench.txt
+# Benchmark artifacts (-Dbench=on probes write bench*.txt to their module dir:
+# bench.txt, bench-pufferfish.txt, bench-sync.txt)
+bench*.txt
 
 # GraalVM native-image output (./gradlew :app-node:nativeImage)
 /rhizome-node
