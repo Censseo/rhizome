@@ -35,8 +35,8 @@ import static rhizome.core.common.Utils.longToBytes;
 /**
  * RocksDB-backed node storage: a single database with column families for
  * blocks, the transaction index, chain metadata, and the ledger. This is the
- * full-node performance path (the pure-Java LevelDB store remains for
- * native-image / tests / light nodes).
+ * only durable store; tests and the native-image path run against the in-memory
+ * implementations in lib-core.
  *
  * <p>Sharing one database lets block application commit atomically via a single
  * {@link WriteBatch} — the fix for Pandanite's independent LevelDB directories
@@ -643,7 +643,8 @@ public final class RocksDbNodeStore implements AutoCloseable {
         }
     }
 
-    // ---- Ledger view (checked arithmetic, same semantics as LevelDBLedger) ----
+    // ---- Ledger view (checked arithmetic: every mutation is range-checked, so withdrawing or
+    // reverting below zero raises rather than wrapping around as Pandanite's C++ ledger did) ----
 
     private final class RocksLedger implements Ledger {
 

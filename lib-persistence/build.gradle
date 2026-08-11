@@ -3,15 +3,22 @@ plugins {
 }
 
 dependencies {
-    implementation project(':lib-core')
-    // Contract-store interface implemented by the RocksDB-backed store below.
-    implementation project(':lib-vm')
+    // `api`, not `implementation`: the RocksDb* stores are public classes whose public signatures
+    // return and accept lib-core types (ChainStore, Ledger, NonceStore, Block, BlockHeader), so
+    // consumers cannot use this module without them. It compiled under `implementation` only
+    // because app-node happens to declare lib-core itself.
+    api project(':lib-core')
+    // Same reasoning: RocksDbContractStore implements ContractStore and takes StorageChange in
+    // public methods. (Nothing here touches Chicory — these two are plain domain interfaces.)
+    api project(':lib-vm')
 
     implementation "${activejGroup}:activej-bytebuf:${activejVersion}"
     implementation "${activejGroup}:activej-common:${activejVersion}"
 
     // https://mvnrepository.com/artifact/org.iq80.leveldb/leveldb
-    // Pure-Java store: the native-image / test / light-node path.
+    // Read-only, and only for PandaniteLedgerDumper: a Pandanite ledger directory is a LevelDB
+    // database, and the dumper iterates one to produce the genesis snapshot. Rhizome itself
+    // stores nothing in LevelDB — the legacy LevelDB store classes were removed as dead code.
     implementation 'org.iq80.leveldb:leveldb:0.12'
 
     // https://mvnrepository.com/artifact/org.rocksdb/rocksdbjni

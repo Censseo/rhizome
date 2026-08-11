@@ -20,7 +20,7 @@ import org.junit.jupiter.api.io.TempDir;
 import rhizome.core.ledger.GenesisLedger;
 import rhizome.core.ledger.LedgerSnapshot;
 import rhizome.core.ledger.PublicAddress;
-import rhizome.persistence.leveldb.LevelDBLedger;
+import rhizome.core.ledger.InMemoryLedger;
 import rhizome.persistence.tools.PandaniteLedgerDumper;
 import rhizome.persistence.tools.PandaniteLedgerDumper.DumpResult;
 
@@ -99,20 +99,17 @@ class PandaniteLedgerDumperTest {
         DumpResult result = PandaniteLedgerDumper.dump(pandaniteLedgerDir, Set.of(), "pandanite", 536000, 1);
         LedgerSnapshot snapshot = result.snapshot();
 
-        LevelDBLedger genesisLedger = new LevelDBLedger(tempDir.resolve("genesis-ledger").toString());
-        try {
-            int seeded = GenesisLedger.seed(genesisLedger, snapshot);
+        // Any Ledger implementation proves the point — what is under test is that the dumped
+        // snapshot seeds a genesis ledger, not which store backs it.
+        var genesisLedger = new InMemoryLedger();
+        int seeded = GenesisLedger.seed(genesisLedger, snapshot);
 
-            assertEquals(3, seeded);
-            assertTrue(genesisLedger.hasWallet(PublicAddress.of(address(1))));
-            assertEquals(500_000L,
-                genesisLedger.getWalletValue(PublicAddress.of(address(1))).amount());
-            assertEquals(999_999_999L,
-                genesisLedger.getWalletValue(PublicAddress.of(address(3))).amount());
-        } finally {
-            genesisLedger.closeDB();
-            genesisLedger.deleteDB();
-        }
+        assertEquals(3, seeded);
+        assertTrue(genesisLedger.hasWallet(PublicAddress.of(address(1))));
+        assertEquals(500_000L,
+            genesisLedger.getWalletValue(PublicAddress.of(address(1))).amount());
+        assertEquals(999_999_999L,
+            genesisLedger.getWalletValue(PublicAddress.of(address(3))).amount());
     }
 
     @Test

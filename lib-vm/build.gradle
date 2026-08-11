@@ -11,7 +11,12 @@ dependencies {
     // (OpCode.signature table, section decoders, count-sized pre-allocations). Bumping Chicory
     // without re-verifying the mirror silently reopens the poison-DEPLOY allocation vector —
     // see the preScanModule javadoc and WasmPreScanCountsTest.
-    api 'com.dylibso.chicory:runtime:1.7.5'
+    // `implementation`, not `api`: no public signature in lib-vm mentions a Chicory type
+    // (WasmVm's public surface is byte[]/HostState/GasMeter, and the two ChicoryException
+    // subclasses are package-private). Exporting it put the parser on the compile classpath of
+    // lib-persistence and app-node, where a second, un-mirrored use of Parser would compile
+    // cleanly and silently defeat the version pin the comment above depends on.
+    implementation 'com.dylibso.chicory:runtime:1.7.5'
 
     // WasmVm logs the memory-max clamp once per validated module (audit: silent clamp).
     implementation "org.slf4j:slf4j-api:${slf4jVersion}"

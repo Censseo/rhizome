@@ -57,8 +57,8 @@ lib-core   — consensus core: ChainEngine (addBlock/popBlock), Executor (transa
              SparseMerkleTree state root, snapshots
 lib-vm     — WASM contract VM: WasmVm (Chicory, gas-metered), WasmContractProcessor,
              ContractStore, undo journals for reorg reversal
-lib-persistence — RocksDB stores (full node: one DB, atomic WriteBatch) and pure-Java
-             LevelDB stores (native-image / test / light path)
+lib-persistence — RocksDB stores (full node: one DB, atomic WriteBatch), plus
+             PandaniteLedgerDumper (reads a Pandanite LevelDB ledger to seed genesis)
 lib-crypto — Ed25519, Pufferfish2 PoW (pure Java, validated against C reference), hashes
 ```
 
@@ -69,7 +69,8 @@ The decoupling is interface-driven, defined in `lib-core` and implemented outwar
 - `PeerSource` (lib-core) ← implemented by `HttpPeerSource` (lib-net), so sync logic never
   depends on a transport.
 - `ChainStore`/`NonceStore`/`ContractStore`/`BoxStore` ← in-memory implementations in core/vm,
-  RocksDB/LevelDB implementations in lib-persistence.
+  RocksDB implementations in lib-persistence. The in-memory pair is the second real
+  implementation these ports exist for; it is what the tests run against.
 
 ## Consensus invariants (do not casually break)
 

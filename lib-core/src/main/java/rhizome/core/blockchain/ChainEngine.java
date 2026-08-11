@@ -50,7 +50,7 @@ import static rhizome.core.mempool.ExecutionStatus.*;
  * and reads see consistent state (Pandanite's unlocked getters produced torn
  * reads of its Bigint total work).
  */
-public final class ChainEngine implements Blockchain, rhizome.core.mempool.AccountView {
+public final class ChainEngine implements rhizome.core.mempool.AccountView {
 
     private static final Logger log = LoggerFactory.getLogger(ChainEngine.class);
 
