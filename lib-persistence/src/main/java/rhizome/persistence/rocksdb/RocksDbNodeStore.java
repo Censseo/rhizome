@@ -17,7 +17,6 @@ import org.rocksdb.WriteOptions;
 import rhizome.core.block.Block;
 import rhizome.core.block.BlockCodec;
 import rhizome.core.block.BlockHeader;
-import rhizome.core.block.BlockImpl;
 import rhizome.core.block.HeaderCodec;
 import rhizome.core.blockchain.ChainStore;
 import rhizome.crypto.SHA256Hash;
@@ -27,7 +26,6 @@ import rhizome.persistence.PersistenceException;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.transaction.Transaction;
 import rhizome.core.transaction.TransactionAmount;
-import rhizome.core.transaction.TransactionImpl;
 
 import static rhizome.core.common.Utils.bytesToLong;
 import static rhizome.core.common.Utils.longToBytes;
@@ -462,9 +460,9 @@ public final class RocksDbNodeStore implements AutoCloseable {
         @Override
         public void append(Block block) {
             long expected = height() + 1;
-            if (((BlockImpl) block).id() != expected) {
+            if (block.id() != expected) {
                 throw new IllegalArgumentException(
-                    "Expected block " + expected + " but got " + ((BlockImpl) block).id());
+                    "Expected block " + expected + " but got " + block.id());
             }
             try (WriteBatch batch = new WriteBatch()) {
                 byte[] key = heightKey(expected);
@@ -473,7 +471,7 @@ public final class RocksDbNodeStore implements AutoCloseable {
                 // column families can never disagree after a crash.
                 batch.put(headersCf, key, HeaderCodec.encode(BlockHeader.of(block)));
                 for (Transaction t : block.transactions()) {
-                    if (!((TransactionImpl) t).isTransactionFee()) {
+                    if (!t.isTransactionFee()) {
                         // raw(): WriteBatch.put copies the key into the native batch buffer
                         // before returning, so no clone is needed for the JNI hand-off.
                         batch.put(txIndexCf, t.hashContents().raw(), key);
@@ -583,7 +581,7 @@ public final class RocksDbNodeStore implements AutoCloseable {
                 batch.delete(blocksCf, key);
                 batch.delete(headersCf, key);
                 for (Transaction t : tip.transactions()) {
-                    if (!((TransactionImpl) t).isTransactionFee()) {
+                    if (!t.isTransactionFee()) {
                         batch.delete(txIndexCf, t.hashContents().raw()); // copied natively — see append
                     }
                 }

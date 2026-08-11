@@ -139,7 +139,7 @@ public final class Executor {
                                             Set<PublicAddress> touchedLedger) {
         List<BlockStateProcessor> domains =
             BlockStateProcessor.inCommitOrder(processor, boxProcessor, tokenProcessor);
-        var blockImpl = (BlockImpl) block;
+        Block blockImpl = block;
         long height = blockImpl.id();
         long expectedReward = params.miningReward(height);
         // Consensus-V2 gate (see NetworkParameters.consensusV2Height): below the activation
@@ -158,7 +158,7 @@ public final class Executor {
         int boxCollects = 0;
         long blockGas = 0;
         for (Transaction t : block.transactions()) {
-            var tx = (TransactionImpl) t;
+            Transaction tx = t;
             if (tx.isTransactionFee()) {
                 if (coinbase != null) {
                     return EXTRA_MINING_FEE;
@@ -290,19 +290,19 @@ public final class Executor {
         if (coinbase == null) {
             return NO_MINING_FEE;
         }
-        if (((TransactionImpl) coinbase).amount().amount() != expectedReward) {
+        if (coinbase.amount().amount() != expectedReward) {
             return INCORRECT_MINING_FEE;
         }
 
         // --- Pass 2: transactional application ---
-        PublicAddress miner = ((TransactionImpl) coinbase).to();
+        PublicAddress miner = coinbase.to();
         List<AppliedOp> applied = new ArrayList<>();
         for (BlockStateProcessor domain : domains) {
             domain.begin();
         }
         try {
             for (Transaction t : block.transactions()) {
-                var tx = (TransactionImpl) t;
+                Transaction tx = t;
                 if (tx.isTransactionFee()) {
                     continue;
                 }
@@ -359,7 +359,7 @@ public final class Executor {
                     deposit(ledger, applied, miner, new TransactionAmount(fee));
                 }
             }
-            deposit(ledger, applied, miner, ((TransactionImpl) coinbase).amount(), consensusV2);
+            deposit(ledger, applied, miner, coinbase.amount(), consensusV2);
             // GHOST uncle rewards: fresh issuance to each referenced uncle's miner, plus a
             // nephew bonus to this block's miner. Every uncle is a real PoW block, so no
             // reward is minted without matching work. Uncle validity (miner address, depth,
@@ -406,7 +406,7 @@ public final class Executor {
      * above accepts exactly what the relay policy admits. Deterministic at block-assembly time,
      * when gasUsed is still unknown.
      */
-    private static long minerRevenue(TransactionImpl tx) {
+    private static long minerRevenue(Transaction tx) {
         if (!tx.kind().isContract()) {
             return tx.fee().amount();
         }
@@ -418,7 +418,7 @@ public final class Executor {
     }
 
     /** Mints the GHOST uncle and nephew rewards for a block's referenced uncles. */
-    private static void payUncleRewards(BlockImpl block, Ledger ledger, List<AppliedOp> applied,
+    private static void payUncleRewards(Block block, Ledger ledger, List<AppliedOp> applied,
                                         PublicAddress miner, NetworkParameters params) {
         List<rhizome.core.block.UncleRef> uncles = block.uncles();
         if (uncles.isEmpty()) {
@@ -489,7 +489,7 @@ public final class Executor {
      * mempool's cumulative-balance selection makes them unreachable in an honestly-produced block,
      * so they only arise in a malicious block, which must be rejected.
      */
-    private static ExecutionStatus applyToken(TransactionImpl tx, Ledger ledger, List<AppliedOp> applied,
+    private static ExecutionStatus applyToken(Transaction tx, Ledger ledger, List<AppliedOp> applied,
                                               PublicAddress miner, TokenProcessor tokenProcessor, long height) {
         // Success stages the token change; a precondition failure stages nothing. Either way the
         // only ledger effect is the fee below, so the block stays valid and revertToken (which
@@ -525,7 +525,7 @@ public final class Executor {
      * honestly-produced block (the mempool selects within the sender's confirmed balance), so they
      * signal a malicious block that must be rejected.
      */
-    private static ExecutionStatus applyBox(TransactionImpl tx, Ledger ledger, List<AppliedOp> applied,
+    private static ExecutionStatus applyBox(Transaction tx, Ledger ledger, List<AppliedOp> applied,
                                             PublicAddress miner, BoxProcessor boxProcessor, long height) {
         long amount = tx.amount().amount();
         long fee = tx.fee().amount();
@@ -580,7 +580,7 @@ public final class Executor {
     }
 
     /** Who receives value released by a box op: the collector for BOX_COLLECT, else the sender. */
-    private static PublicAddress boxCreditTarget(TransactionImpl tx) {
+    private static PublicAddress boxCreditTarget(Transaction tx) {
         return tx.kind() == rhizome.core.transaction.TransactionKind.BOX_COLLECT ? tx.to() : tx.from();
     }
 
@@ -593,7 +593,7 @@ public final class Executor {
      * invalidate the block, Ethereum-style). A non-SUCCESS status means the
      * transaction could not be afforded or applied and the block is invalid.
      */
-    private static ExecutionStatus applyContract(TransactionImpl tx, Ledger ledger,
+    private static ExecutionStatus applyContract(Transaction tx, Ledger ledger,
                                                  List<AppliedOp> applied, PublicAddress miner,
                                                  ContractProcessor processor) {
         long value = tx.amount().amount();
@@ -720,10 +720,10 @@ public final class Executor {
                                   BoxProcessor boxProcessor, long height, NetworkParameters params) {
         List<Transaction> transactions = block.transactions();
         Transaction coinbase = transactions.stream()
-            .filter(t -> ((TransactionImpl) t).isTransactionFee())
+            .filter(t -> t.isTransactionFee())
             .findFirst()
             .orElseThrow(() -> new IllegalArgumentException("Block has no coinbase"));
-        PublicAddress miner = ((TransactionImpl) coinbase).to();
+        PublicAddress miner = coinbase.to();
 
         // Runtime receipts (gas used, success) for this block's contract txs, in block
         // order; consumed in reverse as we walk transactions backwards.
@@ -752,8 +752,7 @@ public final class Executor {
         // TRANSFER), but the three walks must agree structurally regardless.
         int expectedContract = 0;
         int expectedBox = 0;
-        for (Transaction t : transactions) {
-            var tx = (TransactionImpl) t;
+        for (Transaction tx : transactions) {
             if (tx.isTransactionFee()) {
                 continue;
             }
@@ -793,11 +792,11 @@ public final class Executor {
         // per sub-difficulty uncle on every reorg/pop, which either throws LedgerException mid-revert
         // (leaving a partially reverted, corrupted ledger) or silently destroys coins and forks the
         // state root from nodes that only ever applied the block. Guards mirror the apply side's >0.
-        List<rhizome.core.block.UncleRef> uncles = ((BlockImpl) block).uncles();
+        List<rhizome.core.block.UncleRef> uncles = block.uncles();
         if (!uncles.isEmpty()) {
             long baseUncleReward = params.uncleReward(height);
             long baseNephewReward = params.nephewReward(height);
-            int nephewDifficulty = ((BlockImpl) block).difficulty();
+            int nephewDifficulty = block.difficulty();
             for (rhizome.core.block.UncleRef ref : uncles) {
                 int deficit = nephewDifficulty - ref.difficulty();
                 long uncleReward = scaleRewardToWork(baseUncleReward, deficit);
@@ -810,12 +809,12 @@ public final class Executor {
                 }
             }
         }
-        long coinbaseAmount = ((TransactionImpl) coinbase).amount().amount();
+        long coinbaseAmount = coinbase.amount().amount();
         if (coinbaseAmount > 0) { // > 0 guard mirrors deposit's zero-credit no-op (exact inverse)
-            ledger.revertDeposit(miner, ((TransactionImpl) coinbase).amount());
+            ledger.revertDeposit(miner, coinbase.amount());
         }
         for (int i = transactions.size() - 1; i >= 0; i--) {
-            var tx = (TransactionImpl) transactions.get(i);
+            Transaction tx = transactions.get(i);
             if (tx.isTransactionFee()) {
                 continue;
             }
@@ -862,7 +861,7 @@ public final class Executor {
     }
 
     /** Inverse of {@link #applyContract}'s ledger effects, using the block's receipt. */
-    private static void revertContract(Ledger ledger, TransactionImpl tx,
+    private static void revertContract(Ledger ledger, Transaction tx,
                                        ContractProcessor.ContractReceipt receipt, PublicAddress miner) {
         long gasFee = Math.multiplyExact(receipt.gasUsed(), tx.gasPrice());
         if (gasFee > 0) {
@@ -889,7 +888,7 @@ public final class Executor {
     }
 
     /** Inverse of {@link #applyBox}'s ledger effects, using the block's box receipt. */
-    private static void revertBox(Ledger ledger, TransactionImpl tx,
+    private static void revertBox(Ledger ledger, Transaction tx,
                                   BoxProcessor.BoxReceipt receipt, PublicAddress miner) {
         long fee = tx.fee().amount();
         long debit = Math.addExact(fee, receipt.debitFrom()); // exact symmetry with applyBox (audit F6)
@@ -908,7 +907,7 @@ public final class Executor {
     }
 
     /** Inverse of {@link #applyToken}'s ledger effects: a token op moves only the fee. */
-    private static void revertToken(Ledger ledger, TransactionImpl tx, PublicAddress miner) {
+    private static void revertToken(Ledger ledger, Transaction tx, PublicAddress miner) {
         long fee = tx.fee().amount();
         if (fee > 0) {
             ledger.revertDeposit(miner, new TransactionAmount(fee));

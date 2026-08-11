@@ -531,7 +531,7 @@ public final class ChainSynchronizer {
                 // instead of continuing truncated (audit: restore self-truncation), and mark the
                 // engine's degraded state so the condition is observable to the API layer (audit:
                 // silent restore failure) — cleared below once a restore fully succeeds.
-                String reason = "failed to restore local branch at " + ((BlockImpl) block).id()
+                String reason = "failed to restore local branch at " + block.id()
                     + " after a rejected reorg: " + status + " — a full resync is required";
                 engine.markDegraded(reason, false); // a later full restore genuinely heals this
                 log.error("{}", reason);

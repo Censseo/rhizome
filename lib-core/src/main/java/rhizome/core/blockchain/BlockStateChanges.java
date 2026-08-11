@@ -68,8 +68,7 @@ final class BlockStateChanges {
      */
     static void nonces(Block block, List<StateChange> out) {
         Map<PublicAddress, Long> newNonces = new HashMap<>();
-        for (Transaction t : block.transactions()) {
-            var tx = (TransactionImpl) t;
+        for (Transaction tx : block.transactions()) {
             if (!tx.isTransactionFee() && !ChainEngine.isSelfAuthorized(tx)) {
                 newNonces.merge(tx.from(), tx.nonce() + 1, Math::max);
             }

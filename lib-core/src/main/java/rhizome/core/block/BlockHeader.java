@@ -45,7 +45,7 @@ public record BlockHeader(
 
     /** Extracts the logical header of a block (its full PoW preimage + uncle refs). */
     public static BlockHeader of(Block block) {
-        var b = (BlockImpl) block;
+        Block b = block;
         return new BlockHeader(
             b.id(),
             b.timestamp(),

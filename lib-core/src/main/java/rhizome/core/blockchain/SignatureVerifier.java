@@ -80,9 +80,8 @@ public final class SignatureVerifier {
         this.generation = cacheCapacity / 2;
     }
 
-    private static CacheKey key(Transaction t) {
-        var tx = (TransactionImpl) t;
-        return new CacheKey(t.hashContents(), new Bytes(tx.signature().toBytes()), new Bytes(tx.signingKey().toBytes()));
+    private static CacheKey key(Transaction tx) {
+        return new CacheKey(tx.hashContents(), new Bytes(tx.signature().toBytes()), new Bytes(tx.signingKey().toBytes()));
     }
 
     /** True if this exact transaction (content + signature) was already verified, in either generation. */
@@ -101,7 +100,7 @@ public final class SignatureVerifier {
      * non-HTTP {@code MemPool} caller must provide an equivalent gate.
      */
     public boolean verify(Transaction t) {
-        if (((TransactionImpl) t).isTransactionFee()) {
+        if (t.isTransactionFee()) {
             return true;
         }
         CacheKey key = key(t);

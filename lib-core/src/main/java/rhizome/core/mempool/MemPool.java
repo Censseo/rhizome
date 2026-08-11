@@ -130,7 +130,7 @@ public final class MemPool {
      * ArithmeticException (audit M7); now it just reads as "more than any balance" and the
      * caller's balance check rejects it (BALANCE_TOO_LOW).
      */
-    private static long maxSpend(TransactionImpl tx) {
+    private static long maxSpend(Transaction tx) {
         try {
             if (tx.kind().isContract()) {
                 return Math.addExact(tx.amount().amount(), Math.multiplyExact(tx.gasLimit(), tx.gasPrice()));
@@ -142,7 +142,7 @@ public final class MemPool {
     }
 
     public ExecutionStatus addTransaction(Transaction transaction) {
-        var tx = (TransactionImpl) transaction;
+        Transaction tx = transaction;
         if (tx.isTransactionFee()) {
             return INVALID_TRANSACTION_NONCE; // coinbase is minted in blocks, never pooled
         }
@@ -241,7 +241,7 @@ public final class MemPool {
                 // it (its only resubmit was rejected as a duplicate), and a free replacement
                 // would let anyone churn slots. A PARKED transaction is never replaced here —
                 // it expires by TTL or yields to the capacity eviction instead.
-                long oldRevenue = minerRevenue((TransactionImpl) replaced);
+                long oldRevenue = minerRevenue(replaced);
                 long required;
                 try {
                     required = Math.addExact(oldRevenue, Math.max(1, oldRevenue / RBF_MIN_BUMP_PERCENT));
@@ -266,7 +266,7 @@ public final class MemPool {
                 try {
                     for (Transaction p : pending.values()) {
                         if (p != replaced) {
-                            spend = Math.addExact(spend, maxSpend((TransactionImpl) p));
+                            spend = Math.addExact(spend, maxSpend(p));
                         }
                     }
                 } catch (ArithmeticException overflow) {
@@ -370,7 +370,7 @@ public final class MemPool {
      * when gasUsed is still unknown. Used for the minFee admission floor and the RBF bump
      * (audit M9) — NOT for selection ordering, see {@link #priorityRate}.
      */
-    private static long minerRevenue(TransactionImpl tx) {
+    private static long minerRevenue(Transaction tx) {
         if (!tx.kind().isContract()) {
             return tx.fee().amount();
         }
@@ -391,7 +391,7 @@ public final class MemPool {
      * price) for exactly this reason. {@code minerRevenue} stays the metric for the admission
      * floor and RBF, where the total locked value is what matters.
      */
-    private static long priorityRate(TransactionImpl tx) {
+    private static long priorityRate(Transaction tx) {
         long weight = tx.kind().isContract() ? Math.max(1L, tx.gasLimit()) : 1L;
         return minerRevenue(tx) / weight;
     }
@@ -422,8 +422,8 @@ public final class MemPool {
             java.util.PriorityQueue<Map.Entry<PublicAddress, Transaction>> frontier =
                 new java.util.PriorityQueue<>(Map.Entry.<PublicAddress, Transaction>comparingByValue(
                     (a, b) -> {
-                        var ta = (TransactionImpl) a;
-                        var tb = (TransactionImpl) b;
+                        Transaction ta = a;
+                        Transaction tb = b;
                         int byRate = Long.compare(priorityRate(tb), priorityRate(ta));
                         if (byRate != 0) {
                             return byRate;
@@ -448,7 +448,7 @@ public final class MemPool {
                 var best = frontier.poll();
                 PublicAddress sender = best.getKey();
                 Cursor cursor = cursors.get(sender);
-                var tx = (TransactionImpl) best.getValue();
+                Transaction tx = best.getValue();
                 long spend = maxSpend(tx);
                 if (spend <= cursor.budget()) {
                     selected.add(tx);
@@ -476,7 +476,7 @@ public final class MemPool {
         lock.lock();
         try {
             for (Transaction t : block.transactions()) {
-                if (!((TransactionImpl) t).isTransactionFee()) {
+                if (!t.isTransactionFee()) {
                     remove(t.hashContents());
                 }
             }
@@ -516,7 +516,7 @@ public final class MemPool {
      * higher-fee newcomer now always displaces that dead weight. A live (progressing) sender is never
      * evicted, so legitimate saturation still yields {@code QUEUE_FULL}.
      */
-    private boolean makeRoomForParkedSlot(PublicAddress from, TransactionImpl incoming) {
+    private boolean makeRoomForParkedSlot(PublicAddress from, Transaction incoming) {
         long now = clock.getAsLong();
         if (now - lastParkedScanAt >= PARKED_SCAN_INTERVAL_MS) {
             lastParkedScanAt = now;
@@ -529,7 +529,7 @@ public final class MemPool {
                 }
                 // Fully parked: its deepest (highest-nonce) tx is the furthest from ever being minable.
                 Transaction deepest = pending.lastEntry().getValue();
-                candidates.add(Map.entry(deepest, ((TransactionImpl) deepest).fee().amount()));
+                candidates.add(Map.entry(deepest, deepest.fee().amount()));
             }
             parkedCandidates = candidates;
         }

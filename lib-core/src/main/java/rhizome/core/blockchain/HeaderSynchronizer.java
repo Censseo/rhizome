@@ -323,7 +323,7 @@ public final class HeaderSynchronizer {
                     pending = submitFetch(fetcher, peer, windows.get(i + 1));
                 }
                 for (Block block : blocks) {
-                    long idx = ((BlockImpl) block).id() - forkHeight - 1;
+                    long idx = block.id() - forkHeight - 1;
                     if (idx < 0 || idx >= branch.size()
                         || !block.hash().equals(branch.get((int) idx).hash())) {
                         return false; // body does not match its validated header
@@ -337,7 +337,7 @@ public final class HeaderSynchronizer {
                     ExecutionStatus applyStatus =
                         ChainSynchronizer.applyWithUncleFetch(engine, peer, block, engine::addValidatedBody);
                     if (applyStatus != ExecutionStatus.SUCCESS) {
-                        log.warn("body apply rejected at height {}: {}", ((BlockImpl) block).id(), applyStatus);
+                        log.warn("body apply rejected at height {}: {}", block.id(), applyStatus);
                         return false;
                     }
                 }
@@ -509,7 +509,7 @@ public final class HeaderSynchronizer {
                 // recovers the suffix, rather than continuing in a silently-truncated state. The
                 // engine's degraded marker makes the condition observable to the API layer (audit:
                 // silent restore failure) — cleared below once a restore fully succeeds.
-                String reason = "failed to restore local branch at " + ((BlockImpl) block).id()
+                String reason = "failed to restore local branch at " + block.id()
                     + " after a rejected reorg: " + status + " — a full resync is required";
                 engine.markDegraded(reason, false); // a later full restore genuinely heals this
                 log.error("{}", reason);

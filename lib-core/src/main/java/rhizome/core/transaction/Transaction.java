@@ -152,6 +152,25 @@ public sealed interface Transaction permits TransactionImpl {
     public PublicAddress from();
     public PublicAddress to();
 
+    // The rest of a transaction's signed content. These were readable only through a
+    // (TransactionImpl) downcast — 36 of them in production code, every one a pure read, three of
+    // them in lib-persistence reaching down to lib-core's implementation class. Each is already on
+    // the sole implementation; declaring them here is purely additive.
+    public TransactionAmount amount();
+    public TransactionAmount fee();
+    public boolean isTransactionFee();
+    public long timestamp();
+    public int chainId();
+    public long nonce();
+    public PublicKey signingKey();
+    public TransactionSignature signature();
+    public rhizome.crypto.SignatureScheme scheme();
+    public byte[] pqCommitment();
+    public TransactionKind kind();
+    public byte[] data();
+    public long gasLimit();
+    public long gasPrice();
+
     /**
      * Get instance of the serializer
      * @return

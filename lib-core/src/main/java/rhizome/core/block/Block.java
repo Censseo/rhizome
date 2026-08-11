@@ -101,6 +101,16 @@ public sealed interface Block permits BlockImpl {
     public SHA256Hash lastBlockHash();
     public int difficulty();
 
+    // The rest of the header a block commits to. These were readable only through a
+    // (BlockImpl) downcast, which is why 28 of them accumulated in production code — and why
+    // lib-persistence, an outward module, reached down to lib-core's implementation class. Each
+    // is already on the sole implementation; declaring them here is purely additive.
+    public long timestamp();
+    public SHA256Hash merkleRoot();
+    public SHA256Hash nonce();
+    public SHA256Hash stateRoot();
+    public int vote();
+
     /**
      * Get instance of the serializer
      * @return

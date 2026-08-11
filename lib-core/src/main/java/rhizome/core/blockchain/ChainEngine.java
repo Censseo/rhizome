@@ -451,7 +451,7 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
             if (!trustedRestore && !trustedPow && reorgWindowOpen.get()) {
                 return IS_SYNCING;
             }
-            var b = (BlockImpl) block;
+            Block b = block;
             long height = store.height();
 
             if (b.id() != height + 1) {
@@ -722,14 +722,14 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
                 syncVoteableHolder();
             }
             BigInteger uncleWork = uncleWorkByHeight.remove(height);
-            totalWork = totalWork.subtract(BlockWork.of(((BlockImpl) tip).difficulty()));
-            baseWork = baseWork.subtract(BlockWork.of(((BlockImpl) tip).difficulty()));
+            totalWork = totalWork.subtract(BlockWork.of(tip.difficulty()));
+            baseWork = baseWork.subtract(BlockWork.of(tip.difficulty()));
             if (uncleWork != null) {
                 totalWork = totalWork.subtract(uncleWork);
             }
             // Remember the popped block (hash → proven nonce) so a subsequent restoreBlock of the
             // SAME header skips the (tip-independent, already-proven) PoW re-verification.
-            recentlyPoppedBlocks.put(tip.hash(), ((BlockImpl) tip).nonce());
+            recentlyPoppedBlocks.put(tip.hash(), tip.nonce());
             currentDifficulty = computeDifficultyFromChain();
             // THEN revert the peripheral stores (each restores from its own journal and drops
             // journal + receipts in one atomic unit). A failure here is a recoverable tear: the
@@ -1521,8 +1521,7 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
 
     private ExecutionStatus checkAccountNonces(Block block) {
         Map<rhizome.core.ledger.PublicAddress, Long> expected = new HashMap<>();
-        for (Transaction t : block.transactions()) {
-            var tx = (TransactionImpl) t;
+        for (Transaction tx : block.transactions()) {
             if (tx.isTransactionFee() || isSelfAuthorized(tx)) {
                 continue;
             }
@@ -1536,13 +1535,12 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
     }
 
     /** Self-authorized txs (coinbase and permissionless rent collection) carry no account nonce. */
-    static boolean isSelfAuthorized(TransactionImpl tx) {
+    static boolean isSelfAuthorized(Transaction tx) {
         return tx.kind() == rhizome.core.transaction.TransactionKind.BOX_COLLECT;
     }
 
     private void commitAccountNonces(Block block) {
-        for (Transaction t : block.transactions()) {
-            var tx = (TransactionImpl) t;
+        for (Transaction tx : block.transactions()) {
             if (!tx.isTransactionFee() && !isSelfAuthorized(tx)) {
                 nonceStore.set(tx.from(), Math.max(nonceStore.next(tx.from()), tx.nonce() + 1));
             }
@@ -1551,8 +1549,7 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
 
     private void revertAccountNonces(Block block) {
         Map<rhizome.core.ledger.PublicAddress, Long> lowest = new HashMap<>();
-        for (Transaction t : block.transactions()) {
-            var tx = (TransactionImpl) t;
+        for (Transaction tx : block.transactions()) {
             if (!tx.isTransactionFee() && !isSelfAuthorized(tx)) {
                 lowest.merge(tx.from(), tx.nonce(), Math::min);
             }
@@ -1572,7 +1569,7 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
     private static long serializedSize(Block block) {
         long size = rhizome.core.block.dto.BlockDto.BUFFER_SIZE + Integer.BYTES;
         for (Transaction t : block.transactions()) {
-            size += ((TransactionImpl) t).sizeBytes(); // exact wire length without building the DTO (P7)
+            size += t.sizeBytes(); // exact wire length without building the DTO (P7)
         }
         size += (long) block.uncles().size()
             * (SHA256Hash.SIZE + Integer.BYTES + rhizome.core.ledger.PublicAddress.SIZE);
@@ -1586,7 +1583,7 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
     public void registerOrphan(Block block) {
         lock.lock();
         try {
-            var b = (BlockImpl) block;
+            Block b = block;
             // Cheap, allocation-free pre-checks BEFORE the memory-hard verifyNonce (audit H3): the
             // Pufferfish2 hash is expensive by design, so `/submit` must not let an attacker force one
             // per throwaway block. A block can only ever become a valid uncle if it is a recent
@@ -1662,11 +1659,11 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
      * including block's own difficulty), so every path agrees on the bound. Returns {@code null}
      * when a bound fails, exactly like {@link #validateUncles}.
      */
-    private BigInteger uncleWorkFromRefs(BlockImpl block) {
+    private BigInteger uncleWorkFromRefs(Block block) {
         return UncleWeight.structuralWork(block.uncles(), block.difficulty(), params);
     }
 
-    private BigInteger validateUncles(BlockImpl block) {
+    private BigInteger validateUncles(Block block) {
         List<UncleRef> uncles = block.uncles();
         if (uncles.isEmpty()) {
             return BigInteger.ZERO;
@@ -1702,7 +1699,7 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
             if (uncle == null) {
                 return null; // unknown orphan
             }
-            if (((BlockImpl) uncle).difficulty() != ref.difficulty()) {
+            if (uncle.difficulty() != ref.difficulty()) {
                 return null; // committed difficulty must match the real orphan (no work inflation)
             }
             PublicAddress uncleMiner = blockMiner(uncle);
@@ -1745,7 +1742,7 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
                 // so the produced block passes its own validateUncles check.
                 if (orphanMiner != null
                         && uncleEligible(orphan, h, depth, tipHeight, ctx, currentDifficulty)) {
-                    out.add(new UncleRef(orphan.hash(), ((BlockImpl) orphan).difficulty(), orphanMiner));
+                    out.add(new UncleRef(orphan.hash(), orphan.difficulty(), orphanMiner));
                 }
             }
             return out;
@@ -1756,8 +1753,7 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
 
     /** The coinbase recipient (miner) of a block, or {@code null} if it has no coinbase. */
     private static PublicAddress blockMiner(Block block) {
-        for (Transaction t : block.transactions()) {
-            var tx = (TransactionImpl) t;
+        for (Transaction tx : block.transactions()) {
             if (tx.isTransactionFee()) {
                 return tx.to();
             }
@@ -1796,7 +1792,7 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
         // already-referenced or out-of-range orphans costs map lookups, not Pufferfish2 hashes,
         // on every production round (selectUncles scans the whole orphan pool under the engine
         // lock). Pure checks only, so the verdict is unchanged by the reordering.
-        int ud = ((BlockImpl) uncle).difficulty();
+        int ud = uncle.difficulty();
         if (ud < params.minDifficulty() || ud > nephewDifficulty) {
             return false; // work must be real and not inflated beyond the nephew's difficulty
         }

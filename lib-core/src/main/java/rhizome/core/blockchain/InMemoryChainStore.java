@@ -37,13 +37,13 @@ public final class InMemoryChainStore implements ChainStore {
     @Override
     public void append(Block block) {
         long expected = height() + 1;
-        if (((BlockImpl) block).id() != expected) {
+        if (block.id() != expected) {
             throw new IllegalArgumentException(
-                "Expected block " + expected + " but got " + ((BlockImpl) block).id());
+                "Expected block " + expected + " but got " + block.id());
         }
         blocks.add(block);
         for (Transaction t : block.transactions()) {
-            if (!((TransactionImpl) t).isTransactionFee()) {
+            if (!t.isTransactionFee()) {
                 txIndex.put(t.hashContents(), expected);
             }
         }
@@ -56,7 +56,7 @@ public final class InMemoryChainStore implements ChainStore {
         }
         Block removed = blocks.remove(blocks.size() - 1);
         for (Transaction t : removed.transactions()) {
-            if (!((TransactionImpl) t).isTransactionFee()) {
+            if (!t.isTransactionFee()) {
                 txIndex.remove(t.hashContents());
             }
         }
