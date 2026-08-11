@@ -363,7 +363,8 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
             long bal = e.getValue().amount();
             if (bal != 0) {
                 changes.add(rhizome.core.state.StateChange.set(
-                    rhizome.core.state.StateKeys.LEDGER, e.getKey().toBytes(), longBytesBE(bal)));
+                    rhizome.core.state.StateKeys.LEDGER, e.getKey().toBytes(),
+                    BlockStateChanges.longBytesBE(bal)));
             }
         }
         stateAccumulator.applyBlock(GenesisBlock.GENESIS_ID, changes);
@@ -1357,71 +1358,24 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
         }
     }
 
-    /** Gathers a block's committed ledger, nonce, box and token changes into state accumulator changes. */
+    /**
+     * Gathers a block's committed effects into state-accumulator changes.
+     *
+     * <p>The five statements below ARE the emission order the state root commits to; each
+     * translation lives in {@link BlockStateChanges}, where it can be asserted without an engine.
+     * This order is deliberately not the domain commit order — see that class.
+     */
     private List<rhizome.core.state.StateChange> collectStateChanges(
             Block block, java.util.Set<PublicAddress> touched, long height) {
         List<rhizome.core.state.StateChange> changes = new ArrayList<>();
-        for (PublicAddress a : touched) {
-            long bal = ledger.hasWallet(a) ? ledger.getWalletValue(a).amount() : 0;
-            byte[] key = a.toBytes();
-            changes.add(bal == 0
-                ? rhizome.core.state.StateChange.delete(rhizome.core.state.StateKeys.LEDGER, key)
-                : rhizome.core.state.StateChange.set(rhizome.core.state.StateKeys.LEDGER, key, longBytesBE(bal)));
-        }
-        // Account nonces (⚠ consensus domain 0x07): each sender's next-expected nonce after this
-        // block is max(txNonce)+1 over its transactions — a deterministic function of block content
-        // (sequentiality already validated). Committing it lets a snap-synced node obtain nonces
-        // verifiably (root equality) rather than trusting a peer. Derived from the block, not the
-        // nonce store, because the store is advanced only after this collection runs.
-        java.util.Map<PublicAddress, Long> newNonces = new HashMap<>();
-        for (Transaction t : block.transactions()) {
-            var tx = (TransactionImpl) t;
-            if (!tx.isTransactionFee() && !isSelfAuthorized(tx)) {
-                newNonces.merge(tx.from(), tx.nonce() + 1, Math::max);
-            }
-        }
-        newNonces.forEach((from, nonce) -> changes.add(rhizome.core.state.StateChange.set(
-            rhizome.core.state.StateKeys.ACCOUNT_NONCE, from.toBytes(), longBytesBE(nonce))));
-        for (var m : boxProcessor.changes(height)) {
-            changes.add(m.box() == null
-                ? rhizome.core.state.StateChange.delete(rhizome.core.state.StateKeys.BOX, m.id())
-                : rhizome.core.state.StateChange.set(rhizome.core.state.StateKeys.BOX, m.id(), m.box().serialize()));
-        }
-        for (var op : tokenProcessor.changes(height)) {
-            if (op instanceof rhizome.core.token.TokenStore.TokenOp.MetaSet ms) {
-                changes.add(rhizome.core.state.StateChange.set(
-                    rhizome.core.state.StateKeys.TOKEN_META, ms.meta().id(), ms.meta().serialize()));
-            } else if (op instanceof rhizome.core.token.TokenStore.TokenOp.BalanceSet bs) {
-                byte[] rawKey = concat(bs.tokenId(), bs.address());
-                changes.add(bs.amount() == 0
-                    ? rhizome.core.state.StateChange.delete(rhizome.core.state.StateKeys.TOKEN_BALANCE, rawKey)
-                    : rhizome.core.state.StateChange.set(rhizome.core.state.StateKeys.TOKEN_BALANCE, rawKey,
-                        longBytesBE(bs.amount())));
-            }
-        }
-        for (var ch : contractProcessor.changes(height)) {
-            if (ch.code()) {
-                changes.add(rhizome.core.state.StateChange.set(
-                    rhizome.core.state.StateKeys.CONTRACT_CODE, ch.contract().toBytes(), ch.value()));
-            } else {
-                byte[] rawKey = concat(ch.contract().toBytes(), ch.key());
-                changes.add(rhizome.core.state.StateChange.set(
-                    rhizome.core.state.StateKeys.CONTRACT_STORAGE, rawKey, ch.value()));
-            }
-        }
+        BlockStateChanges.ledger(ledger, touched, changes);
+        BlockStateChanges.nonces(block, changes);
+        BlockStateChanges.box(boxProcessor, height, changes);
+        BlockStateChanges.token(tokenProcessor, height, changes);
+        BlockStateChanges.contract(contractProcessor, height, changes);
         return changes;
     }
 
-    private static byte[] longBytesBE(long value) {
-        return rhizome.core.common.Utils.longToBytes(value);
-    }
-
-    private static byte[] concat(byte[] a, byte[] b) {
-        byte[] out = new byte[a.length + b.length];
-        System.arraycopy(a, 0, out, 0, a.length);
-        System.arraycopy(b, 0, out, a.length, b.length);
-        return out;
-    }
 
     // ---- derived state ----
 
@@ -1618,7 +1572,7 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
     }
 
     /** Self-authorized txs (coinbase and permissionless rent collection) carry no account nonce. */
-    private static boolean isSelfAuthorized(TransactionImpl tx) {
+    static boolean isSelfAuthorized(TransactionImpl tx) {
         return tx.kind() == rhizome.core.transaction.TransactionKind.BOX_COLLECT;
     }
 
