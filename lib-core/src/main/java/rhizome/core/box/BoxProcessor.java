@@ -19,6 +19,12 @@ import rhizome.core.transaction.TransactionKind;
  */
 public interface BoxProcessor extends rhizome.core.blockchain.BlockStateProcessor {
 
+    /**
+     * The box domain on a node with no box store wired. Replaces a null field; a box transaction
+     * is still rejected, by {@code available()} rather than by a null test.
+     */
+    BoxProcessor NONE = new AbsentBoxProcessor();
+
     /** Opens a fresh box session for one block. */
     void begin();
 

@@ -62,6 +62,13 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
     private final ContractProcessor contractProcessor;
     private final rhizome.core.box.BoxProcessor boxProcessor;
     private final rhizome.core.token.TokenProcessor tokenProcessor;
+    /**
+     * The same three instances as the typed fields above, in commit order. The typed fields serve
+     * the domain-specific read paths and the state-change translation; this list serves every
+     * lifecycle walk, so the order those walks use is a single value rather than five hand-written
+     * statement sequences. Pinned by {@code StateDomainOrderTest}.
+     */
+    private final java.util.List<BlockStateProcessor> stateDomains;
     private final rhizome.core.state.StateAccumulator stateAccumulator;
     private LedgerSnapshot genesisSnapshot;
     private final OrphanPool orphans = new OrphanPool(256);
@@ -187,15 +194,20 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
         this.nonceStore = nonceStore;
         this.nowMillis = nowMillis;
         this.verifier = verifier;
-        this.contractProcessor = contractProcessor;
-        this.boxProcessor = boxProcessor;
-        this.tokenProcessor = tokenProcessor;
+        // Null means "this node has no such domain". Normalize it once, here, to the absent
+        // singleton: every downstream site then talks to a processor instead of guarding against a
+        // null one, and "absent" is expressed by available() rather than by identity. The public
+        // init() overloads keep accepting null, so no caller changes.
+        this.contractProcessor = contractProcessor == null ? ContractProcessor.NONE : contractProcessor;
+        this.boxProcessor = boxProcessor == null ? rhizome.core.box.BoxProcessor.NONE : boxProcessor;
+        this.tokenProcessor =
+            tokenProcessor == null ? rhizome.core.token.TokenProcessor.NONE : tokenProcessor;
         this.stateAccumulator = stateAccumulator;
-        if (contractProcessor != null) {
-            // Let the VM bound transfer_value by the contract's committed balance (audit T4).
-            contractProcessor.useNativeBalance(a ->
-                ledger.hasWallet(a) ? ledger.getWalletValue(a).amount() : 0L);
-        }
+        this.stateDomains = BlockStateProcessor.inCommitOrder(
+            this.contractProcessor, this.boxProcessor, this.tokenProcessor);
+        // Let the VM bound transfer_value by the contract's committed balance (audit T4).
+        this.contractProcessor.useNativeBalance(a ->
+            ledger.hasWallet(a) ? ledger.getWalletValue(a).amount() : 0L);
     }
 
     /**
@@ -311,15 +323,7 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
         }
         long scanTop = chainHeight + params.maxReorgDepth();
         for (long h = scanTop; h > chainHeight; h--) {
-            if (contractProcessor != null) {
-                contractProcessor.revertBlock(h);
-            }
-            if (boxProcessor != null) {
-                boxProcessor.revertBlock(h);
-            }
-            if (tokenProcessor != null) {
-                tokenProcessor.revertBlock(h);
-            }
+            revertStateDomains(h);
         }
     }
 
@@ -329,6 +333,23 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
      * supported from genesis: enabling the accumulator on an already-populated chain would
      * need a full replay, which is rejected here rather than committing a wrong root.
      */
+    /**
+     * Undoes {@code height} in every per-block state domain, in the canonical order.
+     *
+     * <p>Replaces four byte-identical hand-written triplets (boot reconciliation, the two addBlock
+     * state-root rejections, and popBlock), whose only relationship to Executor's commit order was
+     * a comment. The state accumulator is deliberately NOT in this walk: its revertBlock throws on
+     * an unjournalled height where a processor's is a documented no-op, and its position differs
+     * per site — first during reconciliation, last in popBlock, absent from the stampStateRoot undo
+     * because that path uses dryApply. Folding it in would change three orderings silently and turn
+     * a fail-loud into a fail-silent.
+     */
+    private void revertStateDomains(long height) {
+        for (BlockStateProcessor domain : stateDomains) {
+            domain.revertBlock(height);
+        }
+    }
+
     private void seedGenesisStateRoot() {
         if (stateAccumulator == null || stateAccumulator.isSeeded()) {
             return;
@@ -548,15 +569,7 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
                     if (!java.util.Arrays.equals(newRoot, b.stateRoot().toBytes())) {
                         stateAccumulator.revertBlock(height2);
                         Executor.rollbackBlock(block, ledger, contractProcessor, boxProcessor, height2, params);
-                        if (contractProcessor != null) {
-                            contractProcessor.revertBlock(height2);
-                        }
-                        if (boxProcessor != null) {
-                            boxProcessor.revertBlock(height2);
-                        }
-                        if (tokenProcessor != null) {
-                            tokenProcessor.revertBlock(height2);
-                        }
+                        revertStateDomains(height2);
                         return INVALID_STATE_ROOT;
                     }
                 } else if (!java.util.Arrays.equals(b.stateRoot().toBytes(),
@@ -566,15 +579,7 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
                     // node (audit M6: state-root validation must not depend on local configuration),
                     // so refuse a block whose committed state we are unable to check.
                     Executor.rollbackBlock(block, ledger, contractProcessor, boxProcessor, b.id(), params);
-                    if (contractProcessor != null) {
-                        contractProcessor.revertBlock(b.id());
-                    }
-                    if (boxProcessor != null) {
-                        boxProcessor.revertBlock(b.id());
-                    }
-                    if (tokenProcessor != null) {
-                        tokenProcessor.revertBlock(b.id());
-                    }
+                    revertStateDomains(b.id());
                     return INVALID_STATE_ROOT;
                 }
 
@@ -726,15 +731,7 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
             // into boot recovery (a restore never rewinds the torn peripheral, so it cannot
             // clear the mark).
             try {
-                if (contractProcessor != null) {
-                    contractProcessor.revertBlock(height); // undo this block's contract-state changes
-                }
-                if (boxProcessor != null) {
-                    boxProcessor.revertBlock(height); // undo this block's box-state changes
-                }
-                if (tokenProcessor != null) {
-                    tokenProcessor.revertBlock(height); // undo this block's token-state changes
-                }
+                revertStateDomains(height); // undo this block's contract/box/token changes
                 if (stateAccumulator != null) {
                     stateAccumulator.revertBlock(height); // move the state root back one block
                 }
@@ -1050,19 +1047,16 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
 
     /** Whether the data-box layer is wired (box transactions and queries active). */
     public boolean boxesEnabled() {
-        return boxProcessor != null;
+        return boxProcessor.available();
     }
 
     /** Whether the native-token layer is wired. */
     public boolean tokensEnabled() {
-        return tokenProcessor != null;
+        return tokenProcessor.available();
     }
 
     /** The box at {@code id} from committed state, or {@code null} (none / boxes disabled). */
     public rhizome.core.box.Box box(byte[] id) {
-        if (boxProcessor == null) {
-            return null;
-        }
         lock.lock();
         try {
             return boxProcessor.getCommitted(id);
@@ -1073,9 +1067,6 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
 
     /** Box ids owned by {@code owner}, paginated after {@code afterId} (null = start). */
     public java.util.List<byte[]> boxIdsByOwner(byte[] owner, byte[] afterId, int limit) {
-        if (boxProcessor == null) {
-            return java.util.List.of();
-        }
         lock.lock();
         try {
             return boxProcessor.boxIdsByOwner(owner, afterId, limit);
@@ -1087,7 +1078,7 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
     /** Evaluates a box scan predicate over committed state (owner-index fast path when anchored). */
     public rhizome.core.box.BoxProcessor.ScanPage scanBoxes(
             rhizome.core.box.ScanPredicate predicate, byte[] afterId, int limit, int window) {
-        if (boxProcessor == null) {
+        if (!boxProcessor.available()) {
             return new rhizome.core.box.BoxProcessor.ScanPage(java.util.List.of(), null);
         }
         // No engine lock on the fast path: the scan reads only committed box state (thread-safe),
@@ -1098,9 +1089,6 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
 
     /** Rent-collectable box ids at the next block height, lowest expiry first (block producer). */
     public java.util.List<byte[]> collectableBoxIds(long height, int limit) {
-        if (boxProcessor == null) {
-            return java.util.List.of();
-        }
         lock.lock();
         try {
             return boxProcessor.collectableBoxIds(height, limit);
@@ -1111,7 +1099,7 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
 
     /** Box lifecycle events emitted by the block at {@code height} (for the agent event feed). */
     public java.util.List<rhizome.core.box.BoxProcessor.BoxEvent> boxEvents(long height) {
-        return boxProcessor == null
+        return !boxProcessor.available()
             ? java.util.List.of()
             // Lock-free unless a stamp is committing-then-reverting phantom events for this
             // height (readOutsideStamp falls back to the engine lock in that window).
@@ -1122,9 +1110,6 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
 
     /** Committed metadata for {@code tokenId}, or {@code null} (none / tokens disabled). */
     public rhizome.core.token.TokenMeta tokenMeta(byte[] tokenId) {
-        if (tokenProcessor == null) {
-            return null;
-        }
         lock.lock();
         try {
             return tokenProcessor.meta(tokenId);
@@ -1135,9 +1120,6 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
 
     /** Committed balance of {@code tokenId} held by {@code address}. */
     public long tokenBalance(byte[] tokenId, byte[] address) {
-        if (tokenProcessor == null) {
-            return 0L;
-        }
         lock.lock();
         try {
             return tokenProcessor.balance(tokenId, address);
@@ -1148,9 +1130,6 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
 
     /** Token ids minted by {@code minter}, paginated after {@code afterId} (null = start). */
     public java.util.List<byte[]> tokenIdsByMinter(byte[] minter, byte[] afterId, int limit) {
-        if (tokenProcessor == null) {
-            return java.util.List.of();
-        }
         lock.lock();
         try {
             return tokenProcessor.tokenIdsByMinter(minter, afterId, limit);
@@ -1161,9 +1140,6 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
 
     /** Token ids {@code address} holds, paginated after {@code afterId} (null = start). */
     public java.util.List<byte[]> tokenIdsByHolder(byte[] address, byte[] afterId, int limit) {
-        if (tokenProcessor == null) {
-            return java.util.List.of();
-        }
         lock.lock();
         try {
             return tokenProcessor.tokenIdsByHolder(address, afterId, limit);
@@ -1174,7 +1150,7 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
 
     /** Token lifecycle events emitted by the block at {@code height}. */
     public java.util.List<rhizome.core.token.TokenProcessor.TokenEvent> tokenEvents(long height) {
-        return tokenProcessor == null
+        return !tokenProcessor.available()
             ? java.util.List.of()
             // Same stamp seqlock as boxEvents: never expose phantom, never-committed events.
             : readOutsideStamp(() -> tokenProcessor.events(height));
@@ -1201,7 +1177,7 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
 
     /** Pushes the current votable params into the box processor's holder (read at execution). */
     private void syncVoteableHolder() {
-        var holder = boxProcessor == null ? null : boxProcessor.voteableParams();
+        var holder = boxProcessor.voteableParams();
         if (holder != null) {
             long[] p = currentVoteParams();
             holder.set(p[0], p[1]);
@@ -1371,15 +1347,7 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
                 byte[] root = stateAccumulator.dryApply(collectStateChanges(candidate, touched, h));
                 b.stateRoot(SHA256Hash.of(root));
                 Executor.rollbackBlock(candidate, ledger, contractProcessor, boxProcessor, h, params);
-                if (contractProcessor != null) {
-                    contractProcessor.revertBlock(h);
-                }
-                if (boxProcessor != null) {
-                    boxProcessor.revertBlock(h);
-                }
-                if (tokenProcessor != null) {
-                    tokenProcessor.revertBlock(h);
-                }
+                revertStateDomains(h);
             } finally {
                 store.discardBlockCommit(); // drop the dry-run's staged ledger writes
                 stampVersion.incrementAndGet(); // stamp window closed — stores are clean again
@@ -1414,37 +1382,31 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
         }
         newNonces.forEach((from, nonce) -> changes.add(rhizome.core.state.StateChange.set(
             rhizome.core.state.StateKeys.ACCOUNT_NONCE, from.toBytes(), longBytesBE(nonce))));
-        if (boxProcessor != null) {
-            for (var m : boxProcessor.changes(height)) {
-                changes.add(m.box() == null
-                    ? rhizome.core.state.StateChange.delete(rhizome.core.state.StateKeys.BOX, m.id())
-                    : rhizome.core.state.StateChange.set(rhizome.core.state.StateKeys.BOX, m.id(), m.box().serialize()));
+        for (var m : boxProcessor.changes(height)) {
+            changes.add(m.box() == null
+                ? rhizome.core.state.StateChange.delete(rhizome.core.state.StateKeys.BOX, m.id())
+                : rhizome.core.state.StateChange.set(rhizome.core.state.StateKeys.BOX, m.id(), m.box().serialize()));
+        }
+        for (var op : tokenProcessor.changes(height)) {
+            if (op instanceof rhizome.core.token.TokenStore.TokenOp.MetaSet ms) {
+                changes.add(rhizome.core.state.StateChange.set(
+                    rhizome.core.state.StateKeys.TOKEN_META, ms.meta().id(), ms.meta().serialize()));
+            } else if (op instanceof rhizome.core.token.TokenStore.TokenOp.BalanceSet bs) {
+                byte[] rawKey = concat(bs.tokenId(), bs.address());
+                changes.add(bs.amount() == 0
+                    ? rhizome.core.state.StateChange.delete(rhizome.core.state.StateKeys.TOKEN_BALANCE, rawKey)
+                    : rhizome.core.state.StateChange.set(rhizome.core.state.StateKeys.TOKEN_BALANCE, rawKey,
+                        longBytesBE(bs.amount())));
             }
         }
-        if (tokenProcessor != null) {
-            for (var op : tokenProcessor.changes(height)) {
-                if (op instanceof rhizome.core.token.TokenStore.TokenOp.MetaSet ms) {
-                    changes.add(rhizome.core.state.StateChange.set(
-                        rhizome.core.state.StateKeys.TOKEN_META, ms.meta().id(), ms.meta().serialize()));
-                } else if (op instanceof rhizome.core.token.TokenStore.TokenOp.BalanceSet bs) {
-                    byte[] rawKey = concat(bs.tokenId(), bs.address());
-                    changes.add(bs.amount() == 0
-                        ? rhizome.core.state.StateChange.delete(rhizome.core.state.StateKeys.TOKEN_BALANCE, rawKey)
-                        : rhizome.core.state.StateChange.set(rhizome.core.state.StateKeys.TOKEN_BALANCE, rawKey,
-                            longBytesBE(bs.amount())));
-                }
-            }
-        }
-        if (contractProcessor != null) {
-            for (var ch : contractProcessor.changes(height)) {
-                if (ch.code()) {
-                    changes.add(rhizome.core.state.StateChange.set(
-                        rhizome.core.state.StateKeys.CONTRACT_CODE, ch.contract().toBytes(), ch.value()));
-                } else {
-                    byte[] rawKey = concat(ch.contract().toBytes(), ch.key());
-                    changes.add(rhizome.core.state.StateChange.set(
-                        rhizome.core.state.StateKeys.CONTRACT_STORAGE, rawKey, ch.value()));
-                }
+        for (var ch : contractProcessor.changes(height)) {
+            if (ch.code()) {
+                changes.add(rhizome.core.state.StateChange.set(
+                    rhizome.core.state.StateKeys.CONTRACT_CODE, ch.contract().toBytes(), ch.value()));
+            } else {
+                byte[] rawKey = concat(ch.contract().toBytes(), ch.key());
+                changes.add(rhizome.core.state.StateChange.set(
+                    rhizome.core.state.StateKeys.CONTRACT_STORAGE, rawKey, ch.value()));
             }
         }
         return changes;

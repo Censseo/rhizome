@@ -15,6 +15,12 @@ import rhizome.core.transaction.TransactionKind;
  */
 public interface TokenProcessor extends rhizome.core.blockchain.BlockStateProcessor {
 
+    /**
+     * The token domain on a node with no token store wired. Replaces a null field; a token
+     * transaction is still rejected, by {@code available()} rather than by a null test.
+     */
+    TokenProcessor NONE = new AbsentTokenProcessor();
+
     void begin();
 
     /** Validates and applies one token transaction against the open session (no ledger effect). */

@@ -19,6 +19,13 @@ import rhizome.core.transaction.TransactionKind;
  */
 public interface ContractProcessor extends BlockStateProcessor {
 
+    /**
+     * The contract domain on a node with no VM wired. Replaces a null field, so the engine and the
+     * executor need no null checks; a contract transaction is still rejected, by
+     * {@link BlockStateProcessor#available()} rather than by a null test.
+     */
+    ContractProcessor NONE = new AbsentContractProcessor();
+
     /** Opens a fresh state session for one block. */
     void begin();
 

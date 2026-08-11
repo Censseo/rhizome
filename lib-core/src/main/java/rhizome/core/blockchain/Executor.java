@@ -68,37 +68,10 @@ public final class Executor {
     public static ExecutionStatus executeBlock(Block block, Ledger ledger,
                                                Predicate<SHA256Hash> alreadyExecuted,
                                                NetworkParameters params) {
-        return executeBlock(block, ledger, alreadyExecuted, params, null);
+        return executeBlock(block, ledger, alreadyExecuted, params, null, null, null);
     }
 
-    /**
-     * As {@link #executeBlock(Block, Ledger, Predicate, NetworkParameters)}, but
-     * offloads Ed25519 checks to {@code verifier} (parallel, with a verify-once
-     * cache). Signatures are checked in one batch up front; the structural pass
-     * then trusts that result. Pass {@code null} to verify inline.
-     */
-    public static ExecutionStatus executeBlock(Block block, Ledger ledger,
-                                               Predicate<SHA256Hash> alreadyExecuted,
-                                               NetworkParameters params,
-                                               SignatureVerifier verifier) {
-        return executeBlock(block, ledger, alreadyExecuted, params, verifier, null);
-    }
 
-    /**
-     * As above, with a {@link ContractProcessor} for DEPLOY/CALL transactions. When
-     * {@code processor} is null, contract transactions are rejected (consensus does
-     * not run them). Contract state writes are buffered in a per-block session that
-     * is committed only when the whole block succeeds, so block execution stays
-     * atomic; a contract that reverts or runs out of gas still pays its gas (like
-     * Ethereum) without invalidating the block.
-     */
-    public static ExecutionStatus executeBlock(Block block, Ledger ledger,
-                                               Predicate<SHA256Hash> alreadyExecuted,
-                                               NetworkParameters params,
-                                               SignatureVerifier verifier,
-                                               ContractProcessor processor) {
-        return executeBlock(block, ledger, alreadyExecuted, params, verifier, processor, null);
-    }
 
     /**
      * As above, with a {@link BoxProcessor} for the box transaction kinds
@@ -145,6 +118,27 @@ public final class Executor {
                                                BoxProcessor boxProcessor,
                                                TokenProcessor tokenProcessor,
                                                Set<PublicAddress> touchedLedger) {
+        // A null processor means "this node has no such domain". Normalize here so the body below
+        // talks to a processor rather than guarding against a null one; absence is then expressed
+        // by available(), and the pass-1 rejections keep their exact semantics.
+        return runBlock(block, ledger, alreadyExecuted, params, verifier,
+            processor == null ? ContractProcessor.NONE : processor,
+            boxProcessor == null ? BoxProcessor.NONE : boxProcessor,
+            tokenProcessor == null ? TokenProcessor.NONE : tokenProcessor,
+            touchedLedger);
+    }
+
+    /** As {@link #executeBlock}, with the three domains guaranteed non-null. */
+    private static ExecutionStatus runBlock(Block block, Ledger ledger,
+                                            Predicate<SHA256Hash> alreadyExecuted,
+                                            NetworkParameters params,
+                                            SignatureVerifier verifier,
+                                            ContractProcessor processor,
+                                            BoxProcessor boxProcessor,
+                                            TokenProcessor tokenProcessor,
+                                            Set<PublicAddress> touchedLedger) {
+        List<BlockStateProcessor> domains =
+            BlockStateProcessor.inCommitOrder(processor, boxProcessor, tokenProcessor);
         var blockImpl = (BlockImpl) block;
         long height = blockImpl.id();
         long expectedReward = params.miningReward(height);
@@ -191,7 +185,7 @@ public final class Executor {
             // one, consensus does not run them, so a block carrying one is rejected —
             // no contract tx can be mistaken for a transfer.
             if (tx.kind().isContract()) {
-                if (processor == null) {
+                if (!processor.available()) {
                     return CONTRACT_EXECUTION_UNAVAILABLE;
                 }
                 // Consensus gas ceiling. gasLimit is otherwise bounded only by affordability, and at
@@ -220,7 +214,7 @@ public final class Executor {
                 }
             }
             if (tx.kind().isBox()) {
-                if (boxProcessor == null || height < params.boxActivationHeight()) {
+                if (!boxProcessor.available() || height < params.boxActivationHeight()) {
                     return BOX_UNAVAILABLE;
                 }
                 // Box ops run no VM and cost no gas; the gas fields are reserved and must
@@ -249,7 +243,7 @@ public final class Executor {
                 }
             }
             if (tx.kind().isToken()) {
-                if (tokenProcessor == null || height < params.tokenActivationHeight()) {
+                if (!tokenProcessor.available() || height < params.tokenActivationHeight()) {
                     return TOKEN_UNAVAILABLE;
                 }
                 // Token ops run no VM, cost no gas, and move no PDN — the token amount lives
@@ -303,14 +297,8 @@ public final class Executor {
         // --- Pass 2: transactional application ---
         PublicAddress miner = ((TransactionImpl) coinbase).to();
         List<AppliedOp> applied = new ArrayList<>();
-        if (processor != null) {
-            processor.begin();
-        }
-        if (boxProcessor != null) {
-            boxProcessor.begin();
-        }
-        if (tokenProcessor != null) {
-            tokenProcessor.begin();
+        for (BlockStateProcessor domain : domains) {
+            domain.begin();
         }
         try {
             for (Transaction t : block.transactions()) {
@@ -321,21 +309,21 @@ public final class Executor {
                 if (tx.kind().isContract()) {
                     ExecutionStatus contractStatus = applyContract(tx, ledger, applied, miner, processor);
                     if (contractStatus != SUCCESS) {
-                        return abort(processor, boxProcessor, tokenProcessor, ledger, applied, contractStatus);
+                        return abort(domains, ledger, applied, contractStatus);
                     }
                     continue;
                 }
                 if (tx.kind().isBox()) {
                     ExecutionStatus boxStatus = applyBox(tx, ledger, applied, miner, boxProcessor, height);
                     if (boxStatus != SUCCESS) {
-                        return abort(processor, boxProcessor, tokenProcessor, ledger, applied, boxStatus);
+                        return abort(domains, ledger, applied, boxStatus);
                     }
                     continue;
                 }
                 if (tx.kind().isToken()) {
                     ExecutionStatus tokenStatus = applyToken(tx, ledger, applied, miner, tokenProcessor, height);
                     if (tokenStatus != SUCCESS) {
-                        return abort(processor, boxProcessor, tokenProcessor, ledger, applied, tokenStatus);
+                        return abort(domains, ledger, applied, tokenStatus);
                     }
                     continue;
                 }
@@ -345,7 +333,7 @@ public final class Executor {
                 try {
                     charged = Math.addExact(amount, fee);
                 } catch (ArithmeticException e) {
-                    return abort(processor, boxProcessor, tokenProcessor, ledger, applied, BALANCE_TOO_LOW);
+                    return abort(domains, ledger, applied, BALANCE_TOO_LOW);
                 }
 
                 // Block validity must be a pure function of BALANCE, never of ledger key-presence.
@@ -360,7 +348,7 @@ public final class Executor {
                 // so the withdraw below never touches a non-existent one.
                 long available = ledger.balanceOrZero(tx.from()); // one store read (audit perf)
                 if (available < charged) {
-                    return abort(processor, boxProcessor, tokenProcessor, ledger, applied, BALANCE_TOO_LOW);
+                    return abort(domains, ledger, applied, BALANCE_TOO_LOW);
                 }
 
                 if (charged > 0) {
@@ -377,14 +365,8 @@ public final class Executor {
             // reward is minted without matching work. Uncle validity (miner address, depth,
             // no double-crediting) was already enforced by the engine.
             payUncleRewards(blockImpl, ledger, applied, miner, params);
-            if (processor != null) {
-                processor.commit(blockImpl.id());
-            }
-            if (boxProcessor != null) {
-                boxProcessor.commit(blockImpl.id());
-            }
-            if (tokenProcessor != null) {
-                tokenProcessor.commit(blockImpl.id());
+            for (BlockStateProcessor domain : domains) {
+                domain.commit(blockImpl.id());
             }
             // Report every touched ledger address (each applied op names its wallet) so the
             // caller can read final balances for the state accumulator.
@@ -395,12 +377,12 @@ public final class Executor {
             }
             return SUCCESS;
         } catch (LedgerException e) {
-            return abort(processor, boxProcessor, tokenProcessor, ledger, applied, BALANCE_TOO_LOW);
+            return abort(domains, ledger, applied, BALANCE_TOO_LOW);
         } catch (ArithmeticException e) {
             // A deposit that would overflow a wallet's 64-bit balance (Math.addExact
             // in the ledger) must be rejected cleanly, not left as a partial mutation.
             // Underflow is already a LedgerException above; this is the overflow twin.
-            return abort(processor, boxProcessor, tokenProcessor, ledger, applied, BALANCE_OVERFLOW);
+            return abort(domains, ledger, applied, BALANCE_OVERFLOW);
         } catch (RuntimeException | Error fatal) {
             // A fatal failure mid-block (the VM surfaces a node-level OOM as IllegalStateException
             // rather than heap-dependent gasUsed — see WasmVm) must not slip past abort(): without
@@ -409,7 +391,7 @@ public final class Executor {
             // intended fail-stop. Clean up exactly like a soft abort, then rethrow so the caller
             // still fails the block loudly.
             try {
-                abort(processor, boxProcessor, tokenProcessor, ledger, applied, BALANCE_OVERFLOW);
+                abort(domains, ledger, applied, BALANCE_OVERFLOW);
             } catch (RuntimeException | Error cleanupFailure) {
                 fatal.addSuppressed(cleanupFailure);
             }
@@ -483,18 +465,11 @@ public final class Executor {
     }
 
     /** Rolls back applied ledger ops and discards the contract/box/token sessions, then returns the status. */
-    private static ExecutionStatus abort(ContractProcessor processor, BoxProcessor boxProcessor,
-                                         TokenProcessor tokenProcessor, Ledger ledger,
+    private static ExecutionStatus abort(List<BlockStateProcessor> domains, Ledger ledger,
                                          List<AppliedOp> applied, ExecutionStatus status) {
         rollback(ledger, applied);
-        if (processor != null) {
-            processor.discard();
-        }
-        if (boxProcessor != null) {
-            boxProcessor.discard();
-        }
-        if (tokenProcessor != null) {
-            tokenProcessor.discard();
+        for (BlockStateProcessor domain : domains) {
+            domain.discard();
         }
         return status;
     }
@@ -735,6 +710,14 @@ public final class Executor {
     /** As above, also reversing the block's box transactions via the {@link BoxProcessor}. */
     public static void rollbackBlock(Block block, Ledger ledger, ContractProcessor processor,
                                      BoxProcessor boxProcessor, long height, NetworkParameters params) {
+        undoBlock(block, ledger,
+            processor == null ? ContractProcessor.NONE : processor,
+            boxProcessor == null ? BoxProcessor.NONE : boxProcessor, height, params);
+    }
+
+    /** As {@link #rollbackBlock}, with both domains guaranteed non-null. */
+    private static void undoBlock(Block block, Ledger ledger, ContractProcessor processor,
+                                  BoxProcessor boxProcessor, long height, NetworkParameters params) {
         List<Transaction> transactions = block.transactions();
         Transaction coinbase = transactions.stream()
             .filter(t -> ((TransactionImpl) t).isTransactionFee())
@@ -745,11 +728,11 @@ public final class Executor {
         // Runtime receipts (gas used, success) for this block's contract txs, in block
         // order; consumed in reverse as we walk transactions backwards.
         List<ContractProcessor.ContractReceipt> receipts =
-            processor != null ? processor.receipts(height) : List.of();
+            processor.receipts(height);
         int ri = receipts.size() - 1;
         // Box receipts (ledger deltas) for this block's box txs, consumed in reverse.
         List<BoxProcessor.BoxReceipt> boxReceipts =
-            boxProcessor != null ? boxProcessor.receipts(height) : List.of();
+            boxProcessor.receipts(height);
         int bi = boxReceipts.size() - 1;
 
         // Fail-fast BEFORE any mutation on MISSING receipts (audit: mid-rollback
