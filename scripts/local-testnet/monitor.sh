@@ -23,6 +23,13 @@ trap 'echo; echo "monitor stoppé (csv: $CSV)"' EXIT
 printf '%-10s %-5s %-22s %6s %-13s %5s %5s %5s %8s %6s %-8s %7s %5s %5s\n' \
   "ts" "node" "url" "haut" "tip" "diff" "pairs" "mem" "avgMs" "reorg" "degraded" "stallR" "bannP" "ecl"
 
+# Supervision : `errexit` est DÉSACTIVÉ pour la boucle d'échantillonnage. Le monitor est mort
+# deux fois en campagne au pire moment — au `stop.sh` qui ouvre une partition, quand tous les
+# /stats échouent d'un coup — en laissant un CSV tronqué juste avant la fenêtre qu'il devait
+# documenter. Un cycle qui échoue doit produire une ligne « DOWN », pas la fin de la
+# supervision ; toutes les commandes de la boucle sont déjà défensives (json_get avale les
+# réponses inattendues, node_stats renvoie vide, chaincheck retombe sur `unknown`).
+set +e
 split_cycles=0
 while true; do
   ts=$(date +%s)

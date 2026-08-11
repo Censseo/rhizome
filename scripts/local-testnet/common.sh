@@ -1,28 +1,63 @@
 #!/usr/bin/env bash
-# Configuration partagée du testnet local (N nœuds devnet sur loopback, N=16 par défaut).
+# Configuration partagée du testnet local (N nœuds devnet sur loopback, N=30 par défaut).
 # Doc : TEST-PLAN.md (à côté de ce script — hors docs/, qui est la doc servie par le nœud)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BASE_DIR="${RHIZOME_TESTNET_DIR:-$ROOT/.testnet}"
-NODE_BIN="$ROOT/app-node/build/install/app-node/bin/app-node"
-WALLET_BIN="$ROOT/app-wallet/build/install/app-wallet/bin/app-wallet"
 BASE_PORT="${RHIZOME_TESTNET_BASE_PORT:-3000}"
 
-# Taille du réseau. 16 par défaut : au-delà de 10 (la campagne précédente) et pair, donc
-# partitionnable en deux moitiés égales — la forme qui fabrique l'égalité stricte de travail
-# que le départage par tip hash doit trancher (S7/S15).
-NODES="${RHIZOME_TESTNET_NODES:-16}"
+# Binaire de nœud : natif (GraalVM) par défaut depuis la campagne 3. Un nœud natif démarre en
+# quelques dizaines de ms et occupe ~3-4× moins de mémoire qu'une JVM — c'est ce qui rend 30
+# nœuds tenables sur une seule machine. RHIZOME_TESTNET_NATIVE=0 retombe sur installDist
+# (JVM), utile pour comparer les deux chemins ou déboguer avec un agent JVM.
+NATIVE="${RHIZOME_TESTNET_NATIVE:-1}"
+NATIVE_BIN="$ROOT/app-node/build/native/rhizome-node"
+JVM_BIN="$ROOT/app-node/build/install/app-node/bin/app-node"
+if [[ "$NATIVE" == "1" ]]; then NODE_BIN="$NATIVE_BIN"; else NODE_BIN="$JVM_BIN"; fi
+WALLET_BIN="$ROOT/app-wallet/build/install/app-wallet/bin/app-wallet"
 
-# Mineurs : deux par moitié, pour qu'une partition {0..N/2-1} vs {N/2..N-1} laisse chaque
-# camp produire des blocs à cadence comparable. Sans cela une moitié se fige et la scission
-# métastable — le scénario le plus intéressant — ne peut pas se former.
-MINERS=(0 1 "$((NODES / 2))" "$((NODES / 2 + 1))")
+# Taille du réseau. 30 par défaut (campagne 3) : pair, donc partitionnable en deux moitiés
+# égales — la forme qui fabrique l'égalité stricte de travail que le départage par tip hash
+# doit trancher (S7/S15) — et assez grand pour que le PEX mette du temps à saturer.
+NODES="${RHIZOME_TESTNET_NODES:-30}"
 
-# Plafond de tas par nœud. Sans lui chaque JVM prend -Xmx = 1/4 de la RAM machine : à 16
-# nœuds la machine sature avant que le réseau ne converge. 384 Mo suffisent largement à un
-# nœud devnet (chaîne de quelques milliers de blocs, mempool vide).
-NODE_HEAP="${RHIZOME_TESTNET_HEAP:-384m}"
+# Mineurs : 10 par défaut, répartis RÉGULIÈREMENT sur l'anneau (indices k·N/M). La régularité
+# garantit deux propriétés : (a) chaque moitié {0..N/2-1} / {N/2..N-1} porte le même nombre de
+# mineurs, donc une partition laisse les deux camps avancer à cadence comparable (sans cela
+# une moitié se fige et la scission métastable ne peut pas se former) ; (b) les mineurs ne
+# sont pas voisins, donc un bloc miné traverse plusieurs sauts de gossip avant d'atteindre
+# l'autre mineur — c'est ce qui produit des oncles, et donc du travail GHOST à valider.
+MINER_COUNT="${RHIZOME_TESTNET_MINERS:-10}"
+MINERS=()
+for _k in $(seq 0 $((MINER_COUNT - 1))); do MINERS+=("$((_k * NODES / MINER_COUNT))"); done
+
+# Cadence de production (RHIZOME_BLOCK_INTERVAL_MS, posé sur chaque mineur). Sur devnet la
+# difficulté est collée à son plancher (6) : le PoW SHA256 est instantané et la difficulté ne
+# régule RIEN — le seul levier de cadence est le pacing du producteur. Il FAUT le régler : au
+# défaut devnet (5 s), 10 mineurs produisent ~1 bloc/s, et comme la fenêtre de finalité fait
+# 120 blocs (maxReorgDepth) elle ne dure alors que 2 min — moins qu'une partition utile, donc
+# les deux camps finiraient en REORG_TOO_DEEP mutuel et S7/S15 deviendraient intestables.
+#
+# La cadence agrégée est bruitée : elle suit grossièrement intervalle/mineurs, mais les phases
+# de rattrapage de sync produisent des rafales qui la font varier d'un facteur 3 à 5 (mesures :
+# 25 s → 5 à 10 s/bloc réseau, 12 à 30 s/bloc par camp de 5 mineurs ; 10 s → ~2 s/bloc). Le
+# critère qui tranche n'est pas la cadence elle-même mais le taux de fork qu'elle produit :
+# à 10 s le réseau vit en fork permanent (3 à 7 tips distincts en continu, hauteurs à ±5) —
+# les blocs arrivent plus vite que le gossip ne converge, et « tips distincts: 1 » devient
+# inatteignable, donc inutilisable comme critère. À 25 s le réseau tient un tip unique.
+# Valeur par défaut calibrée là-dessus, à revoir si MINER_COUNT change beaucoup.
+BLOCK_MS="${RHIZOME_TESTNET_BLOCK_MS:-25000}"
+
+# Plafond de tas par nœud. Sans lui chaque nœud prend -Xmx = 1/4 de la RAM machine : à 30
+# nœuds la machine sature avant que le réseau ne converge. 256 Mo suffisent à un nœud devnet
+# natif (chaîne de quelques milliers de blocs, mempool léger) ; le chemin JVM garde 384 Mo,
+# le metaspace et les piles de threads y pèsent en plus.
+if [[ "$NATIVE" == "1" ]]; then
+  NODE_HEAP="${RHIZOME_TESTNET_HEAP:-256m}"
+else
+  NODE_HEAP="${RHIZOME_TESTNET_HEAP:-384m}"
+fi
 
 KEYS_DIR="$ROOT/scripts/local-testnet/keys"
 CHAIN_CHECK="$ROOT/scripts/local-testnet/chaincheck.py"
@@ -176,13 +211,16 @@ check_ports_free() {
 # Arg : nombre de nœuds à lancer (défaut : tout le réseau).
 check_memory() {
   local count=${1:-$NODES}
-  local heap_mb avail_mb needed_mb
+  local heap_mb avail_mb needed_mb overhead
   case "$NODE_HEAP" in
     *g|*G) heap_mb=$(( ${NODE_HEAP%[gG]} * 1024 )) ;;
     *m|*M) heap_mb=${NODE_HEAP%[mM]} ;;
     *)     heap_mb=$(( NODE_HEAP / 1024 / 1024 )) ;;
   esac
-  needed_mb=$(( count * heap_mb * 14 / 10 ))
+  # Marge hors-tas : ~40 % sur la JVM (metaspace, piles, code cache, cache de blocs RocksDB),
+  # ~15 % sur l'image native — pas de metaspace, pas de JIT, le code est dans le binaire.
+  if [[ "$NATIVE" == "1" ]]; then overhead=115; else overhead=140; fi
+  needed_mb=$(( count * heap_mb * overhead / 100 ))
   avail_mb=$(awk '/MemAvailable/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)
   if (( avail_mb > 0 && needed_mb > avail_mb )); then
     echo "ERREUR: $count nœuds × $NODE_HEAP ≈ ${needed_mb} Mo requis, ${avail_mb} Mo disponibles." >&2

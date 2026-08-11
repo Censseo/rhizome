@@ -24,10 +24,19 @@ if (( part_lo < 0 || part_hi >= NODES || part_lo > part_hi )); then
   echo "plage de partition hors borne: $part_lo-$part_hi (0..$((NODES - 1)))" >&2; exit 2
 fi
 
-# 1. Un seul build : les nœuds tournent via build/install (pas N daemons Gradle).
+# 1. Un seul build : les nœuds tournent via un binaire déjà construit (pas N daemons Gradle).
+#    En mode natif c'est build/native/rhizome-node (GraalVM) ; le wallet reste sur la JVM,
+#    il n'est pas dans la boucle chaude du réseau.
 ensure_jdk25
-if [[ ! -x "$NODE_BIN" || ! -x "$WALLET_BIN" ]]; then
-  ./gradlew :app-node:installDist :app-wallet:installDist
+if [[ ! -x "$WALLET_BIN" ]]; then
+  ./gradlew :app-wallet:installDist
+fi
+if [[ ! -x "$NODE_BIN" ]]; then
+  if [[ "$NATIVE" == "1" ]]; then
+    ./gradlew :app-node:nativeImage
+  else
+    ./gradlew :app-node:installDist
+  fi
 fi
 
 mkdir -p "$BASE_DIR/logs" "$KEYS_DIR" "$PID_DIR"
@@ -63,14 +72,22 @@ done
 launch() {
   local i=$1
   local env_vars=(RHIZOME_NETWORK=devnet RHIZOME_PORT="$(node_port "$i")"
-    RHIZOME_DATA="$(data_dir "$i")" RHIZOME_ALLOW_PRIVATE_PEERS=true
-    APP_NODE_OPTS="-Xmx$NODE_HEAP")
+    RHIZOME_DATA="$(data_dir "$i")" RHIZOME_ALLOW_PRIVATE_PEERS=true)
+  # Plafond de tas : le lanceur JVM le lit dans APP_NODE_OPTS, l'image native le prend en
+  # argument (SubstrateVM consomme -Xmx avant main ; RhizomeNode.main ignore argv de toute
+  # façon, donc l'argument est inoffensif si un jour l'option disparaît).
+  local bin_args=()
+  if [[ "$NATIVE" == "1" ]]; then
+    bin_args+=("-Xmx$NODE_HEAP")
+  else
+    env_vars+=(APP_NODE_OPTS="-Xmx$NODE_HEAP")
+  fi
   if [[ -n "${MINER_ADDR[$i]:-}" ]]; then
-    env_vars+=(RHIZOME_MINER="${MINER_ADDR[$i]}")
+    env_vars+=(RHIZOME_MINER="${MINER_ADDR[$i]}" RHIZOME_BLOCK_INTERVAL_MS="$BLOCK_MS")
   fi
   env_vars+=(RHIZOME_PEERS="$(node_seeds "$i" "$part_lo" "$part_hi")")
   setsid bash -c 'echo $$ > "$1"; shift; exec env "$@"' _ \
-    "$(pid_file "$i")" "${env_vars[@]}" "$NODE_BIN" \
+    "$(pid_file "$i")" "${env_vars[@]}" "$NODE_BIN" "${bin_args[@]}" \
     >> "$(log_file "$i")" 2>&1 &
   # Laisse le sous-shell écrire son PID avant que stop.sh ne puisse le lire.
   for _ in $(seq 1 20); do [[ -s "$(pid_file "$i")" ]] && break; sleep 0.1; done
@@ -119,7 +136,7 @@ fi
 if (( part_lo != 0 || part_hi != NODES - 1 )); then
   echo "moitié $part_lo-$part_hi lancée (isolée : seeds internes uniquement)."
 else
-  echo "testnet lancé ($NODES nœuds, ports $BASE_PORT..$((BASE_PORT + NODES - 1)), tas $NODE_HEAP/nœud)."
-  echo "mineurs: ${MINERS[*]}"
+  echo "testnet lancé ($NODES nœuds $([[ "$NATIVE" == 1 ]] && echo natifs || echo JVM), ports $BASE_PORT..$((BASE_PORT + NODES - 1)), tas $NODE_HEAP/nœud)."
+  echo "mineurs (${#MINERS[@]}): ${MINERS[*]}"
 fi
 echo "status.sh pour l'état, stop.sh pour arrêter, monitor.sh pour la supervision."

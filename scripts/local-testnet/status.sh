@@ -27,7 +27,10 @@ for i in $(seq 0 $((NODES - 1))); do
   s="$(cat "$stats_dir/stats-$i.json")"
   if [[ -z "$s" ]]; then
     printf 'node %-3d %-22s  DOWN\n' "$i" "$(node_url "$i")"
-    heights+=(-1)
+    # Un nœud arrêté n'entre PAS dans le calcul d'écart : la sentinelle -1 faisait afficher
+    # « écart=204 » et déclenchait l'alerte « écart > 5 » dès qu'un nœud était volontairement
+    # arrêté (S5/S6/S7), c'est-à-dire précisément quand la lecture doit rester claire. Le
+    # décompte des DOWN est déjà imprimé plus bas.
     continue
   fi
   h=$(json_get "$s" height)
@@ -42,7 +45,6 @@ for i in $(seq 0 $((NODES - 1))); do
   tip=$(json_get "$s" tipHash)
   if [[ -z "$h" || -z "$tip" ]]; then
     printf 'node %-3d %-22s  MALFORMÉ (/stats inattendu)\n' "$i" "$(node_url "$i")"
-    heights+=(-1)
     continue
   fi
   TIPS[$i]="${tip:0:12}"
@@ -59,13 +61,17 @@ for i in $(seq 0 $((NODES - 1))); do
   heights+=("$h")
 done
 
+echo "---"
+if (( ${#heights[@]} == 0 )); then
+  echo "hauteur: aucun nœud répondant"
+  exit 0
+fi
 max=-1; min=999999999
 for h in "${heights[@]}"; do
   (( h > max )) && max=$h
   (( h < min )) && min=$h
 done
-echo "---"
-echo "hauteur: min=$min max=$max écart=$((max - min))"
+echo "hauteur: min=$min max=$max écart=$((max - min)) (sur ${#heights[@]} nœuds répondants)"
 if (( max - min > 5 )); then
   echo "ALERTE: écart de hauteur > 5 (hors scénario de partition)"
 fi
