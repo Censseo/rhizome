@@ -335,15 +335,21 @@ public final class NodeApi {
             .build();
 
         return request -> {
-            int cost = requestCost(node, request);
-            if (!limiter.allow(clientKey(request, trustXff), cost)) {
+            // Resolve the path the ROUTER will dispatch on, once, and classify every gate below
+            // against it. request.getPath() is the raw slice and does NOT agree with the router
+            // (see routingKey): classifying on it let "/submit/" reach the block-ingest handler
+            // while missing the bearer gate, the push shed and the submit budget.
+            String path = routingKey(request);
+            int cost = requestCost(node, request, path);
+            String client = clientKey(request, trustXff);
+            if (!limiter.allow(client, cost)) {
                 return errorJson(429, "rate limited").toPromise();
             }
             // Early shed of push-abusers (audit: gossip push ban-score): a client that kept
             // feeding invalid blocks / corrupt-signature transactions is refused BEFORE the
             // token check and the body decode, for the strike window. A per-client-key shed
             // like the limiter above — never an aggregate gate, so honest peers are unaffected.
-            if ((isSubmitPost(request) || isAddTransactionPost(request)) && node.isPushShed(clientKey(request, trustXff))) {
+            if ((isSubmitPost(request, path) || isAddTransactionPost(request, path)) && node.isPushShed(client)) {
                 return errorJson(429, "push temporarily refused").toPromise();
             }
             // Optional bearer-token gate (RHIZOME_API_TOKEN) on the state-changing/operator
@@ -354,14 +360,14 @@ public final class NodeApi {
             // With protectReads (RHIZOME_PROTECT_READS) EVERY route is gated instead — the
             // private-node/private-explorer switch (audit: no read protection) — except the
             // static SPA/docs shell, which a plain browser navigation cannot bear a token for.
-            if (apiToken != null && isTokenProtectedRoute(request, protectReads) && !bearerMatches(request, apiToken)) {
+            if (apiToken != null && isTokenProtectedRoute(request, path, protectReads) && !bearerMatches(request, apiToken)) {
                 return errorJson(401, "unauthorized").toPromise();
             }
             // Aggregate (all-IP) budget for the explorer reads that decode blocks under the consensus
             // lock: the per-IP limiter above cannot stop a distributed flood from summing past it, so a
             // process-wide bucket bounds the total lock-guarded decode work on the event-loop thread
             // (audit 5th-pass, net Finding 2). Shed over-budget reads before they touch the store.
-            if (isConsensusLockRead(request) && !node.tryReadBudget(cost)) {
+            if (isConsensusLockRead(path) && !node.tryReadBudget(cost)) {
                 return errorJson(429, "read budget exceeded").toPromise();
             }
             // Aggregate submit gate, consumed BEFORE the /submit handler decodes the block body. The
@@ -369,7 +375,7 @@ public final class NodeApi {
             // triggers both run on the event-loop thread; the per-IP limiter cannot stop a distributed
             // flood from summing past it. Shedding here — rather than inside submitBlock, after the
             // decode already ran — closes the decode-before-gate asymmetry (audit S6).
-            if (isSubmitPost(request) && !node.trySubmitBudget()) {
+            if (isSubmitPost(request, path) && !node.trySubmitBudget()) {
                 return errorJson(429, "submit throttled").toPromise();
             }
             // Aggregate mempool-admission gate, consumed BEFORE the tx body is decoded — symmetric
@@ -377,7 +383,7 @@ public final class NodeApi {
             // the event-loop thread and never caches invalid signatures, so without an aggregate cap
             // a distributed corrupt-signature flood sums past the per-IP limiter and pins the loop
             // (audit M1).
-            if (isAddTransactionPost(request) && !node.tryMempoolSigBudget()) {
+            if (isAddTransactionPost(request, path) && !node.tryMempoolSigBudget()) {
                 return errorJson(429, "transaction throttled").toPromise();
             }
             // DNS-rebinding Host check for ALL browser-reachable requests when an allowlist is
@@ -385,7 +391,7 @@ public final class NodeApi {
             // (/stats, /wallet, /logs, …) through the attacker's hostname (audit F6). The P2P
             // protocol endpoints fail open (peers send whatever Host) so peering isn't broken;
             // a missing Host header also fails open (HTTP/1.0 / non-browser CLI clients).
-            if (allowedHosts != null && !allowedHosts.isEmpty() && !isPeerProtocolRequest(request)) {
+            if (allowedHosts != null && !allowedHosts.isEmpty() && !isPeerProtocolRequest(path)) {
                 String host = request.getHeader(H_HOST);
                 if (host != null && !host.isEmpty()
                     && !allowedHosts.contains(host.toLowerCase(java.util.Locale.ROOT))) {
@@ -647,6 +653,104 @@ public final class NodeApi {
     }
 
     /**
+     * The path the ROUTER matches on — which is <em>not</em> {@link HttpRequest#getPath()}.
+     *
+     * <p>ActiveJ dispatches on percent-DECODED path segments and treats the first EMPTY segment as
+     * "serve at the node reached so far" ({@code UrlParser.pollUrlPart} feeding
+     * {@code RoutingServlet.tryServe}), while {@code getPath()} returns the raw, undecoded slice.
+     * Every policy predicate in this file compares a path against route literals, so classifying on
+     * the raw slice missed requests the router happily dispatched: {@code POST /submit/},
+     * {@code /submit//x}, {@code /%73ubmit} and {@code /submit&x} all reach the {@code /submit}
+     * handler while failing {@code "/submit".equals(path)} — escaping the bearer gate, the push
+     * shed, the aggregate submit budget and the request cost alike. Normalising once, here, closes
+     * the whole class rather than the four spellings.
+     *
+     * <p>The decoding mirrors {@code UrlParser.urlParse} exactly: {@code +} becomes a space,
+     * {@code %XX} decodes (a truncated or non-hex escape is a hard failure), and {@code &} or
+     * {@code #} terminate the segment.
+     *
+     * @return the decoded path the router will dispatch on, or {@code null} when a segment carries
+     *         bad percent-encoding — the router answers 400 itself in that case, so no handler runs
+     *         and every caller can safely treat it as "no route".
+     */
+    static String routingKey(HttpRequest request) {
+        String raw;
+        try {
+            raw = request.getPath();
+        } catch (RuntimeException e) {
+            return null;
+        }
+        if (raw.isEmpty() || raw.charAt(0) != '/') {
+            return null;
+        }
+        StringBuilder key = new StringBuilder(raw.length());
+        int pos = 0;
+        while (pos < raw.length()) {
+            int start = pos + 1;
+            int nextSlash = raw.indexOf('/', start);
+            int end = nextSlash < 0 ? raw.length() : nextSlash;
+            String segment = decodeSegment(raw, start, end);
+            if (segment == null) {
+                return null; // bad percent-encoding: the router rejects the request with 400
+            }
+            if (segment.isEmpty()) {
+                break; // an empty segment ends the walk — the router serves at this node
+            }
+            key.append('/').append(segment);
+            pos = end;
+        }
+        return key.isEmpty() ? "/" : key.toString();
+    }
+
+    /**
+     * One path segment, decoded the way {@code UrlParser.urlParse} decodes it. Returns {@code null}
+     * for a truncated ({@code "%4"}) or non-hex ({@code "%zz"}) escape, matching the parser's own
+     * null return that {@code tryServe} turns into a 400.
+     */
+    private static String decodeSegment(String raw, int start, int end) {
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream(end - start);
+        int i = start;
+        while (i < end) {
+            char c = raw.charAt(i);
+            if (c == '&' || c == '#') {
+                break; // the parser ends the segment here
+            }
+            if (c == '+') {
+                out.write(' ');
+                i++;
+            } else if (c == '%') {
+                if (i + 2 >= end) {
+                    return null; // parser guard: (pos + 2 < limit) fails, then b == '%' -> null
+                }
+                int hi = hexDigit(raw.charAt(i + 1));
+                int lo = hexDigit(raw.charAt(i + 2));
+                if (hi < 0 || lo < 0) {
+                    return null; // decodeHex throws, the parser catches it and returns null
+                }
+                out.write((hi << 4) + lo);
+                i += 3;
+            } else {
+                out.write(c & 0xFF);
+                i++;
+            }
+        }
+        return out.toString(StandardCharsets.UTF_8);
+    }
+
+    private static int hexDigit(char c) {
+        if (c >= '0' && c <= '9') {
+            return c - '0';
+        }
+        if (c >= 'a' && c <= 'f') {
+            return c - 'a' + 10;
+        }
+        if (c >= 'A' && c <= 'F') {
+            return c - 'A' + 10;
+        }
+        return -1;
+    }
+
+    /**
      * Rate-limit cost of a request. Cheap endpoints cost 1; the deep chain scans and the VM
      * dry-run cost proportionally more so a single client cannot drive orders of magnitude more
      * work than the flat per-request budget implies (audit M2).
@@ -660,11 +764,16 @@ public final class NodeApi {
      * (the state-snapshot chunk) can be charged proportionally to the bytes they will serve.
      */
     static int requestCost(NodeService node, HttpRequest request) {
-        String path;
-        try {
-            path = request.getPath();
-        } catch (RuntimeException e) {
-            return 1;
+        return requestCost(node, request, routingKey(request));
+    }
+
+    /**
+     * As above, against a {@link #routingKey(HttpRequest)} the caller already computed — the
+     * middleware resolves the key once per request and hands the same value to every classifier.
+     */
+    private static int requestCost(NodeService node, HttpRequest request, String path) {
+        if (path == null) {
+            return 1; // unroutable: the router rejects it before any handler work
         }
         if ("/transaction".equals(path) || "/address_txs".equals(path)) {
             int depth = ExplorerApi.SCAN_DEPTH_DEFAULT;
@@ -776,11 +885,8 @@ public final class NodeApi {
      *       sized far above any plausible convergence traffic.</li>
      * </ul>
      */
-    private static boolean isConsensusLockRead(HttpRequest request) {
-        String path;
-        try {
-            path = request.getPath();
-        } catch (RuntimeException e) {
+    private static boolean isConsensusLockRead(String path) {
+        if (path == null) {
             return false;
         }
         return "/stats".equals(path) || "/blocks".equals(path) || "/block".equals(path)
@@ -790,28 +896,14 @@ public final class NodeApi {
     }
 
     /** True for a POST /submit — the block-ingest route whose body decode must be gated (audit S6). */
-    private static boolean isSubmitPost(HttpRequest request) {
-        if (request.getMethod() != POST) {
-            return false;
-        }
-        try {
-            return "/submit".equals(request.getPath());
-        } catch (RuntimeException e) {
-            return false;
-        }
+    private static boolean isSubmitPost(HttpRequest request, String path) {
+        return request.getMethod() == POST && "/submit".equals(path);
     }
 
     /** True for a POST /add_transaction(JSON) — the tx-ingest routes gated like /submit (audit M1). */
-    private static boolean isAddTransactionPost(HttpRequest request) {
-        if (request.getMethod() != POST) {
-            return false;
-        }
-        try {
-            String path = request.getPath();
-            return "/add_transaction".equals(path) || "/add_transaction_json".equals(path);
-        } catch (RuntimeException e) {
-            return false;
-        }
+    private static boolean isAddTransactionPost(HttpRequest request, String path) {
+        return request.getMethod() == POST
+            && ("/add_transaction".equals(path) || "/add_transaction_json".equals(path));
     }
 
     /**
@@ -821,33 +913,27 @@ public final class NodeApi {
      * peering keeps working. Note {@code /submit} and {@code /add_transaction} ARE gated: they
      * are the operator's block/tx ingest routes and already carry their own anti-DoS budgets —
      * an operator enabling the token on a gossiping node must have peers present it too.
+     *
+     * <p>With {@code protectReads} it instead gates EVERY route (any method) — the
+     * RHIZOME_PROTECT_READS private-node switch: the read surface (stats, balances, SSE logs) is
+     * otherwise public by design even with a token configured (audit: no read protection). The
+     * static SPA/docs shell is EXEMPT ({@link #isSpaShell}): a browser cannot attach a bearer to a
+     * plain navigation, so gating {@code /} or {@code /dashboard/app.js} would make the embedded
+     * explorer unreachable (audit 17th pass). The shell is static content identical for every
+     * client; the SPA's own fetches ({@code /stats}, {@code /blocks}, …) carry the bearer and stay
+     * gated.
+     *
+     * <p>An unroutable path ({@code path == null}) is gated under protectReads and ungated
+     * otherwise, exactly as before: the router answers 400/404 for it either way.
      */
-    private static boolean isTokenProtectedRoute(HttpRequest request) {
-        return isTokenProtectedRoute(request, false);
-    }
-
-    /**
-     * As {@link #isTokenProtectedRoute(HttpRequest)}, but with {@code protectReads} gating
-     * EVERY route (any method) — the RHIZOME_PROTECT_READS private-node switch: the read
-     * surface (stats, balances, SSE logs) is otherwise public by design even with a token
-     * configured (audit: no read protection). The static SPA/docs shell is EXEMPT
-     * ({@link #isSpaShell}): a browser cannot attach a bearer to a plain navigation, so
-     * gating {@code /} or {@code /dashboard/app.js} would make the embedded explorer
-     * unreachable (audit 17th pass). The shell is static content identical for every
-     * client; the SPA's own fetches ({@code /stats}, {@code /blocks}, …) carry the bearer
-     * and stay gated.
-     */
-    private static boolean isTokenProtectedRoute(HttpRequest request, boolean protectReads) {
+    private static boolean isTokenProtectedRoute(HttpRequest request, String path, boolean protectReads) {
         if (protectReads) {
-            return !isSpaShell(request); // private node: everything but the static SPA shell
+            return !isSpaShell(request, path); // private node: everything but the static SPA shell
         }
         if (request.getMethod() != POST) {
             return false;
         }
-        String path;
-        try {
-            path = request.getPath();
-        } catch (RuntimeException e) {
+        if (path == null) {
             return false;
         }
         return switch (path) {
@@ -862,18 +948,17 @@ public final class NodeApi {
      * and the asset trees under {@code /dashboard/} and {@code /docs/}. These paths serve only
      * bundled static files (no chain data), so exempting them from the protectReads bearer
      * leaks nothing a client could not read out of the jar.
+     *
+     * <p>{@code /dashboard} and {@code /docs} (no trailing slash) are shell too: ActiveJ hangs a
+     * wildcard route off the node itself, so both reach the same static handler as
+     * {@code /docs/index.md} does. Classifying them as chain data made {@code /docs} bearer-gated
+     * while {@code /docs/} was not, for identical content.
      */
-    private static boolean isSpaShell(HttpRequest request) {
-        if (request.getMethod() != GET) {
+    private static boolean isSpaShell(HttpRequest request, String path) {
+        if (request.getMethod() != GET || path == null) {
             return false;
         }
-        String path;
-        try {
-            path = request.getPath();
-        } catch (RuntimeException e) {
-            return false;
-        }
-        return "/".equals(path) || "/dashboard".equals(path)
+        return "/".equals(path) || "/dashboard".equals(path) || "/docs".equals(path)
             || path.startsWith("/dashboard/") || path.startsWith("/docs/");
     }
 
@@ -896,11 +981,8 @@ public final class NodeApi {
      * no Origin) — gating them would break peering. Everything else (the browser-reachable data
      * endpoints) is Host-checked when an allowlist is configured.
      */
-    private static boolean isPeerProtocolRequest(HttpRequest request) {
-        String path;
-        try {
-            path = request.getPath();
-        } catch (RuntimeException e) {
+    private static boolean isPeerProtocolRequest(String path) {
+        if (path == null) {
             return false;
         }
         return switch (path) {
