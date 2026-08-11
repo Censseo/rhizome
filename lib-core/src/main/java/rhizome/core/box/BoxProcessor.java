@@ -17,7 +17,7 @@ import rhizome.core.transaction.TransactionKind;
  * <p>Mirrors {@link rhizome.core.blockchain.ContractProcessor}; consensus depends
  * only on this interface, never on the persistence layer.
  */
-public interface BoxProcessor {
+public interface BoxProcessor extends rhizome.core.blockchain.BlockStateProcessor {
 
     /** Opens a fresh box session for one block. */
     void begin();

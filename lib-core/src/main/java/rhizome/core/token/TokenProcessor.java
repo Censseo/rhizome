@@ -13,7 +13,7 @@ import rhizome.core.transaction.TransactionKind;
  * the executor applies. Token state is staged in a per-block session that commits
  * atomically with the block, exactly like boxes and contracts.
  */
-public interface TokenProcessor {
+public interface TokenProcessor extends rhizome.core.blockchain.BlockStateProcessor {
 
     void begin();
 

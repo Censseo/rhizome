@@ -17,7 +17,7 @@ import rhizome.core.transaction.TransactionKind;
  * {@link #discard()} (block rejected), so contract state moves atomically with the
  * block.
  */
-public interface ContractProcessor {
+public interface ContractProcessor extends BlockStateProcessor {
 
     /** Opens a fresh state session for one block. */
     void begin();
