@@ -218,8 +218,9 @@ public final class RhizomeNode implements AutoCloseable {
         if ("snap".equalsIgnoreCase(System.getenv("RHIZOME_SYNC")) && store.chainStore().height() == 0) {
             for (String peerUrl : config.peers()) {
                 try {
-                    if (SnapshotBootstrap.bootstrap(config.params(), snapshot, store, boxStore, tokenStore,
-                            contractStore, stateStore, new HttpPeerSource(peerUrl, blockPrivatePeers,
+                    if (SnapshotBootstrap.bootstrap(config.params(), snapshot,
+                            RocksBootstrapTarget.of(store, boxStore, tokenStore, stateStore),
+                            contractStore, new HttpPeerSource(peerUrl, blockPrivatePeers,
                                 syncHttpClient, peerTokenPolicy),
                             System.currentTimeMillis(), Path.of(config.dataDir()))) {
                         break;

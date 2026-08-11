@@ -172,8 +172,9 @@ class SnapSyncIntegrationTest {
             // spool must be gone once the import completes.
             Path spoolDir = tempDir.resolve("spool");
             java.nio.file.Files.createDirectories(spoolDir);
-            assertTrue(SnapshotBootstrap.bootstrap(PARAMS, genesisSnapshot, store, boxStore, tokenStore,
-                contractStore, stateStore, peer, NOW, spoolDir));
+            assertTrue(SnapshotBootstrap.bootstrap(PARAMS, genesisSnapshot,
+                RocksBootstrapTarget.of(store, boxStore, tokenStore, stateStore),
+                contractStore, peer, NOW, spoolDir));
             try (var left = java.nio.file.Files.list(spoolDir)) {
                 assertEquals(0, left.count(), "the snapshot spool file must be deleted after import");
             }
@@ -219,8 +220,9 @@ class SnapSyncIntegrationTest {
              var tokenStore = new RocksDbTokenStore(tempDir.resolve("tokens2").toString());
              var contractStore = new RocksDbContractStore(tempDir.resolve("contracts2").toString());
              var stateStore = new RocksDbStateStore(tempDir.resolve("state2").toString())) {
-            assertFalse(SnapshotBootstrap.bootstrap(PARAMS, genesisSnapshot, store, boxStore, tokenStore,
-                contractStore, stateStore, peer, NOW));
+            assertFalse(SnapshotBootstrap.bootstrap(PARAMS, genesisSnapshot,
+                RocksBootstrapTarget.of(store, boxStore, tokenStore, stateStore),
+                contractStore, peer, NOW));
             assertEquals(0, store.chainStore().height());
         }
     }

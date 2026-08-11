@@ -11,6 +11,7 @@ import rhizome.core.block.BlockHeader;
 import rhizome.core.blockchain.GenesisBlock;
 import rhizome.core.blockchain.HeaderChain;
 import rhizome.core.blockchain.NetworkParameters;
+import rhizome.core.blockchain.BootstrapTarget;
 import rhizome.core.blockchain.PeerSource;
 import rhizome.core.common.Constants;
 import rhizome.crypto.SHA256Hash;
@@ -18,11 +19,6 @@ import rhizome.core.ledger.LedgerSnapshot;
 import rhizome.core.state.snapshot.DomainStateAdapter;
 import rhizome.core.state.snapshot.SnapshotChunk;
 import rhizome.core.state.snapshot.StateSnapshotImporter;
-import rhizome.persistence.rocksdb.RocksDbBoxStore;
-import rhizome.persistence.rocksdb.RocksDbContractStore;
-import rhizome.persistence.rocksdb.RocksDbNodeStore;
-import rhizome.persistence.rocksdb.RocksDbStateStore;
-import rhizome.persistence.rocksdb.RocksDbTokenStore;
 import rhizome.vm.ContractStateAdapter;
 
 /**
@@ -83,10 +79,9 @@ final class SnapshotBootstrap {
      * Chunk spooling uses the default temporary-file directory.
      */
     static boolean bootstrap(NetworkParameters params, LedgerSnapshot genesisSnapshot,
-                             RocksDbNodeStore store, RocksDbBoxStore boxStore, RocksDbTokenStore tokenStore,
-                             RocksDbContractStore contractStore, RocksDbStateStore stateStore,
+                             BootstrapTarget target, rhizome.vm.ContractStore contractStore,
                              PeerSource peer, long nowMillis) {
-        return bootstrap(params, genesisSnapshot, store, boxStore, tokenStore, contractStore, stateStore,
+        return bootstrap(params, genesisSnapshot, target, contractStore,
             peer, nowMillis, java.nio.file.Path.of(System.getProperty("java.io.tmpdir")));
     }
 
@@ -96,10 +91,9 @@ final class SnapshotBootstrap {
      * is deleted after the import — success or failure (audit: snapshot bootstrap heap).
      */
     static boolean bootstrap(NetworkParameters params, LedgerSnapshot genesisSnapshot,
-                             RocksDbNodeStore store, RocksDbBoxStore boxStore, RocksDbTokenStore tokenStore,
-                             RocksDbContractStore contractStore, RocksDbStateStore stateStore,
+                             BootstrapTarget target, rhizome.vm.ContractStore contractStore,
                              PeerSource peer, long nowMillis, java.nio.file.Path spoolDir) {
-        if (store.chainStore().height() != 0) {
+        if (target.chainStore().height() != 0) {
             throw new IllegalStateException("snapshot bootstrap requires an empty chain store");
         }
         PeerSource.SnapshotInfo info = peer.snapshotInfo();
@@ -227,12 +221,12 @@ final class SnapshotBootstrap {
             // fully transactional sink would avoid the two-pass decode; the bootstrap peer is an
             // operator-configured trusted seed and the chunk count is already bounded).
             var contracts = new ContractStateAdapter(contractStore);
-            adapter = new DomainStateAdapter(store.ledger(), store.nonceStore(), boxStore, tokenStore,
+            adapter = new DomainStateAdapter(target.ledger(), target.nonceStore(), target.boxes(), target.tokens(),
                 contracts, contracts);
             try (var channel = java.nio.channels.FileChannel.open(spool, java.nio.file.StandardOpenOption.READ)) {
                 chunks = new SpooledChunks(channel, offsets, lengths, info.chunkCount());
                 try {
-                    StateSnapshotImporter.importVerified(chunks, stateStore, committedRoot.toBytes(), adapter);
+                    StateSnapshotImporter.importVerified(chunks, target.stateNodes(), committedRoot.toBytes(), adapter);
                 } catch (StateSnapshotImporter.SnapshotVerificationException e) {
                     log.warn("Snapshot verification failed: {}", e.getMessage());
                     return false;
@@ -252,20 +246,20 @@ final class SnapshotBootstrap {
         // bootstrap in progress so an interrupted seed is detected at the next boot instead of
         // running on half-written, inconsistent state (audit M8). The marker lives in the node
         // store and is cleared only after the final commit below succeeds.
-        store.beginBootstrap();
+        target.beginBootstrap();
         adapter.flush(pivot);
         // Durability barrier for the contract seed: import wrote code/storage slots unsynced
         // (batched WAL syncs only bound the tail), so fsync before the bootstrap marker can
         // clear — a power loss must not drop seeded slots the pivot root commits to.
         contractStore.syncToDisk();
-        stateStore.putRoot(pivot, committedRoot.toBytes());
+        target.stateRoots().putRoot(pivot, committedRoot.toBytes());
 
         // Adopt the chain: genesis with its body, then validated headers (body-less) to the
         // pivot; the nonces imported above are current exactly as of the pivot.
-        store.chainStore().append(genesis);
-        store.bootstrapHeaders(headers.subList(0, (int) (pivot - 1)));
-        store.nonceStore().markSyncedThrough(pivot);
-        store.endBootstrap();
+        target.chainStore().append(genesis);
+        target.bootstrapHeaders(headers.subList(0, (int) (pivot - 1)));
+        target.nonceStore().markSyncedThrough(pivot);
+        target.endBootstrap();
 
         log.info("Snap-sync bootstrap complete: pivot={} stateRoot={} ({} chunks); body sync resumes above pivot",
             pivot, committedRoot.toHexString(), chunks.size());
