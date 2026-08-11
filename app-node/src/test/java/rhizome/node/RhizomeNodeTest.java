@@ -225,11 +225,19 @@ class RhizomeNodeTest {
                 awaitHeight(nodeB, 12, 30_000);
                 long heightB = nodeB.engine().height();
                 assertTrue(heightB - 1 > shallowFinality.maxReorgDepth(), "the fork must be past finality");
+                // Identify B's OWN branch by its second block: the two chains share only genesis,
+                // so adopting A's would replace this one. Height cannot be the witness here —
+                // B mines its own branch at blockIntervalMs=30 throughout, so it can legitimately
+                // gain a block between this line and the assertion below, and the test then failed
+                // for the one reason it was not testing.
+                var ownSecondBlock = nodeB.engine().blockAt(2).hash();
 
                 nodeB.syncRound();
 
-                assertEquals(heightB, nodeB.engine().height(),
+                assertEquals(ownSecondBlock, nodeB.engine().blockAt(2).hash(),
                     "nothing adopted from a branch past finality");
+                assertTrue(nodeB.engine().height() >= heightB,
+                    "B keeps its own branch; it never rolls back for a peer past finality");
                 assertFalse(nodeB.banList().isBanned("http://localhost:" + portA),
                     "a deep-forked peer is not misbehaving: it must never be banned");
                 assertTrue(nodeB.knownPeers().contains("http://localhost:" + portA),
