@@ -145,6 +145,28 @@ class ChainSynchronizerPipelineTest {
             snapshot, null, () -> NOW);
     }
 
+    /**
+     * A nonce that provably FAILS this block's proof of work.
+     *
+     * <p>The obvious fixture — a fixed all-zero nonce — is only probably invalid. At the difficulty
+     * these tests run (4 bits) any given hash satisfies the target about one time in sixteen, and
+     * the header differs every run because the miner address is random, so a "tampered" block was
+     * silently valid in ~6% of runs and the synchroniser then returned EXTENDED instead of
+     * PEER_INVALID. Search for a nonce that actually fails instead of assuming one does.
+     */
+    private static SHA256Hash failingNonce(BlockImpl block) {
+        for (int candidate = 0; candidate < 1000; candidate++) {
+            byte[] raw = new byte[SHA256Hash.SIZE];
+            raw[0] = (byte) candidate;
+            raw[1] = (byte) (candidate >>> 8);
+            block.nonce(SHA256Hash.of(raw));
+            if (!block.verifyNonce(PARAMS.powAlgorithm())) {
+                return SHA256Hash.of(raw);
+            }
+        }
+        throw new IllegalStateException("no failing nonce found — is the difficulty zero?");
+    }
+
     private static ChainEngine minedChain() {
         ChainEngine engine = newEngine();
         AtomicLong clock = new AtomicLong(0);
@@ -248,7 +270,7 @@ class ChainSynchronizerPipelineTest {
                         .lastBlockHash(block.lastBlockHash()).build();
                     block.transactions().forEach(broken::addTransaction);
                     broken.merkleRoot(block.merkleRoot());
-                    broken.nonce(SHA256Hash.of(new byte[SHA256Hash.SIZE]));
+                    broken.nonce(failingNonce(broken));
                     out.set(i, broken);
                 }
             }
