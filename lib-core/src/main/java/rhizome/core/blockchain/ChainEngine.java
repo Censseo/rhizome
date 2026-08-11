@@ -1474,57 +1474,13 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
         long fromBoundary = floor == null ? 0 : floor.getKey();
         int difficulty = floor == null ? params.genesisDifficulty() : floor.getValue();
         for (long boundary = fromBoundary + lookback; boundary <= lastBoundary; boundary += lookback) {
-            long windowStart = boundary - lookback + 1;
-            // Exclude the genesis interval from the first window: genesis carries an artificial
-            // timestamp (genesisTimestamp, conventionally 0), so measuring from it would treat
-            // "epoch → first real block" as one block interval and crater the difficulty of the
-            // first retarget. Start the measurement at the first real block instead (audit L2).
-            long measureStart = Math.max(windowStart, GenesisBlock.GENESIS_ID + 1);
-            long intervals = boundary - measureStart;
-            if (intervals > 0) { // else not enough real blocks in this window yet (difficulty unchanged)
-                long observedMs = boundaryTimestamp(boundary) - boundaryTimestamp(measureStart);
-                difficulty = DifficultyAdjustment.nextDifficulty(
-                    params, difficulty, intervals, observedMs / 1000);
-            }
+            // The window arithmetic is shared with HeaderChain (see Retarget); only the memo
+            // policy below is the engine's own. store::headerAt, not this::headerAt — the public
+            // accessor takes the engine lock.
+            difficulty = Retarget.stepWindow(params, store::headerAt, difficulty, boundary);
             difficultyByBoundary.put(boundary, difficulty); // cache every boundary so floorEntry advances
         }
         return difficulty;
-    }
-
-    /**
-     * The timestamp a retarget closing at boundary height {@code h} reads at bound {@code h}:
-     * the median-of-3 ({@link #medianBoundaryTimestamp}) when {@code params.consensusV2(h)},
-     * the raw boundary timestamp (legacy rule) below the activation height. The decision height
-     * is the BOUNDARY the retarget closes at — the identical predicate HeaderChain.boundaryTimestamp
-     * applies, so a chain validated header-first and one folded by the engine retarget the same
-     * way on both sides of the activation.
-     */
-    private long boundaryTimestamp(long h) {
-        if (params.consensusV2(h)) {
-            return medianBoundaryTimestamp(h);
-        }
-        return store.headerAt(h).timestamp();
-    }
-
-    /**
-     * The retarget-bound timestamp at height {@code h}: the median of the (up to) 3 header
-     * timestamps ending at {@code h} inclusive, clamped at genesis (audit: timewarp; applies
-     * only from {@code consensusV2Height} on, see {@link #boundaryTimestamp}). Measuring a
-     * window from two raw timestamps let a miner inflate ONE boundary timestamp and stretch the
-     * observed duration — dragging difficulty down at ~no hash cost. A median-of-3 bound moves by
-     * at most the gap to the neighbouring timestamp under a single-point manipulation. MUST match
-     * {@code HeaderChain.medianTimestamp} exactly — header-sync validation and the engine compute
-     * the same retarget, or every synced chain is rejected at the first boundary.
-     */
-    private long medianBoundaryTimestamp(long h) {
-        long lo = Math.max(GenesisBlock.GENESIS_ID, h - 2);
-        int size = (int) (h - lo + 1);
-        long[] timestamps = new long[size];
-        for (int i = 0; i < size; i++) {
-            timestamps[i] = store.headerAt(h - i).timestamp();
-        }
-        java.util.Arrays.sort(timestamps);
-        return timestamps[size / 2];
     }
 
     private long medianTimePast() {
@@ -1707,23 +1663,7 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
      * when a bound fails, exactly like {@link #validateUncles}.
      */
     private BigInteger uncleWorkFromRefs(BlockImpl block) {
-        List<UncleRef> uncles = block.uncles();
-        if (uncles.size() > params.maxUnclesPerBlock()) {
-            return null;
-        }
-        BigInteger work = BigInteger.ZERO;
-        java.util.Set<SHA256Hash> seen = new java.util.HashSet<>();
-        for (UncleRef ref : uncles) {
-            if (!seen.add(ref.hash())) {
-                return null; // duplicate uncle within one block
-            }
-            int d = ref.difficulty();
-            if (d < params.minDifficulty() || d > block.difficulty()) {
-                return null; // no free/inflated work, even from committed refs
-            }
-            work = work.add(BlockWork.of(d));
-        }
-        return work;
+        return UncleWeight.structuralWork(block.uncles(), block.difficulty(), params);
     }
 
     private BigInteger validateUncles(BlockImpl block) {

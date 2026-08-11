@@ -143,7 +143,7 @@ public final class HeaderChain {
             // Cheapest-first, mirroring ChainEngine.addBlock (audit: validation order): the
             // timestamp bounds are pure comparisons, so they run BEFORE the memory-hard PoW —
             // a forged window then costs the verifier zero hashes instead of one.
-            if (header.timestamp() <= medianTimePast(params, at, h - 1)) {
+            if (header.timestamp() <= Retarget.medianTimePast(params, at, h - 1)) {
                 return Result.reject(Rejection.TIMESTAMP_TOO_OLD, h);
             }
             if (header.timestamp() < at.apply(h - 1).timestamp() + params.minBlockTimeSec() * 1000L) {
@@ -179,14 +179,7 @@ public final class HeaderChain {
             // engine's own mining disagree and every synced chain is rejected as PEER_INVALID at
             // the first retarget.
             if (h % lookback == 0) {
-                long windowStart = h - lookback + 1;
-                long measureStart = Math.max(windowStart, GenesisBlock.GENESIS_ID + 1);
-                long intervals = h - measureStart;
-                if (intervals > 0) {
-                    long observedMs = boundaryTimestamp(params, at, h) - boundaryTimestamp(params, at, measureStart);
-                    expectedDifficulty = DifficultyAdjustment.nextDifficulty(
-                        params, expectedDifficulty, intervals, observedMs / 1000);
-                }
+                expectedDifficulty = Retarget.stepWindow(params, at, expectedDifficulty, h);
                 if (difficultyMemo != null) {
                     // Cache the boundary sealed by this candidate too: if the branch is adopted the
                     // recorded hash matches the new canonical header and the entry stays valid; if
@@ -220,14 +213,9 @@ public final class HeaderChain {
             }
         }
         for (; boundary <= tip; boundary += lookback) {
-            long windowStart = boundary - lookback + 1;
-            // Mirror ChainEngine.computeDifficultyFromChain: exclude the genesis interval (audit L2).
-            long measureStart = Math.max(windowStart, GenesisBlock.GENESIS_ID + 1);
-            long intervals = boundary - measureStart;
-            if (intervals > 0) {
-                long observedMs = boundaryTimestamp(params, at, boundary) - boundaryTimestamp(params, at, measureStart);
-                difficulty = DifficultyAdjustment.nextDifficulty(params, difficulty, intervals, observedMs / 1000);
-            }
+            // Shared with ChainEngine's fold (see Retarget); only the checkpoint memo below is
+            // this validator's own, because a reorg can rewrite a window under it.
+            difficulty = Retarget.stepWindow(params, at, difficulty, boundary);
             if (memo != null) {
                 memo.put(boundary, new DifficultyCheckpoint(difficulty, at.apply(boundary).hash()));
             }
@@ -236,90 +224,11 @@ public final class HeaderChain {
     }
 
     /**
-     * The timestamp a retarget closing at boundary height {@code h} reads at bound {@code h}:
-     * the median-of-3 ({@link #medianTimestamp}) when {@code params.consensusV2(h)} — i.e. the
-     * retarget itself is at or past the activation height — and the raw boundary timestamp
-     * (the legacy, timewarp-vulnerable rule) below it. The decision height is the BOUNDARY the
-     * retarget closes at, and both bounds of one window use the same rule; ChainEngine uses the
-     * identical predicate, so header sync and the engine never disagree across the activation.
-     */
-    private static long boundaryTimestamp(NetworkParameters params, LongFunction<BlockHeader> at, long h) {
-        if (params.consensusV2(h)) {
-            return medianTimestamp(at, h);
-        }
-        return at.apply(h).timestamp();
-    }
-
-    /**
-     * The retarget-bound timestamp at height {@code h}: the median of the (up to) 3 header
-     * timestamps ending at {@code h} inclusive, clamped at genesis (audit: timewarp; applies
-     * only from {@code consensusV2Height} on, see {@link #boundaryTimestamp}). Measuring
-     * a window from two raw timestamps let a miner inflate ONE boundary timestamp and stretch the
-     * observed duration — dragging difficulty down at ~no hash cost. With a median-of-3 bound,
-     * one manipulated timestamp moves the bound by at most the gap to its neighbour, so steering
-     * the retarget needs a sustained multi-block manipulation instead of a single point. The
-     * upper-median convention (index {@code size/2}, as {@code medianTimePast}) also keeps the
-     * artificial genesis timestamp out of the first window's start bound. MUST match
-     * {@code ChainEngine.medianBoundaryTimestamp} exactly — both sides compute the same retarget.
-     */
-    private static long medianTimestamp(LongFunction<BlockHeader> at, long h) {
-        long lo = Math.max(GenesisBlock.GENESIS_ID, h - 2);
-        int size = (int) (h - lo + 1);
-        long[] timestamps = new long[size];
-        for (int i = 0; i < size; i++) {
-            timestamps[i] = at.apply(h - i).timestamp();
-        }
-        java.util.Arrays.sort(timestamps);
-        return timestamps[size / 2];
-    }
-
-    /** Median timestamp of the last {@code medianTimeWindow} headers up to {@code tip} (inclusive). */
-    private static long medianTimePast(NetworkParameters params, LongFunction<BlockHeader> at, long tip) {
-        int window = (int) Math.min(params.medianTimeWindow(), tip);
-        // Primitive long[] instead of a boxed List<Long>: this runs once per candidate header over a
-        // sync window of up to MAX_HEADER_WINDOW, so the per-header boxing + comparator churn added up
-        // (the engine's own add path already uses a primitive ring, audit P6). Same median: sort, take
-        // index size/2.
-        long[] timestamps = new long[window];
-        int i = 0;
-        for (long h = tip - window + 1; h <= tip; h++) {
-            timestamps[i++] = at.apply(h).timestamp();
-        }
-        java.util.Arrays.sort(timestamps);
-        return timestamps[window / 2];
-    }
-
-    /**
      * Structural uncle check + summed committed work, or {@code null} if the references are
-     * malformed (too many, or duplicated within the block). Eligibility against the orphan
-     * pool is deferred to full validation — it needs the bodies.
+     * malformed. Eligibility against the orphan pool is deferred to full validation — it needs
+     * the bodies. Shared with the engine so header sync and block validation cannot disagree.
      */
     private static BigInteger uncleWork(BlockHeader header, NetworkParameters params) {
-        List<UncleRef> uncles = header.uncles();
-        if (uncles.size() > params.maxUnclesPerBlock()) {
-            return null;
-        }
-        BigInteger work = BigInteger.ZERO;
-        java.util.Set<SHA256Hash> seen = new java.util.HashSet<>();
-        for (UncleRef ref : uncles) {
-            if (!seen.add(ref.hash())) {
-                return null; // duplicate uncle within one block
-            }
-            // An uncle's claimed work must be real and cannot exceed the contemporaneous
-            // chain difficulty: bound it to [minDifficulty, header.difficulty()]. Without
-            // this, a peer could commit uncles at difficulty maxDifficulty (255) on a
-            // cheaply-mined minDifficulty branch and inflate its headers-only claimed work
-            // toward 2^255 per header, defeating the anti-DoS work gate the headers-first
-            // sync relies on. This is the SAME bound ChainEngine.uncleEligible enforces
-            // (nephewDifficulty = the including block's own difficulty), so header-sync
-            // validation, block validation and mining all agree — a value outside the range
-            // is rejected by every path and can never split the chain.
-            int d = ref.difficulty();
-            if (d < params.minDifficulty() || d > header.difficulty()) {
-                return null;
-            }
-            work = work.add(BlockWork.of(d));
-        }
-        return work;
+        return UncleWeight.structuralWork(header.uncles(), header.difficulty(), params);
     }
 }
