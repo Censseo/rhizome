@@ -83,14 +83,14 @@ public final class NodeApi {
     private static final int SCAN_OWNER_MAX_CHARS = 256;
 
     /** Rate-limit cost of a /call_readonly, which runs the VM up to its readonly gas cap. */
-    private static final int CALL_READONLY_COST = 25;
+    static final int CALL_READONLY_COST = 25;
     /**
      * Rate-limit cost of a /submit. Accepting a block runs consensus validation and, for a
      * plausible recent sibling, one memory-hard Pufferfish2 hash (registerOrphan) — far dearer than
      * a flat read. Weighted so a single IP cannot drive thousands of block validations/hashes per
      * window (audit H3); still generous for honest block propagation (~1 block / few seconds).
      */
-    private static final int SUBMIT_COST = 8;
+    static final int SUBMIT_COST = 8;
 
     /**
      * Rate-limit cost of an /add_transaction(JSON). Every admission runs one Ed25519 verification
@@ -98,7 +98,7 @@ public final class NodeApi {
      * replayed corrupt-signature tx re-pays the crypto each time — far dearer than a flat read
      * (audit M1). Paired with the aggregate {@code tryMempoolSigBudget} gate below.
      */
-    private static final int TX_SUBMIT_COST = 4;
+    static final int TX_SUBMIT_COST = 4;
 
     /**
      * Fallback rate-limit cost of serving a state-snapshot chunk, charged when the actual
@@ -126,14 +126,14 @@ public final class NodeApi {
      * Weighted like /submit so the admission queue sees bounded arrivals (audit: add_peer
      * cost vs blocking DNS).
      */
-    private static final int ADD_PEER_COST = 8;
+    static final int ADD_PEER_COST = 8;
 
     /**
      * Rate-limit cost of an /orphan fetch: a lock-guarded orphan-pool / uncle-store read plus
      * a full-block binary egress, for an unauthenticated P2P caller — weighted like the other
      * block-serving reads (~1 unit per block) with a small surcharge for the hash-keyed lookup.
      */
-    private static final int ORPHAN_COST = 2;
+    static final int ORPHAN_COST = 2;
 
     /**
      * Rate-limit cost of a /boxes listing: one owner-index scan plus up to {@code limit} (capped
@@ -146,7 +146,7 @@ public final class NodeApi {
      * <p>Charged for the worst case rather than for {@code limit}, deliberately: /scan/boxes does
      * the same, and the only real caller (the dashboard) uses the default.
      */
-    private static final int BOXES_COST = 25;
+    static final int BOXES_COST = 25;
 
     /**
      * Rate-limit cost of a /tokens listing. Worse than /boxes: the limit is hard-coded at 100 and
@@ -154,7 +154,7 @@ public final class NodeApi {
      * token — one index scan + 100 tokenMeta + 100 tokenBalance, so ~201 lock acquisitions.
      * Weighted at the same ~1-unit-per-4-reads rate.
      */
-    private static final int TOKENS_COST = 50;
+    static final int TOKENS_COST = 50;
 
     // -- JsonSink field keys, pre-encoded once per call site (see JsonSink's class Javadoc) ----
     private static final Key K_TOTAL_WORK = Key.of("totalWork");
@@ -388,7 +388,7 @@ public final class NodeApi {
             // lock: the per-IP limiter above cannot stop a distributed flood from summing past it, so a
             // process-wide bucket bounds the total lock-guarded decode work on the event-loop thread
             // (audit 5th-pass, net Finding 2). Shed over-budget reads before they touch the store.
-            if (isConsensusLockRead(path) && !node.tryReadBudget(cost)) {
+            if (isConsensusLockRead(request, path) && !node.tryReadBudget(cost)) {
                 return errorJson(429, "read budget exceeded").toPromise();
             }
             // Aggregate submit gate, consumed BEFORE the /submit handler decodes the block body. The
@@ -412,7 +412,7 @@ public final class NodeApi {
             // (/stats, /wallet, /logs, …) through the attacker's hostname (audit F6). The P2P
             // protocol endpoints fail open (peers send whatever Host) so peering isn't broken;
             // a missing Host header also fails open (HTTP/1.0 / non-browser CLI clients).
-            if (allowedHosts != null && !allowedHosts.isEmpty() && !isPeerProtocolRequest(path)) {
+            if (allowedHosts != null && !allowedHosts.isEmpty() && !isPeerProtocolRequest(request, path)) {
                 String host = request.getHeader(H_HOST);
                 if (host != null && !host.isEmpty()
                     && !allowedHosts.contains(host.toLowerCase(java.util.Locale.ROOT))) {
@@ -816,15 +816,6 @@ public final class NodeApi {
             // admit. Weight by the blocks actually read (audit: explorer full-block scans under-weighted).
             return depth;
         }
-        if ("/call_readonly".equals(path)) {
-            return CALL_READONLY_COST;
-        }
-        if ("/submit".equals(path)) {
-            return SUBMIT_COST;
-        }
-        if ("/add_transaction".equals(path) || "/add_transaction_json".equals(path)) {
-            return TX_SUBMIT_COST;
-        }
         // /sync and /headers were left at cost 1 by the M2 fix, yet they are the heaviest read
         // endpoints: /sync reads and buffers up to BLOCKS_PER_FETCH full blocks (each up to
         // MAX_BLOCK_SIZE) and /headers does up to BLOCK_HEADERS_PER_FETCH block reads. Weight both
@@ -844,12 +835,6 @@ public final class NodeApi {
         if ("/blocks".equals(path)) {
             return rangeCost(request, 1, ExplorerApi.BLOCKS_RANGE_MAX); // full-block reads: ~1 unit per block
         }
-        if ("/stats".equals(path)) {
-            // STATS_WINDOW full-block decodes, each under the consensus lock — weight ~1 per block like
-            // /sync and /blocks (NOT divided by SCAN_COST_PER_BLOCKS, which is the lighter header-scan
-            // rate and rounds 32/20 down to 1, leaving /stats effectively unweighted).
-            return DashboardApi.STATS_WINDOW;
-        }
         // /logs was left at cost 1, yet its fromHeight cursor scan walks up to LOG_SCAN_WINDOW
         // heights × 3 event sources (contract + box + token) per call (audit F2). Weight the
         // cursor scan by its bounded span — the /logs request carries no end parameter, so the
@@ -867,35 +852,26 @@ public final class NodeApi {
             }
             return NodeService.LOG_SCAN_WINDOW;
         }
+        // Everything else is a flat weight declared in RoutePolicy; an unmatched path costs 1.
+        RoutePolicy.Route route = RoutePolicy.lookup(request, path);
+        if (route != null && route.cost() != RoutePolicy.Cost.DYNAMIC) {
+            return route.cost();
+        }
         // /state/snapshot/chunk serves a ~MiB-scale binary chunk (the peer-side fetch cap is
         // 16 MiB); a flat per-request cost is a bandwidth amplifier (audit F3). Charge
         // proportionally to the chunk's actual size when it is resolvable at the gate.
         if ("/state/snapshot/chunk".equals(path)) {
             return snapshotChunkCost(node, request);
         }
-        if ("/orphan".equals(path)) {
-            return ORPHAN_COST;
-        }
-        if ("/add_peer".equals(path)) {
-            return ADD_PEER_COST;
-        }
         // /scan/boxes examines up to BOX_SCAN_WINDOW boxes per call (bounded store reads, no
         // consensus lock but real disk I/O) — leaving it at cost 1 let a client drive ~512k
         // reads/s inside its 1000 req/s budget (audit: scan cost under-weighted). Weight it like
         // the /logs cursor scan (~1 unit per 4 reads), so the same budget admits ~7 scans/s.
-        if ("/scan/boxes".equals(path)) {
-            return NodeService.BOX_SCAN_WINDOW / 4;
-        }
+
         // /boxes and /tokens fan one request out into ~101 and ~201 CONSENSUS-LOCKED store reads
         // (see the constants). They sat at the default cost of 1 — cheaper per lock acquisition
         // than any other read in the table — because nothing ties registering a route to weighting
         // it (audit: unclassified routes fall through to 1).
-        if ("/boxes".equals(path)) {
-            return BOXES_COST;
-        }
-        if ("/tokens".equals(path)) {
-            return TOKENS_COST;
-        }
         return 1;
     }
 
@@ -924,15 +900,8 @@ public final class NodeApi {
      * {@code /logs} does per-height map/store reads rather than lock-guarded block decodes — this
      * gate bounds lock contention specifically, not store I/O in general.
      */
-    private static boolean isConsensusLockRead(String path) {
-        if (path == null) {
-            return false;
-        }
-        return "/stats".equals(path) || "/blocks".equals(path) || "/block".equals(path)
-            || "/transaction".equals(path) || "/address_txs".equals(path)
-            || "/sync".equals(path) || "/headers".equals(path) || "/state/snapshot/chunk".equals(path)
-            || "/orphan".equals(path)
-            || "/boxes".equals(path) || "/tokens".equals(path);
+    private static boolean isConsensusLockRead(HttpRequest request, String path) {
+        return RoutePolicy.guarded(RoutePolicy.lookup(request, path), RoutePolicy.Guard.READ_BUDGET);
     }
 
     /** True for a POST /submit — the block-ingest route whose body decode must be gated (audit S6). */
@@ -967,20 +936,13 @@ public final class NodeApi {
      * otherwise, exactly as before: the router answers 400/404 for it either way.
      */
     private static boolean isTokenProtectedRoute(HttpRequest request, String path, boolean protectReads) {
+        RoutePolicy.Route route = RoutePolicy.lookup(request, path);
         if (protectReads) {
-            return !isSpaShell(request, path); // private node: everything but the static SPA shell
+            // Private node: everything but the static shell, including a path that matches no
+            // route (the router answers 404 for it either way).
+            return !RoutePolicy.guarded(route, RoutePolicy.Guard.SPA_SHELL);
         }
-        if (request.getMethod() != POST) {
-            return false;
-        }
-        if (path == null) {
-            return false;
-        }
-        return switch (path) {
-            case "/add_peer", "/scan/register", "/scan/deregister",
-                 "/add_transaction", "/add_transaction_json", "/submit", "/call_readonly" -> true;
-            default -> false;
-        };
+        return RoutePolicy.guarded(route, RoutePolicy.Guard.TOKEN);
     }
 
     /**
@@ -995,11 +957,7 @@ public final class NodeApi {
      * while {@code /docs/} was not, for identical content.
      */
     private static boolean isSpaShell(HttpRequest request, String path) {
-        if (request.getMethod() != GET || path == null) {
-            return false;
-        }
-        return "/".equals(path) || "/dashboard".equals(path) || "/docs".equals(path)
-            || path.startsWith("/dashboard/") || path.startsWith("/docs/");
+        return RoutePolicy.guarded(RoutePolicy.lookup(request, path), RoutePolicy.Guard.SPA_SHELL);
     }
 
     /** Constant-time check of {@code Authorization: Bearer <token>} against the configured token. */
@@ -1021,16 +979,8 @@ public final class NodeApi {
      * no Origin) — gating them would break peering. Everything else (the browser-reachable data
      * endpoints) is Host-checked when an allowlist is configured.
      */
-    private static boolean isPeerProtocolRequest(String path) {
-        if (path == null) {
-            return false;
-        }
-        return switch (path) {
-            case "/sync", "/headers", "/blocks", "/block", "/peers", "/block_count", "/total_work",
-                 "/info", "/state/snapshot/info", "/state/snapshot/chunk", "/orphan",
-                 "/add_peer", "/add_transaction", "/add_transaction_json", "/submit" -> true;
-            default -> false;
-        };
+    private static boolean isPeerProtocolRequest(HttpRequest request, String path) {
+        return RoutePolicy.guarded(RoutePolicy.lookup(request, path), RoutePolicy.Guard.PEER_PROTOCOL);
     }
 
     /**
