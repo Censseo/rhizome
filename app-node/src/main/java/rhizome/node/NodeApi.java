@@ -135,6 +135,27 @@ public final class NodeApi {
      */
     private static final int ORPHAN_COST = 2;
 
+    /**
+     * Rate-limit cost of a /boxes listing: one owner-index scan plus up to {@code limit} (capped
+     * at 100) per-id box reads, every one of them taking the consensus lock
+     * ({@code ChainEngine.boxIdsByOwner} / {@code ChainEngine.box}). At the flat cost of 1 that was
+     * ~101 lock acquisitions for the price of one /block, which takes exactly one — the widest
+     * cost/work gap left in the table. Weighted at the project's own rate of ~1 unit per 4 bounded
+     * reads, the same rule that gives /scan/boxes its BOX_SCAN_WINDOW/4.
+     *
+     * <p>Charged for the worst case rather than for {@code limit}, deliberately: /scan/boxes does
+     * the same, and the only real caller (the dashboard) uses the default.
+     */
+    private static final int BOXES_COST = 25;
+
+    /**
+     * Rate-limit cost of a /tokens listing. Worse than /boxes: the limit is hard-coded at 100 and
+     * not client-controllable, and the {@code holder=} form does a third lock-guarded read per
+     * token — one index scan + 100 tokenMeta + 100 tokenBalance, so ~201 lock acquisitions.
+     * Weighted at the same ~1-unit-per-4-reads rate.
+     */
+    private static final int TOKENS_COST = 50;
+
     // -- JsonSink field keys, pre-encoded once per call site (see JsonSink's class Javadoc) ----
     private static final Key K_TOTAL_WORK = Key.of("totalWork");
     private static final Key K_SIZE = Key.of("size");
@@ -865,6 +886,16 @@ public final class NodeApi {
         if ("/scan/boxes".equals(path)) {
             return NodeService.BOX_SCAN_WINDOW / 4;
         }
+        // /boxes and /tokens fan one request out into ~101 and ~201 CONSENSUS-LOCKED store reads
+        // (see the constants). They sat at the default cost of 1 — cheaper per lock acquisition
+        // than any other read in the table — because nothing ties registering a route to weighting
+        // it (audit: unclassified routes fall through to 1).
+        if ("/boxes".equals(path)) {
+            return BOXES_COST;
+        }
+        if ("/tokens".equals(path)) {
+            return TOKENS_COST;
+        }
         return 1;
     }
 
@@ -883,7 +914,15 @@ public final class NodeApi {
      *       lock-holding reads and outbound bandwidth at cost ~1 (audit: aggregate bound on the
      *       sync/snapshot serving paths). Honest sync still fits the aggregate budget — it is
      *       sized far above any plausible convergence traffic.</li>
+     *   <li>the box/token listings {@code /boxes} and {@code /tokens}, which fan a single request
+     *       into ~101 and ~201 lock-guarded store reads. They were outside this gate <em>and</em>
+     *       at the default cost of 1, so they escaped both bounds at once.</li>
      * </ul>
+     *
+     * <p>Deliberately NOT here: {@code /scan/boxes} and {@code /logs}. Both are weighted, but
+     * {@code ChainEngine.scanBoxes} runs OUTSIDE the consensus lock behind the stamp seqlock, and
+     * {@code /logs} does per-height map/store reads rather than lock-guarded block decodes — this
+     * gate bounds lock contention specifically, not store I/O in general.
      */
     private static boolean isConsensusLockRead(String path) {
         if (path == null) {
@@ -892,7 +931,8 @@ public final class NodeApi {
         return "/stats".equals(path) || "/blocks".equals(path) || "/block".equals(path)
             || "/transaction".equals(path) || "/address_txs".equals(path)
             || "/sync".equals(path) || "/headers".equals(path) || "/state/snapshot/chunk".equals(path)
-            || "/orphan".equals(path);
+            || "/orphan".equals(path)
+            || "/boxes".equals(path) || "/tokens".equals(path);
     }
 
     /** True for a POST /submit — the block-ingest route whose body decode must be gated (audit S6). */

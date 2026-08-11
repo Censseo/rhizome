@@ -201,6 +201,31 @@ class NodeApiTest {
     }
 
     @Test
+    void boxAndTokenListingsAreWeightedAndReadGatedLikeTheirLockAcquisitions() throws Exception {
+        // /boxes fans out into one owner-index scan plus up to 100 per-id box reads, and
+        // /tokens?holder= into one scan plus 100 tokenMeta plus 100 tokenBalance — ~101 and ~201
+        // acquisitions of the consensus lock, against exactly one for /block. Both sat at the
+        // default cost of 1 and outside the aggregate read gate, so they escaped both bounds.
+        String owner = "AB".repeat(PublicAddress.SIZE);
+        assertEquals(25, NodeApi.requestCost(HttpRequest.get("http://x/boxes?owner=" + owner).build()));
+        assertEquals(50, NodeApi.requestCost(HttpRequest.get("http://x/tokens?holder=" + owner).build()));
+
+        // …and they are charged to the process-wide gate, which is what bounds a distributed flood.
+        NodeService node = new NodeService(engine, mempool,
+            new RateLimiter(NodeService.SUBMIT_POW_MAX_PER_SEC, 1000, 1),
+            new RateLimiter(NodeService.READONLY_GAS_MAX_PER_SEC, 1000, 1),
+            new RateLimiter(60, 3_600_000, 1)); // aggregate read budget: 60 units/window
+        var srv = NodeApi.servlet(eventloop, node, new RateLimiter(1_000_000, 60_000, 100));
+        assertNotEquals(429, callWith(srv, HttpRequest.get("http://x/tokens?holder=" + owner).build()).getCode());
+        assertEquals(429, callWith(srv, HttpRequest.get("http://x/tokens?holder=" + owner).build()).getCode());
+
+        // /scan/boxes stays weighted but UNGATED on purpose: ChainEngine.scanBoxes runs outside the
+        // consensus lock behind the stamp seqlock, so it contends nothing this gate protects.
+        assertEquals(NodeService.BOX_SCAN_WINDOW / 4,
+            NodeApi.requestCost(HttpRequest.get("http://x/scan/boxes?scanId=x").build()));
+    }
+
+    @Test
     void explorerScanEndpointsAreWeightedByBlocksActuallyDecoded() {
         // /transaction and /address_txs decode up to `depth` FULL blocks under the consensus lock
         // (ExplorerApi.findTransaction / addressTransactions), the same cost class as /blocks and /stats.
