@@ -8,6 +8,7 @@ import java.util.concurrent.ConcurrentNavigableMap;
 import java.util.concurrent.ConcurrentSkipListMap;
 
 import rhizome.core.blockchain.NetworkParameters;
+import rhizome.core.state.HeightRetainedIndex;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.transaction.TransactionKind;
 
@@ -28,28 +29,22 @@ public final class DefaultTokenProcessor implements TokenProcessor {
     private Map<String, TokenMeta> sessionMeta;
     private Map<String, Long> sessionBalance;
     private List<TokenEvent> currentEvents = new ArrayList<>();
-    /** Height-keyed, so ascending order IS the eviction order (see {@link #evictOldest}). */
-    private final ConcurrentNavigableMap<Long, List<TokenEvent>> eventsByHeight = new ConcurrentSkipListMap<>();
-    private final ConcurrentNavigableMap<Long, List<TokenStore.TokenOp>> changesByHeight =
-        new ConcurrentSkipListMap<>();
-
     /**
-     * Byte budgets on the two retained maps, mirroring {@code WasmContractProcessor}'s. Height
-     * count alone is not a memory bound: at the production {@code retainDepth = maxReorgDepth},
-     * these hold every token op and event of 120 blocks with no cap on their size (audit: RAM
-     * retention — closed for contracts, left open here when the retention code was copied).
+     * Per-height retention for reorg reversal, bounded by heights AND bytes — see
+     * {@link HeightRetainedIndex}, which the three domain processors now share instead of each
+     * keeping its own copy of the same machinery.
      */
+    private final HeightRetainedIndex<TokenEvent> eventsByHeight;
+    private final HeightRetainedIndex<TokenStore.TokenOp> changesByHeight;
+
+    /** Budgets on the two retained maps. Height count alone is not a memory bound: at the
+     *  production retainDepth these hold every token op and event of 120 blocks, capped only by
+     *  the block size limit (audit: RAM retention). */
     static final long MAX_RETAINED_EVENT_BYTES = 16L * 1024 * 1024;
     static final long MAX_RETAINED_CHANGE_BYTES = 16L * 1024 * 1024;
 
     /** Fixed part of a serialized {@link TokenMeta}: id, minter, decimals, supply, height, 2 lengths. */
     private static final long TOKEN_META_FIXED_BYTES = 32L + PublicAddress.SIZE + 1 + 8 + 8 + 1 + 1;
-
-    private long retainedEventBytes;
-    private long retainedChangeBytes;
-
-    /** Serializes every counter mutation so a counter never drifts from its map. */
-    private final Object retentionLock = new Object();
 
     /** Blocks between amortized durable interval prunes ({@code pruneJournals}); see pruneToChainTip. */
     static final long PRUNE_INTERVAL = 32;
@@ -63,6 +58,10 @@ public final class DefaultTokenProcessor implements TokenProcessor {
         this.store = store;
         this.params = params;
         this.retainDepth = retainDepth;
+        this.eventsByHeight = new HeightRetainedIndex<>(retainDepth, MAX_RETAINED_EVENT_BYTES,
+            DefaultTokenProcessor::eventBytes);
+        this.changesByHeight = new HeightRetainedIndex<>(retainDepth, MAX_RETAINED_CHANGE_BYTES,
+            DefaultTokenProcessor::changeBytes);
     }
 
     @Override
@@ -202,13 +201,13 @@ public final class DefaultTokenProcessor implements TokenProcessor {
             // empty-journal fsyncs).
             if (!ops.isEmpty()) {
                 store.applyBlock(blockHeight, ops);
-                retainChanges(blockHeight, ops);
+                changesByHeight.retain(blockHeight, ops);
             }
             sessionMeta = null;
             sessionBalance = null;
         }
         if (!currentEvents.isEmpty()) {
-            retainEvents(blockHeight, currentEvents);
+            eventsByHeight.retain(blockHeight, currentEvents);
         }
         currentEvents = new ArrayList<>();
         // Deliberately NO retention prune here: this commit may still be reverted within the
@@ -219,86 +218,16 @@ public final class DefaultTokenProcessor implements TokenProcessor {
 
     @Override
     public void pruneToChainTip(long chainTip) {
+        eventsByHeight.pruneThrough(chainTip, null);
+        changesByHeight.pruneThrough(chainTip, null);
+        // Amortized durable interval prune: the deleteRange fsync is the backstop for rows
+        // committed before a restart, not worth paying every block (audit perf). It only ever lags
+        // the exact per-height schedule, so the reorg depth stays fully covered.
         long cutoff = chainTip - retainDepth;
-        if (cutoff > 0) {
-            synchronized (retentionLock) {
-                // `<= cutoff`, not `< cutoff`: keep EXACTLY retainDepth heights, (cutoff, chainTip].
-                // The strict-less-than form kept one height too many — the off-by-one the contract
-                // processor fixed in audit F10 and this copy never picked up.
-                dropThrough(eventsByHeight, cutoff, DefaultTokenProcessor::eventBytes,
-                    bytes -> retainedEventBytes -= bytes);
-                dropThrough(changesByHeight, cutoff, DefaultTokenProcessor::changeBytes,
-                    bytes -> retainedChangeBytes -= bytes);
-                // Amortized interval prune (see PRUNE_INTERVAL): the deleteRange fsync is the
-                // backstop for pre-restart rows, not worth paying every block (audit perf). It only
-                // ever lags the retention window — the reorg depth stays fully covered.
-                if (cutoff - lastIntervalPruneCutoff >= PRUNE_INTERVAL) {
-                    store.pruneJournals(cutoff);
-                    lastIntervalPruneCutoff = cutoff;
-                }
-            }
+        if (cutoff > 0 && cutoff - lastIntervalPruneCutoff >= PRUNE_INTERVAL) {
+            store.pruneJournals(cutoff);
+            lastIntervalPruneCutoff = cutoff;
         }
-    }
-
-    /** Removes every height at or below {@code cutoff}, crediting the freed bytes back. */
-    private static <T> void dropThrough(ConcurrentNavigableMap<Long, List<T>> map, long cutoff,
-                                        java.util.function.ToLongFunction<List<T>> sizer,
-                                        java.util.function.LongConsumer credit) {
-        var expired = map.headMap(cutoff, true);
-        for (List<T> value : expired.values()) {
-            credit.accept(sizer.applyAsLong(value));
-        }
-        expired.clear();
-    }
-
-    // ---- byte-budgeted retention (audit: RAM retention) ---------------------------------------
-    // Eviction is RAM-only. Neither map has a durable fallback, by design: events are
-    // non-consensus, and changes are consumed by ChainEngine.collectStateChanges at the commit
-    // height and re-derived on re-apply.
-
-    private void retainEvents(long blockHeight, List<TokenEvent> events) {
-        synchronized (retentionLock) {
-            List<TokenEvent> previous = eventsByHeight.put(blockHeight, events);
-            if (previous != null) {
-                retainedEventBytes -= eventBytes(previous);
-            }
-            retainedEventBytes += eventBytes(events);
-            retainedEventBytes -= evictOldest(eventsByHeight, blockHeight,
-                retainedEventBytes, MAX_RETAINED_EVENT_BYTES, DefaultTokenProcessor::eventBytes);
-        }
-    }
-
-    private void retainChanges(long blockHeight, List<TokenStore.TokenOp> changes) {
-        synchronized (retentionLock) {
-            List<TokenStore.TokenOp> previous = changesByHeight.put(blockHeight, changes);
-            if (previous != null) {
-                retainedChangeBytes -= changeBytes(previous);
-            }
-            retainedChangeBytes += changeBytes(changes);
-            retainedChangeBytes -= evictOldest(changesByHeight, blockHeight,
-                retainedChangeBytes, MAX_RETAINED_CHANGE_BYTES, DefaultTokenProcessor::changeBytes);
-        }
-    }
-
-    /**
-     * Drops oldest-first until the map fits {@code budget}, returning the bytes freed. Never evicts
-     * {@code keepHeight}: {@code changes(height)} is read by {@code ChainEngine.collectStateChanges}
-     * immediately after commit, so dropping it would omit a domain from the state root rather than
-     * merely lose a cache entry.
-     */
-    private static <T> long evictOldest(ConcurrentNavigableMap<Long, List<T>> map, long keepHeight,
-                                        long retained, long budget,
-                                        java.util.function.ToLongFunction<List<T>> sizer) {
-        long freed = 0;
-        while (retained - freed > budget) {
-            Map.Entry<Long, List<T>> oldest = map.firstEntry();
-            if (oldest == null || oldest.getKey() == keepHeight) {
-                break;
-            }
-            map.remove(oldest.getKey());
-            freed += sizer.applyAsLong(oldest.getValue());
-        }
-        return freed;
     }
 
     /** Retained size of one height's events: actor address, type string, token id. */
@@ -337,27 +266,19 @@ public final class DefaultTokenProcessor implements TokenProcessor {
 
     @Override
     public void revertBlock(long blockHeight) {
-        synchronized (retentionLock) {
-            List<TokenEvent> events = eventsByHeight.remove(blockHeight);
-            if (events != null) {
-                retainedEventBytes -= eventBytes(events);
-            }
-            List<TokenStore.TokenOp> changes = changesByHeight.remove(blockHeight);
-            if (changes != null) {
-                retainedChangeBytes -= changeBytes(changes);
-            }
-        }
+        eventsByHeight.forget(blockHeight);
+        changesByHeight.forget(blockHeight);
         store.revertBlock(blockHeight);
     }
 
     @Override
     public List<TokenEvent> events(long blockHeight) {
-        return eventsByHeight.getOrDefault(blockHeight, List.of());
+        return eventsByHeight.get(blockHeight);
     }
 
     @Override
     public List<TokenStore.TokenOp> changes(long blockHeight) {
-        return changesByHeight.getOrDefault(blockHeight, List.of());
+        return changesByHeight.get(blockHeight);
     }
 
     @Override

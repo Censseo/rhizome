@@ -4,8 +4,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ConcurrentNavigableMap;
-import java.util.concurrent.ConcurrentSkipListMap;
+import rhizome.core.state.HeightRetainedIndex;
 
 import rhizome.core.blockchain.NetworkParameters;
 import rhizome.core.ledger.PublicAddress;
@@ -41,39 +40,23 @@ public final class DefaultBoxProcessor implements BoxProcessor {
     private List<BoxEvent> currentEvents = new ArrayList<>();
 
     /**
-     * Per-height retention for reorg reversal. {@link ConcurrentSkipListMap}, not a hash map:
-     * keys are block heights, so ascending order IS the eviction order and the byte-budget
-     * eviction below takes its victim in O(log n) rather than scanning the key set.
+     * Per-height retention for reorg reversal, bounded by heights AND bytes — see
+     * {@link HeightRetainedIndex}, shared with the token and contract processors.
      */
-    private final ConcurrentNavigableMap<Long, List<BoxReceipt>> receiptsByHeight = new ConcurrentSkipListMap<>();
-    private final ConcurrentNavigableMap<Long, List<BoxEvent>> eventsByHeight = new ConcurrentSkipListMap<>();
-    private final ConcurrentNavigableMap<Long, List<BoxStore.BoxMutation>> changesByHeight =
-        new ConcurrentSkipListMap<>();
+    private final HeightRetainedIndex<BoxReceipt> receiptsByHeight;
+    private final HeightRetainedIndex<BoxEvent> eventsByHeight;
+    private final HeightRetainedIndex<BoxStore.BoxMutation> changesByHeight;
 
-    /**
-     * Byte budgets on the three retained maps, mirroring {@code WasmContractProcessor}'s.
-     * Height-count retention alone is not a memory bound: at the production
-     * {@code retainDepth = maxReorgDepth = 120}, {@link #changesByHeight} holds the FULL
-     * serialized box payload of every mutation in 120 blocks, which is bounded only by the block
-     * size limit times 120 — the same unbounded-RAM shape the contract processor's budgets were
-     * added to close (audit: RAM retention), left open here because the retention code was
-     * copied without them.
-     */
+    /** Budgets on the three retained maps. At the production retainDepth, changesByHeight holds
+     *  the FULL serialized box payload of every mutation in 120 blocks, bounded only by the block
+     *  size limit — the unbounded-RAM shape the contract processor's budgets closed (audit: RAM
+     *  retention) and these copies never picked up. */
     static final long MAX_RETAINED_RECEIPT_BYTES = 16L * 1024 * 1024;
     static final long MAX_RETAINED_EVENT_BYTES = 16L * 1024 * 1024;
     static final long MAX_RETAINED_CHANGE_BYTES = 64L * 1024 * 1024;
 
     /** Fixed retained size of one {@link BoxReceipt}: kind tag plus three longs. */
     private static final long RECEIPT_RECORD_BYTES = 1 + 8L + 8L + 8L;
-
-    private long retainedReceiptBytes;
-    private long retainedEventBytes;
-    private long retainedChangeBytes;
-
-    /** Serializes every counter mutation (retain / revert / prune / load-through / evict) so a
-     *  counter never drifts from its map when these run on different threads. Reads stay
-     *  lock-free on the concurrent maps. */
-    private final Object retentionLock = new Object();
 
     public DefaultBoxProcessor(BoxStore store, NetworkParameters params) {
         this(store, params, params.maxReorgDepth());
@@ -83,6 +66,12 @@ public final class DefaultBoxProcessor implements BoxProcessor {
         this.store = store;
         this.params = params;
         this.retainDepth = retainDepth;
+        this.receiptsByHeight = new HeightRetainedIndex<>(retainDepth, MAX_RETAINED_RECEIPT_BYTES,
+            DefaultBoxProcessor::receiptBytes);
+        this.eventsByHeight = new HeightRetainedIndex<>(retainDepth, MAX_RETAINED_EVENT_BYTES,
+            DefaultBoxProcessor::eventBytes);
+        this.changesByHeight = new HeightRetainedIndex<>(retainDepth, MAX_RETAINED_CHANGE_BYTES,
+            DefaultBoxProcessor::changeBytes);
         this.voteable = rhizome.core.blockchain.VoteableParams.fromDefaults(params);
     }
 
@@ -303,7 +292,7 @@ public final class DefaultBoxProcessor implements BoxProcessor {
                 // (RocksDB: no second fsync for the receipts, audit perf).
                 store.applyBlock(blockHeight, mutations, encodedReceipts);
                 encodedReceipts = null; // already persisted with the batch
-                retainChanges(blockHeight, mutations);
+                changesByHeight.retain(blockHeight, mutations);
             }
             session = null;
         }
@@ -313,10 +302,10 @@ public final class DefaultBoxProcessor implements BoxProcessor {
         if (!currentReceipts.isEmpty()) {
             // Write-through (audit F7): the RAM copy serves the hot reorg path; the store copy
             // survives a restart, so a later pop/restore of this block finds its receipts.
-            retainReceipts(blockHeight, currentReceipts);
+            receiptsByHeight.retain(blockHeight, currentReceipts);
         }
         if (!currentEvents.isEmpty()) {
-            retainEvents(blockHeight, currentEvents);
+            eventsByHeight.retain(blockHeight, currentEvents);
         }
         currentReceipts = new ArrayList<>();
         currentEvents = new ArrayList<>();
@@ -336,20 +325,9 @@ public final class DefaultBoxProcessor implements BoxProcessor {
 
     @Override
     public void revertBlock(long blockHeight) {
-        synchronized (retentionLock) {
-            List<BoxReceipt> receipts = receiptsByHeight.remove(blockHeight);
-            if (receipts != null) {
-                retainedReceiptBytes -= receiptBytes(receipts);
-            }
-            List<BoxEvent> events = eventsByHeight.remove(blockHeight);
-            if (events != null) {
-                retainedEventBytes -= eventBytes(events);
-            }
-            List<BoxStore.BoxMutation> changes = changesByHeight.remove(blockHeight);
-            if (changes != null) {
-                retainedChangeBytes -= changeBytes(changes);
-            }
-        }
+        receiptsByHeight.forget(blockHeight);
+        eventsByHeight.forget(blockHeight);
+        changesByHeight.forget(blockHeight);
         // The store drops the block's receipts in the SAME atomic unit as the journal-driven
         // restore (audit: revert-path tear) — no separate deleteReceipts call here.
         store.revertBlock(blockHeight);
@@ -357,9 +335,8 @@ public final class DefaultBoxProcessor implements BoxProcessor {
 
     @Override
     public List<BoxReceipt> receipts(long blockHeight) {
-        List<BoxReceipt> cached = receiptsByHeight.get(blockHeight);
-        if (cached != null) {
-            return cached;
+        if (receiptsByHeight.has(blockHeight)) {
+            return receiptsByHeight.get(blockHeight);
         }
         // Durable load-through (audit F7): after a restart the RAM cache is empty; recover the
         // committed receipts from the store so a reorg's ledger reversal stays exact. Stores
@@ -369,18 +346,18 @@ public final class DefaultBoxProcessor implements BoxProcessor {
             return List.of();
         }
         List<BoxReceipt> decoded = BoxReceiptCodec.decode(encoded);
-        retainReceipts(blockHeight, decoded); // re-accounted, so the counter tracks the load-through
+        receiptsByHeight.retain(blockHeight, decoded); // re-accounted after the load-through
         return decoded;
     }
 
     @Override
     public List<BoxEvent> events(long blockHeight) {
-        return eventsByHeight.getOrDefault(blockHeight, List.of());
+        return eventsByHeight.get(blockHeight);
     }
 
     @Override
     public List<BoxStore.BoxMutation> changes(long blockHeight) {
-        return changesByHeight.getOrDefault(blockHeight, List.of());
+        return changesByHeight.get(blockHeight);
     }
 
     @Override
@@ -448,106 +425,14 @@ public final class DefaultBoxProcessor implements BoxProcessor {
 
     @Override
     public void pruneToChainTip(long chainTip) {
+        receiptsByHeight.pruneThrough(chainTip, store::deleteReceipts); // receipts prune on the journal schedule (audit F7)
+        eventsByHeight.pruneThrough(chainTip, null);
+        changesByHeight.pruneThrough(chainTip, null);
         long cutoff = chainTip - retainDepth;
-        if (cutoff <= 0) {
-            return;
+        if (cutoff > 0 && cutoff - lastIntervalPruneCutoff >= PRUNE_INTERVAL) {
+            store.pruneJournals(cutoff);
+            lastIntervalPruneCutoff = cutoff;
         }
-        synchronized (retentionLock) {
-            // `<= cutoff`, not `< cutoff`: keep EXACTLY retainDepth heights, (cutoff, chainTip].
-            // The strict-less-than form retained one height too many — the same off-by-one the
-            // contract processor fixed in audit F10 and this copy never picked up.
-            for (Long h : receiptsByHeight.headMap(cutoff, true).keySet()) {
-                store.deleteReceipts(h); // receipts prune on the journal schedule (audit F7)
-            }
-            dropThrough(receiptsByHeight, cutoff, DefaultBoxProcessor::receiptBytes,
-                bytes -> retainedReceiptBytes -= bytes);
-            dropThrough(eventsByHeight, cutoff, DefaultBoxProcessor::eventBytes,
-                bytes -> retainedEventBytes -= bytes);
-            dropThrough(changesByHeight, cutoff, DefaultBoxProcessor::changeBytes,
-                bytes -> retainedChangeBytes -= bytes);
-            if (cutoff - lastIntervalPruneCutoff >= PRUNE_INTERVAL) {
-                store.pruneJournals(cutoff);
-                lastIntervalPruneCutoff = cutoff;
-            }
-        }
-    }
-
-    /** Removes every height at or below {@code cutoff}, crediting the freed bytes back. */
-    private static <T> void dropThrough(ConcurrentNavigableMap<Long, List<T>> map, long cutoff,
-                                        java.util.function.ToLongFunction<List<T>> sizer,
-                                        java.util.function.LongConsumer credit) {
-        var expired = map.headMap(cutoff, true);
-        for (List<T> value : expired.values()) {
-            credit.accept(sizer.applyAsLong(value));
-        }
-        expired.clear();
-    }
-
-    // ---- byte-budgeted retention (audit: RAM retention) ---------------------------------------
-    // Eviction is RAM-ONLY: the durable copies are deleted solely by the height-scheduled prune
-    // above, so `receipts()` keeps its store-level fallback. Events and changes have no fallback
-    // by design — events are non-consensus, and changes are consumed by
-    // ChainEngine.collectStateChanges at the commit height and re-derived on re-apply.
-
-    private void retainReceipts(long blockHeight, List<BoxReceipt> receipts) {
-        synchronized (retentionLock) {
-            List<BoxReceipt> previous = receiptsByHeight.put(blockHeight, receipts);
-            if (previous != null) {
-                retainedReceiptBytes -= receiptBytes(previous);
-            }
-            retainedReceiptBytes += receiptBytes(receipts);
-            retainedReceiptBytes -= evictOldest(receiptsByHeight, blockHeight,
-                retainedReceiptBytes, MAX_RETAINED_RECEIPT_BYTES, DefaultBoxProcessor::receiptBytes);
-        }
-    }
-
-    private void retainEvents(long blockHeight, List<BoxEvent> events) {
-        synchronized (retentionLock) {
-            List<BoxEvent> previous = eventsByHeight.put(blockHeight, events);
-            if (previous != null) {
-                retainedEventBytes -= eventBytes(previous);
-            }
-            retainedEventBytes += eventBytes(events);
-            retainedEventBytes -= evictOldest(eventsByHeight, blockHeight,
-                retainedEventBytes, MAX_RETAINED_EVENT_BYTES, DefaultBoxProcessor::eventBytes);
-        }
-    }
-
-    private void retainChanges(long blockHeight, List<BoxStore.BoxMutation> changes) {
-        synchronized (retentionLock) {
-            List<BoxStore.BoxMutation> previous = changesByHeight.put(blockHeight, changes);
-            if (previous != null) {
-                retainedChangeBytes -= changeBytes(previous);
-            }
-            retainedChangeBytes += changeBytes(changes);
-            retainedChangeBytes -= evictOldest(changesByHeight, blockHeight,
-                retainedChangeBytes, MAX_RETAINED_CHANGE_BYTES, DefaultBoxProcessor::changeBytes);
-        }
-    }
-
-    /**
-     * Drops oldest-first until the map fits {@code budget}, returning the bytes freed.
-     *
-     * <p>Never evicts {@code keepHeight}, the height just retained: {@code changes(height)} is read
-     * by {@code ChainEngine.collectStateChanges} immediately after commit, and dropping it would
-     * silently omit a domain from the state root rather than merely lose a cache entry. A single
-     * block cannot exceed the budget in practice — the block size limit bounds it — so the guard
-     * only ever fires on a misconfiguration, where a fatter-than-budget block is the right thing
-     * to keep.
-     */
-    private static <T> long evictOldest(ConcurrentNavigableMap<Long, List<T>> map, long keepHeight,
-                                        long retained, long budget,
-                                        java.util.function.ToLongFunction<List<T>> sizer) {
-        long freed = 0;
-        while (retained - freed > budget) {
-            Map.Entry<Long, List<T>> oldest = map.firstEntry();
-            if (oldest == null || oldest.getKey() == keepHeight) {
-                break;
-            }
-            map.remove(oldest.getKey());
-            freed += sizer.applyAsLong(oldest.getValue());
-        }
-        return freed;
     }
 
     /** Retained size of one height's receipts: a fixed record each, no variable-length payload. */
