@@ -41,7 +41,7 @@ public final class BlockCodec {
             size += dtos[i].getSize();
         }
         // Each uncle: hash (32) + difficulty (4) + miner address (25).
-        int uncleSize = rhizome.crypto.SHA256Hash.SIZE + Integer.BYTES + rhizome.core.ledger.PublicAddress.SIZE;
+        int uncleSize = HeaderWire.UNCLE_BYTES;
         size += Integer.BYTES + uncles.size() * uncleSize;
 
         ByteBuffer buffer = ByteBuffer.allocate(size);
@@ -51,9 +51,7 @@ public final class BlockCodec {
         }
         buffer.putInt(uncles.size());
         for (UncleRef uncle : uncles) {
-            buffer.put(uncle.hash().toBytes());
-            buffer.putInt(uncle.difficulty());
-            buffer.put(uncle.miner().toBytes());
+            HeaderWire.writeUncle(buffer, uncle);
         }
         return buffer.array();
     }
@@ -78,27 +76,10 @@ public final class BlockCodec {
         for (int i = 0; i < header.numTransactions(); i++) {
             transactions.add(Transaction.of(TransactionDto.readFrom(buffer)));
         }
-        List<UncleRef> uncles = new ArrayList<>();
-        int numUncles = buffer.getInt();
-        // Reject an out-of-range uncle count before iterating: consensus caps uncles at
-        // maxUnclesPerBlock (2); a raw wire int must never drive an unbounded loop/alloc.
-        if (numUncles < 0 || numUncles > rhizome.core.common.Constants.MAX_UNCLES_PER_BLOCK) {
-            throw new IllegalArgumentException("numUncles out of range: " + numUncles);
-        }
+        int numUncles = HeaderWire.readUncleCount(buffer);
+        List<UncleRef> uncles = new ArrayList<>(numUncles);
         for (int i = 0; i < numUncles; i++) {
-            byte[] h = new byte[rhizome.crypto.SHA256Hash.SIZE];
-            buffer.get(h);
-            int difficulty = buffer.getInt();
-            // Bound uncle difficulty at decode, exactly as HeaderCodec.readFrom does (codec parity):
-            // ChainEngine.validateUncles folds it into BigInteger.TWO.pow(difficulty), so a raw wire
-            // int must never reach that pow — reject out-of-range here for defense in depth.
-            if (difficulty < 0 || difficulty > rhizome.core.common.Constants.MAX_DIFFICULTY) {
-                throw new IllegalArgumentException("uncleDifficulty out of range: " + difficulty);
-            }
-            byte[] m = new byte[rhizome.core.ledger.PublicAddress.SIZE];
-            buffer.get(m);
-            uncles.add(new UncleRef(rhizome.crypto.SHA256Hash.of(h), difficulty,
-                rhizome.core.ledger.PublicAddress.of(m)));
+            uncles.add(HeaderWire.readUncle(buffer));
         }
         return Block.of(header, transactions, uncles);
     }

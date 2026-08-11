@@ -56,6 +56,54 @@ class CodecBoundsTest {
         assertDoesNotThrow(() -> HeaderCodec.decode(header(0, 0, null)));
     }
 
+    /**
+     * One malformed prefix field, four decoders, one verdict.
+     *
+     * <p>The header prefix is byte-identical across HeaderCodec, BlockDto and BlockCodec, but each
+     * used to validate it with its own bound set — only HeaderCodec bounded {@code id}, so the same
+     * malformed height was rejected on the /headers path and accepted on /submit and on the way
+     * into RocksDB. The per-shape tests in this file could not catch that, because each drives one
+     * decoder: a suite organised the way the duplication is organised locks the asymmetry in rather
+     * than exposing it. This one asserts the decoders agree.
+     *
+     * <p>A header with no uncles and a block with no transactions and no uncles are the same 156
+     * bytes, which is exactly the property being tested, so one buffer drives all three binary
+     * paths.
+     */
+    @Test
+    void everyDecoderRejectsTheSameMalformedPrefix() {
+        // Offsets into the shared prefix: id(0) timestamp(4) difficulty(12) numTransactions(16)
+        // lastBlockHash(20) merkleRoot(52) nonce(84) stateRoot(116) vote(148).
+        int[][] malformed = {
+            {0, 0}, {0, -1}, {0, Integer.MIN_VALUE},                 // id: a height is positive
+            {12, Constants.MAX_DIFFICULTY + 1}, {12, -1},            // difficulty
+            {16, Integer.MAX_VALUE}, {16, -1},                       // numTransactions
+            {148, 3}, {148, -3}, {148, Integer.MIN_VALUE},           // vote
+        };
+        for (int[] field : malformed) {
+            byte[] bytes = header(0, 0, null);
+            ByteBuffer.wrap(bytes).putInt(field[0], field[1]);
+            String what = "offset " + field[0] + " = " + field[1];
+
+            assertThrows(IllegalArgumentException.class, () -> HeaderCodec.decode(bytes),
+                "HeaderCodec must reject " + what);
+            assertThrows(IllegalArgumentException.class, () -> BlockCodec.decode(bytes),
+                "BlockCodec must reject " + what + " — same bytes, same verdict");
+            assertThrows(IllegalArgumentException.class,
+                () -> BlockDto.readFrom(ByteBuffer.wrap(bytes)),
+                "BlockDto must reject " + what + " — it is the storage and /submit path");
+        }
+    }
+
+    @Test
+    void aWellFormedPrefixDecodesOnEveryPath() {
+        // The negative case above is only meaningful if the same buffer is accepted everywhere.
+        byte[] bytes = header(0, 0, null);
+        assertDoesNotThrow(() -> HeaderCodec.decode(bytes));
+        assertDoesNotThrow(() -> BlockCodec.decode(bytes));
+        assertDoesNotThrow(() -> BlockDto.readFrom(ByteBuffer.wrap(bytes)));
+    }
+
     @Test
     void rejectsHugeTransactionCount() {
         assertThrows(IllegalArgumentException.class, () -> HeaderCodec.decode(header(Integer.MAX_VALUE, 0, null)));
