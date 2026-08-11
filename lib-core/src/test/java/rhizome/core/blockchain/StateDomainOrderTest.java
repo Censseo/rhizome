@@ -183,6 +183,10 @@ class StateDomainOrderTest {
             delegate.revertBlock(blockHeight);
         }
 
+        @Override public void pruneToChainTip(long chainTip) {
+            delegate.pruneToChainTip(chainTip); // forwarded, not journaled: not an ordering phase
+        }
+
         @Override public BoxResult run(TransactionKind kind, PublicAddress from, PublicAddress to,
                                        long amount, long nonce, byte[] data, long height) {
             return delegate.run(kind, from, to, amount, nonce, data, height);
@@ -250,6 +254,10 @@ class StateDomainOrderTest {
         @Override public void revertBlock(long blockHeight) {
             journal.add("token.revert");
             delegate.revertBlock(blockHeight);
+        }
+
+        @Override public void pruneToChainTip(long chainTip) {
+            delegate.pruneToChainTip(chainTip); // forwarded, not journaled: not an ordering phase
         }
 
         @Override public TokenResult run(TransactionKind kind, PublicAddress from, PublicAddress to,

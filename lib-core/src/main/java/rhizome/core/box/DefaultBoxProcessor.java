@@ -49,7 +49,6 @@ public final class DefaultBoxProcessor implements BoxProcessor {
     private final ConcurrentNavigableMap<Long, List<BoxEvent>> eventsByHeight = new ConcurrentSkipListMap<>();
     private final ConcurrentNavigableMap<Long, List<BoxStore.BoxMutation>> changesByHeight =
         new ConcurrentSkipListMap<>();
-    private long lastCommittedHeight = -1;
 
     /**
      * Byte budgets on the three retained maps, mirroring {@code WasmContractProcessor}'s.
@@ -321,8 +320,11 @@ public final class DefaultBoxProcessor implements BoxProcessor {
         }
         currentReceipts = new ArrayList<>();
         currentEvents = new ArrayList<>();
-        lastCommittedHeight = Math.max(lastCommittedHeight, blockHeight);
-        pruneOld();
+        // Deliberately NO retention prune here: this commit may still be reverted within the
+        // caller's critical section (the stampStateRoot dry run, an addBlock state-root
+        // rejection), and pruning against an uncommitted height deletes the oldest in-window
+        // receipts a max-depth reorg still needs. The engine prunes post-append via
+        // {@link #pruneToChainTip}.
     }
 
     @Override
@@ -436,21 +438,22 @@ public final class DefaultBoxProcessor implements BoxProcessor {
 
     /**
      * Cadence of the amortized durable interval prune ({@code pruneJournals} range tombstones).
-     * Per-height receipt deletes still run every commit; the interval deleteRange is only the
-     * backstop for rows committed before a restart (the RAM maps are empty then), so it is paid
-     * every PRUNE_INTERVAL blocks instead of ~2 synced tombstone fsyncs per block (audit perf).
-     * It only ever lags the exact per-height schedule — the reorg window stays fully covered.
+     * Per-height receipt deletes still run on every appended block; the interval deleteRange is
+     * only the backstop for rows committed before a restart (the RAM maps are empty then), so it
+     * is paid every PRUNE_INTERVAL blocks instead of ~2 synced tombstone fsyncs per block (audit
+     * perf). It only ever lags the exact per-height schedule — the reorg window stays covered.
      */
     static final long PRUNE_INTERVAL = 32;
     private long lastIntervalPruneCutoff;
 
-    private void pruneOld() {
-        long cutoff = lastCommittedHeight - retainDepth;
+    @Override
+    public void pruneToChainTip(long chainTip) {
+        long cutoff = chainTip - retainDepth;
         if (cutoff <= 0) {
             return;
         }
         synchronized (retentionLock) {
-            // `<= cutoff`, not `< cutoff`: keep EXACTLY retainDepth heights, (cutoff, last].
+            // `<= cutoff`, not `< cutoff`: keep EXACTLY retainDepth heights, (cutoff, chainTip].
             // The strict-less-than form retained one height too many — the same off-by-one the
             // contract processor fixed in audit F10 and this copy never picked up.
             for (Long h : receiptsByHeight.headMap(cutoff, true).keySet()) {

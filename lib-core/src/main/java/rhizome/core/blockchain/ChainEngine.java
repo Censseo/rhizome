@@ -626,6 +626,14 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
                 currentDifficulty = computeDifficultyFromChain();
                 applyVotingAt(b.id()); // tally this epoch's votes if a boundary; effective next block
                 pruneDerivedStateCaches(b.id()); // bound vote/difficulty memo growth (audit)
+                // Domain retention prunes ONLY here, on a block that stands: the stampStateRoot
+                // dry run and the state-root rejections above commit domains at this height and
+                // then revert them, so a commit-time prune would key retention to a commit
+                // attempt rather than the chain tip and delete the oldest in-window receipts a
+                // max-depth reorg still needs (see BlockStateProcessor.pruneToChainTip).
+                for (BlockStateProcessor domain : stateDomains) {
+                    domain.pruneToChainTip(b.id());
+                }
                 if (onBlockApplied != null) {
                     onBlockApplied.accept(b.id()); // fast/non-blocking by contract (see setter)
                 }

@@ -8,7 +8,7 @@ import rhizome.core.transaction.TransactionAmount;
 /**
  * In-memory {@link Ledger} reference implementation, with the same checked
  * arithmetic as the persistent stores (underflow/overflow throw). Used by the
- * light node, tooling and tests; the durable path is LevelDB/RocksDB.
+ * light node, tooling and tests; the durable path is RocksDB (lib-persistence).
  */
 public final class InMemoryLedger implements Ledger {
 

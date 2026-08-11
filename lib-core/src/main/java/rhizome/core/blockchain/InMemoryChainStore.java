@@ -13,7 +13,7 @@ import rhizome.core.transaction.TransactionImpl;
 
 /**
  * In-memory {@link ChainStore} — reference implementation for tests and local
- * development; a LevelDB-backed one lives in lib-persistence.
+ * development; a RocksDB-backed one lives in lib-persistence.
  */
 public final class InMemoryChainStore implements ChainStore {
 

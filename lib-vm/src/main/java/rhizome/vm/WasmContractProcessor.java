@@ -47,7 +47,6 @@ public final class WasmContractProcessor implements ContractProcessor {
     private final ConcurrentNavigableMap<Long, List<ContractReceipt>> receiptsByHeight = new ConcurrentSkipListMap<>();
     private final ConcurrentNavigableMap<Long, List<ContractLog>> logsByHeight = new ConcurrentSkipListMap<>();
     private final ConcurrentNavigableMap<Long, List<ContractChange>> changesByHeight = new ConcurrentSkipListMap<>();
-    private long lastCommittedHeight = -1;
 
     /**
      * Bounds on the RAM {@link #logsByHeight} retains. Event logs are a best-effort query
@@ -92,9 +91,9 @@ public final class WasmContractProcessor implements ContractProcessor {
 
     /**
      * Cadence of the amortized durable interval prune ({@code pruneThrough} range tombstones).
-     * Per-height point deletes still run every commit, keeping the RAM maps and their durable
-     * rows at exactly {@code retainDepth}; the interval deleteRange is only the backstop for
-     * rows committed before a restart (the RAM maps are empty then). Running it every block
+     * Per-height point deletes still run on every appended block, keeping the RAM maps and their
+     * durable rows at exactly {@code retainDepth}; the interval deleteRange is only the backstop
+     * for rows committed before a restart (the RAM maps are empty then). Running it every block
      * paid ~2 synced range-tombstone fsyncs per block for rows that rarely exist (audit perf).
      * The reorg window is unaffected: per-height deletes cover it exactly, and the interval
      * prune only ever lags it — never leads it.
@@ -443,8 +442,11 @@ public final class WasmContractProcessor implements ContractProcessor {
         }
         currentReceipts = new java.util.ArrayList<>();
         currentLogs = new java.util.ArrayList<>();
-        lastCommittedHeight = Math.max(lastCommittedHeight, blockHeight);
-        pruneOldJournals();
+        // Deliberately NO retention prune here: this commit may still be reverted within the
+        // caller's critical section (the stampStateRoot dry run, an addBlock state-root
+        // rejection), and pruning against an uncommitted height deletes the oldest in-window
+        // journals/receipts a max-depth reorg still needs. The engine prunes post-append via
+        // {@link #pruneToChainTip}.
     }
 
     @Override
@@ -816,14 +818,15 @@ public final class WasmContractProcessor implements ContractProcessor {
 
     /**
      * Drops journals buried deeper than the retention depth (unreachable by any reorg). Keeps
-     * EXACTLY {@code retainDepth} heights — {@code (lastCommittedHeight - retainDepth, lastCommittedHeight]}
+     * EXACTLY {@code retainDepth} heights — {@code (chainTip - retainDepth, chainTip]}
      * — so {@code retainDepth} remains the single source of truth for "how many blocks can be
      * reverted"; the previous strict-less-than comparison retained one extra height (audit F10).
      * The safe direction is keeping more, and this never drops below it: retainDepth must be at
      * least the chain's max reorg depth (see the constructor), and exactly retainDepth are kept.
      */
-    private void pruneOldJournals() {
-        long cutoff = lastCommittedHeight - retainDepth;
+    @Override
+    public void pruneToChainTip(long chainTip) {
+        long cutoff = chainTip - retainDepth;
         if (cutoff <= 0) {
             return;
         }

@@ -1,18 +1,21 @@
 # Persistence Specification
 
-> Source of truth for on-disk storage — RocksDB stores, the pure-Java LevelDB path, atomic batches,
+> Source of truth for on-disk storage — RocksDB stores, atomic batches,
 > undo journals, and crash reconciliation.
 > Extracted from `WHITEPAPER.md` §6.2, §7.6 and source analysis.
 > **Status**: Draft — needs review
 
 ## Overview
 
-Two backends implement the store interfaces declared in `lib-core`:
+One durable backend implements the store interfaces declared in `lib-core`/`lib-vm`:
 
 - **RocksDB** — the full-node path. Chain and ledger share **one database with column families**;
   append and pop are atomic `WriteBatch`es, so a crash never leaves half-written state. Chosen over
   iq80 LevelDB (pure-Java, slower) and LMDB for its write throughput and atomic batches.
-- **Pure-Java LevelDB** — the native-image / test / light path, with no JNI dependency.
+
+The second real implementation of those ports is the `InMemory*` family in `lib-core`, which the
+tests run against. (The `org.iq80.leveldb` dependency remains only for `PandaniteLedgerDumper`,
+which iterates a *foreign* Pandanite ledger to seed genesis — it stores nothing.)
 
 The load-bearing property is that **peripheral state moves atomically with the block and reverses
 exactly on reorg**, including across a restart.
@@ -23,14 +26,11 @@ exactly on reorg**, including across a restart.
 
 | Area | Source |
 |---|---|
-| Block persistence interface | [BlockPersistence.java](../../lib-persistence/src/main/java/rhizome/persistence/BlockPersistence.java) |
 | Chain + ledger + nonces + txindex (one DB) | [RocksDbNodeStore.java](../../lib-persistence/src/main/java/rhizome/persistence/rocksdb/RocksDbNodeStore.java) |
 | Box store + owner/expiry indexes | [RocksDbBoxStore.java](../../lib-persistence/src/main/java/rhizome/persistence/rocksdb/RocksDbBoxStore.java) |
 | Token store + minter/holder indexes | [RocksDbTokenStore.java](../../lib-persistence/src/main/java/rhizome/persistence/rocksdb/RocksDbTokenStore.java) |
 | Contract store | [RocksDbContractStore.java](../../lib-persistence/src/main/java/rhizome/persistence/rocksdb/RocksDbContractStore.java) |
 | SMT nodes + per-height roots | [RocksDbStateStore.java](../../lib-persistence/src/main/java/rhizome/persistence/rocksdb/RocksDbStateStore.java) |
-| Pure-Java LevelDB path | [persistence/leveldb/](../../lib-persistence/src/main/java/rhizome/persistence/leveldb/) |
-| Transaction index | [TransactionStore.java](../../lib-persistence/src/main/java/rhizome/persistence/TransactionStore.java) |
 | Pandanite ledger dump tool | [PandaniteLedgerDumper.java](../../lib-persistence/src/main/java/rhizome/persistence/tools/PandaniteLedgerDumper.java) |
 
 **Does not own**
@@ -106,12 +106,7 @@ the same write batch as the append**. Headers, genesis and the transaction index
 
 All are **recomputed locally** on snapshot import, never transferred.
 
-### D-7 — Pure-Java LevelDB path *(implemented)*
-
-`LevelDBBlockPersistence`, `LevelDBDataStore`, `LevelDBLedger` provide a JNI-free backend for the
-GraalVM native-image path, tests, and light nodes.
-
-### D-8 — Fixed-layout binary codec *(implemented)*
+### D-7 — Fixed-layout binary codec *(implemented)*
 
 Manual `ByteBuffer` big-endian serialisation replaces runtime-codegen serializers (ActiveJ/Fory):
 deterministic, fast, and native-friendly. See

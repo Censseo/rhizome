@@ -36,6 +36,9 @@ import rhizome.core.ledger.PublicAddress;
 import rhizome.core.mempool.ExecutionStatus;
 import rhizome.core.mempool.MemPool;
 import rhizome.core.merkletree.MerkleTree;
+import rhizome.core.state.InMemoryRootStore;
+import rhizome.core.state.InMemorySmtNodeStore;
+import rhizome.core.state.StateAccumulator;
 import rhizome.core.transaction.Transaction;
 import rhizome.core.transaction.TransactionAmount;
 import rhizome.core.transaction.TransactionImpl;
@@ -221,6 +224,84 @@ class BoxConsensusTest {
         ChainEngineTestAccess.popBlock(restartedEngine);
         assertNull(restartedEngine.box(id));
         assertEquals(start, ledger.getWalletValue(sender).amount());
+    }
+
+    /**
+     * Security regression: on a block-producing node every mining round runs
+     * {@code stampStateRoot}, which executes a candidate at tip+1 and rolls it back. When
+     * retention pruning was keyed on processor commits, that phantom commit moved the watermark
+     * one height past the chain tip and pruned the oldest in-window height's receipts — the RAM
+     * copy AND the durable one. The legal max-depth reorg that later popped that height died on
+     * {@code Executor.rollbackBlock}'s missing-receipts guard, and with the durable copy gone no
+     * restart could heal it: the node never adopted a heavier branch again. The dry run must
+     * leave the reorg window byte-for-byte intact.
+     */
+    @Test
+    void aStampStateRootDryRunKeepsTheReorgWindowIntact() {
+        var deepParams = NetworkParameters.testnet().toBuilder()
+            .powAlgorithm(PowAlgorithm.SHA256).genesisDifficulty(3).minDifficulty(3)
+            .storagePeriodBlocks(3).storageFeeFactor(1).minValuePerByte(1)
+            .maxReorgDepth(3).build();
+        InMemoryLedger deepLedger = new InMemoryLedger();
+        var deepBoxes = new DefaultBoxProcessor(new InMemoryBoxStore(), deepParams);
+        AtomicLong deepClock = new AtomicLong(1_000_000L);
+        LedgerSnapshot snapshot = new LedgerSnapshot("t", 0, deepParams.chainId());
+        snapshot.put(sender, new TransactionAmount(10_000_000L));
+        var accumulator = new StateAccumulator(new InMemorySmtNodeStore(), new InMemoryRootStore(),
+            deepParams.maxReorgDepth());
+        ChainEngine deepEngine = ChainEngine.init(deepParams, deepLedger, new InMemoryChainStore(),
+            snapshot, null, deepClock::get, null, null, deepBoxes, null, accumulator);
+
+        // Assemble exactly like the producer: stamp the root BEFORE mining the nonce.
+        java.util.function.Function<List<Transaction>, ExecutionStatus> mineStamped = txs -> {
+            long height = deepEngine.height() + 1;
+            var b = (BlockImpl) BlockImpl.builder()
+                .id((int) height).timestamp(deepClock.addAndGet(1000))
+                .difficulty(deepEngine.difficulty()).lastBlockHash(deepEngine.tipHash()).build();
+            b.addTransaction(Transaction.of(miner, new TransactionAmount(deepParams.miningReward(height))));
+            txs.forEach(b::addTransaction);
+            var tree = new MerkleTree();
+            tree.setItems(b.transactions());
+            b.merkleRoot(tree.getRootHash());
+            deepEngine.stampStateRoot(b);
+            b.nonce(Miner.mineNonce(b.hash(), b.difficulty(), deepParams.powAlgorithm()));
+            return deepEngine.addBlock(b);
+        };
+
+        // A box-carrying block at height 2, then empties to tip 4: with retainDepth 3 the window
+        // is (1, 4], so height 2 is exactly the oldest height a max-depth reorg can pop.
+        byte[] id = Box.deriveId(sender, 0);
+        long start = deepLedger.getWalletValue(sender).amount();
+        assertEquals(ExecutionStatus.SUCCESS, mineStamped.apply(List.of(boxTx(
+            TransactionKind.BOX_CREATE, BoxPayload.encodeCreate(List.of(BoxRegister.string("v1"))),
+            5000, 0))));
+        assertEquals(ExecutionStatus.SUCCESS, mineStamped.apply(List.of())); // height 3
+        assertEquals(ExecutionStatus.SUCCESS, mineStamped.apply(List.of())); // height 4
+
+        // The producer's dry run over a candidate at 5 (never submitted): in the regression this
+        // pruned height 2's receipts from RAM and disk alike.
+        long height = deepEngine.height() + 1;
+        var candidate = (BlockImpl) BlockImpl.builder()
+            .id((int) height).timestamp(deepClock.addAndGet(1000))
+            .difficulty(deepEngine.difficulty()).lastBlockHash(deepEngine.tipHash()).build();
+        candidate.addTransaction(
+            Transaction.of(miner, new TransactionAmount(deepParams.miningReward(height))));
+        var tree = new MerkleTree();
+        tree.setItems(candidate.transactions());
+        candidate.merkleRoot(tree.getRootHash());
+        deepEngine.stampStateRoot(candidate);
+
+        assertEquals(1, deepBoxes.receipts(2).size(),
+            "the dry run must not prune the oldest in-window height's receipts");
+
+        // The max-depth reorg: pops 4, 3 and the box-carrying 2 — exactly the depth the retained
+        // receipts exist for. Pre-fix this threw on the deepest pop and wedged the node.
+        ChainEngineTestAccess.popBlock(deepEngine);
+        ChainEngineTestAccess.popBlock(deepEngine);
+        ChainEngineTestAccess.popBlock(deepEngine);
+        assertNull(deepEngine.box(id), "the create is reverted");
+        assertEquals(start, deepLedger.getWalletValue(sender).amount(),
+            "the ledger reversal stays exact through the deepest in-window pop");
     }
 
     /**

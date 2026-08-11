@@ -351,9 +351,10 @@ unsettled questions live.
 - **Second signature in the payload vs. the envelope.** Payload keeps `TransactionDto` unchanged
   and matches box/token precedent. An envelope-level multi-signature slot would be cleaner for
   future primitives but is a wire-breaking change with no existing precedent.
-- **Light-path persistence.** Boxes and tokens have RocksDB + in-memory stores but **no LevelDB
-  implementation**, unlike the ledger. Banknotes inherit that gap; whether to fix it here or accept
-  it is a scoping decision.
+- **Light-path persistence.** Boxes and tokens have RocksDB + in-memory stores but **no pure-Java
+  store implementation** (the LevelDB cluster was dropped; only the dumper that reads a foreign
+  Pandanite ledger still uses that dependency). Banknotes inherit that gap; whether to fix it here
+  or accept it is a scoping decision.
 - **Chip supply chain.** Everything rests on keys being generated inside the secure element and
   never leaving. That is a manufacturing assurance question, entirely outside the protocol.
 

@@ -208,12 +208,56 @@ class WasmContractProcessorPersistenceTest {
             processor.run(PublicAddress.random(), TransactionKind.DEPLOY,
                 PublicAddress.empty(), COUNTER, 0, GAS_LIMIT, 0);
             processor.commit(h);
+            processor.pruneToChainTip(h); // the engine prunes post-append, not at commit
         }
         assertEquals(Set.of(4L, 5L, 6L), store.journals.keySet(),
             "exactly retainDepth journals are kept");
         assertEquals(Set.of(4L, 5L, 6L), store.receipts.keySet(),
             "receipts prune on the journal schedule (F3)");
         assertEquals(List.of(), processor.receipts(3), "a pruned height serves no receipts");
+    }
+
+    @Test
+    void aRevertedCommitPrunesNothing() {
+        // The stampStateRoot dry run commits a candidate at tip+1 and reverts it within the same
+        // engine critical section, so a prune keyed on commit heights runs one ahead of the chain
+        // and deletes the oldest in-window height's journal AND durable receipts — the max-depth
+        // reorg that then needs them dies on rollbackBlock's receipt guard, and a restart cannot
+        // heal it (the durable copy went with the RAM one). Retention must track appended tips.
+        DurableTestStore store = new DurableTestStore();
+        WasmContractProcessor processor = new WasmContractProcessor(new WasmVm(), store, 3);
+        for (long h = 1; h <= 6; h++) {
+            processor.begin();
+            processor.run(PublicAddress.random(), TransactionKind.DEPLOY,
+                PublicAddress.empty(), COUNTER, 0, GAS_LIMIT, 0);
+            processor.commit(h);
+            processor.pruneToChainTip(h);
+        }
+        assertEquals(Set.of(4L, 5L, 6L), store.receipts.keySet());
+
+        // The dry run at 7: commit (the rollback walk and the state-root collection read the
+        // staged state), then revert. No pruneToChainTip runs — the candidate never appended.
+        processor.begin();
+        processor.run(PublicAddress.random(), TransactionKind.DEPLOY,
+            PublicAddress.empty(), COUNTER, 0, GAS_LIMIT, 0);
+        processor.commit(7);
+        processor.revertBlock(7);
+
+        assertEquals(Set.of(4L, 5L, 6L), store.journals.keySet(),
+            "a reverted phantom commit must not prune the reorg window");
+        assertEquals(Set.of(4L, 5L, 6L), store.receipts.keySet(),
+            "a reverted phantom commit must not prune the window's durable receipts");
+        assertEquals(1, processor.receipts(4).size(), "the oldest in-window receipts still serve");
+        assertNull(store.getJournal(7), "the phantom height leaves no journal");
+        assertNull(store.getReceipts(7), "the phantom height leaves no receipts");
+
+        // Once a block at 7 really appends, the window slides forward exactly one height.
+        processor.begin();
+        processor.run(PublicAddress.random(), TransactionKind.DEPLOY,
+            PublicAddress.empty(), COUNTER, 0, GAS_LIMIT, 0);
+        processor.commit(7);
+        processor.pruneToChainTip(7);
+        assertEquals(Set.of(5L, 6L, 7L), store.receipts.keySet());
     }
 
     @Test

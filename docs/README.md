@@ -20,7 +20,7 @@ truth: what each area does, what it owns, and which invariants must never regres
 | [banknotes](banknotes/spec.md) | Paper bearer notes — irrevocable escrow, NFC-chip redemption, machine attestation | *(none yet)* | Design |
 | [networking](networking/spec.md) | HTTP p2p, PEX, gossip, ban scoring, headers-first sync, pruning | `lib-net`, `lib-core` sync | Draft |
 | [state](state/spec.md) | Sparse-Merkle state root, light-client proofs, snapshot bootstrap | `lib-core/state` | Draft |
-| [persistence](persistence/spec.md) | RocksDB column families, atomic batches, undo journals, LevelDB path | `lib-persistence` | Draft |
+| [persistence](persistence/spec.md) | RocksDB column families, atomic batches, undo journals | `lib-persistence` | Draft |
 | [node-api](node-api/spec.md) | HTTP surface, env config, token auth, CSRF/rebinding gates, aggregate budgets | `app-node` | Draft |
 | [dashboard](dashboard/spec.md) | Embedded zero-dependency web UI — 6 pages, browser key custody | `app-node/resources/dashboard` | Draft |
 | [wallet](wallet/spec.md) | CLI wallet, encrypted keystore, chain-id pin, local signing | `app-wallet` | Draft |

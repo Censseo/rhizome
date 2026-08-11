@@ -50,6 +50,21 @@ public interface BlockStateProcessor {
     void revertBlock(long blockHeight);
 
     /**
+     * Drops retained journals/receipts/changes the reorg window no longer covers: every height at
+     * or below {@code chainTip - retainDepth}, keeping EXACTLY retainDepth heights.
+     *
+     * <p>Driven by the engine only AFTER a block is appended — never from {@link #commit(long)}.
+     * A commit can still be reverted within the same engine critical section (the stampStateRoot
+     * dry run over a candidate at tip+1, or an addBlock state-root rejection), so a watermark fed
+     * by commit attempts runs one height ahead of the chain and prunes exactly the oldest
+     * in-window height a max-depth reorg still needs; that reorg then dies on the rollback
+     * receipt guard, for good, because the durable receipts were deleted with the RAM copy.
+     * Keying the prune on the appended chain tip makes retention track blocks that STAND.
+     */
+    default void pruneToChainTip(long chainTip) {
+    }
+
+    /**
      * Whether this domain is wired on this node. False only for the absent singletons that stand in
      * for a missing processor, so the engine and executor need no null checks.
      *

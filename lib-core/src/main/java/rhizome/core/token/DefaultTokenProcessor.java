@@ -32,7 +32,6 @@ public final class DefaultTokenProcessor implements TokenProcessor {
     private final ConcurrentNavigableMap<Long, List<TokenEvent>> eventsByHeight = new ConcurrentSkipListMap<>();
     private final ConcurrentNavigableMap<Long, List<TokenStore.TokenOp>> changesByHeight =
         new ConcurrentSkipListMap<>();
-    private long lastCommittedHeight = -1;
 
     /**
      * Byte budgets on the two retained maps, mirroring {@code WasmContractProcessor}'s. Height
@@ -52,7 +51,7 @@ public final class DefaultTokenProcessor implements TokenProcessor {
     /** Serializes every counter mutation so a counter never drifts from its map. */
     private final Object retentionLock = new Object();
 
-    /** Blocks between amortized durable interval prunes ({@code pruneJournals}); see commit. */
+    /** Blocks between amortized durable interval prunes ({@code pruneJournals}); see pruneToChainTip. */
     static final long PRUNE_INTERVAL = 32;
     private long lastIntervalPruneCutoff;
 
@@ -212,11 +211,18 @@ public final class DefaultTokenProcessor implements TokenProcessor {
             retainEvents(blockHeight, currentEvents);
         }
         currentEvents = new ArrayList<>();
-        lastCommittedHeight = Math.max(lastCommittedHeight, blockHeight);
-        long cutoff = lastCommittedHeight - retainDepth;
+        // Deliberately NO retention prune here: this commit may still be reverted within the
+        // caller's critical section (the stampStateRoot dry run, an addBlock state-root
+        // rejection), so pruning must key on the appended chain tip — the engine drives it
+        // post-append via {@link #pruneToChainTip}.
+    }
+
+    @Override
+    public void pruneToChainTip(long chainTip) {
+        long cutoff = chainTip - retainDepth;
         if (cutoff > 0) {
             synchronized (retentionLock) {
-                // `<= cutoff`, not `< cutoff`: keep EXACTLY retainDepth heights, (cutoff, last].
+                // `<= cutoff`, not `< cutoff`: keep EXACTLY retainDepth heights, (cutoff, chainTip].
                 // The strict-less-than form kept one height too many — the off-by-one the contract
                 // processor fixed in audit F10 and this copy never picked up.
                 dropThrough(eventsByHeight, cutoff, DefaultTokenProcessor::eventBytes,
