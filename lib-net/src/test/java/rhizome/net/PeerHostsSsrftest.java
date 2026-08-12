@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.net.InetAddress;
 
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -15,6 +16,12 @@ import org.junit.jupiter.api.Test;
  * must not bypass the v4 rules.
  */
 class PeerHostsSsrftest {
+
+    /** The resolution cache is process-wide; primed names must be this class's own. */
+    @BeforeEach
+    void clearResolutionCache() {
+        PeerHosts.resetCacheForTests();
+    }
 
     private static boolean routable(String literal) throws Exception {
         return PeerHosts.isRoutable(InetAddress.getByName(literal));

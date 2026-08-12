@@ -7,9 +7,16 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.net.InetAddress;
 import java.util.concurrent.atomic.AtomicLong;
 
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 class PeerBanListTest {
+
+    /** The resolution cache is process-wide; primed names must be this class's own. */
+    @BeforeEach
+    void clearResolutionCache() {
+        PeerHosts.resetCacheForTests();
+    }
 
     @Test
     void bansOnceScoreCrossesThreshold() {

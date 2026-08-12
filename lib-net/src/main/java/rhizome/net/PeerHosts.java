@@ -60,6 +60,20 @@ final class PeerHosts {
     /** A cached resolution; {@code addrs == null} marks a cached FAILURE (negative entry). */
     private record CacheEntry(InetAddress[] addrs, long expiresAtNanos) {}
 
+    /**
+     * The resolution cache. Static on purpose — one JVM has one resolver, one TTL policy and one
+     * eviction bound, and every {@code PeerHosts} entry point is a static utility called from
+     * PeerRegistry, PeerBanList, PeerDiscovery, PeerBroadcaster and HttpPeerSource. Making it
+     * per-node would give two nodes in one process two views of DNS for no gain.
+     *
+     * <p>What it lacked was a way to put it back. It is the only mutable state in this class, it is
+     * written by {@link #primeCacheForTests} and by every real resolution, and nothing ever cleared
+     * it — so in a test JVM (one fork per module) a primed name, a cached negative or a 6000-entry
+     * eviction sweep from one test class was visible to every class that ran after it. Nothing fails
+     * today because each test happens to prime and assert inside one method, but the coupling is
+     * real: {@code PeerHostsCacheBoundTest} evicts every entry any other class primed.
+     * {@link #resetCacheForTests} is that missing handle.
+     */
     private static final Map<String, CacheEntry> DNS_CACHE = Collections.synchronizedMap(
         new LinkedHashMap<String, CacheEntry>(64, 0.75f, true) {
             @Override
@@ -105,6 +119,15 @@ final class PeerHosts {
     /** Visible for testing: number of cached DNS entries (bounded by {@link #MAX_ENTRIES}). */
     static int cachedEntryCount() {
         return DNS_CACHE.size();
+    }
+
+    /**
+     * Visible for testing: empties the resolution cache, so a test class establishes its own DNS
+     * answers instead of inheriting whatever ran before it in the same JVM. Every test that reads
+     * or primes cache state calls this in {@code @BeforeEach}.
+     */
+    static void resetCacheForTests() {
+        DNS_CACHE.clear();
     }
 
     /** Visible for testing: seed the resolution cache for {@code host}. Lets a test exercise the

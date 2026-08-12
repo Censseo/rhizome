@@ -1,11 +1,13 @@
 package rhizome.net;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.net.UnknownHostException;
 
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -18,8 +20,20 @@ import org.junit.jupiter.api.Test;
  */
 class PeerHostsCacheBoundTest {
 
+    /**
+     * The resolution cache is process-wide, so without this every assertion below would be about
+     * whatever the previously-run test class left in it — and this class in particular sweeps
+     * 6000 entries through a 4096-entry LRU, evicting every name any other class primed.
+     */
+    @BeforeEach
+    void clearResolutionCache() {
+        PeerHosts.resetCacheForTests();
+    }
+
     @Test
     void dnsCacheStaysBoundedUnderManyDistinctHosts() {
+        assertEquals(0, PeerHosts.cachedEntryCount(),
+            "each test starts from an empty cache, not from its predecessor's leftovers");
         int distinct = 6_000; // comfortably above the 4096 cap
         for (int i = 0; i < distinct; i++) {
             String literal = "10." + ((i >> 16) & 0xFF) + "." + ((i >> 8) & 0xFF) + "." + (i & 0xFF);
