@@ -111,9 +111,9 @@ class SnapshotApiTest {
             assertEquals(ExecutionStatus.SUCCESS, engine.addBlock(b));
         }
 
-        node = new NodeService(engine, new MemPool(PARAMS, new SignatureVerifier(), engine, 1000));
         snapshotSource = new DomainStateAdapter(ledger, nonces, boxStore, tokenStore, null, null);
-        node.setSnapshotSource(snapshotSource);
+        node = new NodeService(engine, new MemPool(PARAMS, new SignatureVerifier(), engine, 1000),
+            NodeSources.builder().snapshotSource(snapshotSource).build());
 
         try (ServerSocket probe = new ServerSocket(0)) {
             port = probe.getLocalPort();

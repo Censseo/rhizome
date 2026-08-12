@@ -383,8 +383,8 @@ class NodeApiTest {
         var contract = PublicAddress.random();
         var log = new rhizome.core.blockchain.ContractProcessor.ContractLog(
             contract, "count".getBytes(), new byte[] {1, 0, 0, 0, 0, 0, 0, 0});
-        var node = new NodeService(engine, mempool);
-        node.setLogSource(h -> h == 1 ? List.of(log) : List.of());
+        var node = new NodeService(engine, mempool, NodeSources.builder()
+            .logSource(h -> h == 1 ? List.of(log) : List.of()).build());
         var s = NodeApi.servlet(eventloop, node);
 
         // ?height=1 → that block's logs.
@@ -596,8 +596,7 @@ class NodeApiTest {
                 return ContractResult.ok(1, new byte[0], null);
             }
         };
-        var node = new NodeService(engine, mempool);
-        node.setContracts(blocking);
+        var node = new NodeService(engine, mempool, NodeSources.builder().contracts(blocking).build());
 
         // Occupy every admission slot: the first dry-run blocks inside the consensus lock, the
         // rest park on it holding their permits.

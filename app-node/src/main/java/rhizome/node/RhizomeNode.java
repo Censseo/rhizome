@@ -254,31 +254,6 @@ public final class RhizomeNode implements AutoCloseable {
                 store.nonceStore(), snapshot, null, System::currentTimeMillis, verifier, contractProcessor,
                 boxProcessor, tokenProcessor, stateAccumulator);
             var mempool = new MemPool(config.params(), verifier, engine, config.mempoolSize());
-            var service = new NodeService(engine, mempool);
-            opened.push(service::close);
-            // Snapshot spools live with the stores, not the OS temp dir (often a tmpfs → the whole
-            // state would silently be back in RAM); the setter also sweeps SIGKILL leftovers.
-            try {
-                service.setSnapshotSpoolDir(Path.of(config.dataDir(), "snapshots"));
-            } catch (java.io.IOException e) {
-                throw new IllegalStateException(
-                    "cannot create snapshot spool dir under " + config.dataDir(), e);
-            }
-            // Expose contract event logs and box lifecycle events (by block height) so agents
-            // can watch on-chain state on one feed.
-            service.setLogSource(contractProcessor::logs);
-            // Dashboard introspection: deployed code lookup for GET /contract.
-            service.setCodeSource(contractProcessor::codeAt);
-            service.setBoxEventSource(boxProcessor::events);
-            service.setTokenEventSource(tokenProcessor::events);
-            // Read-only dry-run calls (query contract state without a transaction).
-            service.setContracts(contractProcessor);
-            // Snap-sync source: this node can materialise and serve full-state snapshots,
-            // verifiable by peers against the state root committed in the pivot header.
-            service.setSnapshotSource(new rhizome.core.state.snapshot.DomainStateAdapter(
-                store.ledger(), store.nonceStore(), boxStore, tokenStore,
-                new rhizome.vm.ContractStateAdapter(contractStore), null));
-
             // Every node keeps a live peer set (seeded from config), serves /peers and
             // accepts announcements, so the network can self-organise from a few seeds.
             var banList = new PeerBanList(BAN_THRESHOLD, 60 * 60 * 1000L, 4096);
@@ -288,7 +263,6 @@ public final class RhizomeNode implements AutoCloseable {
             var registry = new PeerRegistry(config.selfUrl(), 128, banList, blockPrivatePeers);
             // Config peers are trusted seeds: protected from eclipse eviction and SSRF filtering.
             registry.addSeeds(config.peers());
-            service.setPeers(registry);
 
             // Re-broadcast blocks/transactions accepted from RPC (flood; loops terminate because a
             // peer that already has an item rejects it and won't gossip on). Assembled here rather
@@ -296,8 +270,35 @@ public final class RhizomeNode implements AutoCloseable {
             // nothing but the peer set and the config, and no request can arrive before start().
             var broadcaster = new PeerBroadcaster(registry::snapshot, blockPrivatePeers, peerTokenPolicy);
             opened.push(broadcaster::close);
-            service.setOnBlockAccepted(broadcaster::broadcastBlock);
-            service.setOnTransactionAccepted(broadcaster::broadcastTransaction);
+
+            var service = new NodeService(engine, mempool, AdmissionControl.defaults(),
+                NodeSources.builder()
+                    .peers(registry)
+                    // Contract event logs and box/token lifecycle events by height, so agents can
+                    // watch on-chain state on one feed.
+                    .logSource(contractProcessor::logs)
+                    .boxEventSource(boxProcessor::events)
+                    .tokenEventSource(tokenProcessor::events)
+                    // Dashboard introspection: deployed code lookup for GET /contract.
+                    .codeSource(contractProcessor::codeAt)
+                    // Read-only dry-run calls (query contract state without a transaction).
+                    .contracts(contractProcessor)
+                    // Snap-sync source: this node can materialise and serve full-state snapshots,
+                    // verifiable by peers against the state root committed in the pivot header.
+                    .snapshotSource(new rhizome.core.state.snapshot.DomainStateAdapter(
+                        store.ledger(), store.nonceStore(), boxStore, tokenStore,
+                        new rhizome.vm.ContractStateAdapter(contractStore), null))
+                    .build(),
+                new NodeListeners(broadcaster::broadcastBlock, broadcaster::broadcastTransaction));
+            opened.push(service::close);
+            // Snapshot spools live with the stores, not the OS temp dir (often a tmpfs → the whole
+            // state would silently be back in RAM); the setter also sweeps SIGKILL leftovers.
+            try {
+                service.setSnapshotSpoolDir(Path.of(config.dataDir(), "snapshots"));
+            } catch (java.io.IOException e) {
+                throw new IllegalStateException(
+                    "cannot create snapshot spool dir under " + config.dataDir(), e);
+            }
 
             java.util.Set<String> allowedHosts = allowedHosts(config);
             // Surface the effective DNS-rebinding allowlist at startup: it now also covers the

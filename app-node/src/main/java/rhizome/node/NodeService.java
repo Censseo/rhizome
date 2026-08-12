@@ -24,15 +24,10 @@ public final class NodeService {
 
     private final ChainEngine engine;
     private final MemPool mempool;
-    private volatile java.util.function.Consumer<Block> onBlockAccepted;
-    private volatile java.util.function.Consumer<Transaction> onTransactionAccepted;
-    private volatile PeerRegistry peers;
-    private volatile java.util.function.LongFunction<List<ContractLog>> logSource;
-    private volatile java.util.function.Function<PublicAddress, byte[]> codeSource;
-    private volatile java.util.function.LongFunction<List<rhizome.core.box.BoxProcessor.BoxEvent>> boxEventSource;
-    private volatile java.util.function.LongFunction<List<rhizome.core.token.TokenProcessor.TokenEvent>> tokenEventSource;
-    private volatile rhizome.core.blockchain.ContractProcessor contracts;
-    private volatile rhizome.core.state.snapshot.StateSource snapshotSource;
+    /** The read-side collaborators, fixed at assembly; see {@link NodeSources}. */
+    private final NodeSources sources;
+    /** The gossip fan-out, fixed at assembly; see {@link NodeListeners}. */
+    private final NodeListeners listeners;
     private volatile java.nio.file.Path snapshotSpoolDir;
     private volatile MaterializedSnapshot snapshot;
 
@@ -146,11 +141,22 @@ public final class NodeService {
     private final AdmissionControl admission;
 
     public NodeService(ChainEngine engine, MemPool mempool) {
-        this(engine, mempool, AdmissionControl.defaults());
+        this(engine, mempool, AdmissionControl.defaults(), NodeSources.none(), NodeListeners.none());
+    }
+
+    public NodeService(ChainEngine engine, MemPool mempool, NodeSources sources) {
+        this(engine, mempool, AdmissionControl.defaults(), sources, NodeListeners.none());
     }
 
     NodeService(ChainEngine engine, MemPool mempool, AdmissionControl admission) {
+        this(engine, mempool, admission, NodeSources.none(), NodeListeners.none());
+    }
+
+    public NodeService(ChainEngine engine, MemPool mempool, AdmissionControl admission,
+                       NodeSources sources, NodeListeners listeners) {
         this.admission = admission;
+        this.sources = sources;
+        this.listeners = listeners;
         this.engine = engine;
         this.mempool = mempool;
     }
@@ -164,39 +170,17 @@ public final class NodeService {
         return admission.tryRead(cost);
     }
 
-    /** Called when a freshly submitted block/transaction is accepted (for gossip). */
-    public void setOnBlockAccepted(java.util.function.Consumer<Block> listener) {
-        this.onBlockAccepted = listener;
-    }
 
-    public void setOnTransactionAccepted(java.util.function.Consumer<Transaction> listener) {
-        this.onTransactionAccepted = listener;
-    }
 
-    public void setPeers(PeerRegistry registry) {
-        this.peers = registry;
-    }
 
-    /** Source of contract event logs by block height (the contract processor). */
-    public void setLogSource(java.util.function.LongFunction<List<ContractLog>> source) {
-        this.logSource = source;
-    }
 
-    /** Source of deployed contract code by address (the contract store). */
-    public void setCodeSource(java.util.function.Function<PublicAddress, byte[]> source) {
-        this.codeSource = source;
-    }
 
     /** Deployed code at {@code contract}, or {@code null} if none / no store wired. */
     public byte[] contractCode(PublicAddress contract) {
-        var source = codeSource;
+        var source = sources.codeSource();
         return source == null ? null : source.apply(contract);
     }
 
-    /** Source of box lifecycle events by block height (the box processor). */
-    public void setBoxEventSource(java.util.function.LongFunction<List<rhizome.core.box.BoxProcessor.BoxEvent>> source) {
-        this.boxEventSource = source;
-    }
 
     /**
      * Event logs emitted by a block: contract logs plus box lifecycle events (mapped
@@ -204,9 +188,9 @@ public final class NodeService {
      * the event type as topic, and the box id as data), so agents watch both on one feed.
      */
     public List<ContractLog> logsAt(long height) {
-        var logs = logSource;
-        var boxes = boxEventSource;
-        var tokens = tokenEventSource;
+        var logs = sources.logSource();
+        var boxes = sources.boxEventSource();
+        var tokens = sources.tokenEventSource();
         List<ContractLog> out = new ArrayList<>(logs == null ? List.of() : logs.apply(height));
         if (boxes != null) {
             for (var e : boxes.apply(height)) {
@@ -223,10 +207,6 @@ public final class NodeService {
         return out;
     }
 
-    /** Source of token lifecycle events by block height (the token processor). */
-    public void setTokenEventSource(java.util.function.LongFunction<List<rhizome.core.token.TokenProcessor.TokenEvent>> source) {
-        this.tokenEventSource = source;
-    }
 
     /** Committed metadata for {@code tokenId}, or {@code null}. */
     public rhizome.core.token.TokenMeta tokenMeta(byte[] tokenId) {
@@ -277,14 +257,10 @@ public final class NodeService {
         return engine.stateProof(domain, rawKey);
     }
 
-    /** The contract processor, for read-only dry-run calls. */
-    public void setContracts(rhizome.core.blockchain.ContractProcessor contracts) {
-        this.contracts = contracts;
-    }
 
     /** Whether read-only contract calls are available (a contract processor is wired). */
     public boolean dryRunAvailable() {
-        return contracts != null;
+        return sources.contracts() != null;
     }
 
     /**
@@ -317,7 +293,7 @@ public final class NodeService {
         }
         try {
             return java.util.Optional.of(
-                engine.withConsistentView(() -> contracts.dryRun(from, to, input, value, gasLimit)));
+                engine.withConsistentView(() -> sources.contracts().dryRun(from, to, input, value, gasLimit)));
         } finally {
             admission.releaseDryRunSlot();
         }
@@ -415,7 +391,8 @@ public final class NodeService {
 
     /** Peer base URLs this node knows (empty if discovery is not enabled). */
     public java.util.List<String> knownPeers() {
-        return peers == null ? java.util.List.of() : peers.snapshot();
+        PeerRegistry registry = sources.peers();
+        return registry == null ? java.util.List.of() : registry.snapshot();
     }
 
     /**
@@ -424,7 +401,8 @@ public final class NodeService {
      * full {@link #knownPeers()} snapshot (audit S-6).
      */
     public java.util.List<String> publicPeers() {
-        return peers == null ? java.util.List.of() : peers.publicSnapshot();
+        PeerRegistry registry = sources.peers();
+        return registry == null ? java.util.List.of() : registry.publicSnapshot();
     }
 
     /**
@@ -433,7 +411,7 @@ public final class NodeService {
      * {@link #peerAdmission}); the registry decides off-loop whether the peer is actually added.
      */
     public void addPeer(String url) {
-        PeerRegistry registry = peers;
+        PeerRegistry registry = sources.peers();
         if (registry == null) {
             return;
         }
@@ -509,10 +487,6 @@ public final class NodeService {
         return engine.prunedBelow();
     }
 
-    /** Wires the state source that snapshot materialisation exports from. */
-    public void setSnapshotSource(rhizome.core.state.snapshot.StateSource source) {
-        this.snapshotSource = source;
-    }
 
     /**
      * Wires the directory snapshot spools live in (the node's data dir, alongside the stores —
@@ -552,7 +526,7 @@ public final class NodeService {
      * cleans up the partial file and keeps the previous snapshot.
      */
     public boolean materializeSnapshot() {
-        var source = snapshotSource;
+        var source = sources.snapshotSource();
         if (source == null || engine.stateRoot() == null) {
             return false;
         }
@@ -759,7 +733,7 @@ public final class NodeService {
     public ExecutionStatus submitTransaction(Transaction transaction) {
         ExecutionStatus status = mempool.addTransaction(transaction);
         if (status == ExecutionStatus.SUCCESS) {
-            notify(onTransactionAccepted, transaction);
+            notify(listeners.onTransactionAccepted(), transaction);
         }
         return status;
     }
@@ -806,7 +780,7 @@ public final class NodeService {
         ExecutionStatus status = engine.addBlock(block);
         if (status == ExecutionStatus.SUCCESS) {
             mempool.onBlockApplied(block);
-            notify(onBlockAccepted, block);
+            notify(listeners.onBlockAccepted(), block);
         } else {
             // A block that didn't extend our tip may be a valid sibling that lost the
             // race; keep it (PoW-gated inside) so a later block can cite it as an uncle.

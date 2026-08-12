@@ -108,8 +108,11 @@ class SnapSyncIntegrationTest {
             genesisSnapshot, null, clock::get, null, null,
             new DefaultBoxProcessor(boxStore, PARAMS), new DefaultTokenProcessor(tokenStore, PARAMS), accumulator);
 
-        minerNode = new NodeService(minerEngine, new MemPool(PARAMS, new rhizome.core.blockchain.SignatureVerifier(), minerEngine, 1000));
-        minerNode.setSnapshotSource(new DomainStateAdapter(minerLedger, nonces, boxStore, tokenStore, null, null));
+        minerNode = new NodeService(minerEngine,
+            new MemPool(PARAMS, new rhizome.core.blockchain.SignatureVerifier(), minerEngine, 1000),
+            NodeSources.builder()
+                .snapshotSource(new DomainStateAdapter(minerLedger, nonces, boxStore, tokenStore, null, null))
+                .build());
 
         // 12 blocks with one transfer each, snapshot, then keep mining past the burial window.
         mine(12);

@@ -99,10 +99,8 @@ class BoxApiTest {
         engine = ChainEngine.init(params, new InMemoryLedger(), new InMemoryChainStore(),
             snapshot, null, clock::get, verifier, contracts, boxes, tokens, accumulator);
         mempool = new MemPool(params, verifier, engine, 1000);
-        var node = new NodeService(engine, mempool);
-        node.setContracts(contracts);
-        node.setBoxEventSource(boxes::events);
-        node.setTokenEventSource(tokens::events);
+        var node = new NodeService(engine, mempool, NodeSources.builder()
+            .contracts(contracts).boxEventSource(boxes::events).tokenEventSource(tokens::events).build());
         servlet = NodeApi.servlet(eventloop, node);
 
         eventloop.keepAlive(true);

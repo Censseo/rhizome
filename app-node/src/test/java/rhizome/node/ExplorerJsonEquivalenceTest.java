@@ -102,10 +102,8 @@ class ExplorerJsonEquivalenceTest {
         engine = ChainEngine.init(params, new InMemoryLedger(), new InMemoryChainStore(),
             snapshot, null, clock::get, verifier, processor, boxProcessor, tokenProcessor);
         var mempool = new MemPool(params, verifier, engine, 1000);
-        node = new NodeService(engine, mempool);
-        node.setLogSource(processor::logs);
-        node.setCodeSource(processor::codeAt);
-        node.setContracts(processor);
+        node = new NodeService(engine, mempool, NodeSources.builder()
+            .logSource(processor::logs).codeSource(processor::codeAt).contracts(processor).build());
         servlet = NodeApi.servlet(eventloop, node);
 
         eventloop.keepAlive(true);

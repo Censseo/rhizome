@@ -1,0 +1,44 @@
+package rhizome.node;
+
+import java.util.List;
+import java.util.function.Function;
+import java.util.function.LongFunction;
+
+import rhizome.core.blockchain.ContractProcessor;
+import rhizome.core.box.BoxProcessor;
+import rhizome.core.ledger.PublicAddress;
+import rhizome.core.state.snapshot.StateSource;
+import rhizome.core.token.TokenProcessor;
+import rhizome.net.PeerRegistry;
+import rhizome.core.blockchain.ContractProcessor.ContractLog;
+
+/**
+ * The read-side collaborators a {@link NodeService} serves from: the peer set, the per-height
+ * event and log sources, the contract processor behind dry-runs, and the snapshot exporter.
+ *
+ * <p>These were seven {@code volatile} fields with seven setters, which said something untrue
+ * about them: that they change while the node runs. They do not — every one is written once,
+ * during assembly, and never again. The {@code volatile} was there to publish a field the
+ * constructor could not set, and the setters existed because the assembly was a sequence of
+ * statements rather than a value. Now that {@code RhizomeNode.assemble} builds a graph and returns
+ * it, they can be what they always were: constructor arguments.
+ *
+ * <p>Every component is nullable and every consumer already handles absence — a node with no
+ * contract VM, no boxes or no snapshot source is a legal configuration, not a half-built one, and
+ * {@link #none()} is what a test that cares about none of them passes.
+ */
+@lombok.Builder(toBuilder = true)
+public record NodeSources(
+    PeerRegistry peers,
+    LongFunction<List<ContractLog>> logSource,
+    Function<PublicAddress, byte[]> codeSource,
+    LongFunction<List<BoxProcessor.BoxEvent>> boxEventSource,
+    LongFunction<List<TokenProcessor.TokenEvent>> tokenEventSource,
+    ContractProcessor contracts,
+    StateSource snapshotSource) {
+
+    /** No sources at all: the shape a test that only exercises the chain endpoints needs. */
+    public static NodeSources none() {
+        return NodeSources.builder().build();
+    }
+}
