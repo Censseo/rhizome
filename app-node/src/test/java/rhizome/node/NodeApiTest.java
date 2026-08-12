@@ -476,7 +476,7 @@ class NodeApiTest {
         // accumulates strikes and is shed with 429 BEFORE the body is decoded, for the window.
         var node = new NodeService(engine, mempool);
         var s = NodeApi.servlet(eventloop, node);
-        for (int i = 0; i < NodeService.PUSH_STRIKE_LIMIT; i++) {
+        for (int i = 0; i < PushStrikeTable.STRIKE_LIMIT; i++) {
             Transaction t = Transaction.of(sender, PublicAddress.random(), new TransactionAmount(100),
                 key, new TransactionAmount(0), 1000L, params.chainId() + 5, 0); // wrong chain-id
             t.sign(priv);
@@ -508,15 +508,15 @@ class NodeApiTest {
         Transaction junk = Transaction.of(sender, PublicAddress.random(), new TransactionAmount(100),
             key, new TransactionAmount(0), 1000L, params.chainId() + 5, 0); // wrong chain-id
         junk.sign(priv);
-        for (int i = 0; i < NodeService.PUSH_STRIKE_MAX_KEYS; i++) {
+        for (int i = 0; i < PushStrikeTable.MAX_KEYS; i++) {
             assertEquals(ExecutionStatus.INVALID_CHAIN_ID, node.submitTransaction(junk, "filler-" + i));
         }
         assertEquals(1, node.pushStrikeCount("filler-0"), "the table is full and every filler tracked");
 
-        for (int i = 0; i <= NodeService.PUSH_STRIKE_LIMIT; i++) {
+        for (int i = 0; i <= PushStrikeTable.STRIKE_LIMIT; i++) {
             assertEquals(ExecutionStatus.INVALID_CHAIN_ID, node.submitTransaction(junk, "latecomer"));
         }
-        assertEquals(NodeService.PUSH_STRIKE_LIMIT + 1, node.pushStrikeCount("latecomer"),
+        assertEquals(PushStrikeTable.STRIKE_LIMIT + 1, node.pushStrikeCount("latecomer"),
             "a client arriving after the table filled must still accumulate its own strikes");
         assertTrue(node.isPushShed("latecomer"),
             "filling the strike table with 8192 keys must not exempt the next abuser from the shed");
