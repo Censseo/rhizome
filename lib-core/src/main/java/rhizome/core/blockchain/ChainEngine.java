@@ -662,7 +662,8 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
      * Removes the tip block (never genesis), reverting ledger and nonces. Package-private
      * (audit: unguarded public popBlock): truncating the canonical chain is a
      * synchronizer-only operation — tests and recovery simulations use
-     * {@link ChainEngineTestAccess#popBlock(ChainEngine)}.
+     * {@code ChainEngineTestAccess.popBlock(engine)}, which lives in this module's test fixtures
+     * (not in {@code src/main}, so it is absent from the runtime jar).
      * <p>Crash-consistency ordering (audit: revert-path tear): the height/ledger batch lands
      * FIRST, the peripheral reverts (contract, box, token, state) SECOND. A crash before the
      * pop leaves every store at the old height (staged ledger writes are discarded); a crash

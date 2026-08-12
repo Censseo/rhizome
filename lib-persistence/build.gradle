@@ -29,5 +29,10 @@ dependencies {
     implementation 'commons-io:commons-io:2.16.1'
 
     implementation "org.slf4j:slf4j-api:${slf4jVersion}"
+
+    // ChainEngineTestAccess: the crash-recovery tests here pop the tip, which ChainEngine keeps
+    // package-private on purpose. Test-scoped, so nothing in the published jar can reach it.
+    testImplementation testFixtures(project(':lib-core'))
+
     testRuntimeOnly "ch.qos.logback:logback-classic:${logbackVersion}"
 }

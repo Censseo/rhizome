@@ -1,5 +1,11 @@
 plugins {
     id 'java-library'
+    // ChainEngineTestAccess — the bridge to ChainEngine's package-private popBlock — used to ship
+    // in src/main, so a production binary carried a public entry point to chain truncation for the
+    // sake of tests in other modules. As a test fixture it stays visible to lib-core's own tests
+    // and to lib-persistence's (via testFixtures(project(':lib-core'))), and disappears from the
+    // runtime jar.
+    id 'java-test-fixtures'
 }
 
 dependencies {
@@ -10,7 +16,7 @@ dependencies {
     // Address derivation (PublicAddress) uses BouncyCastle digests directly.
     implementation "org.bouncycastle:bcprov-jdk18on:${bouncycastleVersion}"
 
-    // JSONObject appears in the Serializable contract and domain toJson() methods.
+    // JSONObject appears in the domain toJson()/fromJson() signatures (Block, Transaction, User).
     api "org.json:json:${jsonVersion}"
 
     // API only (no backend): the synchronizers log a failed post-reorg restore at ERROR; the

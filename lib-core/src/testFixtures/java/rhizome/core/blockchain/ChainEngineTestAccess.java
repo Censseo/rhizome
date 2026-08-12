@@ -9,6 +9,12 @@ package rhizome.core.blockchain;
  * truncation. Tests and crash-recovery simulations — including those in other modules, which
  * cannot see package-private members — go through this explicit bridge instead, so every
  * non-synchronizer pop is greppable as deliberate.
+ *
+ * <p>Lives in {@code src/testFixtures} rather than {@code src/main}: it exists for tests, and
+ * shipping it in the runtime jar handed production a public entry point to chain truncation —
+ * exactly the thing the package-private {@code popBlock} was reduced to prevent. Consumers declare
+ * {@code testImplementation testFixtures(project(':lib-core'))}; the same-package access still
+ * works because both source sets land on the classpath under {@code rhizome.core.blockchain}.
  */
 public final class ChainEngineTestAccess {
 
