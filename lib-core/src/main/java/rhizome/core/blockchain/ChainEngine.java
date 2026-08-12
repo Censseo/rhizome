@@ -46,9 +46,36 @@ import static rhizome.core.mempool.ExecutionStatus.*;
  *   <li>{@link Executor} applies transactions transactionally</li>
  * </ol>
  *
- * <p>All public methods are serialised on a single lock: one writer at a time,
- * and reads see consistent state (Pandanite's unlocked getters produced torn
- * reads of its Bigint total work).
+ * <h2>Concurrency: three tiers, not one</h2>
+ *
+ * <p>This javadoc used to say "all public methods are serialised on a single lock". That is the
+ * doctrine — Pandanite's unlocked getters produced torn reads of its BigInteger total work — but it
+ * was not true of about a dozen methods, and a blanket claim that is false in places is worse than
+ * an accurate one, because it stops anyone from asking which places. There are three tiers:
+ *
+ * <ol>
+ *   <li><b>Serialised on the engine lock.</b> Every mutator ({@link #addBlock}, {@code popBlock},
+ *       {@link #stampStateRoot}, {@link #runExclusive}, {@link #withConsistentView}) and every
+ *       getter that reads the ledger, the store or a derived cache ({@link #height},
+ *       {@link #tipHash}, {@link #blockAt}, {@link #headerAt}, {@link #difficulty},
+ *       {@link #totalWork}, {@link #nextNonce}, {@link #confirmedBalance}, {@link #box},
+ *       {@link #tokenBalance}, {@link #voteableParams}, {@link #stateRoot}, …). One writer at a
+ *       time; readers see a consistent snapshot. Every private method reachable from here carries
+ *       {@code assert lock.isHeldByCurrentThread()}, so an unlocked caller fails loudly under
+ *       {@code -ea} instead of silently racing.</li>
+ *   <li><b>Deliberately lock-free, seqlock-guarded.</b> {@link #scanBoxes}, {@link #boxEvents} and
+ *       {@link #tokenEvents} go through {@code readOutsideStamp}: they read the box/token stores
+ *       without the lock and fall back to it only if a {@code stampStateRoot} dry-run overlapped
+ *       the read (see {@code stampVersion}). This is the one intentional exception, and it exists
+ *       because these are the scan-shaped reads that would otherwise hold the consensus lock for a
+ *       whole window of entries.</li>
+ *   <li><b>Lock-free by construction.</b> {@link #isReorgInProgress}, {@link #degradedState},
+ *       {@link #isDegraded}, {@link #boxesEnabled}, {@link #tokensEnabled}, {@link #params},
+ *       {@link #nowMillis} and {@link #setOnBlockApplied} touch only atomics, volatiles or final
+ *       fields. They need no lock and must not take one — {@code isDegraded} and
+ *       {@code isReorgInProgress} are polled from paths that must never block behind a block
+ *       application, which is the whole reason they are atomics.</li>
+ * </ol>
  */
 public final class ChainEngine implements rhizome.core.mempool.AccountView {
 
@@ -73,6 +100,20 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
     private LedgerSnapshot genesisSnapshot;
     private final OrphanPool orphans = new OrphanPool(256);
     private final ReentrantLock lock = new ReentrantLock();
+
+    /**
+     * Message for the {@code assert lock.isHeldByCurrentThread()} guarding every method in tier 1
+     * of the class javadoc. Assertions rather than a runtime check: the whole statement is elided
+     * without {@code -ea}, so the consensus path pays nothing in production or in a GraalVM native
+     * image, while every test run (Gradle enables assertions by default) executes the check on
+     * every block applied, popped, restored and stamped.
+     *
+     * <p>Before this, the repo contained no lock-assertion primitive at all: the discipline that
+     * "these run under the lock" lived entirely in prose, and the only way to find a private mutator
+     * called from an unlocked path was to read every caller.
+     */
+    private static final String LOCK_REQUIRED =
+        "engine lock must be held: this mutates or reads state guarded by it";
 
     /** Next expected account nonce per sender; persisted, updated incrementally on add/pop. */
     private final NonceStore nonceStore;
@@ -292,9 +333,14 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
         } else if (!GenesisBlock.matches(store.blockAt(GenesisBlock.GENESIS_ID), params, snapshot)) {
             throw new IllegalStateException("Stored genesis does not match network parameters and snapshot");
         }
-        engine.reconcilePeripheralStores();
-        engine.rebuildDerivedState();
-        engine.seedGenesisStateRoot();
+        // Under the lock even though nothing else can see the engine yet: these three are tier-1
+        // methods, and "except at boot" is an exception every future reader would have to
+        // rediscover. One uncontended acquisition, once per process.
+        engine.runExclusive(() -> {
+            engine.reconcilePeripheralStores();
+            engine.rebuildDerivedState();
+            engine.seedGenesisStateRoot();
+        });
         return engine;
     }
 
@@ -315,6 +361,8 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
      * exact committed height.
      */
     private void reconcilePeripheralStores() {
+        assert lock.isHeldByCurrentThread() : LOCK_REQUIRED;
+
         long chainHeight = store.height();
         if (stateAccumulator != null) {
             for (long h = stateAccumulator.committedHeight(); h > chainHeight; h--) {
@@ -345,12 +393,16 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
      * a fail-loud into a fail-silent.
      */
     private void revertStateDomains(long height) {
+        assert lock.isHeldByCurrentThread() : LOCK_REQUIRED;
+
         for (BlockStateProcessor domain : stateDomains) {
             domain.revertBlock(height);
         }
     }
 
     private void seedGenesisStateRoot() {
+        assert lock.isHeldByCurrentThread() : LOCK_REQUIRED;
+
         if (stateAccumulator == null || stateAccumulator.isSeeded()) {
             return;
         }
@@ -1180,6 +1232,8 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
 
     /** Current votable params: the last epoch-boundary values, or the network defaults. */
     private long[] currentVoteParams() {
+        assert lock.isHeldByCurrentThread() : LOCK_REQUIRED;
+
         var e = voteParamsByBoundary.lastEntry();
         return e != null ? e.getValue().clone()
             : new long[] {params.storageFeeFactor(), params.minValuePerByte()};
@@ -1187,6 +1241,8 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
 
     /** Pushes the current votable params into the box processor's holder (read at execution). */
     private void syncVoteableHolder() {
+        assert lock.isHeldByCurrentThread() : LOCK_REQUIRED;
+
         var holder = boxProcessor.voteableParams();
         if (holder != null) {
             long[] p = currentVoteParams();
@@ -1200,6 +1256,8 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
      * next block, so the just-executed boundary block still used the previous values.
      */
     private void applyVotingAt(long height) {
+        assert lock.isHeldByCurrentThread() : LOCK_REQUIRED;
+
         long epoch = params.votingEpochLength();
         if (epoch <= 0 || height < epoch || height % epoch != 0) {
             return;
@@ -1254,6 +1312,8 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
      * belt-and-braces: it is the live base value a boundary case would read.
      */
     private void pruneDerivedStateCaches(long tip) {
+        assert lock.isHeldByCurrentThread() : LOCK_REQUIRED;
+
         long mrd = params.maxReorgDepth();
         // Difficulty memo: keep the window's boundaries PLUS the single floor entry below the
         // cutoff — the ideal resume point for the fold. Without it, a lookback wider than the
@@ -1376,6 +1436,8 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
      */
     private List<rhizome.core.state.StateChange> collectStateChanges(
             Block block, java.util.Set<PublicAddress> touched, long height) {
+        assert lock.isHeldByCurrentThread() : LOCK_REQUIRED;
+
         List<rhizome.core.state.StateChange> changes = new ArrayList<>();
         BlockStateChanges.ledger(ledger, touched, changes);
         BlockStateChanges.nonces(block, changes);
@@ -1389,6 +1451,8 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
     // ---- derived state ----
 
     private void rebuildDerivedState() {
+        assert lock.isHeldByCurrentThread() : LOCK_REQUIRED;
+
         totalWork = BigInteger.ZERO;
         baseWork = BigInteger.ZERO;
         uncleWorkByHeight.clear();
@@ -1462,6 +1526,8 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
      * difficulty exception.
      */
     private int computeDifficultyFromChain() {
+        assert lock.isHeldByCurrentThread() : LOCK_REQUIRED;
+
         int lookback = params.difficultyLookback();
         long height = store.height();
         if (height < lookback) {
@@ -1485,6 +1551,8 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
     }
 
     private long medianTimePast() {
+        assert lock.isHeldByCurrentThread() : LOCK_REQUIRED;
+
         int size = mtpWindow.size();
         if (size == 0) {
             return 0; // no chain yet (defensive; the ring holds >= genesis whenever height >= 1)
@@ -1500,6 +1568,8 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
 
     /** The median-time window, rebuilt from headers (boot / reorg base). Ascending height order. */
     private void rebuildMtpWindow() {
+        assert lock.isHeldByCurrentThread() : LOCK_REQUIRED;
+
         mtpWindow.clear();
         long height = store.height();
         long lo = Math.max(GenesisBlock.GENESIS_ID, height - params.medianTimeWindow() + 1);
@@ -1521,6 +1591,8 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
     // ---- account nonces ----
 
     private ExecutionStatus checkAccountNonces(Block block) {
+        assert lock.isHeldByCurrentThread() : LOCK_REQUIRED;
+
         Map<rhizome.core.ledger.PublicAddress, Long> expected = new HashMap<>();
         for (Transaction tx : block.transactions()) {
             if (tx.isTransactionFee() || isSelfAuthorized(tx)) {
@@ -1541,6 +1613,8 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
     }
 
     private void commitAccountNonces(Block block) {
+        assert lock.isHeldByCurrentThread() : LOCK_REQUIRED;
+
         for (Transaction tx : block.transactions()) {
             if (!tx.isTransactionFee() && !isSelfAuthorized(tx)) {
                 nonceStore.set(tx.from(), Math.max(nonceStore.next(tx.from()), tx.nonce() + 1));
@@ -1549,6 +1623,8 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
     }
 
     private void revertAccountNonces(Block block) {
+        assert lock.isHeldByCurrentThread() : LOCK_REQUIRED;
+
         Map<rhizome.core.ledger.PublicAddress, Long> lowest = new HashMap<>();
         for (Transaction tx : block.transactions()) {
             if (!tx.isTransactionFee() && !isSelfAuthorized(tx)) {
@@ -1661,10 +1737,14 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
      * when a bound fails, exactly like {@link #validateUncles}.
      */
     private BigInteger uncleWorkFromRefs(Block block) {
+        assert lock.isHeldByCurrentThread() : LOCK_REQUIRED;
+
         return UncleWeight.structuralWork(block.uncles(), block.difficulty(), params);
     }
 
     private BigInteger validateUncles(Block block) {
+        assert lock.isHeldByCurrentThread() : LOCK_REQUIRED;
+
         List<UncleRef> uncles = block.uncles();
         if (uncles.isEmpty()) {
             return BigInteger.ZERO;
@@ -1764,6 +1844,8 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
 
     /** Recent main-chain hashes an uncle may fork from, and uncle hashes already referenced. */
     private UncleContext uncleContext(int h, int depth, long tipHeight) {
+        assert lock.isHeldByCurrentThread() : LOCK_REQUIRED;
+
         java.util.Set<SHA256Hash> recentChain = new java.util.HashSet<>();
         java.util.Set<SHA256Hash> alreadyReferenced = new java.util.HashSet<>();
         for (long ancestor = Math.max(GenesisBlock.GENESIS_ID, h - depth - 1L); ancestor <= tipHeight; ancestor++) {
@@ -1788,6 +1870,8 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
      */
     private boolean uncleEligible(Block uncle, int h, int depth, long tipHeight, UncleContext ctx,
                                   int nephewDifficulty) {
+        assert lock.isHeldByCurrentThread() : LOCK_REQUIRED;
+
         // Cheapest-first, PoW last — the same DoS-ordering doctrine as addBlock: the memory-hard
         // verifyNonce runs only for orphans every cheap check already accepts, so a pool full of
         // already-referenced or out-of-range orphans costs map lookups, not Pufferfish2 hashes,
@@ -1825,6 +1909,8 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
      * useful entries). Callers hold the engine lock.
      */
     private boolean verifyOrphanPowOnce(Block block, int id) {
+        assert lock.isHeldByCurrentThread() : LOCK_REQUIRED;
+
         SHA256Hash key = block.hash();
         if (verifiedOrphanPow.containsKey(key)) {
             return true;
