@@ -25,10 +25,10 @@ import rhizome.core.transaction.TransactionAmount;
 public final class ContractExecutor {
 
     private final WasmVm vm;
-    private final ContractStore store;
+    private final ContractState store;
     private final Ledger ledger;
 
-    public ContractExecutor(WasmVm vm, ContractStore store, Ledger ledger) {
+    public ContractExecutor(WasmVm vm, ContractState store, Ledger ledger) {
         this.vm = vm;
         this.store = store;
         this.ledger = ledger;

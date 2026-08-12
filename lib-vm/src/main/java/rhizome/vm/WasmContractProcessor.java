@@ -275,7 +275,7 @@ public final class WasmContractProcessor implements ContractProcessor {
      * refused, as is a chain deeper than {@link #MAX_CALL_DEPTH}.
      */
     private CallOutcome runCall(byte[] callerBytes, PublicAddress contract, byte[] input,
-                                long value, GasMeter meter, ContractStore parent,
+                                long value, GasMeter meter, ContractState parent,
                                 java.util.Deque<PublicAddress> stack,
                                 List<ContractProcessor.NativeTransfer> transfers,
                                 java.util.Map<PublicAddress, Long> reservedByContract) {

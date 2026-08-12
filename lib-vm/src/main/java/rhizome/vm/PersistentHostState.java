@@ -22,7 +22,7 @@ import rhizome.core.ledger.PublicAddress;
  */
 public final class PersistentHostState implements HostState {
 
-    private final ContractStore store;
+    private final ContractState store;
     private final PublicAddress contract;
     private final byte[] caller;
     private final byte[] input;
@@ -48,17 +48,17 @@ public final class PersistentHostState implements HostState {
         }
     }
 
-    public PersistentHostState(ContractStore store, PublicAddress contract,
+    public PersistentHostState(ContractState store, PublicAddress contract,
                                byte[] caller, byte[] input, long value) {
         this(store, contract, caller, input, value, null);
     }
 
-    public PersistentHostState(ContractStore store, PublicAddress contract,
+    public PersistentHostState(ContractState store, PublicAddress contract,
                                byte[] caller, byte[] input, long value, BoxReader boxReader) {
         this(store, contract, caller, input, value, boxReader, null);
     }
 
-    public PersistentHostState(ContractStore store, PublicAddress contract,
+    public PersistentHostState(ContractState store, PublicAddress contract,
                                byte[] caller, byte[] input, long value, BoxReader boxReader,
                                NativeTransferHandler transferHandler) {
         this.store = store;

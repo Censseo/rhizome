@@ -58,7 +58,7 @@ public record StorageChange(boolean isCode, PublicAddress contract, byte[] key, 
     }
 
     /** Applies this mutation to {@code store} via its per-operation methods. */
-    public void applyTo(ContractStore store) {
+    public void applyTo(ContractState store) {
         if (isCode) {
             if (value == null) {
                 store.deleteCode(contract);

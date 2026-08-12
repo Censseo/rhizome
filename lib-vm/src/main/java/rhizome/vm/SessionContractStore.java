@@ -9,7 +9,7 @@ import java.util.Map;
 import rhizome.core.ledger.PublicAddress;
 
 /**
- * A write-buffering overlay over a base {@link ContractStore}: reads fall through
+ * A write-buffering overlay over a base {@link ContractState}: reads fall through
  * to the base unless the key was written in this session; writes stay in memory
  * until {@link #flushWithJournal()}. This is the per-block session — the executor
  * flushes it when the block is accepted and drops it otherwise, so contract state
@@ -35,9 +35,9 @@ import rhizome.core.ledger.PublicAddress;
  * boundary). The load-bearing read-side invariant: nothing mutates a store-returned array in
  * place.
  */
-final class SessionContractStore implements ContractStore {
+final class SessionContractStore implements ContractState {
 
-    private final ContractStore base;
+    private final ContractState base;
     // LinkedHashMap, not HashMap: forwardChanges/pendingChanges/captureJournal iterate these maps
     // into CONSENSUS-VISIBLE lists (state-root change order, undo-journal order). HashMap order is
     // a function of hashes and growth history; insertion order is explicit and stable across JVMs.
@@ -56,7 +56,7 @@ final class SessionContractStore implements ContractStore {
         }
     }
 
-    SessionContractStore(ContractStore base) {
+    SessionContractStore(ContractState base) {
         this.base = base;
     }
 
@@ -145,7 +145,7 @@ final class SessionContractStore implements ContractStore {
      * #pendingChanges()} so the processor can hand mutations and journal to {@link
      * ContractStore#applyBlock(long, List, byte[])} and have them commit as one atomic unit.
      *
-     * <p>The storage priors come from ONE batched read ({@link ContractStore#getStorageMulti}):
+     * <p>The storage priors come from ONE batched read ({@link ContractState#getStorageMulti}):
      * a point read per written key made a K-write block cost K store round-trips at every commit
      * (audit: journal-capture N+1). Journal order is the session's insertion order.
      */
