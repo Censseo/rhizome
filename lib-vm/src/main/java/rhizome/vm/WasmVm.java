@@ -933,16 +933,34 @@ public final class WasmVm {
     }
 
     /**
-     * The host ABI names a contract may import from module {@code "env"} — exactly the functions
-     * {@link #hostFunctions} provides. Deploy-time validation rejects anything else (audit:
-     * validateCode controlled neither imports nor exports), so a module demanding an unknown host
-     * capability — or importing a memory/table/global instead of a function — never enters on-chain
-     * state; instantiation would fail it later anyway, but as a per-call revert rather than a
-     * one-time deploy rejection.
+     * The single declaration of the host ABI surface: the functions a contract may import from
+     * module {@code "env"}.
+     *
+     * <p>This list existed twice, about a thousand lines apart — once as the deploy-time import
+     * whitelist and once as the {@code new HostFunction(ENV, "…")} names {@link #hostFunctions}
+     * builds. Nothing tied them together, so adding a thirteenth host function and forgetting the
+     * whitelist would reject at DEPLOY every module that used it — a consensus-visible rule
+     * diverging from the runtime by omission, with no compile error and no test to catch it.
+     * Both sides now derive from here, and {@code hostFunctions} asserts it provides exactly this
+     * set (assertions run in every test; elided in production).
+     *
+     * <p>The wasm name is the constant lowercased. Deploy-time validation rejects anything not in
+     * this set (audit: validateCode controlled neither imports nor exports), so a module demanding
+     * an unknown host capability — or importing a memory/table/global instead of a function —
+     * never enters on-chain state; instantiation would fail it later anyway, but as a per-call
+     * revert rather than a one-time deploy rejection.
      */
-    private static final java.util.Set<String> HOST_IMPORTS = java.util.Set.of(
-        "storage_read", "storage_write", "set_output", "emit_log", "get_caller", "get_input",
-        "get_value", "get_self", "get_deployer", "transfer_value", "call_contract", "box_read");
+    private enum AbiFn {
+        STORAGE_READ, STORAGE_WRITE, SET_OUTPUT, EMIT_LOG, GET_CALLER, GET_INPUT,
+        GET_VALUE, GET_SELF, GET_DEPLOYER, TRANSFER_VALUE, CALL_CONTRACT, BOX_READ;
+
+        /** The {@code env.*} import name this constant stands for. */
+        final String wasmName = name().toLowerCase(java.util.Locale.ROOT);
+    }
+
+    private static final java.util.Set<String> HOST_IMPORTS = java.util.Arrays.stream(AbiFn.values())
+        .map(fn -> fn.wasmName)
+        .collect(java.util.stream.Collectors.toUnmodifiableSet());
 
     /**
      * Enforces the sandbox ABI at validation time: every import must be a FUNCTION import of a
@@ -1769,7 +1787,7 @@ public final class WasmVm {
     }
 
     private HostFunction[] hostFunctions(HostState host, GasMeter gas, ContractCallHandler calls) {
-        HostFunction storageRead = new HostFunction(ENV, "storage_read",
+        HostFunction storageRead = new HostFunction(ENV, AbiFn.STORAGE_READ.wasmName,
             List.of(ValType.I32, ValType.I32, ValType.I32, ValType.I32), List.of(ValType.I32),
             (Instance inst, long... args) -> {
                 Memory mem = inst.memory();
@@ -1799,7 +1817,7 @@ public final class WasmVm {
                 return new long[] {value.length};
             });
 
-        HostFunction storageWrite = new HostFunction(ENV, "storage_write",
+        HostFunction storageWrite = new HostFunction(ENV, AbiFn.STORAGE_WRITE.wasmName,
             List.of(ValType.I32, ValType.I32, ValType.I32, ValType.I32), List.of(),
             (Instance inst, long... args) -> {
                 Memory mem = inst.memory();
@@ -1826,7 +1844,7 @@ public final class WasmVm {
                 return null;
             });
 
-        HostFunction setOutput = new HostFunction(ENV, "set_output",
+        HostFunction setOutput = new HostFunction(ENV, AbiFn.SET_OUTPUT.wasmName,
             List.of(ValType.I32, ValType.I32), List.of(),
             (Instance inst, long... args) -> {
                 int len = asLen(args[1]);
@@ -1837,7 +1855,7 @@ public final class WasmVm {
                 return null;
             });
 
-        HostFunction emitLog = new HostFunction(ENV, "emit_log",
+        HostFunction emitLog = new HostFunction(ENV, AbiFn.EMIT_LOG.wasmName,
             List.of(ValType.I32, ValType.I32, ValType.I32, ValType.I32), List.of(),
             (Instance inst, long... args) -> {
                 Memory mem = inst.memory();
@@ -1856,11 +1874,11 @@ public final class WasmVm {
 
         // Read the call context into contract memory. Each returns the source's true
         // length (so a contract can size its buffer), copying at most out_cap bytes.
-        HostFunction getCaller = new HostFunction(ENV, "get_caller",
+        HostFunction getCaller = new HostFunction(ENV, AbiFn.GET_CALLER.wasmName,
             List.of(ValType.I32, ValType.I32), List.of(ValType.I32),
             (Instance inst, long... args) -> new long[] {copyOut(inst, host.caller(), args[0], args[1], gas)});
 
-        HostFunction getInput = new HostFunction(ENV, "get_input",
+        HostFunction getInput = new HostFunction(ENV, AbiFn.GET_INPUT.wasmName,
             List.of(ValType.I32, ValType.I32), List.of(ValType.I32),
             (Instance inst, long... args) -> new long[] {copyOut(inst, host.input(), args[0], args[1], gas)});
 
@@ -1869,11 +1887,11 @@ public final class WasmVm {
         // `call` instruction itself) — as unprofitable as an empty loop. Adding a charge now
         // would change gasUsed on already-executed calls — a consensus change requiring an
         // activation height, not a fix (audit: get_value metering).
-        HostFunction getValue = new HostFunction(ENV, "get_value",
+        HostFunction getValue = new HostFunction(ENV, AbiFn.GET_VALUE.wasmName,
             List.of(), List.of(ValType.I64),
             (Instance inst, long... args) -> new long[] {host.value()});
 
-        HostFunction getSelf = new HostFunction(ENV, "get_self",
+        HostFunction getSelf = new HostFunction(ENV, AbiFn.GET_SELF.wasmName,
             List.of(ValType.I32, ValType.I32), List.of(ValType.I32),
             (Instance inst, long... args) -> new long[] {copyOut(inst, host.selfAddress(), args[0], args[1], gas)});
 
@@ -1881,7 +1899,7 @@ public final class WasmVm {
         // at deploy, immutable). Copies up to out_cap bytes, returns the true length (0 if unknown).
         // Lets a template gate its init/one-time setup to the deployer so a mempool observer cannot
         // front-run init and seize the contract (audit T1).
-        HostFunction getDeployer = new HostFunction(ENV, "get_deployer",
+        HostFunction getDeployer = new HostFunction(ENV, AbiFn.GET_DEPLOYER.wasmName,
             List.of(ValType.I32, ValType.I32), List.of(ValType.I32),
             (Instance inst, long... args) -> {
                 // Charge the storage-read base like storage_read: deployer() performs a real backing-store
@@ -1895,7 +1913,7 @@ public final class WasmVm {
         // contract's own balance to the 25-byte address at to_ptr. Returns 0 on success, -1 if
         // rejected (unaffordable, bad recipient, or no ledger wired). The move is recorded and
         // applied by the executor on success; a revert discards it (audit T4).
-        HostFunction transferValue = new HostFunction(ENV, "transfer_value",
+        HostFunction transferValue = new HostFunction(ENV, AbiFn.TRANSFER_VALUE.wasmName,
             List.of(ValType.I32, ValType.I32, ValType.I64), List.of(ValType.I32),
             (Instance inst, long... args) -> {
                 int toLen = asLen(args[1]);
@@ -1913,7 +1931,7 @@ public final class WasmVm {
         // box_read(id_ptr, out_ptr, out_cap) -> i32: reads the 32-byte box id at id_ptr,
         // copies the serialized box (up to out_cap bytes) to out_ptr and returns its true
         // length, or -1 if no box exists. A read-only data input — the box is not consumed.
-        HostFunction boxRead = new HostFunction(ENV, "box_read",
+        HostFunction boxRead = new HostFunction(ENV, AbiFn.BOX_READ.wasmName,
             List.of(ValType.I32, ValType.I32, ValType.I32), List.of(ValType.I32),
             (Instance inst, long... args) -> {
                 Memory mem = inst.memory();
@@ -1943,7 +1961,7 @@ public final class WasmVm {
         // failed. The dispatcher runs the callee in its own state frame, so a failed
         // call leaves no trace; gas is shared with this meter, so nested work draws
         // from the same budget (forwarded gas, no resurrection).
-        HostFunction callContract = new HostFunction(ENV, "call_contract",
+        HostFunction callContract = new HostFunction(ENV, AbiFn.CALL_CONTRACT.wasmName,
             List.of(ValType.I32, ValType.I32, ValType.I32, ValType.I32, ValType.I32, ValType.I32),
             List.of(ValType.I32),
             (Instance inst, long... args) -> {
@@ -1968,9 +1986,26 @@ public final class WasmVm {
                 return new long[] {copyOut(inst, output, args[4], args[5], gas)};
             });
 
-        return new HostFunction[] {
+        HostFunction[] provided = {
             storageRead, storageWrite, setOutput, emitLog, getCaller, getInput, getValue, getSelf,
             getDeployer, transferValue, callContract, boxRead};
+        // The runtime surface and the deploy-time whitelist are the same list or the ABI is
+        // inconsistent — a divergence that is otherwise invisible until a contract is rejected
+        // on-chain. Elided without -ea; every contract-executing test runs it.
+        assert providesExactly(provided, HOST_IMPORTS)
+            : "host functions and the import whitelist disagree";
+        return provided;
+    }
+
+    /** True iff {@code provided} supplies each expected {@code env.*} name exactly once. */
+    private static boolean providesExactly(HostFunction[] provided, java.util.Set<String> expected) {
+        java.util.Set<String> names = new java.util.HashSet<>();
+        for (HostFunction fn : provided) {
+            if (!ENV.equals(fn.module()) || !names.add(fn.name())) {
+                return false;
+            }
+        }
+        return names.equals(expected);
     }
 
     /**
