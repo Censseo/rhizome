@@ -120,8 +120,7 @@ public final class RhizomeNode implements AutoCloseable {
      * plus a safety margin, or the node would prune a body it still needs. Enforced here so a
      * misconfiguration fails fast at boot rather than mid-reorg.
      */
-    private static int keepBlocks(NetworkParameters params) {
-        String env = System.getenv("RHIZOME_PRUNE");
+    static int parseKeepBlocks(String env, NetworkParameters params) {
         if (env == null || env.isBlank()) {
             return 0;
         }
@@ -153,7 +152,7 @@ public final class RhizomeNode implements AutoCloseable {
         // /call_readonly open to the whole network. Refuse to start in that posture unless the
         // operator explicitly opts in with RHIZOME_ALLOW_OPEN_API=true (pure P2P relay nodes).
         if (config.apiToken().isEmpty() && !isLoopbackBind(config.bindAddress())
-            && !"true".equalsIgnoreCase(System.getenv("RHIZOME_ALLOW_OPEN_API"))) {
+            && !config.allowOpenApi()) {
             throw new IllegalStateException("refusing to start: the API binds " + config.bindAddress()
                 + " without RHIZOME_API_TOKEN, leaving state-changing/operator routes open to the "
                 + "network. Set RHIZOME_API_TOKEN, bind 127.0.0.1, or set RHIZOME_ALLOW_OPEN_API=true "
@@ -176,11 +175,8 @@ public final class RhizomeNode implements AutoCloseable {
         // instead: only an explicit
         // RHIZOME_ALLOW_PRIVATE_PEERS=true opts out (for local dev/devnets peering over 127.0.0.1 or
         // private IPs via pure PEX — configured RHIZOME_PEERS seeds already bypass the filter).
-        boolean allowPrivate = config.allowPrivatePeers()
-            || "true".equalsIgnoreCase(System.getenv("RHIZOME_ALLOW_PRIVATE_PEERS"));
-        this.blockPrivatePeers = !allowPrivate;
-        String envPeerToken = System.getenv("RHIZOME_PEER_TOKEN");
-        this.peerToken = envPeerToken == null || envPeerToken.isBlank() ? null : envPeerToken.trim();
+        this.blockPrivatePeers = !config.allowPrivatePeers();
+        this.peerToken = config.peerToken().orElse(null);
         this.peerTokenPolicy = new PeerTokenPolicy(peerToken, config.peers());
         if (peerToken != null) {
             for (String peer : config.peers()) {
@@ -197,7 +193,7 @@ public final class RhizomeNode implements AutoCloseable {
             ? SnapshotLoader.fromFile(Path.of(config.snapshotPath().get()))
             : SnapshotLoader.empty(config.params().chainId());
 
-        store = new RocksDbNodeStore(config.dataDir(), keepBlocks(config.params()));
+        store = new RocksDbNodeStore(config.dataDir(), config.keepBlocks());
         contractStore = new RocksDbContractStore(config.dataDir() + "/contracts");
         boxStore = new RocksDbBoxStore(config.dataDir() + "/boxes");
         tokenStore = new RocksDbTokenStore(config.dataDir() + "/tokens");
@@ -215,7 +211,7 @@ public final class RhizomeNode implements AutoCloseable {
         // RHIZOME_SYNC=snap on an empty data dir: adopt a peer's verified state snapshot at
         // a buried pivot instead of replaying history; falls back to full sync when no peer
         // offers a usable snapshot. The engine boot below then starts at the pivot.
-        if ("snap".equalsIgnoreCase(System.getenv("RHIZOME_SYNC")) && store.chainStore().height() == 0) {
+        if (config.snapSync() && store.chainStore().height() == 0) {
             for (String peerUrl : config.peers()) {
                 try {
                     if (SnapshotBootstrap.bootstrap(config.params(), snapshot,
@@ -358,8 +354,8 @@ public final class RhizomeNode implements AutoCloseable {
         // navigation cannot bear a token for; RHIZOME_TRUST_XFF keys rate limits and scan
         // ownership on the first X-Forwarded-For hop, for nodes only reachable through a
         // trusted proxy.
-        boolean protectReads = "true".equalsIgnoreCase(System.getenv("RHIZOME_PROTECT_READS"));
-        boolean trustXff = "true".equalsIgnoreCase(System.getenv("RHIZOME_TRUST_XFF"));
+        boolean protectReads = config.protectReads();
+        boolean trustXff = config.trustXff();
         if (protectReads && config.apiToken().isEmpty()) {
             log.warn("RHIZOME_PROTECT_READS=true without RHIZOME_API_TOKEN has no effect:"
                 + " there is no token to gate reads behind.");
@@ -407,9 +403,8 @@ public final class RhizomeNode implements AutoCloseable {
             producer.setOnProduced(broadcaster::broadcastBlock);
             // Optional parameter vote this miner casts on each block (RHIZOME_VOTE):
             // ±1 storageFeeFactor, ±2 minValuePerByte, 0/absent = abstain.
-            String vote = System.getenv("RHIZOME_VOTE");
-            if (vote != null && !vote.isBlank()) {
-                producer.setVote(parseVote(vote));
+            if (config.vote() != 0) {
+                producer.setVote(config.vote());
             }
             producer.start();
         });
@@ -422,6 +417,9 @@ public final class RhizomeNode implements AutoCloseable {
      * consensus gate rejects as {@code INVALID_VOTE} (audit: unvalidated config).
      */
     static int parseVote(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return 0; // abstain
+        }
         final int vote;
         try {
             vote = Integer.parseInt(raw.trim());
@@ -452,7 +450,7 @@ public final class RhizomeNode implements AutoCloseable {
         // Periodic snapshot materialisation (RHIZOME_SNAPSHOT_EVERY blocks, 0 = never):
         // recapture once the chain has advanced a full interval past the last pivot, so a
         // deep-enough snapshot is always on offer for snap-syncing peers.
-        long snapshotEvery = snapshotEveryBlocks();
+        long snapshotEvery = config.snapshotEveryBlocks();
         if (snapshotEvery > 0) {
             syncScheduler.scheduleWithFixedDelay(guarded(() -> {
                 if (engine.height() >= service.snapshotPivot() + snapshotEvery && service.materializeSnapshot()) {
@@ -478,10 +476,9 @@ public final class RhizomeNode implements AutoCloseable {
     }
 
     /** Blocks between snapshot materialisations, from {@code RHIZOME_SNAPSHOT_EVERY} (default ~1 day). */
-    private static long snapshotEveryBlocks() {
-        String env = System.getenv("RHIZOME_SNAPSHOT_EVERY");
+    static long parseSnapshotEvery(String env) {
         if (env == null || env.isBlank()) {
-            return 17_280;
+            return NodeConfig.DEFAULT_SNAPSHOT_EVERY;
         }
         try {
             return Long.parseLong(env.trim());
@@ -717,8 +714,7 @@ public final class RhizomeNode implements AutoCloseable {
      * the default — the computed default set is the anti-rebinding control.
      */
     private static java.util.Set<String> allowedHosts(NodeConfig config) {
-        String extra = System.getenv("RHIZOME_ALLOWED_HOSTS");
-        if (extra != null && "off".equalsIgnoreCase(extra.trim())) {
+        if (!config.hostAllowlistEnabled()) {
             log.warn("RHIZOME_ALLOWED_HOSTS=off: the DNS-rebinding Host allowlist is disabled — "
                 + "only the Origin/marker CSRF guard remains. Prefer listing the deployment's "
                 + "public hostnames instead.");
@@ -770,14 +766,7 @@ public final class RhizomeNode implements AutoCloseable {
         }
         // Operator-supplied extra authorities (reverse proxy, Docker/NAT): taken verbatim,
         // lower-cased — the operator knows the public name:port clients actually send.
-        if (extra != null && !extra.isBlank()) {
-            for (String h : extra.split(",")) {
-                String trimmed = h.trim().toLowerCase(java.util.Locale.ROOT);
-                if (!trimmed.isEmpty()) {
-                    hosts.add(trimmed);
-                }
-            }
-        }
+        hosts.addAll(config.extraAllowedHosts()); // already trimmed and lower-cased by fromEnv
         return hosts;
     }
 
@@ -896,47 +885,7 @@ public final class RhizomeNode implements AutoCloseable {
     }
 
     public static void main(String[] args) throws Exception {
-        NetworkParametersArg net = NetworkParametersArg.fromEnv();
-        NodeConfig config = NodeConfig.defaults(net.params(),
-            System.getenv().getOrDefault("RHIZOME_DATA", "./data"),
-            parsePort(System.getenv().getOrDefault("RHIZOME_PORT", "3000")));
-
-        String snapshot = System.getenv("RHIZOME_SNAPSHOT");
-        if (snapshot != null && !snapshot.isBlank()) {
-            config = config.withSnapshot(snapshot);
-        }
-        String miner = System.getenv("RHIZOME_MINER");
-        if (miner != null && !miner.isBlank()) {
-            config = config.withMiner(rhizome.core.ledger.PublicAddress.of(miner));
-        }
-        // Producer pacing override, mainly for local devnets (fast blocks behind the
-        // dashboard); consensus rules still bound what other nodes accept.
-        String interval = System.getenv("RHIZOME_BLOCK_INTERVAL_MS");
-        if (interval != null && !interval.isBlank()) {
-            config = config.withBlockIntervalMs(parseBlockIntervalMs(interval));
-        }
-        String peers = System.getenv("RHIZOME_PEERS");
-        if (peers != null && !peers.isBlank()) {
-            config = config.withPeers(java.util.Arrays.stream(peers.split(","))
-                .map(String::trim).filter(s -> !s.isEmpty()).toList());
-        }
-        String advertise = System.getenv("RHIZOME_ADVERTISE");
-        if (advertise != null && !advertise.isBlank()) {
-            config = config.withAdvertisedUrl(parseAdvertisedUrl(advertise));
-        }
-        // Bind address for the HTTP API (default 127.0.0.1 — secure by default, audit H-2);
-        // a public-facing node binds 0.0.0.0 explicitly and must then also set
-        // RHIZOME_API_TOKEN (or RHIZOME_ALLOW_OPEN_API=true for a pure relay).
-        String bind = System.getenv("RHIZOME_BIND_ADDRESS");
-        if (bind != null && !bind.isBlank()) {
-            config = config.withBindAddress(bind.trim());
-        }
-        // Optional bearer token gating the state-changing/operator routes (audit F4).
-        String token = System.getenv("RHIZOME_API_TOKEN");
-        if (token != null && !token.isBlank()) {
-            config = config.withApiToken(token.trim());
-        }
-
+        NodeConfig config = NodeConfig.fromEnv();
         RhizomeNode node = new RhizomeNode(config);
         Runtime.getRuntime().addShutdownHook(new Thread(node::close));
         node.start();
