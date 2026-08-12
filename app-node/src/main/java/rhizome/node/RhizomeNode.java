@@ -47,6 +47,13 @@ import rhizome.vm.WasmVm;
  * <p>Wired with plain constructors rather than a reflection-based DI container,
  * so the assembly stays explicit and GraalVM-native friendly (per the
  * performance-stack analysis).
+ *
+ * <p>The lifecycle has two distinct halves, and keeping them apart is what makes the node
+ * testable. {@link #assemble} builds the whole graph — {@link NodeComponents} — and binds nothing;
+ * {@link #start()} takes that graph and opens the socket, starts the threads and arms the
+ * schedules — {@link NodeRuntime}. Only the second half needs a free port, which is why every
+ * deployment posture the first half decides (an exposed bind, a prune depth, snap-sync, the Host
+ * allowlist) is now reachable from a plain unit test.
  */
 public final class RhizomeNode implements AutoCloseable {
 
@@ -54,46 +61,19 @@ public final class RhizomeNode implements AutoCloseable {
 
     private final NodeConfig config;
 
-    private RocksDbNodeStore store;
-    private RocksDbContractStore contractStore;
-    private RocksDbBoxStore boxStore;
-    private RocksDbTokenStore tokenStore;
-    private RocksDbStateStore stateStore;
-    private ChainEngine engine;
-    private MemPool mempool;
-    private NodeService service;
-    private SignatureVerifier verifier;
-
-    private Eventloop eventloop;
-    private SseLogHub sseHub;
-    private Thread eventloopThread;
-    private HttpServer httpServer;
-    private java.util.concurrent.ExecutorService apiWorkers;
-
-    private BlockProducer producer;
-    private ScheduledExecutorService syncScheduler;
-    private PeerBroadcaster broadcaster;
-    private PeerRegistry registry;
-    private PeerDiscovery discovery;
-    private PeerBanList banList;
-    /** One shared HTTP client for all sync rounds, so a fresh client (and its selector thread +
-     *  connection pool) is not built per peer per round, and keep-alive is reused (audit net #1). */
-    private final java.net.http.HttpClient syncHttpClient = HttpPeerSource.newClient();
-    /** Whether to refuse/ pin private peer hosts (SSRF): on for internet-exposed mainnet. */
-    private boolean blockPrivatePeers;
     /**
-     * Optional bearer token (env {@code RHIZOME_PEER_TOKEN}) for OUTBOUND peer-to-peer requests,
-     * gated by {@link #peerTokenPolicy}: the registry is fed by UNAUTHENTICATED /add_peer and
-     * PEX, so attaching the token to every request (the historical behaviour) leaked the shared
-     * deployment secret — in cleartext over http — to any gossip-learned peer (audit: peer token
-     * exfiltration via gossip). The token now only goes to explicitly configured peers
-     * ({@code config.peers()}) over https; gossip/sync to any other peer is unauthenticated.
-     * When an operator gates the ingest routes behind {@code RHIZOME_API_TOKEN}, configured
-     * peers must therefore be reached over https or their 401-refused pushes simply do not
-     * converge. Never logged.
+     * The assembled object graph, or null before {@link #start()} has built it.
+     *
+     * <p>This field and {@link #runtime} replace twenty-three individually-assigned ones. The
+     * count was the problem: they were written across four lifecycle methods, so reading any one
+     * of them meant knowing which methods had already run, and {@code close()} answered that
+     * question twenty-three separate times — with null checks that a start failing halfway could
+     * satisfy in incoherent combinations.
      */
-    private String peerToken;
-    private PeerTokenPolicy peerTokenPolicy;
+    private NodeComponents components;
+
+    /** The sockets, threads and schedules, or null until {@link #start()} has opened them. */
+    private NodeRuntime runtime;
 
     // Ban-score costs per sync outcome. Serving an invalid chain (bad PoW, broken
     // continuity, claimed-heavy-proved-light) is a protocol violation, but the signal
@@ -146,7 +126,21 @@ public final class RhizomeNode implements AutoCloseable {
         this.config = config;
     }
 
-    public synchronized void start() throws IOException {
+    /**
+     * Builds the node's whole object graph — stores, engine, mempool, services, peer set — and
+     * returns it. Opens no socket, schedules no loop, mines nothing.
+     *
+     * <p>Everything here used to be the first hundred lines of {@code start()}, which is why none
+     * of it was reachable without binding a port: the exposure refusal, the snap-sync bootstrap,
+     * the retention check and the {@code Host} allowlist discovery could only be exercised by a
+     * test willing to take a port, and two postures could not be compared in one JVM. Splitting
+     * the construction from the listening is what makes them plain function calls.
+     *
+     * <p>Failure releases what it opened. A store that opens and is then abandoned keeps its
+     * RocksDB {@code LOCK} until the process exits, so the next attempt on the same data
+     * directory would fail for a reason unrelated to the actual cause.
+     */
+    static NodeComponents assemble(NodeConfig config) throws IOException {
         // Secure-by-default exposure gate (audit H-2): binding a non-loopback address without
         // an API token leaves /add_peer, /scan/register, /submit, /add_transaction and
         // /call_readonly open to the whole network. Refuse to start in that posture unless the
@@ -175,9 +169,18 @@ public final class RhizomeNode implements AutoCloseable {
         // instead: only an explicit
         // RHIZOME_ALLOW_PRIVATE_PEERS=true opts out (for local dev/devnets peering over 127.0.0.1 or
         // private IPs via pure PEX — configured RHIZOME_PEERS seeds already bypass the filter).
-        this.blockPrivatePeers = !config.allowPrivatePeers();
-        this.peerToken = config.peerToken().orElse(null);
-        this.peerTokenPolicy = new PeerTokenPolicy(peerToken, config.peers());
+        boolean blockPrivatePeers = !config.allowPrivatePeers();
+        // Optional bearer token (env RHIZOME_PEER_TOKEN) for OUTBOUND peer-to-peer requests, gated
+        // by the PeerTokenPolicy: the registry is fed by UNAUTHENTICATED /add_peer and PEX, so
+        // attaching the token to every request (the historical behaviour) leaked the shared
+        // deployment secret — in cleartext over http — to any gossip-learned peer (audit: peer
+        // token exfiltration via gossip). The token now only goes to explicitly configured peers
+        // (config.peers()) over https; gossip/sync to any other peer is unauthenticated. When an
+        // operator gates the ingest routes behind RHIZOME_API_TOKEN, configured peers must
+        // therefore be reached over https or their 401-refused pushes simply do not converge.
+        // Never logged.
+        String peerToken = config.peerToken().orElse(null);
+        PeerTokenPolicy peerTokenPolicy = new PeerTokenPolicy(peerToken, config.peers());
         if (peerToken != null) {
             for (String peer : config.peers()) {
                 String canonical = PeerUrls.canonicalize(peer);
@@ -193,100 +196,162 @@ public final class RhizomeNode implements AutoCloseable {
             ? SnapshotLoader.fromFile(Path.of(config.snapshotPath().get()))
             : SnapshotLoader.empty(config.params().chainId());
 
-        store = new RocksDbNodeStore(config.dataDir(), config.keepBlocks());
-        contractStore = new RocksDbContractStore(config.dataDir() + "/contracts");
-        boxStore = new RocksDbBoxStore(config.dataDir() + "/boxes");
-        tokenStore = new RocksDbTokenStore(config.dataDir() + "/tokens");
-        stateStore = new RocksDbStateStore(config.dataDir() + "/state");
-        verifier = new SignatureVerifier();
+        // Opened one at a time and unwound in reverse on any failure below (see the javadoc).
+        java.util.Deque<AutoCloseable> opened = new java.util.ArrayDeque<>();
+        try {
+            var store = opened(opened, new RocksDbNodeStore(config.dataDir(), config.keepBlocks()));
+            var contractStore = opened(opened, new RocksDbContractStore(config.dataDir() + "/contracts"));
+            var boxStore = opened(opened, new RocksDbBoxStore(config.dataDir() + "/boxes"));
+            var tokenStore = opened(opened, new RocksDbTokenStore(config.dataDir() + "/tokens"));
+            var stateStore = opened(opened, new RocksDbStateStore(config.dataDir() + "/state"));
+            var verifier = new SignatureVerifier();
+            opened.push(verifier::shutdown);
 
-        // A snap-sync bootstrap seeds several independent stores that commit separately; if a
-        // prior run was interrupted mid-seed, the on-disk state is inconsistent. Fail fast with
-        // a clear instruction rather than running on it (audit M8).
-        if (store.bootstrapInProgress()) {
-            throw new IOException("a previous snap-sync bootstrap did not complete; the data directory ("
-                + config.dataDir() + ") is inconsistent — delete it and restart to re-bootstrap");
-        }
+            // A snap-sync bootstrap seeds several independent stores that commit separately; if a
+            // prior run was interrupted mid-seed, the on-disk state is inconsistent. Fail fast with
+            // a clear instruction rather than running on it (audit M8).
+            if (store.bootstrapInProgress()) {
+                throw new IOException("a previous snap-sync bootstrap did not complete; the data directory ("
+                    + config.dataDir() + ") is inconsistent — delete it and restart to re-bootstrap");
+            }
 
-        // RHIZOME_SYNC=snap on an empty data dir: adopt a peer's verified state snapshot at
-        // a buried pivot instead of replaying history; falls back to full sync when no peer
-        // offers a usable snapshot. The engine boot below then starts at the pivot.
-        if (config.snapSync() && store.chainStore().height() == 0) {
-            for (String peerUrl : config.peers()) {
-                try {
-                    if (SnapshotBootstrap.bootstrap(config.params(), snapshot,
-                            RocksBootstrapTarget.of(store, boxStore, tokenStore, stateStore),
-                            contractStore, new HttpPeerSource(peerUrl, blockPrivatePeers,
-                                syncHttpClient, peerTokenPolicy),
-                            System.currentTimeMillis(), Path.of(config.dataDir()))) {
-                        break;
+            // One shared HTTP client for all sync rounds, so a fresh client (and its selector
+            // thread + connection pool) is not built per peer per round (audit net #1). Built here
+            // because the snap bootstrap just below is already a peer fetch.
+            java.net.http.HttpClient syncHttpClient = HttpPeerSource.newClient();
+
+            // RHIZOME_SYNC=snap on an empty data dir: adopt a peer's verified state snapshot at
+            // a buried pivot instead of replaying history; falls back to full sync when no peer
+            // offers a usable snapshot. The engine boot below then starts at the pivot.
+            if (config.snapSync() && store.chainStore().height() == 0) {
+                for (String peerUrl : config.peers()) {
+                    try {
+                        if (SnapshotBootstrap.bootstrap(config.params(), snapshot,
+                                RocksBootstrapTarget.of(store, boxStore, tokenStore, stateStore),
+                                contractStore, new HttpPeerSource(peerUrl, blockPrivatePeers,
+                                    syncHttpClient, peerTokenPolicy),
+                                System.currentTimeMillis(), Path.of(config.dataDir()))) {
+                            break;
+                        }
+                    } catch (RuntimeException e) {
+                        log.warn("Snap bootstrap from {} failed: {}", peerUrl, e.toString());
                     }
-                } catch (RuntimeException e) {
-                    log.warn("Snap bootstrap from {} failed: {}", peerUrl, e.toString());
                 }
             }
+
+            var contractProcessor = new WasmContractProcessor(new WasmVm(), contractStore,
+                config.params().maxReorgDepth());
+            var boxProcessor = new DefaultBoxProcessor(boxStore, config.params());
+            var tokenProcessor = new DefaultTokenProcessor(tokenStore, config.params());
+            // Authenticated state root over ledger + boxes + tokens (committed in each header).
+            int stateRetainDepth = config.params().maxReorgDepth();
+            checkStateRetention(stateRetainDepth, config.params().maxReorgDepth());
+            var stateAccumulator = new StateAccumulator(stateStore, stateStore, stateRetainDepth);
+            // Contracts read data boxes (Ergo-style data inputs) through the box processor's
+            // session-aware view, so a box written earlier in the block is visible.
+            contractProcessor.setBoxReader(boxProcessor::get);
+            var engine = ChainEngine.init(config.params(), store.ledger(), store.chainStore(),
+                store.nonceStore(), snapshot, null, System::currentTimeMillis, verifier, contractProcessor,
+                boxProcessor, tokenProcessor, stateAccumulator);
+            var mempool = new MemPool(config.params(), verifier, engine, config.mempoolSize());
+            var service = new NodeService(engine, mempool);
+            opened.push(service::close);
+            // Snapshot spools live with the stores, not the OS temp dir (often a tmpfs → the whole
+            // state would silently be back in RAM); the setter also sweeps SIGKILL leftovers.
+            try {
+                service.setSnapshotSpoolDir(Path.of(config.dataDir(), "snapshots"));
+            } catch (java.io.IOException e) {
+                throw new IllegalStateException(
+                    "cannot create snapshot spool dir under " + config.dataDir(), e);
+            }
+            // Expose contract event logs and box lifecycle events (by block height) so agents
+            // can watch on-chain state on one feed.
+            service.setLogSource(contractProcessor::logs);
+            // Dashboard introspection: deployed code lookup for GET /contract.
+            service.setCodeSource(contractProcessor::codeAt);
+            service.setBoxEventSource(boxProcessor::events);
+            service.setTokenEventSource(tokenProcessor::events);
+            // Read-only dry-run calls (query contract state without a transaction).
+            service.setContracts(contractProcessor);
+            // Snap-sync source: this node can materialise and serve full-state snapshots,
+            // verifiable by peers against the state root committed in the pivot header.
+            service.setSnapshotSource(new rhizome.core.state.snapshot.DomainStateAdapter(
+                store.ledger(), store.nonceStore(), boxStore, tokenStore,
+                new rhizome.vm.ContractStateAdapter(contractStore), null));
+
+            // Every node keeps a live peer set (seeded from config), serves /peers and
+            // accepts announcements, so the network can self-organise from a few seeds.
+            var banList = new PeerBanList(BAN_THRESHOLD, 60 * 60 * 1000L, 4096);
+            // Block SSRF-prone (loopback / private / metadata) discovered peers on mainnet, where
+            // the node is internet-exposed. Testnet/devnets peer over localhost, so they stay
+            // permissive; an operator running mainnet over private infra can opt back in.
+            var registry = new PeerRegistry(config.selfUrl(), 128, banList, blockPrivatePeers);
+            // Config peers are trusted seeds: protected from eclipse eviction and SSRF filtering.
+            registry.addSeeds(config.peers());
+            service.setPeers(registry);
+
+            // Re-broadcast blocks/transactions accepted from RPC (flood; loops terminate because a
+            // peer that already has an item rejects it and won't gossip on). Assembled here rather
+            // than after the socket opens — as startGossip() did — because the broadcaster takes
+            // nothing but the peer set and the config, and no request can arrive before start().
+            var broadcaster = new PeerBroadcaster(registry::snapshot, blockPrivatePeers, peerTokenPolicy);
+            opened.push(broadcaster::close);
+            service.setOnBlockAccepted(broadcaster::broadcastBlock);
+            service.setOnTransactionAccepted(broadcaster::broadcastTransaction);
+
+            java.util.Set<String> allowedHosts = allowedHosts(config);
+            // Surface the effective DNS-rebinding allowlist at startup: it now also covers the
+            // host's LAN interface addresses (audit F9), which are otherwise invisible to the operator.
+            log.info("API allowed Host authorities (DNS-rebinding guard): {}", allowedHosts);
+
+            return new NodeComponents(store, contractStore, boxStore, tokenStore, stateStore,
+                verifier, engine, mempool, service, banList, registry, broadcaster, peerTokenPolicy,
+                syncHttpClient, blockPrivatePeers, allowedHosts);
+        } catch (Throwable t) {
+            releaseQuietly(opened);
+            throw t;
         }
+    }
 
-        var contractProcessor = new WasmContractProcessor(new WasmVm(), contractStore,
-            config.params().maxReorgDepth());
-        var boxProcessor = new DefaultBoxProcessor(boxStore, config.params());
-        var tokenProcessor = new DefaultTokenProcessor(tokenStore, config.params());
-        // Authenticated state root over ledger + boxes + tokens (committed in each header).
-        int stateRetainDepth = config.params().maxReorgDepth();
-        checkStateRetention(stateRetainDepth, config.params().maxReorgDepth());
-        var stateAccumulator = new StateAccumulator(stateStore, stateStore, stateRetainDepth);
-        // Contracts read data boxes (Ergo-style data inputs) through the box processor's
-        // session-aware view, so a box written earlier in the block is visible.
-        contractProcessor.setBoxReader(boxProcessor::get);
-        engine = ChainEngine.init(config.params(), store.ledger(), store.chainStore(),
-            store.nonceStore(), snapshot, null, System::currentTimeMillis, verifier, contractProcessor,
-            boxProcessor, tokenProcessor, stateAccumulator);
-        mempool = new MemPool(config.params(), verifier, engine, config.mempoolSize());
-        service = new NodeService(engine, mempool);
-        // Snapshot spools live with the stores, not the OS temp dir (often a tmpfs → the whole
-        // state would silently be back in RAM); the setter also sweeps SIGKILL leftovers.
-        try {
-            service.setSnapshotSpoolDir(Path.of(config.dataDir(), "snapshots"));
-        } catch (java.io.IOException e) {
-            throw new IllegalStateException(
-                "cannot create snapshot spool dir under " + config.dataDir(), e);
+    /** Records {@code resource} as owned by the in-progress assembly, then returns it. */
+    private static <T extends AutoCloseable> T opened(java.util.Deque<AutoCloseable> owned, T resource) {
+        owned.push(resource);
+        return resource;
+    }
+
+    /**
+     * Unwinds a failed assembly, newest first, so a store opened before the failure does not keep
+     * its RocksDB {@code LOCK} for the life of the process. Best-effort by design: the failure
+     * being unwound is the one worth reporting, so a secondary close failure is logged, never
+     * thrown.
+     */
+    private static void releaseQuietly(java.util.Deque<AutoCloseable> owned) {
+        while (!owned.isEmpty()) {
+            try {
+                owned.pop().close();
+            } catch (Exception e) {
+                log.warn("failed to release a partially assembled component: {}", e.toString());
+            }
         }
-        // Expose contract event logs and box lifecycle events (by block height) so agents
-        // can watch on-chain state on one feed.
-        service.setLogSource(contractProcessor::logs);
-        // Dashboard introspection: deployed code lookup for GET /contract.
-        service.setCodeSource(contractProcessor::codeAt);
-        service.setBoxEventSource(boxProcessor::events);
-        service.setTokenEventSource(tokenProcessor::events);
-        // Read-only dry-run calls (query contract state without a transaction).
-        service.setContracts(contractProcessor);
-        // Snap-sync source: this node can materialise and serve full-state snapshots,
-        // verifiable by peers against the state root committed in the pivot header.
-        service.setSnapshotSource(new rhizome.core.state.snapshot.DomainStateAdapter(
-            store.ledger(), store.nonceStore(), boxStore, tokenStore,
-            new rhizome.vm.ContractStateAdapter(contractStore), null));
+    }
 
-        // Every node keeps a live peer set (seeded from config), serves /peers and
-        // accepts announcements, so the network can self-organise from a few seeds.
-        banList = new PeerBanList(BAN_THRESHOLD, 60 * 60 * 1000L, 4096);
-        // Block SSRF-prone (loopback / private / metadata) discovered peers on mainnet, where
-        // the node is internet-exposed. Testnet/devnets peer over localhost, so they stay
-        // permissive; an operator running mainnet over private infra can opt back in.
-        registry = new PeerRegistry(config.selfUrl(), 128, banList, blockPrivatePeers);
-        // Config peers are trusted seeds: protected from eclipse eviction and SSRF filtering.
-        registry.addSeeds(config.peers());
-        service.setPeers(registry);
-
-        startHttp();
-        startGossip();
-        startProducerIfConfigured();
-        startNetworkLoops();
+    /**
+     * Opens the socket, starts the threads and arms the schedules over an already-assembled graph.
+     *
+     * <p>Everything before this point is {@link #assemble}: this method is only the moment the
+     * node becomes reachable and starts doing work on its own.
+     */
+    public synchronized void start() throws IOException {
+        // Assigned before the runtime is built so that a failure below — a port already in use is
+        // the common one — still leaves close() able to release the stores.
+        components = assemble(config);
+        runtime = startServing(components);
 
         log.info("Rhizome node started: network={} height={} apiPort={} mining={} seedPeers={}",
-            config.params().networkName(), engine.height(), config.apiPort(),
+            config.params().networkName(), components.engine().height(), config.apiPort(),
             config.miner().isPresent(), config.peers().size());
         // The open-bind posture is only reachable through the RHIZOME_ALLOW_OPEN_API override
-        // (start() refuses it otherwise) — surface it loudly (audit H-2).
+        // (assemble() refuses it otherwise) — surface it loudly (audit H-2).
         if (config.apiToken().isEmpty() && !isLoopbackBind(config.bindAddress())) {
             log.warn("RHIZOME_ALLOW_OPEN_API override active: the API binds {} without "
                 + "RHIZOME_API_TOKEN — state-changing/operator routes are open to the network.",
@@ -317,8 +382,14 @@ public final class RhizomeNode implements AutoCloseable {
         }
     }
 
-    private void startHttp() throws IOException {
-        eventloop = Eventloop.create();
+    /**
+     * The whole "become reachable" step: HTTP socket, worker pool, optional producer, network
+     * loops. Every piece is a local until the {@link NodeRuntime} at the end, so a failure part of
+     * the way through cannot leave the node in a half-started state that {@code close()} would
+     * then have to guess at.
+     */
+    private NodeRuntime startServing(NodeComponents c) throws IOException {
+        Eventloop eventloop = Eventloop.create();
         // Consensus-heavy request handlers (block/tx ingest, VM dry-run, lock-guarded explorer
         // reads) run on this bounded pool, NOT on the event-loop thread: a single valid-but-heavy
         // block or one max-gas dry-run would otherwise freeze every route the loop serves —
@@ -327,7 +398,7 @@ public final class RhizomeNode implements AutoCloseable {
         // boundary instead of queueing unbounded latency. Daemon threads; drained in close()
         // before the stores close.
         int workerCount = Math.max(2, Runtime.getRuntime().availableProcessors() / 2);
-        apiWorkers = new java.util.concurrent.ThreadPoolExecutor(workerCount, workerCount,
+        var apiWorkers = new java.util.concurrent.ThreadPoolExecutor(workerCount, workerCount,
             60L, TimeUnit.SECONDS, new java.util.concurrent.ArrayBlockingQueue<>(256),
             r -> {
                 Thread t = new Thread(r, "rhizome-api-worker");
@@ -338,16 +409,15 @@ public final class RhizomeNode implements AutoCloseable {
         // Stream every applied block's logs (plus a heartbeat) to SSE subscribers,
         // whatever path the block arrived by: API submit, gossip, sync or the local
         // producer. The engine listener only enqueues onto the event loop.
-        sseHub = new SseLogHub(eventloop, 256);
-        engine.setOnBlockApplied(height -> sseHub.publish(height, () -> service.logsAt(height)));
+        // The one genuine cycle in the assembly, and the reason the SSE hub cannot move into
+        // assemble(): engine → hub → service → engine, closed here because the hub needs the
+        // event loop this method just created.
+        SseLogHub sseHub = new SseLogHub(eventloop, 256);
+        c.engine().setOnBlockApplied(height -> sseHub.publish(height, () -> c.service().logsAt(height)));
         // Per-client rate limit (fixed 1s window) with a bounded client table
         // (the table cap is the memory-leak fix; the per-window count is generous
         // so honest peers on a shared host are never throttled).
         RateLimiter limiter = new RateLimiter(1000, 1000, 65_536);
-        java.util.Set<String> allowedHosts = allowedHosts(config);
-        // Surface the effective DNS-rebinding allowlist at startup: it now also covers the
-        // host's LAN interface addresses (audit F9), which are otherwise invisible to the operator.
-        log.info("API allowed Host authorities (DNS-rebinding guard): {}", allowedHosts);
         // Opt-in hardening switches (both default off — see NodeApi for the full semantics):
         // RHIZOME_PROTECT_READS gates EVERY route (not just POSTs) behind RHIZOME_API_TOKEN,
         // for private nodes/explorers — except the static SPA/docs shell, which a plain browser
@@ -365,8 +435,8 @@ public final class RhizomeNode implements AutoCloseable {
                 + " X-Forwarded-For header. If this port is reachable WITHOUT passing through"
                 + " the trusted proxy, clients can spoof it and evade per-IP limits.");
         }
-        httpServer = HttpServer.builder(eventloop,
-                NodeApi.servlet(eventloop, service, limiter, sseHub, allowedHosts,
+        HttpServer httpServer = HttpServer.builder(eventloop,
+                NodeApi.servlet(eventloop, c.service(), limiter, sseHub, c.allowedHosts(),
                     config.apiToken().orElse(null), apiWorkers, protectReads, trustXff))
             .withListenAddress(new java.net.InetSocketAddress(config.bindAddress(), config.apiPort()))
             // Bound how long a connection may stall a read or write: body sizes are capped, but
@@ -378,36 +448,92 @@ public final class RhizomeNode implements AutoCloseable {
             .withReadWriteTimeout(java.time.Duration.ofSeconds(30))
             .build();
         eventloop.keepAlive(true);
-        eventloopThread = new Thread(eventloop, "rhizome-http");
+        Thread eventloopThread = new Thread(eventloop, "rhizome-http");
         eventloopThread.setDaemon(true);
         eventloopThread.start();
+
+        // From here the event loop is LIVE, and keepAlive(true) means it spins until told to
+        // stop. A failure past this point — a port already in use is the everyday one — used to
+        // be cleaned up by close(), which could see the half-set fields; now that the runtime is
+        // returned whole, close() will see no runtime at all, so this method unwinds its own.
+        BlockProducer producer = null;
         try {
-            eventloop.submit(() -> httpServer.listen()).get();
-        } catch (Exception e) {
-            throw new IOException("Failed to start HTTP server on port " + config.apiPort(), e);
+            try {
+                eventloop.submit(() -> httpServer.listen()).get();
+            } catch (Exception e) {
+                throw new IOException("Failed to start HTTP server on port " + config.apiPort(), e);
+            }
+
+            if (config.miner().isPresent()) {
+                producer = new BlockProducer(c.engine(), c.mempool(), config.miner().get(),
+                    System::currentTimeMillis, config.blockIntervalMs());
+                producer.setOnProduced(c.broadcaster()::broadcastBlock);
+                // Optional parameter vote this miner casts on each block (RHIZOME_VOTE):
+                // ±1 storageFeeFactor, ±2 minValuePerByte, 0/absent = abstain.
+                if (config.vote() != 0) {
+                    producer.setVote(config.vote());
+                }
+                producer.start();
+            }
+
+            var discovery = new PeerDiscovery(c.registry(), config.selfUrl(), c.blockPrivatePeers(),
+                c.peerTokenPolicy());
+            ScheduledExecutorService syncScheduler = Executors.newScheduledThreadPool(2, r -> {
+                Thread t = new Thread(r, "rhizome-net");
+                t.setDaemon(true);
+                return t;
+            });
+            // Every scheduled task is wrapped in guarded(): a task whose run() lets ANY Throwable
+            // escape is silently unscheduled by ScheduledThreadPoolExecutor — one stray Error would
+            // stop that loop forever, with no log line (audit: scheduler task suppression).
+            syncScheduler.scheduleWithFixedDelay(guarded(this::syncRound, "sync round"),
+                config.syncPeriodMs(), config.syncPeriodMs(), TimeUnit.MILLISECONDS);
+            syncScheduler.scheduleWithFixedDelay(guarded(discovery::round, "peer discovery"),
+                config.syncPeriodMs(), config.syncPeriodMs(), TimeUnit.MILLISECONDS);
+            // Periodic snapshot materialisation (RHIZOME_SNAPSHOT_EVERY blocks, 0 = never):
+            // recapture once the chain has advanced a full interval past the last pivot, so a
+            // deep-enough snapshot is always on offer for snap-syncing peers.
+            long snapshotEvery = config.snapshotEveryBlocks();
+            if (snapshotEvery > 0) {
+                syncScheduler.scheduleWithFixedDelay(guarded(() -> {
+                    if (c.engine().height() >= c.service().snapshotPivot() + snapshotEvery
+                            && c.service().materializeSnapshot()) {
+                        log.info("Materialized state snapshot at height {} ({} chunks)",
+                            c.service().snapshotPivot(), c.service().materializedSnapshot().chunkCount());
+                    }
+                }, "snapshot materialisation"), config.syncPeriodMs(), config.syncPeriodMs(), TimeUnit.MILLISECONDS);
+            }
+
+            return new NodeRuntime(eventloop, eventloopThread, httpServer, apiWorkers, producer,
+                syncScheduler, discovery);
+        } catch (Throwable t) {
+            if (producer != null) {
+                producer.stop();
+            }
+            stopServing(eventloop, eventloopThread, httpServer, apiWorkers);
+            throw t;
         }
     }
 
-    private void startGossip() {
-        broadcaster = new PeerBroadcaster(registry::snapshot, blockPrivatePeers, peerTokenPolicy);
-        // Re-broadcast blocks/transactions accepted from RPC (flood; loops terminate
-        // because a peer that already has an item rejects it and won't gossip on).
-        service.setOnBlockAccepted(broadcaster::broadcastBlock);
-        service.setOnTransactionAccepted(broadcaster::broadcastTransaction);
-    }
-
-    private void startProducerIfConfigured() {
-        config.miner().ifPresent(miner -> {
-            producer = new BlockProducer(engine, mempool, miner, System::currentTimeMillis,
-                config.blockIntervalMs());
-            producer.setOnProduced(broadcaster::broadcastBlock);
-            // Optional parameter vote this miner casts on each block (RHIZOME_VOTE):
-            // ±1 storageFeeFactor, ±2 minValuePerByte, 0/absent = abstain.
-            if (config.vote() != 0) {
-                producer.setVote(config.vote());
-            }
-            producer.start();
-        });
+    /**
+     * Unwinds a failed {@link #startServing}: the same drain-the-loop-then-the-workers order
+     * {@code close()} uses, on a shorter join budget because nothing has served a request yet, so
+     * there is no in-flight body read to wait out.
+     */
+    private static void stopServing(Eventloop eventloop, Thread eventloopThread,
+                                    HttpServer httpServer, java.util.concurrent.ExecutorService apiWorkers) {
+        try {
+            eventloop.submit(() -> httpServer.close());
+            eventloop.keepAlive(false);
+            eventloop.execute(eventloop::breakEventloop);
+            eventloopThread.join(5_000);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (RuntimeException e) {
+            log.warn("failed to unwind the event loop after a failed start: {}", e.toString());
+        } finally {
+            apiWorkers.shutdownNow();
+        }
     }
 
     /**
@@ -431,34 +557,6 @@ public final class RhizomeNode implements AutoCloseable {
                 + "(0 abstain, ±1 storageFeeFactor, ±2 minValuePerByte), was: " + vote);
         }
         return vote;
-    }
-
-    private void startNetworkLoops() {
-        discovery = new PeerDiscovery(registry, config.selfUrl(), blockPrivatePeers, peerTokenPolicy);
-        syncScheduler = Executors.newScheduledThreadPool(2, r -> {
-            Thread t = new Thread(r, "rhizome-net");
-            t.setDaemon(true);
-            return t;
-        });
-        // Every scheduled task is wrapped in guarded(): a task whose run() lets ANY Throwable
-        // escape is silently unscheduled by ScheduledThreadPoolExecutor — one stray Error would
-        // stop that loop forever, with no log line (audit: scheduler task suppression).
-        syncScheduler.scheduleWithFixedDelay(guarded(this::syncRound, "sync round"),
-            config.syncPeriodMs(), config.syncPeriodMs(), TimeUnit.MILLISECONDS);
-        syncScheduler.scheduleWithFixedDelay(guarded(discovery::round, "peer discovery"),
-            config.syncPeriodMs(), config.syncPeriodMs(), TimeUnit.MILLISECONDS);
-        // Periodic snapshot materialisation (RHIZOME_SNAPSHOT_EVERY blocks, 0 = never):
-        // recapture once the chain has advanced a full interval past the last pivot, so a
-        // deep-enough snapshot is always on offer for snap-syncing peers.
-        long snapshotEvery = config.snapshotEveryBlocks();
-        if (snapshotEvery > 0) {
-            syncScheduler.scheduleWithFixedDelay(guarded(() -> {
-                if (engine.height() >= service.snapshotPivot() + snapshotEvery && service.materializeSnapshot()) {
-                    log.info("Materialized state snapshot at height {} ({} chunks)",
-                        service.snapshotPivot(), service.materializedSnapshot().chunkCount());
-                }
-            }, "snapshot materialisation"), config.syncPeriodMs(), config.syncPeriodMs(), TimeUnit.MILLISECONDS);
-        }
     }
 
     /**
@@ -516,6 +614,11 @@ public final class RhizomeNode implements AutoCloseable {
 
     /** One sync round across all known peers; peer failures are isolated. */
     public void syncRound() {
+        // Bound once: this runs on the single sync thread, which the scheduler only arms after
+        // start() has published the graph, so the reference cannot change under the round.
+        final NodeComponents c = components;
+        final ChainEngine engine = c.engine();
+        final PeerRegistry registry = c.registry();
         var synchronizer = new HeaderSynchronizer(engine);
         java.util.List<String> peers = registry.snapshot();
         int n = peers.size();
@@ -561,7 +664,8 @@ public final class RhizomeNode implements AutoCloseable {
             peersTried++;
             try {
                 ChainSynchronizer.Result result = synchronizer.syncFrom(
-                    new HttpPeerSource(peerUrl, blockPrivatePeers, syncHttpClient, peerTokenPolicy));
+                    new HttpPeerSource(peerUrl, c.blockPrivatePeers(), c.syncHttpClient(),
+                        c.peerTokenPolicy()));
                 // Any Result at all means the peer answered well-formed protocol data, so it is
                 // a real Rhizome node and from here on it can earn ban score — including for the
                 // PEER_INVALID case just below (a node that speaks the protocol and lies IS
@@ -629,7 +733,8 @@ public final class RhizomeNode implements AutoCloseable {
         // Eclipsed = this round had no usable sync source at all: either the registry is empty
         // (bans evict, so this is the common shape) or every peer in it was skipped as banned.
         boolean eclipsed = peersTried == 0 && (peersKnown == 0 || peersSkippedBanned == peersKnown);
-        service.recordSyncRound(peersKnown, peersTried, peersSkippedBanned, roundsWithoutProgress, eclipsed);
+        components.service().recordSyncRound(peersKnown, peersTried, peersSkippedBanned,
+            roundsWithoutProgress, eclipsed);
         if (eclipsed) {
             if (!eclipsedReported) {
                 log.warn("sync eclipsed: no usable sync source this round ({} known peer(s), {} skipped "
@@ -663,6 +768,7 @@ public final class RhizomeNode implements AutoCloseable {
      * the registry, which also arms the 5-minute host re-admission cooldown.
      */
     private void penalize(String peerUrl, int points, String reason) {
+        PeerRegistry registry = components.registry();
         if (!registry.isConfirmed(peerUrl)) {
             registry.remove(peerUrl);
             log.debug("Dropped unconfirmed peer {} ({}) — not a protocol-speaking node, not banned",
@@ -678,23 +784,23 @@ public final class RhizomeNode implements AutoCloseable {
 
     /** Runs one peer-discovery round now (otherwise it runs on the network schedule). */
     public void discoverRound() {
-        discovery.round();
+        runtime.discovery().round();
     }
 
     public java.util.List<String> knownPeers() {
-        return registry.snapshot();
+        return components.registry().snapshot();
     }
 
     public PeerBanList banList() {
-        return banList;
+        return components.banList();
     }
 
     public NodeService service() {
-        return service;
+        return components.service();
     }
 
     public ChainEngine engine() {
-        return engine;
+        return components.engine();
     }
 
     public int apiPort() {
@@ -772,33 +878,38 @@ public final class RhizomeNode implements AutoCloseable {
 
     @Override
     public synchronized void close() {
+        // The two holders answer, once each, the question the old twenty-three null checks
+        // answered independently: did this node assemble, and did it start? Every guard below is
+        // one of those two — the sequence, its budgets and its skip conditions are unchanged.
+        final NodeRuntime rt = runtime;
+        final NodeComponents c = components;
         // Stop NEW work first: close the HTTP server and drain the eventloop before touching
         // anything else, so no request handler can be inside a native store read/write while
         // shutdown proceeds (a late /sync read racing the column-family close aborts the JVM).
         // The join budget covers the worst in-flight request: peer body reads are deadline-bound
         // (BodyReadDeadline, 30 s), so a drained eventloop always dies within this window.
-        if (eventloop != null) {
-            eventloop.submit(() -> httpServer.close());
-            eventloop.keepAlive(false);
-            eventloop.execute(eventloop::breakEventloop);
+        if (rt != null) {
+            rt.eventloop().submit(() -> rt.httpServer().close());
+            rt.eventloop().keepAlive(false);
+            rt.eventloop().execute(rt.eventloop()::breakEventloop);
             try {
-                eventloopThread.join(35_000);
+                rt.eventloopThread().join(35_000);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
         }
-        if (producer != null) {
-            producer.stop();
+        if (rt != null && rt.producer() != null) {
+            rt.producer().stop();
         }
         // Drain in-flight API workers (offloaded block/tx ingest, dry-runs, explorer reads)
         // before the stores close: a worker mid-validation may hold the engine lock or sit
         // inside a native RocksDB call, so an undrained pool makes the store close below unsafe
         // in exactly the two ways the syncScheduler branch describes — skip it the same way.
         boolean workersStuck = false;
-        if (apiWorkers != null) {
-            apiWorkers.shutdownNow();
+        if (rt != null) {
+            rt.apiWorkers().shutdownNow();
             try {
-                if (!apiWorkers.awaitTermination(30, TimeUnit.SECONDS)) {
+                if (!rt.apiWorkers().awaitTermination(30, TimeUnit.SECONDS)) {
                     workersStuck = true;
                     log.error("API worker pool still busy after 30 s; the store close will be "
                         + "skipped (native use-after-free / lock-hang risk)");
@@ -812,13 +923,13 @@ public final class RhizomeNode implements AutoCloseable {
         // under a live native call crashes the JVM. shutdownNow() only signals —
         // awaitTermination() is what guarantees no writer is left running.
         boolean syncStuck = false;
-        if (syncScheduler != null) {
-            syncScheduler.shutdownNow();
+        if (rt != null) {
+            rt.syncScheduler().shutdownNow();
             try {
                 // The await budget must exceed the worst in-flight syncRound: peer body reads
                 // are deadline-bound at 30 s (BodyReadDeadline), so a stuck sync always unwinds
                 // within ~45 s.
-                if (!syncScheduler.awaitTermination(45, TimeUnit.SECONDS)) {
+                if (!rt.syncScheduler().awaitTermination(45, TimeUnit.SECONDS)) {
                     // A truly stuck sync thread makes the store close below UNSAFE on two
                     // counts: if it is inside a native RocksDB call, closing the handles under
                     // it is a use-after-free (JVM-level SIGSEGV, not a catchable exception);
@@ -837,49 +948,23 @@ public final class RhizomeNode implements AutoCloseable {
             }
         }
         try {
-            if (discovery != null) {
-                discovery.close(); // stop the PEX fan-out pool (daemon threads, best-effort)
-            }
-            if (broadcaster != null) {
-                broadcaster.close();
-            }
-            if (verifier != null) {
-                verifier.shutdown();
+            if (rt != null) {
+                rt.discovery().close(); // stop the PEX fan-out pool (daemon threads, best-effort)
             }
         } finally {
-            // Release the file-backed state snapshot's spool. Independent of the store-close
-            // guard below: it touches only a temp file, and the eventloop (its only reader) is
-            // already drained above.
-            if (service != null) {
-                service.close();
-            }
-            // Close the stores under the engine lock: producer/sync/eventloop are stopped above,
-            // but a straggler (late gossip task, timed-out eventloop job) could still be queued.
-            // Holding the lock guarantees no thread is inside a native write while the handles
-            // close; a late writer afterwards gets a clean "database is closed" Java exception
-            // instead of corrupting the native heap. Runs even if a step above threw, so the
-            // data directory is never left locked open (audit: incomplete shutdown). SKIPPED
-            // when the sync scheduler never drained: the stuck thread may be inside a native
-            // call (close = SIGSEGV) or holding this very lock (close = shutdown hang) — see
-            // the scheduler branch above.
-            if (engine != null && !syncStuck && !workersStuck) {
-                engine.runExclusive(() -> {
-                    if (store != null) {
-                        store.close();
-                    }
-                    if (contractStore != null) {
-                        contractStore.close();
-                    }
-                    if (boxStore != null) {
-                        boxStore.close();
-                    }
-                    if (tokenStore != null) {
-                        tokenStore.close();
-                    }
-                    if (stateStore != null) {
-                        stateStore.close();
-                    }
-                });
+            // The rest of the sequence — gossip fan-out, verifier pool, the file-backed snapshot
+            // spool, then the stores under the engine lock — belongs to the graph, so it lives
+            // with the graph. The spool release is independent of the store-close guard: it
+            // touches only a temp file, and the eventloop (its only reader) is drained above.
+            //
+            // Closing the stores under the engine lock matters because a straggler (late gossip
+            // task, timed-out eventloop job) could still be queued: holding the lock guarantees
+            // no thread is inside a native write while the handles close, and a late writer
+            // afterwards gets a clean "database is closed" Java exception instead of corrupting
+            // the native heap. SKIPPED when either pool never drained — see the two branches
+            // above for why that is the safer answer.
+            if (c != null) {
+                c.release(!syncStuck && !workersStuck);
             }
         }
     }
@@ -965,12 +1050,5 @@ public final class RhizomeNode implements AutoCloseable {
             default -> throw new IllegalArgumentException(
                 "RHIZOME_NETWORK must be one of mainnet, testnet, devnet — was: " + raw);
         };
-    }
-
-    /** Selects the network from RHIZOME_NETWORK (mainnet|testnet|devnet). */
-    private record NetworkParametersArg(rhizome.core.blockchain.NetworkParameters params) {
-        static NetworkParametersArg fromEnv() {
-            return new NetworkParametersArg(parseNetwork(System.getenv("RHIZOME_NETWORK")));
-        }
     }
 }
