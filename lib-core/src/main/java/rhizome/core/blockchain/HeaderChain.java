@@ -6,7 +6,6 @@ import java.util.List;
 import java.util.function.LongFunction;
 
 import rhizome.core.block.BlockHeader;
-import rhizome.core.block.UncleRef;
 import rhizome.crypto.SHA256Hash;
 
 /**

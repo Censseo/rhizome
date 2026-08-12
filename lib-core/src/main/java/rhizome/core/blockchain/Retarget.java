@@ -99,8 +99,8 @@ final class Retarget {
      * <p>{@code ChainEngine} does NOT call this on its hot path: it maintains the same median over
      * an incrementally-updated primitive ring, because this scan would re-read the window on every
      * added block (audit P6). That divergence is deliberate and is guarded by
-     * {@code MedianTimePastRingTest}, which asserts the ring against this function as the
-     * reference. The engine does use it to rebuild the ring at boot.
+     * {@code RetargetMirrorTest}, which asserts the ring against this function as the
+     * reference (and by {@code MedianTimePastRingTest}, against an independent fold).
      */
     static long medianTimePast(NetworkParameters params, LongFunction<BlockHeader> at, long tip) {
         int window = (int) Math.min(params.medianTimeWindow(), tip);

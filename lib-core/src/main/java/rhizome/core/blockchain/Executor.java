@@ -71,13 +71,12 @@ public final class Executor {
         return executeBlock(block, ledger, alreadyExecuted, params, null, null, null);
     }
 
-
-
     /**
-     * As above, with a {@link BoxProcessor} for the box transaction kinds
-     * (BOX_CREATE/UPDATE/SPEND/COLLECT). When {@code boxProcessor} is null, box
-     * transactions are rejected. Box state is staged in a per-block session that
-     * commits atomically with the block, exactly like contract state.
+     * As above, with a {@link SignatureVerifier} for batch signature checks (skipped when
+     * {@code verifier} is null), a {@link ContractProcessor} for the contract kinds, and a
+     * {@link BoxProcessor} for the box transaction kinds (BOX_CREATE/UPDATE/SPEND/COLLECT).
+     * A null processor rejects that domain's transactions. Box state is staged in a
+     * per-block session that commits atomically with the block, exactly like contract state.
      */
     public static ExecutionStatus executeBlock(Block block, Ledger ledger,
                                                Predicate<SHA256Hash> alreadyExecuted,

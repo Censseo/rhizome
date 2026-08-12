@@ -6,10 +6,8 @@ import java.util.List;
 import java.util.Map;
 
 import rhizome.core.block.Block;
-import rhizome.core.block.BlockImpl;
 import rhizome.crypto.SHA256Hash;
 import rhizome.core.transaction.Transaction;
-import rhizome.core.transaction.TransactionImpl;
 
 /**
  * In-memory {@link ChainStore} — reference implementation for tests and local
