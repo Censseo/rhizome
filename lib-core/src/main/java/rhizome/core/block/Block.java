@@ -8,7 +8,6 @@ import rhizome.core.block.dto.BlockDto;
 import rhizome.crypto.SHA256Hash;
 import rhizome.core.serialization.JsonSink;
 import rhizome.core.serialization.JsonSink.Key;
-import rhizome.core.serialization.Serializable;
 import rhizome.core.transaction.Transaction;
 
 import java.util.List;
@@ -122,7 +121,7 @@ public sealed interface Block permits BlockImpl {
     /**
      * Serializes the block
      */
-    static class BlockSerializer implements Serializable<BlockDto, Block> {
+    static class BlockSerializer {
 
         static final String ID = "id";
         static final String HASH = "hash";
@@ -154,7 +153,6 @@ public sealed interface Block permits BlockImpl {
 
         static BlockSerializer instance = new BlockSerializer();
 
-        @Override
         public BlockDto serialize(Block block) {
             var blockImpl = (BlockImpl) block;
             return new BlockDto(
@@ -170,12 +168,6 @@ public sealed interface Block permits BlockImpl {
             );
         }
     
-        @Override
-        public Block deserialize(BlockDto object) {
-            throw new UnsupportedOperationException("Not implemented");
-        }
-    
-        @Override
         public JSONObject toJson(Block block) {
             var blockImpl = (BlockImpl) block;
             JSONObject result = new JSONObject();

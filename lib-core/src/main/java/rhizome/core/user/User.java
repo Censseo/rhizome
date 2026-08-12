@@ -7,7 +7,6 @@ import org.json.JSONObject;
 import rhizome.crypto.PrivateKey;
 import rhizome.crypto.PublicKey;
 import rhizome.core.ledger.PublicAddress;
-import rhizome.core.serialization.Serializable;
 import rhizome.core.transaction.Transaction;
 import rhizome.core.transaction.TransactionAmount;
 
@@ -64,22 +63,13 @@ public interface User {
     /**
      * Serializes the Transaction
      */
-    static class UserSerializer implements Serializable<JSONObject, User> {
+    static class UserSerializer {
 
         static final String PUBLIC_KEY = "publicKey";
         static final String PRIVATE_KEY = "privateKey";
 
         static UserSerializer instance = new UserSerializer();
 
-        @Override
-        public JSONObject serialize(User object) {
-            throw new UnsupportedOperationException("Unimplemented method 'serialize'");
-        }
-        @Override
-        public User deserialize(JSONObject object) {
-            throw new UnsupportedOperationException("Unimplemented method 'deserialize'");
-        }
-        @Override
         public User fromJson(JSONObject json) {
             // The private key is REQUIRED here: the default toJson omits it, so accepting the
             // public form would silently build a user whose privateKey() is null and NPE later
@@ -96,7 +86,6 @@ public interface User {
          * must never leak its secret into logs/JSON dumps unless the caller explicitly asks for
          * {@link #toJsonWithPrivateKey(User)} (audit: private key serialized in plaintext).
          */
-        @Override
         public JSONObject toJson(User user) {
             var userImpl = (UserImpl) user;
             JSONObject result = new JSONObject();

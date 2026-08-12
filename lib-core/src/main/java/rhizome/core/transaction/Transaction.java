@@ -8,7 +8,6 @@ import rhizome.crypto.SHA256Hash;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.serialization.JsonSink;
 import rhizome.core.serialization.JsonSink.Key;
-import rhizome.core.serialization.Serializable;
 import rhizome.core.transaction.dto.TransactionDto;
 
 public sealed interface Transaction permits TransactionImpl {
@@ -182,7 +181,7 @@ public sealed interface Transaction permits TransactionImpl {
     /**
      * Serializes the Transaction
      */
-    static class TransactionSerializer implements Serializable<TransactionDto, Transaction> {
+    static class TransactionSerializer {
 
         static final String TO = "to";
         static final String AMOUNT = "amount";
@@ -223,7 +222,6 @@ public sealed interface Transaction permits TransactionImpl {
 
         static TransactionSerializer instance = new TransactionSerializer();
 
-        @Override
         public TransactionDto serialize(Transaction transaction) {
             var transactionImpl = (TransactionImpl) transaction;
             return new TransactionDto(
@@ -245,7 +243,6 @@ public sealed interface Transaction permits TransactionImpl {
             );
         }
 
-        @Override
         public Transaction deserialize(TransactionDto transactionDto) {
             return TransactionImpl.builder()
                 // `from` is derived, never read off the wire: under scheme agility it is the only
@@ -272,7 +269,6 @@ public sealed interface Transaction permits TransactionImpl {
                 .build();
         }
     
-        @Override
         public JSONObject toJson(Transaction transaction) {
             var transactionImpl = (TransactionImpl) transaction;    
             JSONObject result = new JSONObject();
