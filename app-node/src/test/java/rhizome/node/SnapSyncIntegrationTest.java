@@ -111,7 +111,8 @@ class SnapSyncIntegrationTest {
         minerNode = new NodeService(minerEngine,
             new MemPool(PARAMS, new rhizome.core.blockchain.SignatureVerifier(), minerEngine, 1000),
             NodeSources.builder()
-                .snapshotSource(new DomainStateAdapter(minerLedger, nonces, boxStore, tokenStore, null, null))
+                .snapshots(SnapshotService.inTempDir(minerEngine,
+                    new DomainStateAdapter(minerLedger, nonces, boxStore, tokenStore, null, null)))
                 .build());
 
         // 12 blocks with one transfer each, snapshot, then keep mining past the burial window.

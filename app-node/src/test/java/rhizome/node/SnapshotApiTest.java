@@ -113,7 +113,9 @@ class SnapshotApiTest {
 
         snapshotSource = new DomainStateAdapter(ledger, nonces, boxStore, tokenStore, null, null);
         node = new NodeService(engine, new MemPool(PARAMS, new SignatureVerifier(), engine, 1000),
-            NodeSources.builder().snapshotSource(snapshotSource).build());
+            NodeSources.builder()
+                .snapshots(SnapshotService.inTempDir(engine, snapshotSource))
+                .build());
 
         try (ServerSocket probe = new ServerSocket(0)) {
             port = probe.getLocalPort();
@@ -189,36 +191,8 @@ class SnapshotApiTest {
         assertEquals(snapBefore.chunkCount(), node.materializedSnapshot().chunkCount());
     }
 
-    @Test
-    void spoolDirIsUsedAndStaleSpoolsAreSweptAtWiring() throws Exception {
-        // The spool dir lives with the node's data (the OS temp dir is often a tmpfs, which
-        // would silently put the whole state back in RAM). A SIGKILLed predecessor leaves
-        // rhizome-snapshot-* files behind; wiring the dir sweeps them exactly once.
-        java.nio.file.Path dir = java.nio.file.Files.createTempDirectory("rhizome-spool-test-");
-        try {
-            java.nio.file.Path stale = java.nio.file.Files.write(
-                dir.resolve("rhizome-snapshot-stale.chunks"), new byte[]{1, 2, 3});
-            java.nio.file.Path unrelated = java.nio.file.Files.write(
-                dir.resolve("unrelated-file"), new byte[]{4});
-
-            node.setSnapshotSpoolDir(dir);
-            assertTrue(java.nio.file.Files.notExists(stale), "stale spool swept at wiring");
-            assertTrue(java.nio.file.Files.exists(unrelated), "unrelated files are untouched");
-
-            assertTrue(node.materializeSnapshot());
-            var snap = node.materializedSnapshot();
-            assertEquals(dir, snap.file().getParent(), "new spools land in the wired dir");
-            assertTrue(java.nio.file.Files.exists(snap.file()));
-        } finally {
-            node.close();
-            try (var entries = java.nio.file.Files.list(dir)) {
-                for (var p : entries.toList()) {
-                    java.nio.file.Files.deleteIfExists(p);
-                }
-            }
-            java.nio.file.Files.deleteIfExists(dir);
-        }
-    }
+    // The spool directory and its stale-spool sweep moved to SnapshotServiceTest with the
+    // mechanism itself: they are about where the export is written, not about serving it.
 
     @Test
     void fileBackedSnapshotServesTheSameBytesAndReplacesItsSpool() {
@@ -229,7 +203,7 @@ class SnapshotApiTest {
         var snap = node.materializedSnapshot();
         assertTrue(java.nio.file.Files.exists(snap.file()), "chunks are spooled to a file");
         var expected = rhizome.core.state.snapshot.StateSnapshotExporter.export(
-            snapshotSource, NodeService.SNAPSHOT_CHUNK_ENTRIES);
+            snapshotSource, SnapshotService.SNAPSHOT_CHUNK_ENTRIES);
         assertEquals(expected.size(), snap.chunkCount(), "same chunking as the in-memory export");
         for (int i = 0; i < expected.size(); i++) {
             assertArrayEquals(expected.get(i).encode(), snap.chunkBytes(i),

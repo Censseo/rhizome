@@ -271,6 +271,21 @@ public final class RhizomeNode implements AutoCloseable {
             var broadcaster = new PeerBroadcaster(registry::snapshot, blockPrivatePeers, peerTokenPolicy);
             opened.push(broadcaster::close);
 
+            // Snapshot spools live with the stores, not the OS temp dir (often a tmpfs → the whole
+            // state would silently be back in RAM); opening the service also sweeps the spools a
+            // SIGKILLed predecessor left behind.
+            final SnapshotService snapshots;
+            try {
+                snapshots = opened(opened, SnapshotService.open(engine,
+                    new rhizome.core.state.snapshot.DomainStateAdapter(
+                        store.ledger(), store.nonceStore(), boxStore, tokenStore,
+                        new rhizome.vm.ContractStateAdapter(contractStore), null),
+                    Path.of(config.dataDir(), "snapshots")));
+            } catch (java.io.IOException e) {
+                throw new IllegalStateException(
+                    "cannot create snapshot spool dir under " + config.dataDir(), e);
+            }
+
             var service = new NodeService(engine, mempool, AdmissionControl.defaults(),
                 NodeSources.builder()
                     .peers(registry)
@@ -285,20 +300,10 @@ public final class RhizomeNode implements AutoCloseable {
                     .contracts(contractProcessor)
                     // Snap-sync source: this node can materialise and serve full-state snapshots,
                     // verifiable by peers against the state root committed in the pivot header.
-                    .snapshotSource(new rhizome.core.state.snapshot.DomainStateAdapter(
-                        store.ledger(), store.nonceStore(), boxStore, tokenStore,
-                        new rhizome.vm.ContractStateAdapter(contractStore), null))
+                    .snapshots(snapshots)
                     .build(),
                 new NodeListeners(broadcaster::broadcastBlock, broadcaster::broadcastTransaction));
             opened.push(service::close);
-            // Snapshot spools live with the stores, not the OS temp dir (often a tmpfs → the whole
-            // state would silently be back in RAM); the setter also sweeps SIGKILL leftovers.
-            try {
-                service.setSnapshotSpoolDir(Path.of(config.dataDir(), "snapshots"));
-            } catch (java.io.IOException e) {
-                throw new IllegalStateException(
-                    "cannot create snapshot spool dir under " + config.dataDir(), e);
-            }
 
             java.util.Set<String> allowedHosts = allowedHosts(config);
             // Surface the effective DNS-rebinding allowlist at startup: it now also covers the

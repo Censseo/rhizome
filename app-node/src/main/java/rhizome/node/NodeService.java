@@ -28,95 +28,13 @@ public final class NodeService {
     private final NodeSources sources;
     /** The gossip fan-out, fixed at assembly; see {@link NodeListeners}. */
     private final NodeListeners listeners;
-    private volatile java.nio.file.Path snapshotSpoolDir;
-    private volatile MaterializedSnapshot snapshot;
-
-    /** Entry bound per snapshot chunk (bytes are bounded separately by the exporter). */
-    static final int SNAPSHOT_CHUNK_ENTRIES = 4096;
-
     /**
-     * A consistent full-state export frozen at one (pivotHeight, stateRoot) point, backed by a
-     * spool file instead of the heap: the exporter's chunks are stream-encoded into the file at
-     * capture time and only their {@code (offset, length)} index is retained (a few bytes per
-     * chunk), so the RAM peak of a materialisation is one chunk rather than the whole state —
-     * and an idle node serving snapshots holds none of it on the heap (audit: snapshot export
-     * RAM peak). Chunk reads are positional ({@link java.nio.channels.FileChannel#read} with an
-     * explicit offset), which is thread-safe across concurrent API requests sharing one snapshot.
-     * {@link #close()} releases the file; the owner closes a snapshot when it is replaced and at
-     * service shutdown.
+     * The snap-sync export — the spool dir, the capture and the one live materialisation; see
+     * {@link SnapshotService}. Never null: a {@link NodeSources} without one gets
+     * {@link SnapshotService#none}. Closed by {@link #close()}, so ownership transfers here at
+     * construction.
      */
-    static final class MaterializedSnapshot implements AutoCloseable {
-        private final long pivotHeight;
-        private final byte[] stateRoot;
-        private final java.nio.file.Path file;
-        private final long[] offsets;
-        private final long[] lengths;
-        private final java.nio.channels.FileChannel channel;
-
-        private MaterializedSnapshot(long pivotHeight, byte[] stateRoot, java.nio.file.Path file,
-                                     long[] offsets, long[] lengths,
-                                     java.nio.channels.FileChannel channel) {
-            this.pivotHeight = pivotHeight;
-            this.stateRoot = stateRoot;
-            this.file = file;
-            this.offsets = offsets;
-            this.lengths = lengths;
-            this.channel = channel;
-        }
-
-        long pivotHeight() {
-            return pivotHeight;
-        }
-
-        byte[] stateRoot() {
-            return stateRoot;
-        }
-
-        /** The spool the chunks are read from (visible for the replacement/deletion tests). */
-        java.nio.file.Path file() {
-            return file;
-        }
-
-        int chunkCount() {
-            return lengths.length;
-        }
-
-        /** On-wire length of chunk {@code index}, without reading its bytes. */
-        long chunkLength(int index) {
-            return lengths[index];
-        }
-
-        byte[] chunkBytes(int index) {
-            if (index < 0 || index >= lengths.length) {
-                throw new IndexOutOfBoundsException(index);
-            }
-            java.nio.ByteBuffer buf = java.nio.ByteBuffer.allocate(Math.toIntExact(lengths[index]));
-            try {
-                while (buf.hasRemaining()) {
-                    if (channel.read(buf, offsets[index] + buf.position()) < 0) {
-                        throw new java.io.EOFException("snapshot spool truncated at chunk " + index);
-                    }
-                }
-            } catch (java.io.IOException e) {
-                throw new java.io.UncheckedIOException("snapshot chunk read failed", e);
-            }
-            return buf.array();
-        }
-
-        @Override
-        public void close() {
-            try {
-                channel.close();
-            } catch (java.io.IOException e) {
-                log.warn("Snapshot spool {} could not be closed", file, e);
-            }
-            try {
-                java.nio.file.Files.deleteIfExists(file);
-            } catch (java.io.IOException e) {
-                log.warn("Snapshot spool {} could not be deleted", file, e);
-            }
-        }
-    }
+    private final SnapshotService snapshots;
 
     /** Maximum blocks a single /logs catch-up scan spans, so agents poll in bounded chunks. */
     public static final int LOG_SCAN_WINDOW = 128;
@@ -159,6 +77,8 @@ public final class NodeService {
         this.listeners = listeners;
         this.engine = engine;
         this.mempool = mempool;
+        this.snapshots = sources.snapshots() != null
+            ? sources.snapshots() : SnapshotService.none(engine);
     }
 
     /**
@@ -489,140 +409,21 @@ public final class NodeService {
 
 
     /**
-     * Wires the directory snapshot spools live in (the node's data dir, alongside the stores —
-     * NOT the OS temp dir, which is commonly a tmpfs and would silently put the whole state
-     * back in RAM). Stale {@code rhizome-snapshot-*} spools from a previous process (SIGKILL
-     * leaves them behind — {@link #close()} only runs on a clean shutdown) are swept here,
-     * once, at wiring time. When unset, spools fall back to the default temp dir (tests).
-     */
-    public void setSnapshotSpoolDir(java.nio.file.Path dir) throws java.io.IOException {
-        java.nio.file.Files.createDirectories(dir);
-        int swept = 0;
-        try (var entries = java.nio.file.Files.list(dir)) {
-            for (var stale : (Iterable<java.nio.file.Path>) entries
-                    .filter(p -> p.getFileName().toString().startsWith("rhizome-snapshot-"))
-                    ::iterator) {
-                try {
-                    java.nio.file.Files.deleteIfExists(stale);
-                    swept++;
-                } catch (java.io.IOException e) {
-                    log.warn("Stale snapshot spool {} could not be deleted", stale, e);
-                }
-            }
-        }
-        if (swept > 0) {
-            log.info("Swept {} stale snapshot spool(s) from {}", swept, dir);
-        }
-        this.snapshotSpoolDir = dir;
-    }
-
-    /**
-     * Captures a fresh materialised snapshot of the full committed state under the engine
-     * lock, so every chunk corresponds to the single {@code (height, stateRoot)} pair it
-     * advertises. Chunks are spooled to a temp file as the exporter emits them (see {@link
-     * MaterializedSnapshot}); only the offset index is kept on the heap. Replaces — and deletes
-     * the spool of — any previous snapshot. False when the node cannot export (no source
-     * wired, or no state accumulator producing roots) or when the spool I/O fails; a failure
-     * cleans up the partial file and keeps the previous snapshot.
+     * Captures a fresh full-state export at the current tip, replacing any previous one; false when
+     * this node cannot export or the spool I/O fails. See {@link SnapshotService#materialize()}.
      */
     public boolean materializeSnapshot() {
-        var source = sources.snapshotSource();
-        if (source == null || engine.stateRoot() == null) {
-            return false;
-        }
-        final MaterializedSnapshot fresh;
-        try {
-            fresh = engine.withConsistentView(() -> {
-                try {
-                    return captureSnapshot(source);
-                } catch (java.io.IOException e) {
-                    throw new java.io.UncheckedIOException(e);
-                }
-            });
-        } catch (java.io.UncheckedIOException e) {
-            log.error("Snapshot materialisation failed; the previous snapshot is kept",
-                e.getCause());
-            return false;
-        }
-        MaterializedSnapshot previous = this.snapshot;
-        this.snapshot = fresh;
-        if (previous != null) {
-            previous.close();
-        }
-        return true;
-    }
-
-    /**
-     * Stream-encodes every exported chunk into a fresh temp spool and returns the file-backed
-     * snapshot over it. At most one chunk is heap-resident at a time. A failure anywhere
-     * (write, channel open) deletes the partial spool before propagating.
-     */
-    private MaterializedSnapshot captureSnapshot(rhizome.core.state.snapshot.StateSource source)
-            throws java.io.IOException {
-        var dir = snapshotSpoolDir;
-        java.nio.file.Path file = dir != null
-            ? java.nio.file.Files.createTempFile(dir, "rhizome-snapshot-", ".chunks")
-            : java.nio.file.Files.createTempFile("rhizome-snapshot-", ".chunks");
-        try {
-            var offsets = new LongIndex();
-            var lengths = new LongIndex();
-            long[] position = {0};
-            try (var out = java.nio.file.Files.newOutputStream(file)) {
-                rhizome.core.state.snapshot.StateSnapshotExporter.export(
-                        source, SNAPSHOT_CHUNK_ENTRIES,
-                        rhizome.core.state.snapshot.StateSnapshotExporter.DEFAULT_CHUNK_BYTES,
-                        chunk -> {
-                            byte[] encoded = chunk.encode();
-                            offsets.add(position[0]);
-                            lengths.add(encoded.length);
-                            try {
-                                out.write(encoded);
-                            } catch (java.io.IOException e) {
-                                throw new java.io.UncheckedIOException(e);
-                            }
-                            position[0] += encoded.length;
-                        });
-            }
-            return new MaterializedSnapshot(engine.height(), engine.stateRoot(), file,
-                offsets.toArray(), lengths.toArray(),
-                java.nio.channels.FileChannel.open(file,
-                    java.nio.file.StandardOpenOption.READ));
-        } catch (java.io.IOException | RuntimeException e) {
-            try {
-                java.nio.file.Files.deleteIfExists(file);
-            } catch (java.io.IOException cleanup) {
-                log.warn("Partial snapshot spool {} could not be deleted", file, cleanup);
-            }
-            throw e;
-        }
-    }
-
-    /** A minimal growable {@code long[]} for the snapshot chunk index (avoids boxed lists). */
-    private static final class LongIndex {
-        private long[] values = new long[64];
-        private int size;
-
-        void add(long value) {
-            if (size == values.length) {
-                values = java.util.Arrays.copyOf(values, size * 2);
-            }
-            values[size++] = value;
-        }
-
-        long[] toArray() {
-            return java.util.Arrays.copyOf(values, size);
-        }
+        return snapshots.materialize();
     }
 
     /** The current materialised snapshot, or {@code null} if none has been captured. */
-    MaterializedSnapshot materializedSnapshot() {
-        return snapshot;
+    public SnapshotService.MaterializedSnapshot materializedSnapshot() {
+        return snapshots.current();
     }
 
     /** Height of the current materialised snapshot ({@code 0} when none). */
     public long snapshotPivot() {
-        var snap = snapshot;
-        return snap == null ? 0 : snap.pivotHeight();
+        return snapshots.pivotHeight();
     }
 
     /**
@@ -635,11 +436,7 @@ public final class NodeService {
      * production (daemon), one per node across a test run.
      */
     public void close() {
-        MaterializedSnapshot snap = this.snapshot;
-        this.snapshot = null;
-        if (snap != null) {
-            snap.close();
-        }
+        snapshots.close();
         admissions.close();
     }
 

@@ -7,14 +7,13 @@ import java.util.function.LongFunction;
 import rhizome.core.blockchain.ContractProcessor;
 import rhizome.core.box.BoxProcessor;
 import rhizome.core.ledger.PublicAddress;
-import rhizome.core.state.snapshot.StateSource;
 import rhizome.core.token.TokenProcessor;
 import rhizome.net.PeerRegistry;
 import rhizome.core.blockchain.ContractProcessor.ContractLog;
 
 /**
  * The read-side collaborators a {@link NodeService} serves from: the peer set, the per-height
- * event and log sources, the contract processor behind dry-runs, and the snapshot exporter.
+ * event and log sources, the contract processor behind dry-runs, and the snapshot service.
  *
  * <p>These were seven {@code volatile} fields with seven setters, which said something untrue
  * about them: that they change while the node runs. They do not — every one is written once,
@@ -24,8 +23,10 @@ import rhizome.core.blockchain.ContractProcessor.ContractLog;
  * it, they can be what they always were: constructor arguments.
  *
  * <p>Every component is nullable and every consumer already handles absence — a node with no
- * contract VM, no boxes or no snapshot source is a legal configuration, not a half-built one, and
- * {@link #none()} is what a test that cares about none of them passes.
+ * contract VM, no boxes or no snapshot export is a legal configuration, not a half-built one, and
+ * {@link #none()} is what a test that cares about none of them passes. {@code snapshots} is the one
+ * exception in form only: {@link NodeService} normalises a null to {@link SnapshotService#none},
+ * which answers "no snapshot" to everything, so the three snapshot calls need no null check.
  */
 @lombok.Builder(toBuilder = true)
 public record NodeSources(
@@ -35,7 +36,7 @@ public record NodeSources(
     LongFunction<List<BoxProcessor.BoxEvent>> boxEventSource,
     LongFunction<List<TokenProcessor.TokenEvent>> tokenEventSource,
     ContractProcessor contracts,
-    StateSource snapshotSource) {
+    SnapshotService snapshots) {
 
     /** No sources at all: the shape a test that only exercises the chain endpoints needs. */
     public static NodeSources none() {
