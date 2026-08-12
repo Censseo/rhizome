@@ -132,45 +132,11 @@ public final class NodeService {
 
     private final ScanRegistry scans = new ScanRegistry();
 
-    /** Bound on peer admissions queued off-loop at once; excess {@code /add_peer} calls are shed. */
-    private static final int MAX_PENDING_ADMISSIONS = 256;
-
     /**
-     * Off-loop worker for peer admission. Admitting a peer resolves DNS (ban check, routability,
-     * subnet bucket); that blocking work must never run on the ActiveJ event-loop thread that
-     * serves {@code /add_peer}, or a peer whose hostname resolves slowly (or times out) would
-     * freeze the entire node. Daemon so it never holds the JVM open.
-     *
-     * <p>The queue is <b>bounded</b> (audit): the earlier single-thread executor used an unbounded
-     * queue, so a flood of {@code /add_peer} — each retaining a URL and each an ~5 s blocking DNS
-     * resolve — grew the queue ~1000/s and exhausted the heap while starving honest peers behind
-     * it. A full queue now sheds the request ({@code AbortPolicy}, caught below).
+     * Off-loop, bounded, coalescing admission of self-announced peers. Owns the worker thread,
+     * the queue bound and the two coalescing sets; see {@link PeerAdmissionQueue}.
      */
-    private final java.util.concurrent.ExecutorService peerAdmission =
-        new java.util.concurrent.ThreadPoolExecutor(1, 1, 0L, java.util.concurrent.TimeUnit.MILLISECONDS,
-            new java.util.concurrent.ArrayBlockingQueue<>(MAX_PENDING_ADMISSIONS),
-            r -> {
-                Thread t = new Thread(r, "rhizome-peer-admit");
-                t.setDaemon(true);
-                return t;
-            },
-            new java.util.concurrent.ThreadPoolExecutor.AbortPolicy());
-
-    /** URLs currently queued/running for admission, so duplicate {@code /add_peer} coalesce. */
-    private final java.util.Set<String> pendingAdmissions =
-        java.util.concurrent.ConcurrentHashMap.newKeySet();
-
-    /**
-     * Hosts currently queued/running for admission, in lock-step with {@link #pendingAdmissions}.
-     * The URL set alone coalesces only exact duplicates; an attacker varies the port/path of one
-     * slow-resolving host to queue an unbounded number of full blocking DNS resolves for the SAME
-     * host against the single admission thread (audit: add_peer coalescing bypass by port
-     * variation). Coalescing by host too means one slow host occupies at most one queue slot;
-     * the cost is that two honest peers on different ports of one host must wait for the first
-     * admission to finish — an acceptable trade against the bounded queue.
-     */
-    private final java.util.Set<String> pendingAdmissionHosts =
-        java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private final PeerAdmissionQueue admissions = new PeerAdmissionQueue();
 
     /**
      * Global (all-clients) cap on the memory-hard PoW verifications that {@code /submit} can trigger
@@ -549,56 +515,7 @@ public final class NodeService {
         if (registry == null) {
             return;
         }
-        // Canonicalize BEFORE the coalescing set: case/trailing-dot/default-port/slash variants
-        // of one URL must coalesce into a single in-flight admission (and a single registry
-        // slot) — the registry applies the same canonical form at admission (audit: /add_peer
-        // coalescing bypass).
-        String canonical = rhizome.net.PeerUrls.canonicalize(url);
-        if (canonical == null || canonical.isEmpty()) {
-            return;
-        }
-        // Coalesce duplicate in-flight admissions: re-submitting the same slow hostname must not
-        // enqueue another full blocking DNS resolve — neither under the same canonical URL nor
-        // under a port/path variant of the same host (see pendingAdmissionHosts). The sets are
-        // kept in lock-step with the queue — every queued task removes its entries on completion,
-        // and a rejected enqueue removes them below — so they can never grow past the queue bound.
-        if (!pendingAdmissions.add(canonical)) {
-            return; // already queued or running
-        }
-        String host = hostOf(canonical);
-        if (host != null && !pendingAdmissionHosts.add(host)) {
-            pendingAdmissions.remove(canonical);
-            return; // another admission for this host is already queued or running
-        }
-        try {
-            peerAdmission.execute(() -> {
-                try {
-                    registry.add(canonical);
-                } catch (RuntimeException e) {
-                    // Best-effort: a malformed or unresolvable peer is simply not added.
-                } finally {
-                    pendingAdmissions.remove(canonical);
-                    if (host != null) {
-                        pendingAdmissionHosts.remove(host);
-                    }
-                }
-            });
-        } catch (java.util.concurrent.RejectedExecutionException rejected) {
-            pendingAdmissions.remove(canonical); // queue full: shed load, keep the sets bounded
-            if (host != null) {
-                pendingAdmissionHosts.remove(host);
-            }
-        }
-    }
-
-    /** Lower-cased host of a canonical peer URL, or {@code null} when it has none (unparseable). */
-    private static String hostOf(String canonicalUrl) {
-        try {
-            String host = java.net.URI.create(canonicalUrl).getHost();
-            return host == null || host.isEmpty() ? null : host.toLowerCase(java.util.Locale.ROOT);
-        } catch (RuntimeException e) {
-            return null;
-        }
+        admissions.enqueue(url, registry::add);
     }
 
     public NetworkParameters params() {
@@ -813,8 +730,13 @@ public final class NodeService {
     }
 
     /**
-     * Releases the file-backed snapshot (closes its channel, deletes its spool). Called at
-     * node shutdown; a fresh materialisation after close starts from no snapshot again.
+     * Releases the file-backed snapshot (closes its channel, deletes its spool) and stops the peer
+     * admission worker. Called at node shutdown; a fresh materialisation after close starts from
+     * no snapshot again.
+     *
+     * <p>The admission worker was never stopped: its executor was a field with no shutdown at all,
+     * so every node ever built leaked a {@code rhizome-peer-admit} thread — invisible in
+     * production (daemon), one per node across a test run.
      */
     public void close() {
         MaterializedSnapshot snap = this.snapshot;
@@ -822,6 +744,7 @@ public final class NodeService {
         if (snap != null) {
             snap.close();
         }
+        admissions.close();
     }
 
     /** Degraded-mode reason (e.g. a failed reorg restore), or {@code null} when healthy. */
