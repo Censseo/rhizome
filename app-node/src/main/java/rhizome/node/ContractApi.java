@@ -27,7 +27,7 @@ import static rhizome.node.ApiResponses.parseLong;
 final class ContractApi {
 
     /** Server-side ceiling on a read-only dry-run's gas: bounds free, unauthenticated VM compute.
-     *  Kept equal to the aggregate per-second budget (NodeService.READONLY_GAS_MAX_PER_SEC) so a
+     *  Kept equal to the aggregate per-second budget (AdmissionControl.READONLY_GAS_MAX_PER_SEC) so a
      *  clamped max-gas request is always admissible — a higher clamp would be shed with 429 every
      *  time it declared more than the budget, making the documented clamp unreachable. */
     private static final long MAX_READONLY_GAS = 25_000_000L;
@@ -177,7 +177,7 @@ final class ContractApi {
         if (dryRun.isEmpty()) {
             // Too many dry-runs already running or parked on the consensus lock: shed with 503
             // (retryable) instead of queueing another blocking-pool thread behind it (audit:
-            // dry-run backlog bounded at admission, NodeService.MAX_CONCURRENT_DRY_RUNS).
+            // dry-run backlog bounded at admission, AdmissionControl.MAX_CONCURRENT_DRY_RUNS).
             return errorJson(503, "dry-run busy, retry later");
         }
         result = dryRun.get();

@@ -166,7 +166,8 @@ class NodeApiTest {
         // body is decoded (audit F1 + S6): the first /submit is accepted; the second is shed with 429
         // without decoding the body or touching the chain — the aggregate anti-DoS cap the per-IP
         // limiter lacks, now applied ahead of the decode rather than after it.
-        NodeService gated = new NodeService(engine, mempool, new RateLimiter(1, 3_600_000, 1));
+        NodeService gated = new NodeService(engine, mempool, AdmissionControl.builder()
+            .submitPow(new RateLimiter(1, 3_600_000, 1)).build());
         var gatedServlet = NodeApi.servlet(eventloop, gated);
 
         HttpResponse first = callWith(gatedServlet,
@@ -181,15 +182,32 @@ class NodeApiTest {
     }
 
     @Test
+    void aggregateMempoolSignatureGateShedsTransactionsBeforeVerifying() throws Exception {
+        // The fourth aggregate budget (audit M1): /add_transaction runs one inline Ed25519 verify
+        // per admission and INVALID signatures are never cached, so replaying corrupt-signature
+        // transactions re-pays the crypto every time. It is the only one of the four that had no
+        // seam — the constructor ladder stopped at three limiters — so until AdmissionControl made
+        // it injectable this budget had no test at all.
+        NodeService gated = new NodeService(engine, mempool, AdmissionControl.builder()
+            .mempoolSig(new RateLimiter(1, 3_600_000, 1)).build());
+        var gatedServlet = NodeApi.servlet(eventloop, gated);
+
+        assertEquals(200, callWith(gatedServlet, HttpRequest.post("http://x/add_transaction")
+            .withBody(signedSend(100_000, 0).serialize().toBuffer()).build()).getCode());
+        assertEquals(429, callWith(gatedServlet, HttpRequest.post("http://x/add_transaction")
+            .withBody(signedSend(100_000, 1).serialize().toBuffer()).build()).getCode(),
+            "an over-budget transaction must be shed before the signature is verified");
+        assertEquals(1, gated.mempoolSize(), "the shed transaction never reached the pool");
+    }
+
+    @Test
     void aggregateReadGateShedsExplorerReadsPastTheGlobalBudget() throws Exception {
         // A distributed flood can stay within every per-IP budget yet sum to unbounded lock-guarded
         // block decodes on the event loop; the process-wide read gate caps the total (audit 5th-pass,
         // net Finding 2). Here the per-IP limiter is generous but the aggregate read budget is tiny.
         var lenientPerIp = new RateLimiter(1_000_000, 60_000, 100);
-        NodeService node = new NodeService(engine, mempool,
-            new RateLimiter(NodeService.SUBMIT_POW_MAX_PER_SEC, 1000, 1),
-            new RateLimiter(NodeService.READONLY_GAS_MAX_PER_SEC, 1000, 1),
-            new RateLimiter(40, 3_600_000, 1)); // aggregate read budget: 40 units/window
+        NodeService node = new NodeService(engine, mempool, AdmissionControl.builder()
+            .read(new RateLimiter(40, 3_600_000, 1)).build()); // aggregate read budget: 40 units/window
         var srv = NodeApi.servlet(eventloop, node, lenientPerIp);
 
         // /stats costs STATS_WINDOW (32): the first is admitted (gate charges before the handler),
@@ -211,10 +229,8 @@ class NodeApiTest {
         assertEquals(50, NodeApi.requestCost(HttpRequest.get("http://x/tokens?holder=" + owner).build()));
 
         // …and they are charged to the process-wide gate, which is what bounds a distributed flood.
-        NodeService node = new NodeService(engine, mempool,
-            new RateLimiter(NodeService.SUBMIT_POW_MAX_PER_SEC, 1000, 1),
-            new RateLimiter(NodeService.READONLY_GAS_MAX_PER_SEC, 1000, 1),
-            new RateLimiter(60, 3_600_000, 1)); // aggregate read budget: 60 units/window
+        NodeService node = new NodeService(engine, mempool, AdmissionControl.builder()
+            .read(new RateLimiter(60, 3_600_000, 1)).build()); // aggregate read budget: 60 units/window
         var srv = NodeApi.servlet(eventloop, node, new RateLimiter(1_000_000, 60_000, 100));
         assertNotEquals(429, callWith(srv, HttpRequest.get("http://x/tokens?holder=" + owner).build()).getCode());
         assertEquals(429, callWith(srv, HttpRequest.get("http://x/tokens?holder=" + owner).build()).getCode());
@@ -258,9 +274,8 @@ class NodeApiTest {
         // call reserving 60 is admitted and the second is shed (the /call_readonly handler then
         // returns HTTP 429) WITHOUT running the VM on the event loop — the aggregate cap the per-IP
         // limiter lacks for /call_readonly (audit 5th-pass, net Finding 1).
-        NodeService gated = new NodeService(engine, mempool,
-            new RateLimiter(NodeService.SUBMIT_POW_MAX_PER_SEC, 1000, 1),
-            new RateLimiter(100, 3_600_000, 1));
+        NodeService gated = new NodeService(engine, mempool, AdmissionControl.builder()
+            .readonlyGas(new RateLimiter(100, 3_600_000, 1)).build());
         assertTrue(gated.tryReadonlyGasBudget(60), "first call fits the budget");
         assertFalse(gated.tryReadonlyGasBudget(60), "second call is over the aggregate budget");
     }
@@ -429,7 +444,8 @@ class NodeApiTest {
         // Auth BEFORE the global gates (audit: auth after budgets): unauthenticated requests must
         // get a cheap 401 WITHOUT burning the shared submit budget that gated peers depend on —
         // otherwise an unauthenticated flood starves the authenticated ones.
-        NodeService gated = new NodeService(engine, mempool, new RateLimiter(1, 3_600_000, 1));
+        NodeService gated = new NodeService(engine, mempool, AdmissionControl.builder()
+            .submitPow(new RateLimiter(1, 3_600_000, 1)).build());
         var s = NodeApi.servlet(eventloop, gated, new RateLimiter(1_000_000, 60_000, 100),
             null, null, "s3cret");
         var auth = io.activej.http.HttpHeaders.AUTHORIZATION;
@@ -456,10 +472,8 @@ class NodeApiTest {
         // aggregate bound on the sync/snapshot serving paths): a distributed flood of "peers"
         // must not sum to unbounded lock-guarded reads and egress at cost ~1.
         var lenientPerIp = new RateLimiter(1_000_000, 60_000, 100);
-        NodeService node = new NodeService(engine, mempool,
-            new RateLimiter(NodeService.SUBMIT_POW_MAX_PER_SEC, 1000, 1),
-            new RateLimiter(NodeService.READONLY_GAS_MAX_PER_SEC, 1000, 1),
-            new RateLimiter(1, 3_600_000, 1)); // aggregate read budget: a single unit
+        NodeService node = new NodeService(engine, mempool, AdmissionControl.builder()
+            .read(new RateLimiter(1, 3_600_000, 1)).build()); // aggregate read budget: a single unit
         var s = NodeApi.servlet(eventloop, node, lenientPerIp);
 
         // /sync?start=1&end=1 costs 1: admitted once, then the aggregate gate sheds.
@@ -553,7 +567,7 @@ class NodeApiTest {
 
     @Test
     void dryRunIsShedWith503WhenTheAdmissionSlotsAreFull() throws Exception {
-        // The dry-run backlog is bounded at ADMISSION (NodeService.MAX_CONCURRENT_DRY_RUNS
+        // The dry-run backlog is bounded at ADMISSION (AdmissionControl.MAX_CONCURRENT_DRY_RUNS
         // permits taken before the consensus lock): once every slot is running or parked on
         // the lock, the next call must be shed immediately — Optional.empty here, 503 at the
         // API — instead of queueing another worker behind a 25M-gas VM run (audit).
@@ -590,7 +604,7 @@ class NodeApiTest {
         var results = new java.util.concurrent.ConcurrentLinkedQueue<
             java.util.Optional<rhizome.core.blockchain.ContractProcessor.ContractResult>>();
         var threads = new java.util.ArrayList<Thread>();
-        for (int i = 0; i < NodeService.MAX_CONCURRENT_DRY_RUNS; i++) {
+        for (int i = 0; i < AdmissionControl.MAX_CONCURRENT_DRY_RUNS; i++) {
             Thread t = new Thread(() -> results.add(node.dryRun(PublicAddress.empty(),
                 PublicAddress.empty(), new byte[0], 0, 1_000_000L)));
             t.setDaemon(true);
@@ -617,11 +631,11 @@ class NodeApiTest {
         for (Thread t : threads) {
             t.join(10_000);
         }
-        assertEquals(NodeService.MAX_CONCURRENT_DRY_RUNS, results.size());
+        assertEquals(AdmissionControl.MAX_CONCURRENT_DRY_RUNS, results.size());
         for (var r : results) {
             assertTrue(r.isPresent(), "an admitted dry-run completes once the lock frees up");
         }
-        assertEquals(NodeService.MAX_CONCURRENT_DRY_RUNS, node.dryRunSlotsAvailable());
+        assertEquals(AdmissionControl.MAX_CONCURRENT_DRY_RUNS, node.dryRunSlotsAvailable());
         assertTrue(node.dryRun(PublicAddress.empty(), PublicAddress.empty(), new byte[0], 0,
             1_000_000L).isPresent());
     }

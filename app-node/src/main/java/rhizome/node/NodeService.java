@@ -1,7 +1,6 @@
 package rhizome.node;
 
 import rhizome.net.PeerRegistry;
-import rhizome.net.RateLimiter;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -139,90 +138,19 @@ public final class NodeService {
     private final PeerAdmissionQueue admissions = new PeerAdmissionQueue();
 
     /**
-     * Global (all-clients) cap on the memory-hard PoW verifications that {@code /submit} can trigger
-     * per second. The per-IP HTTP limiter allows ~125 submits/s/IP with no aggregate bound, so a
-     * single IP resending one PoW-free block (public parent hash, in-window id, garbage nonce) can
-     * pin the single event-loop thread on ~40 memory-hard hashes/s and, via the shared consensus
-     * lock, stall block production and sync (audit F1). This single-bucket limiter bounds the total
-     * across every source IP, well below loop capacity; an over-budget submit is dropped WITHOUT
-     * hashing. Declining to speculatively verify is safe: both verification sites already drop
-     * non-verifying blocks (orphan admission is best-effort), and honest blocks still arrive via
-     * sync, which calls the engine directly and is not gated here.
+     * The four aggregate budgets and the dry-run concurrency slots; see {@link AdmissionControl}.
+     * One object rather than four fields and four chained constructors: a test that shrinks one
+     * budget no longer restates the other two positionally, and mempoolSig — previously the only
+     * gate with no seam — is now injectable like the rest.
      */
-    static final int SUBMIT_POW_MAX_PER_SEC = 25;
-    private final RateLimiter submitPowGate;
-
-    /**
-     * Aggregate (all-IP) cap on mempool transaction admissions per second, bounding the Ed25519
-     * verifications {@code /add_transaction} can trigger on the event-loop thread. {@code /submit}
-     * has submitPowGate, but {@code /add_transaction} had no equivalent: each admission runs one
-     * ~100 µs signature verify inline (MemPool.addTransaction), INVALID signatures are never cached
-     * (only valid ones are remembered), so re-playing the same corrupt-signature tx re-pays the
-     * crypto every time — and the per-IP limiter has no aggregate bound (audit M1). This single
-     * global bucket caps total admissions/s well below loop capacity; an over-budget tx is shed at
-     * the HTTP boundary (429) before the body is decoded. Sized generously for honest gossip
-     * (a few tx/s network-wide) while making a distributed signature-flood uneconomic.
-     */
-    static final int MEMPOOL_SIG_MAX_PER_SEC = 100;
-    private final RateLimiter mempoolSigGate = new RateLimiter(MEMPOOL_SIG_MAX_PER_SEC, 1000, 1);
-
-    /**
-     * Aggregate compute budget for {@code /call_readonly} dry-runs, in gas units per second, summed
-     * across every source IP. A dry-run runs the VM interpreter for up to {@code MAX_READONLY_GAS}
-     * (25M, clamped in ContractApi to exactly this budget) synchronously on the single event-loop
-     * thread; the per-IP HTTP rate limiter bounds only one IP, so a few IPs each within their
-     * per-IP budget could still pin the loop with back-to-back gas-sink runs and starve block
-     * ingestion/sync (audit 5th-pass, net Finding 1 — the same aggregate-vs-per-IP gap the F1
-     * submitPowGate closed for /submit). This single global bucket caps total dry-run gas/s below
-     * loop capacity; an over-budget call is shed (HTTP 429) WITHOUT running the VM. Sized to admit
-     * many cheap dashboard queries while throttling repeated max-gas sinks to one per second —
-     * a full 25M-gas interpreted run is already a substantial slice of event-loop time (audit:
-     * readonly gas calibration).
-     */
-    static final int READONLY_GAS_MAX_PER_SEC = 25_000_000;
-    private final RateLimiter readonlyGasGate;
-
-    /**
-     * Aggregate budget for the explorer read endpoints that fully decode blocks from RocksDB <em>under
-     * the consensus lock</em> ({@code /stats}, {@code /blocks}, {@code /block}, {@code /transaction},
-     * {@code /address_txs}), in {@code requestCost} units per second summed across every source IP. The
-     * per-IP rate limiter weights these by the blocks they read, but bounds only one IP — so a
-     * distributed flood of many IPs, each within its per-IP budget, still sums to unbounded
-     * lock-guarded block decodes on the single event-loop thread, contending block production and sync
-     * (audit 5th-pass, net Finding 2 — the aggregate-vs-per-IP gap already closed for /submit and
-     * /call_readonly). This single global bucket caps the total; an over-budget read is shed (HTTP 429)
-     * before it decodes anything. Sized well above heavy multi-client dashboard use (each client is
-     * already ≤ the per-IP budget) yet far below loop capacity, so it only bites a genuine flood. The
-     * peer-serving heavyweights (/sync, /headers, /state/snapshot/chunk, /orphan) are charged to this
-     * budget too (NodeApi.isConsensusLockRead): they run the same lock-guarded store reads per block
-     * served and amplify egress by up to hundreds of blocks (or ~16 MiB) per request, so an
-     * unauthenticated flood of "peers" must not sum past the aggregate bound either — the budget is
-     * sized far above any plausible convergence traffic, so honest sync is unaffected.
-     */
-    static final int READ_DECODE_MAX_PER_SEC = 8_000;
-    private final RateLimiter readGate;
+    private final AdmissionControl admission;
 
     public NodeService(ChainEngine engine, MemPool mempool) {
-        this(engine, mempool, new RateLimiter(SUBMIT_POW_MAX_PER_SEC, 1000, 1),
-            new RateLimiter(READONLY_GAS_MAX_PER_SEC, 1000, 1),
-            new RateLimiter(READ_DECODE_MAX_PER_SEC, 1000, 1));
+        this(engine, mempool, AdmissionControl.defaults());
     }
 
-    NodeService(ChainEngine engine, MemPool mempool, RateLimiter submitPowGate) {
-        this(engine, mempool, submitPowGate, new RateLimiter(READONLY_GAS_MAX_PER_SEC, 1000, 1),
-            new RateLimiter(READ_DECODE_MAX_PER_SEC, 1000, 1));
-    }
-
-    NodeService(ChainEngine engine, MemPool mempool, RateLimiter submitPowGate, RateLimiter readonlyGasGate) {
-        this(engine, mempool, submitPowGate, readonlyGasGate,
-            new RateLimiter(READ_DECODE_MAX_PER_SEC, 1000, 1));
-    }
-
-    NodeService(ChainEngine engine, MemPool mempool, RateLimiter submitPowGate, RateLimiter readonlyGasGate,
-                RateLimiter readGate) {
-        this.submitPowGate = submitPowGate;
-        this.readonlyGasGate = readonlyGasGate;
-        this.readGate = readGate;
+    NodeService(ChainEngine engine, MemPool mempool, AdmissionControl admission) {
+        this.admission = admission;
         this.engine = engine;
         this.mempool = mempool;
     }
@@ -230,10 +158,10 @@ public final class NodeService {
     /**
      * Reserves {@code cost} units from the process-wide explorer-read budget, returning false if the
      * aggregate lock-guarded block-decode budget this second is exhausted (the caller then sheds the
-     * request with 429 before touching the store). See {@link #READ_DECODE_MAX_PER_SEC}.
+     * request with 429 before touching the store). See {@link AdmissionControl}.
      */
     public boolean tryReadBudget(int cost) {
-        return readGate.allow("read", cost);
+        return admission.tryRead(cost);
     }
 
     /** Called when a freshly submitted block/transaction is accepted (for gossip). */
@@ -366,10 +294,8 @@ public final class NodeService {
      */
     public boolean tryReadonlyGasBudget(long gasLimit) {
         // gasLimit is clamped to MAX_READONLY_GAS (= the per-second budget) before it reaches here.
-        return readonlyGasGate.allow("readonly", (int) Math.min(gasLimit, MAX_READONLY_GAS_CHARGE));
+        return admission.tryReadonlyGas(gasLimit);
     }
-
-    private static final long MAX_READONLY_GAS_CHARGE = 25_000_000L;
 
     /** Runs a read-only CALL against committed state, discarding writes (no ledger effect).
      *  Serialized with block application and sync through the consensus lock: the contract
@@ -377,33 +303,29 @@ public final class NodeService {
      *  dry-run racing a sync-driven block apply could read a half-updated state or corrupt the
      *  session the apply is using (audit: dryRun outside the consensus lock).
      *
-     *  <p>Admission is bounded by {@link #MAX_CONCURRENT_DRY_RUNS}: only that many dry-runs may be
+     *  <p>Admission is bounded by {@link AdmissionControl#MAX_CONCURRENT_DRY_RUNS}: only that many dry-runs may be
      *  running or parked on the consensus lock at once. The lock admits a single thread, so without
      *  a bound a dry-run flood piles up as unbounded parked worker-pool threads behind it, each a
      *  25M-gas VM run that then delays block application (the old bounded queue inside the VM never
      *  filled — at most one task was ever submitted to it, because the lock serialized admission
      *  upstream). A call that cannot take a slot returns {@link java.util.Optional#empty()}
      *  immediately (the API maps it to 503) instead of queueing. */
-    static final int MAX_CONCURRENT_DRY_RUNS = 8;
-    private final java.util.concurrent.Semaphore dryRunSlots =
-        new java.util.concurrent.Semaphore(MAX_CONCURRENT_DRY_RUNS);
-
     public java.util.Optional<rhizome.core.blockchain.ContractProcessor.ContractResult> dryRun(
             PublicAddress from, PublicAddress to, byte[] input, long value, long gasLimit) {
-        if (!dryRunSlots.tryAcquire()) {
+        if (!admission.tryDryRunSlot()) {
             return java.util.Optional.empty();
         }
         try {
             return java.util.Optional.of(
                 engine.withConsistentView(() -> contracts.dryRun(from, to, input, value, gasLimit)));
         } finally {
-            dryRunSlots.release();
+            admission.releaseDryRunSlot();
         }
     }
 
     /** Visible for testing: dry-run admission slots currently free (0 = new dry-runs are shed). */
     int dryRunSlotsAvailable() {
-        return dryRunSlots.availablePermits();
+        return admission.dryRunSlotsAvailable();
     }
 
     /** The full body of a known orphan (uncle candidate) by hash, or {@code null} — served to
@@ -866,7 +788,7 @@ public final class NodeService {
      * #submitBlock} (block production, tests) legitimately bypass this network-boundary shed.
      */
     public boolean trySubmitBudget() {
-        return submitPowGate.allow("submit");
+        return admission.trySubmit();
     }
 
     /**
@@ -876,7 +798,7 @@ public final class NodeService {
      * production, tests) legitimately bypass this network-boundary shed.
      */
     public boolean tryMempoolSigBudget() {
-        return mempoolSigGate.allow("tx");
+        return admission.tryMempoolSig();
     }
 
     /** Accepts a mined block; on success the mempool is purged of its transactions. */
