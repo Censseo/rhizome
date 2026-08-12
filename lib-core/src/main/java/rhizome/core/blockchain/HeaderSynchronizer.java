@@ -3,10 +3,6 @@ package rhizome.core.blockchain;
 import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
 
 import rhizome.core.block.Block;
 import rhizome.core.block.BlockHeader;
@@ -279,49 +275,20 @@ public final class HeaderSynchronizer {
     }
 
     private boolean applyBodies(PeerSource peer, long forkHeight, List<BlockHeader> branch) {
-        long to = forkHeight + branch.size();
-        List<long[]> windows = new ArrayList<>();
-        for (long start = forkHeight + 1; start <= to; start += Constants.BLOCKS_PER_FETCH) {
-            windows.add(new long[] {start, Math.min(to, start + Constants.BLOCKS_PER_FETCH - 1)});
-        }
-        if (windows.isEmpty()) {
-            return true;
-        }
-        // Pipeline the body download: while the current window's blocks are applied to the engine, the
-        // NEXT window is fetched over the network on a helper thread. Application stays strictly serial
-        // and in order (the engine is single-writer), so the applied sequence — and thus every consensus
-        // outcome and the state root — is byte-for-byte identical; only the network I/O of window K+1
-        // overlaps the disk/CPU apply of window K. Exactly one fetch is ever outstanding, so the peer
-        // source is still used from one thread at a time.
-        ExecutorService fetcher = Executors.newSingleThreadExecutor(r -> {
-            Thread t = new Thread(r, "rhizome-body-fetch");
-            t.setDaemon(true);
-            return t;
-        });
-        try {
-            Future<List<Block>> pending = submitFetch(fetcher, peer, windows.get(0));
-            for (int i = 0; i < windows.size(); i++) {
-                List<Block> blocks;
-                try {
-                    blocks = pending.get();
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    return false;
-                } catch (ExecutionException e) {
-                    if (e.getCause() instanceof LocalSaturationException saturated) {
-                        throw saturated; // local backpressure, not a peer fault (see fetchHeaders)
-                    }
-                    if (e.getCause() instanceof PeerUnavailableException unavailable) {
-                        // Transport failure mid-body (the peer 503'd because it is itself
-                        // reorging): not invalid, retried next round — never a ban.
-                        throw unavailable;
-                    }
-                    return false; // transport/decode failure fetching this window (was a RuntimeException)
+        return BodyPipeline.run("rhizome-body-fetch", peer, forkHeight + 1, forkHeight + branch.size(),
+            cause -> {
+                if (cause instanceof LocalSaturationException saturated) {
+                    throw saturated; // local backpressure, not a peer fault (see fetchHeaders)
                 }
-                // Start the next window's fetch before applying the current one, so the two overlap.
-                if (i + 1 < windows.size()) {
-                    pending = submitFetch(fetcher, peer, windows.get(i + 1));
+                if (cause instanceof PeerUnavailableException unavailable) {
+                    // Transport failure mid-body (the peer 503'd because it is itself reorging):
+                    // not invalid, retried next round — never a ban.
+                    throw unavailable;
                 }
+                // Anything else is a transport/decode failure fetching this window: abort the
+                // sync with a false verdict rather than propagate (was a bare RuntimeException).
+            },
+            blocks -> {
                 for (Block block : blocks) {
                     long idx = block.id() - forkHeight - 1;
                     if (idx < 0 || idx >= branch.size()
@@ -341,17 +308,8 @@ public final class HeaderSynchronizer {
                         return false;
                     }
                 }
-            }
-            return true;
-        } finally {
-            // Cancel any still-running prefetch (e.g. after a mismatch/failure returned early) and free
-            // the helper thread. The fetch is read-only network I/O, so a discarded result changes nothing.
-            fetcher.shutdownNow();
-        }
-    }
-
-    private static Future<List<Block>> submitFetch(ExecutorService fetcher, PeerSource peer, long[] window) {
-        return fetcher.submit(() -> peer.blocks(window[0], window[1]));
+                return true;
+            });
     }
 
     private ChainSynchronizer.Result reorg(PeerSource peer, long forkHeight, List<BlockHeader> branch) {

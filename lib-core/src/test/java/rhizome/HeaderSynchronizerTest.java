@@ -441,4 +441,47 @@ class HeaderSynchronizerTest {
         org.junit.jupiter.api.Assertions.assertFalse(local.isReorgInProgress(),
             "the reorg window must be closed, so the chain accepts new tips again");
     }
+
+    @Test
+    void aMalformedBodyWindowIsThePeersFaultAndNeverEscapesTheSyncPass() {
+        // The headers-first and full-block paths classify a failed body fetch DIFFERENTLY, and
+        // that disagreement is deliberate: the full-block path propagates every RuntimeException
+        // to its caller, this one propagates only the two typed transport signals and treats
+        // anything else as a bad peer. Only the two typed cases were pinned, so the divergence
+        // itself was untested — swapping this path onto the other policy broke no test.
+        ChainEngine peerEngine = newEngine();
+        mine(peerEngine, PublicAddress.random(), new AtomicLong(0), 5);
+        ChainEngine local = newEngine();
+
+        EnginePeer garbageBodies = new EnginePeer(peerEngine) {
+            @Override public List<Block> blocks(long start, long end) {
+                throw new IllegalStateException("undecodable body window");
+            }
+        };
+
+        assertEquals(ChainSynchronizer.Result.PEER_INVALID,
+            new HeaderSynchronizer(local).syncFrom(garbageBodies),
+            "a malformed body window is a verdict about the peer, not an exception for the round");
+        assertEquals(1, local.height(), "nothing was applied from the failed window");
+    }
+
+    @Test
+    void localBackpressureMidBodyIsNotAPeerFaultOnTheHeadersPath() {
+        // The other side of the same policy: LocalSaturation is OUR bound, so it must reach
+        // syncFrom unwrapped (the pipeline hands it back as an ExecutionException cause) and map
+        // to NO_CHANGE — never a ban for a peer that did nothing wrong.
+        ChainEngine peerEngine = newEngine();
+        mine(peerEngine, PublicAddress.random(), new AtomicLong(0), 5);
+        ChainEngine local = newEngine();
+
+        EnginePeer saturated = new EnginePeer(peerEngine) {
+            @Override public List<Block> blocks(long start, long end) {
+                throw new LocalSaturationException("local exchange cap", null);
+            }
+        };
+
+        assertEquals(ChainSynchronizer.Result.NO_CHANGE,
+            new HeaderSynchronizer(local).syncFrom(saturated));
+        assertEquals(1, local.height());
+    }
 }

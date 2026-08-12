@@ -5,10 +5,6 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
 
 import rhizome.core.block.Block;
 import rhizome.core.block.BlockHeader;
@@ -202,53 +198,21 @@ public final class ChainSynchronizer {
      * malformed response), so the cause is rethrown unwrapped rather than folded into a boolean.
      */
     private boolean applyRange(PeerSource peer, long from, long to) {
-        List<long[]> windows = new ArrayList<>();
-        for (long start = from; start <= to; start += Constants.BLOCKS_PER_FETCH) {
-            windows.add(new long[] {start, Math.min(to, start + Constants.BLOCKS_PER_FETCH - 1)});
-        }
-        if (windows.isEmpty()) {
-            return true;
-        }
-        ExecutorService fetcher = Executors.newSingleThreadExecutor(r -> {
-            Thread t = new Thread(r, "rhizome-block-fetch");
-            t.setDaemon(true);
-            return t;
-        });
-        try {
-            Future<List<Block>> pending = submitFetch(fetcher, peer, windows.get(0));
-            for (int i = 0; i < windows.size(); i++) {
-                List<Block> blocks;
-                try {
-                    blocks = pending.get();
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    return false;
-                } catch (ExecutionException e) {
-                    if (e.getCause() instanceof RuntimeException cause) {
-                        throw cause; // exactly what the un-pipelined loop let through
-                    }
-                    throw new IllegalStateException("block fetch failed", e.getCause());
+        return BodyPipeline.run("rhizome-block-fetch", peer, from, to,
+            cause -> {
+                if (cause instanceof RuntimeException runtime) {
+                    throw runtime; // exactly what the un-pipelined loop let through
                 }
-                // Start the next window's fetch BEFORE applying this one, so the two overlap.
-                if (i + 1 < windows.size()) {
-                    pending = submitFetch(fetcher, peer, windows.get(i + 1));
-                }
+                throw new IllegalStateException("block fetch failed", cause);
+            },
+            blocks -> {
                 for (Block block : blocks) {
                     if (applyWithUncleFetch(engine, peer, block, engine::addBlock) != ExecutionStatus.SUCCESS) {
                         return false;
                     }
                 }
-            }
-            return true;
-        } finally {
-            // Cancel a still-running prefetch (early return on a rejected block, or a throw) and
-            // free the helper thread. The fetch is read-only, so a discarded result changes nothing.
-            fetcher.shutdownNow();
-        }
-    }
-
-    private static Future<List<Block>> submitFetch(ExecutorService fetcher, PeerSource peer, long[] window) {
-        return fetcher.submit(() -> peer.blocks(window[0], window[1]));
+                return true;
+            });
     }
 
     /**
