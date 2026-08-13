@@ -4,8 +4,8 @@ import rhizome.core.ledger.PublicAddress;
 
 /**
  * One contract-state mutation inside an atomic block commit
- * ({@link ContractStore#applyBlock(long, java.util.List, byte[])} /
- * {@link ContractStore#revertBlock(long, java.util.List)}).
+ * ({@link ContractStore#applyBlock(long, java.util.List)} /
+ * {@link ContractStore#revertBlock(long)}).
  *
  * <p>An entry is either a <em>code</em> mutation ({@code isCode == true}, {@code key} is null)
  * or a <em>storage</em> mutation ({@code isCode == false}, {@code key} is the storage slot key).

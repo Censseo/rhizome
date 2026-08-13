@@ -2,6 +2,7 @@ package rhizome.vm;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -57,21 +58,27 @@ public interface ContractStoreContract {
     }
 
     @Test
-    default void applyBlockCommitsChangesAndJournal() throws Exception {
+    default void applyBlockCommitsChangesAndGeneratesTheJournal() throws Exception {
         ContractStore store = newContractStore();
         PublicAddress contract = PublicAddress.random();
         byte[] key = {0};
         byte[] fresh = {7};
-        byte[] journal = {9, 9, 9};
         store.putStorage(contract, key, new byte[] {1});
+        store.putCode(contract, new byte[] {0x00, 0x61, 0x73, 0x6d, 9});
         store.applyBlock(10, List.of(
             StorageChange.putStorage(contract, key, new byte[] {2}),
             StorageChange.putStorage(contract, fresh, new byte[] {3}),
-            StorageChange.putCode(contract, new byte[] {0x00, 0x61, 0x73, 0x6d})), journal);
+            StorageChange.putCode(contract, new byte[] {0x00, 0x61, 0x73, 0x6d})));
         assertArrayEquals(new byte[] {2}, store.getStorage(contract, key));
         assertArrayEquals(new byte[] {3}, store.getStorage(contract, fresh));
         assertArrayEquals(new byte[] {0x00, 0x61, 0x73, 0x6d}, store.getCode(contract));
-        assertArrayEquals(journal, store.getJournal(10));
+        // The store generated the journal itself: each prior, in change order (audit: one undo
+        // protocol). Decodable and re-revertable — see applyThenRevertRestoresTheWholeStoreByteForByte.
+        List<ContractUndo> journal = ContractJournalCodec.decode(store.getJournal(10));
+        assertEquals(3, journal.size());
+        assertArrayEquals(new byte[] {1}, journal.get(0).prior());
+        assertNull(journal.get(1).prior(), "a fresh key's prior is a delete");
+        assertArrayEquals(new byte[] {0x00, 0x61, 0x73, 0x6d, 9}, journal.get(2).prior());
     }
 
     @Test
@@ -83,11 +90,8 @@ public interface ContractStoreContract {
         store.putStorage(contract, key, new byte[] {1});
         store.applyBlock(10, List.of(
             StorageChange.putStorage(contract, key, new byte[] {2}),
-            StorageChange.putStorage(contract, fresh, new byte[] {3})), new byte[] {9});
-        // Restores are the undo journal in final application order; null value = delete (audit F1).
-        store.revertBlock(10, List.of(
-            StorageChange.putStorage(contract, key, new byte[] {1}),
-            StorageChange.deleteStorage(contract, fresh)));
+            StorageChange.putStorage(contract, fresh, new byte[] {3})));
+        store.revertBlock(10);
         assertArrayEquals(new byte[] {1}, store.getStorage(contract, key));
         assertNull(store.getStorage(contract, fresh));
         assertNull(store.getJournal(10));
@@ -99,9 +103,9 @@ public interface ContractStoreContract {
         PublicAddress contract = PublicAddress.random();
         byte[] key = {0};
         store.putStorage(contract, key, new byte[] {1});
-        store.applyBlock(10, List.of(StorageChange.putStorage(contract, key, new byte[] {2})), new byte[] {9});
+        store.applyBlock(10, List.of(StorageChange.putStorage(contract, key, new byte[] {2})));
         store.putReceipts(10, new byte[] {7, 7, 7});
-        store.revertBlock(10, List.of(StorageChange.putStorage(contract, key, new byte[] {1})));
+        store.revertBlock(10);
         assertArrayEquals(new byte[] {1}, store.getStorage(contract, key));
         assertNull(store.getJournal(10));
         assertNull(store.getReceipts(10), "receipts drop with the revert, not separately");
@@ -110,10 +114,10 @@ public interface ContractStoreContract {
     @Test
     default void revertBlockWithReceiptsAndNoJournalStillDropsThem() throws Exception {
         // A receipts-only height (a reverting CALL that touched no storage): the store-level
-        // revert must accept an empty restore list and still drop the receipts.
+        // revert must find no journal and still drop the receipts.
         ContractStore store = newContractStore();
         store.putReceipts(11, new byte[] {1, 2, 3});
-        store.revertBlock(11, List.of());
+        store.revertBlock(11);
         assertNull(store.getReceipts(11));
         assertNull(store.getJournal(11));
     }
@@ -141,11 +145,10 @@ public interface ContractStoreContract {
         ContractStore store = newContractStore();
         PublicAddress contract = PublicAddress.random();
         byte[] key = {0};
-        byte[] journal = {9, 9, 9};
-        store.applyBlock(10, List.of(StorageChange.putStorage(contract, key, new byte[] {2})), journal);
+        store.applyBlock(10, List.of(StorageChange.putStorage(contract, key, new byte[] {2})));
         // Re-applying the same height would journal the already-mutated state as "prior" (audit F10).
         List<StorageChange> repeat = List.of(StorageChange.putStorage(contract, key, new byte[] {4}));
-        assertThrows(IllegalStateException.class, () -> store.applyBlock(10, repeat, journal));
+        assertThrows(IllegalStateException.class, () -> store.applyBlock(10, repeat));
     }
 
     @Test
@@ -155,14 +158,14 @@ public interface ContractStoreContract {
         // double-apply guard the moment it, or a later journal-less apply at the same height, ran
         // again.
         ContractStore store = newContractStore();
-        store.applyBlock(5, List.of(), null);
-        store.applyBlock(5, List.of(), null); // must not throw
+        store.applyBlock(5, List.of());
+        store.applyBlock(5, List.of()); // must not throw
         PublicAddress contract = PublicAddress.random();
         byte[] key = {0};
         // A later real apply at that same height is still accepted — no phantom journal blocks it.
         store.applyBlock(5, List.of(StorageChange.putStorage(contract, key, new byte[] {1})), new byte[] {7});
         assertArrayEquals(new byte[] {1}, store.getStorage(contract, key));
-        assertArrayEquals(new byte[] {7}, store.getJournal(5));
+        assertNotNull(store.getJournal(5));
     }
 
     /**
@@ -184,22 +187,18 @@ public interface ContractStoreContract {
 
         store.applyBlock(10, List.of(
             StorageChange.putStorage(contract, keyA, new byte[] {2}),
-            StorageChange.putStorage(contract, keyB, new byte[] {3})), new byte[] {9});
+            StorageChange.putStorage(contract, keyB, new byte[] {3})));
         store.applyBlock(11, List.of(
             StorageChange.putStorage(contract, keyA, new byte[] {4}),
             StorageChange.deleteStorage(contract, keyB),
-            StorageChange.putCode(contract, new byte[] {0x00, 0x61, 0x73, 0x6d, 5})), new byte[] {8});
+            StorageChange.putCode(contract, new byte[] {0x00, 0x61, 0x73, 0x6d, 5})));
         assertTrue(!wholeStoreBytes(store).equals(before),
             "the later blocks must actually change the store for the test to mean anything");
 
-        // Restores are the priors in final application order (reverse journal order).
-        store.revertBlock(11, List.of(
-            StorageChange.putStorage(contract, keyA, new byte[] {2}),
-            StorageChange.deleteStorage(contract, keyB),
-            StorageChange.putCode(contract, new byte[] {0x00, 0x61, 0x73, 0x6d})));
-        store.revertBlock(10, List.of(
-            StorageChange.putStorage(contract, keyA, new byte[] {1}),
-            StorageChange.deleteStorage(contract, keyB)));
+        // The store generated AND decodes its own journal — the revert takes no caller-supplied
+        // restores (audit: one undo protocol).
+        store.revertBlock(11);
+        store.revertBlock(10);
         assertEquals(before, wholeStoreBytes(store),
             "reverting N blocks must restore the store to its pre-apply state, byte for byte");
     }

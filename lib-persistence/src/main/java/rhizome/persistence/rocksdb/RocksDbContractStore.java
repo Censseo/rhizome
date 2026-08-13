@@ -13,6 +13,7 @@ import org.slf4j.LoggerFactory;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.vm.ContractJournalCodec;
 import rhizome.vm.ContractStore;
+import rhizome.vm.ContractUndo;
 import rhizome.vm.StorageChange;
 
 /**
@@ -157,20 +158,26 @@ public final class RocksDbContractStore extends RocksDbStore implements Contract
     }
 
     @Override
-    public void applyBlock(long height, List<StorageChange> changes, byte[] journal) {
-        applyBlock(height, changes, journal, null);
+    public void applyBlock(long height, List<StorageChange> changes) {
+        applyBlock(height, changes, null);
     }
 
     @Override
-    public void applyBlock(long height, List<StorageChange> changes, byte[] journal, byte[] encodedReceipts) {
-        // All slot mutations AND the undo journal AND the receipts land in ONE synced WriteBatch:
-        // a crash mid-flush can no longer leave storage half-applied with no journal to rewind it
-        // (audit F1), and the receipts no longer cost a second fsync per block (audit perf).
+    public void applyBlock(long height, List<StorageChange> changes, byte[] encodedReceipts) {
+        // All slot mutations AND the generated undo journal AND the receipts land in ONE synced
+        // WriteBatch: a crash mid-flush can no longer leave storage half-applied with no journal
+        // to rewind it (audit F1), and the receipts no longer cost a second fsync per block
+        // (audit perf).
         if (raw(journalCf, heightKey(height)) != null) {
             // A double-apply would capture the already-mutated state as the journal's "prior" (audit F10).
             throw new IllegalStateException("contract store already has a journal at height " + height);
         }
         try (WriteBatch batch = new WriteBatch()) {
+            // The store GENERATES the journal itself — each key's prior, in change order, exactly
+            // like the box and token stores (audit: one undo protocol). The storage priors come
+            // from ONE multi-get (see getStorageMulti) so a K-write block costs one round-trip,
+            // preserving the audit perf of the old session-side capture.
+            byte[] journal = encodeJournalFrom(changes);
             for (StorageChange change : changes) {
                 stage(batch, change);
             }
@@ -184,6 +191,36 @@ public final class RocksDbContractStore extends RocksDbStore implements Contract
         } catch (RocksDBException e) {
             throw new IllegalStateException("contract store applyBlock failed", e);
         }
+    }
+
+    /** Captures each change's prior and encodes the undo journal (null when no change). */
+    private byte[] encodeJournalFrom(List<StorageChange> changes) {
+        if (changes.isEmpty()) {
+            return null;
+        }
+        // Storage priors come from ONE multi-get (see getStorageMulti) so a K-write block costs
+        // one round-trip; code priors are point reads (code changes are rare and the multi-get
+        // would need a parallel key list for a null key).
+        List<PublicAddress> storageContracts = new ArrayList<>();
+        List<byte[]> storageKeys = new ArrayList<>();
+        for (StorageChange change : changes) {
+            if (!change.isCode()) {
+                storageContracts.add(change.contract());
+                storageKeys.add(change.key());
+            }
+        }
+        List<byte[]> priors = storageContracts.isEmpty() ? List.of()
+            : getStorageMulti(storageContracts, storageKeys);
+        List<ContractUndo> journal = new ArrayList<>(changes.size());
+        int storageIndex = 0;
+        for (StorageChange change : changes) {
+            byte[] prior = change.isCode()
+                ? raw(codeCf, change.contract().toBytes())
+                : priors.get(storageIndex++);
+            journal.add(new ContractUndo(change.isCode(), change.contract(),
+                change.isCode() ? null : change.key(), prior));
+        }
+        return ContractJournalCodec.encode(journal);
     }
 
     @Override

@@ -32,48 +32,58 @@ public interface ContractStore extends ContractState, ContractSnapshotStore, Con
     // a block's prior state and drops its journal as one unit.
 
     /**
-     * Commits one block's contract mutations together with its serialized undo journal, as a
-     * single atomic unit where the store supports it.
+     * Commits one block's contract mutations and records its undo journal, as a single atomic
+     * unit where the store supports it.
      *
-     * <p>Semantics:
+     * <p>The store GENERATES the journal itself — it captures each key's prior value before
+     * applying the change, exactly like the box and token stores, so the caller hands over
+     * plain mutations and the undo protocol is one (audit: one undo protocol). Semantics:
      * <ul>
      *   <li>{@code changes} are applied in list order; each is a set, or a delete when its value
-     *       is null (see {@link StorageChange}). They are exactly what
-     *       {@code SessionContractStore.flushWithJournal()} used to write one-by-one.</li>
-     *   <li>{@code journal} is the block's serialized undo journal, persisted at {@code height}
-     *       exactly as {@link #putJournal} would (a durable store keeps it so a reorg after a
-     *       restart can still reverse the block); may be null to commit changes without a
-     *       journal (e.g. a block that touched no contract state).</li>
+     *       is null (see {@link StorageChange}).</li>
+     *   <li>The undo journal — every prior, or a delete where the key did not exist before the
+     *       block — is persisted at {@code height} exactly as {@link #putJournal} would (a
+     *       durable store keeps it so a reorg after a restart can still reverse the block). A
+     *       mutation-less apply persists no journal.</li>
      *   <li>A height that already has a journal MUST be refused with {@link IllegalStateException}:
      *       a double-apply would capture the already-mutated state as the journal's "prior", so a
      *       later revert would restore the wrong values (audit F10).</li>
      * </ul>
      *
-     * <p>The default implementation checks the guard, then loops the per-operation methods and
-     * calls {@link #putJournal} — correct, just not atomic — so a store that does not override
-     * this gets the guard for free rather than opting out of it by omission.
+     * <p>The default implementation checks the guard, then captures each prior, loops the
+     * per-operation methods, and calls {@link #putJournal} — correct, just not atomic — so a
+     * store that does not override this gets the guard and the journal for free rather than
+     * opting out of them by omission.
      */
-    default void applyBlock(long height, java.util.List<StorageChange> changes, byte[] journal) {
+    default void applyBlock(long height, java.util.List<StorageChange> changes) {
         if (getJournal(height) != null) {
             throw new IllegalStateException("contract store already has a journal at height " + height);
+        }
+        java.util.List<ContractUndo> journal = new java.util.ArrayList<>(changes.size());
+        for (StorageChange change : changes) {
+            byte[] prior = change.isCode()
+                ? getCode(change.contract())
+                : getStorage(change.contract(), change.key());
+            journal.add(new ContractUndo(change.isCode(), change.contract(),
+                change.isCode() ? null : change.key(), prior));
         }
         for (StorageChange change : changes) {
             change.applyTo(this);
         }
-        if (journal != null) {
-            putJournal(height, journal);
+        if (!journal.isEmpty()) {
+            putJournal(height, ContractJournalCodec.encode(journal));
         }
     }
 
     /**
-     * As {@link #applyBlock(long, java.util.List, byte[])}, additionally committing the block's
-     * encoded receipts in the SAME atomic unit where the store supports it (RocksDB: they join
-     * the single synced WriteBatch — previously a second fsync per block, audit perf). The
-     * default falls back to the separate {@link #putReceipts} write, correct but not atomic.
+     * As {@link #applyBlock(long, java.util.List)}, additionally committing the block's encoded
+     * receipts in the SAME atomic unit where the store supports it (RocksDB: they join the
+     * single synced WriteBatch — previously a second fsync per block, audit perf). The default
+     * falls back to the separate {@link #putReceipts} write, correct but not atomic.
      */
-    default void applyBlock(long height, java.util.List<StorageChange> changes, byte[] journal,
+    default void applyBlock(long height, java.util.List<StorageChange> changes,
                             byte[] encodedReceipts) {
-        applyBlock(height, changes, journal);
+        applyBlock(height, changes);
         if (encodedReceipts != null) {
             putReceipts(height, encodedReceipts);
         }

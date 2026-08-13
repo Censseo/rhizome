@@ -404,26 +404,27 @@ public final class WasmContractProcessor implements ContractProcessor {
         byte[] encodedReceipts = currentReceipts.isEmpty() ? null : encodeReceipts(currentReceipts);
         if (session != null) {
             List<ContractChange> changes = session.forwardChanges();
-            List<ContractUndo> journal = session.captureJournal();
             // A block that touched no contract state persists NO journal either: the 4-byte
             // empty journal row cost every contract-free block a synced write, and every revert
             // path already maps a MISSING journal to "nothing to undo at this height" (see
             // revertBlock; audit: empty-journal fsyncs). applyBlock itself is skipped when the
             // block carries neither mutations nor receipts — an empty synced batch is a wasted
-            // fsync. A receipts-only block (e.g. a reverting CALL) still rides applyBlock with a
-            // null journal, so the receipts stay in the one atomic batch.
-            byte[] encodedJournal = journal.isEmpty() ? null : ContractJournalCodec.encode(journal);
-            if (encodedJournal != null) {
-                retainJournal(blockHeight, journal);
-            }
-            if (!changes.isEmpty() || encodedJournal != null || encodedReceipts != null) {
-                // Commit the block's mutations AND its serialized undo journal AND its receipts
-                // as ONE atomic unit where the store supports it (RocksDB: a single synced
-                // WriteBatch), so a crash mid-flush cannot leave storage half-applied with no
-                // journal to rewind it (audit store F1) and the receipts cost no second fsync
-                // (audit perf). The journal doubles as the durable reorg-undo after a restart (M9).
-                baseStore.applyBlock(blockHeight, session.pendingChanges(), encodedJournal, encodedReceipts);
+            // fsync. A receipts-only block (e.g. a reverting CALL) still rides applyBlock, so
+            // the receipts stay in the one atomic batch.
+            if (!changes.isEmpty() || encodedReceipts != null) {
+                // Commit the block's mutations AND its undo journal AND its receipts as ONE
+                // atomic unit where the store supports it (RocksDB: a single synced WriteBatch),
+                // so a crash mid-flush cannot leave storage half-applied with no journal to
+                // rewind it (audit store F1) and the receipts cost no second fsync (audit perf).
+                // The store GENERATES the journal itself (each key's prior, like the box and
+                // token stores — audit: one undo protocol); it doubles as the durable reorg-undo
+                // after a restart (M9). The byte-budgeted RAM copy below is a cache over it.
+                baseStore.applyBlock(blockHeight, session.pendingChanges(), encodedReceipts);
                 encodedReceipts = null;
+                byte[] persisted = baseStore.getJournal(blockHeight);
+                if (persisted != null) {
+                    retainJournal(blockHeight, ContractJournalCodec.decode(persisted));
+                }
             }
             if (!changes.isEmpty()) {
                 retainChanges(blockHeight, changes);

@@ -110,21 +110,38 @@ class WasmContractProcessorPersistenceTest {
             receipts.remove(height);
         }
 
-        @Override public void applyBlock(long height, List<StorageChange> changes, byte[] journal) {
+        @Override public void applyBlock(long height, List<StorageChange> changes) {
             applyBlockCalls++;
-            // Apply to the delegate directly so the directWrites counter sees only REAL bypasses.
+            // The store generates the journal itself (each prior, in change order — audit: one
+            // undo protocol). Apply to the delegate directly so the directWrites counter sees
+            // only REAL bypasses.
+            List<ContractUndo> journal = new java.util.ArrayList<>(changes.size());
             for (StorageChange change : changes) {
+                byte[] prior = change.isCode()
+                    ? delegate.getCode(change.contract())
+                    : delegate.getStorage(change.contract(), change.key());
+                journal.add(new ContractUndo(change.isCode(), change.contract(),
+                    change.isCode() ? null : change.key(), prior));
                 change.applyTo(delegate);
             }
-            if (journal != null) {
-                putJournal(height, journal);
+            if (!journal.isEmpty()) {
+                putJournal(height, ContractJournalCodec.encode(journal));
             }
         }
 
-        @Override public void revertBlock(long height, List<StorageChange> restores) {
+        @Override public void revertBlock(long height) {
+            // The store decodes its own journal — the revert no longer takes caller-supplied
+            // restores (audit: who decodes the journal). Nothing committed at the height is a
+            // strict no-op, like the durable stores (boot recovery replays empty reverts).
+            byte[] journal = journals.get(height);
+            if (journal == null && !receipts.containsKey(height)) {
+                return;
+            }
             revertBlockCalls++;
-            for (StorageChange restore : restores) {
-                restore.applyTo(delegate);
+            if (journal != null) {
+                for (StorageChange restore : ContractJournalCodec.restores(journal)) {
+                    restore.applyTo(delegate);
+                }
             }
             deleteJournal(height);
             // The store-level contract: receipts ride the SAME atomic unit as the restore and
@@ -378,7 +395,7 @@ class WasmContractProcessorPersistenceTest {
         // entry ArrayList before touching any record. The count must be bounded by the bytes
         // present and rejected with a clean exception.
         byte[] corrupt = java.nio.ByteBuffer.allocate(4).putInt(Integer.MAX_VALUE).array();
-        assertThrows(IllegalArgumentException.class, () -> WasmContractProcessor.decodeJournal(corrupt));
+        assertThrows(IllegalStateException.class, () -> ContractJournalCodec.decode(corrupt));
     }
 
     @Test
@@ -390,8 +407,8 @@ class WasmContractProcessorPersistenceTest {
         b.put((byte) 1);             // isCode
         b.put(new byte[25]);         // contract address
         b.putInt(Integer.MAX_VALUE); // keyLen — absurd
-        assertThrows(IllegalArgumentException.class,
-            () -> WasmContractProcessor.decodeJournal(b.array()));
+        assertThrows(IllegalStateException.class,
+            () -> ContractJournalCodec.decode(b.array()));
     }
 
     @Test
@@ -415,7 +432,7 @@ class WasmContractProcessorPersistenceTest {
     void aTruncatedJournalFailsCleanly() {
         // Fewer bytes than even the count field: must surface as a clean exception, never a
         // giant allocation or a silent half-decode.
-        assertThrows(RuntimeException.class, () -> WasmContractProcessor.decodeJournal(new byte[2]));
+        assertThrows(RuntimeException.class, () -> ContractJournalCodec.decode(new byte[2]));
         assertThrows(RuntimeException.class, () -> WasmContractProcessor.decodeReceipts(new byte[2]));
     }
 }

@@ -127,7 +127,7 @@ final class SessionContractStore implements ContractState {
 
     /**
      * The buffered writes as {@link StorageChange} mutations for the atomic
-     * {@link ContractStore#applyBlock(long, List, byte[])} commit path: code and storage sets, and
+     * {@link ContractStore#applyBlock(long, List)} commit path: code and storage sets, and
      * a {@link StorageChange#deleteStorage} for each tombstone. Does not touch the base store.
      */
     List<StorageChange> pendingChanges() {
@@ -140,42 +140,11 @@ final class SessionContractStore implements ContractState {
     }
 
     /**
-     * The undo journal for this session's buffered writes — each written key's prior base value
-     * ({@code null} if it did not exist) — WITHOUT applying the writes. Paired with {@link
-     * #pendingChanges()} so the processor can hand mutations and journal to {@link
-     * ContractStore#applyBlock(long, List, byte[])} and have them commit as one atomic unit.
-     *
-     * <p>The storage priors come from ONE batched read ({@link ContractState#getStorageMulti}):
-     * a point read per written key made a K-write block cost K store round-trips at every commit
-     * (audit: journal-capture N+1). Journal order is the session's insertion order.
-     */
-    List<ContractUndo> captureJournal() {
-        List<ContractUndo> journal = new ArrayList<>(codeWrites.size() + storageWrites.size());
-        codeWrites.forEach((contract, v) ->
-            journal.add(new ContractUndo(true, contract, null, base.getCode(contract))));
-        if (!storageWrites.isEmpty()) {
-            List<Slot> slots = new ArrayList<>(storageWrites.keySet());
-            List<PublicAddress> contracts = new ArrayList<>(slots.size());
-            List<byte[]> keys = new ArrayList<>(slots.size());
-            for (Slot slot : slots) {
-                contracts.add(slot.contract());
-                keys.add(slot.key());
-            }
-            List<byte[]> priors = base.getStorageMulti(contracts, keys);
-            for (int i = 0; i < slots.size(); i++) {
-                Slot slot = slots.get(i);
-                journal.add(new ContractUndo(false, slot.contract(), slot.key(), priors.get(i)));
-            }
-        }
-        return journal;
-    }
-
-    /**
      * Writes every buffered change into the base store and returns the undo journal
      * (each written key's prior base value, {@code null} if it did not exist), so the
      * block can be reverted exactly. Used to fold a call frame into its parent session;
-     * the top-level block commit instead uses {@link #captureJournal()} + {@link
-     * #pendingChanges()} with the store's atomic applyBlock.
+     * the top-level block commit hands the buffered mutations to the store's atomic
+     * applyBlock, which generates the journal itself (audit: one undo protocol).
      */
     List<ContractUndo> flushWithJournal() {
         List<ContractUndo> journal = new ArrayList<>();

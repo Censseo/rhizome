@@ -12,10 +12,8 @@ import org.junit.jupiter.api.io.TempDir;
 
 import rhizome.core.ledger.PublicAddress;
 import rhizome.persistence.rocksdb.RocksDbContractStore;
-import rhizome.vm.ContractJournalCodec;
 import rhizome.vm.ContractStore;
 import rhizome.vm.ContractStoreContract;
-import rhizome.vm.ContractUndo;
 import rhizome.vm.StorageChange;
 
 /**
@@ -102,17 +100,17 @@ class RocksDbContractStoreTest implements ContractStoreContract {
     void receiptsSurviveReopenAndAreDroppedByRevert() throws Exception {
         PublicAddress contract = PublicAddress.random();
         byte[] key = {0};
-        byte[] journal = ContractJournalCodec.encode(List.of(
-            new ContractUndo(false, contract, key, new byte[] {1})));
         try (var store = new RocksDbContractStore(dir.toString())) {
             store.putStorage(contract, key, new byte[] {1});
+            // The store GENERATES its own journal from the changes (audit: one undo protocol).
             store.applyBlock(10, List.of(StorageChange.putStorage(contract, key, new byte[] {2})),
-                journal, new byte[] {7, 7, 7});
+                new byte[] {7, 7, 7});
         }
         // The block's journal AND receipts are on disk, not in memory.
         try (var store = new RocksDbContractStore(dir.toString())) {
             org.junit.jupiter.api.Assertions.assertArrayEquals(new byte[] {7, 7, 7}, store.getReceipts(10));
-            org.junit.jupiter.api.Assertions.assertArrayEquals(journal, store.getJournal(10));
+            org.junit.jupiter.api.Assertions.assertNotNull(store.getJournal(10),
+                "the store must have persisted the journal it generated");
             store.revertBlock(10); // the store decodes its own journal
         }
         // The revert's drops are durable too.
