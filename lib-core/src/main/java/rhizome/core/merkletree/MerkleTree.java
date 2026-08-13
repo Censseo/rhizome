@@ -1,14 +1,18 @@
 package rhizome.core.merkletree;
-import lombok.Getter;
-import lombok.Setter;
+
+import java.util.ArrayList;
+import java.util.List;
+
+import rhizome.crypto.Crypto;
 import rhizome.crypto.SHA256Hash;
 import rhizome.core.transaction.Transaction;
 
-import rhizome.crypto.Crypto;
-
-import java.util.*;
-
-@Getter @Setter
+/**
+ * Computes a block's transaction Merkle root. Only the root is ever read back (block assembly and
+ * validation both discard the tree the moment they have it), so this folds level by level into a
+ * single hash rather than retaining a graph of parent-linked nodes — the inclusion-proof machinery
+ * that graph existed for had no production consumer.
+ */
 public class MerkleTree {
 
     /**
@@ -20,13 +24,7 @@ public class MerkleTree {
     private static final byte LEAF_PREFIX = 0x00;
     private static final byte NODE_PREFIX = 0x01;
 
-    private HashTree root;
-    private Map<SHA256Hash, HashTree> fringeNodes;
-
-    public MerkleTree() {
-        this.root = null;
-        this.fringeNodes = new HashMap<>();
-    }
+    private SHA256Hash rootHash = SHA256Hash.empty();
 
     /** Leaf hash: {@code SHA-256(0x00 || txHash)}. */
     public static SHA256Hash leafHash(SHA256Hash txHash) {
@@ -53,84 +51,36 @@ public class MerkleTree {
         // not just the set. Sorting would make [t0,t1] and [t1,t0] share a root — hence a block
         // hash — so a reordered variant of a valid block would carry valid PoW yet be accepted or
         // rejected depending on which order a node received, splitting consensus.
-        fringeNodes.clear();
         if (items.isEmpty()) {
             // Defined empty-tree root (audit L8): a block always carries a coinbase so this is not
             // reached on the consensus path, but the class must not NPE for an empty item list.
-            this.root = new HashTree(SHA256Hash.empty());
+            this.rootHash = SHA256Hash.empty();
             return;
         }
 
-        List<HashTree> level = new ArrayList<>(items.size());
+        List<SHA256Hash> level = new ArrayList<>(items.size());
         for (Transaction item : items) {
-            SHA256Hash txHash = item.hash(); // memoized in TransactionImpl — hash once per leaf
-            HashTree leaf = new HashTree(leafHash(txHash));
-            fringeNodes.put(txHash, leaf);
-            level.add(leaf);
+            level.add(leafHash(item.hash())); // item.hash() is memoized in TransactionImpl
         }
 
-        // Canonical level-by-level build. An odd level duplicates its LAST node (a fresh node with
-        // the same hash) rather than folding the first leaf back in — the previous single-queue
-        // build mixed tree levels and duplicated the first leaf, so distinct transaction lists
-        // could collide on the root (audit L7). Domain separation above makes the duplicate a
-        // node, not a forgeable leaf.
+        // Canonical level-by-level fold. An odd level duplicates its LAST hash (not the first, and
+        // not by folding a leaf back in) — the previous single-queue build mixed tree levels and
+        // duplicated the first leaf, so distinct transaction lists could collide on the root
+        // (audit L7). Domain separation above makes the duplicate a node, not a forgeable leaf.
         while (level.size() > 1) {
-            List<HashTree> next = new ArrayList<>((level.size() + 1) / 2);
+            List<SHA256Hash> next = new ArrayList<>((level.size() + 1) / 2);
             for (int i = 0; i < level.size(); i += 2) {
-                HashTree a = level.get(i);
-                HashTree b = (i + 1 < level.size()) ? level.get(i + 1) : new HashTree(a.hash());
-                HashTree parent = new HashTree(nodeHash(a.hash(), b.hash()));
-                a.parent(parent);
-                b.parent(parent);
-                parent.left(a);
-                parent.right(b);
-                next.add(parent);
+                SHA256Hash a = level.get(i);
+                SHA256Hash b = (i + 1 < level.size()) ? level.get(i + 1) : a;
+                next.add(nodeHash(a, b));
             }
             level = next;
         }
 
-        this.root = level.get(0);
+        this.rootHash = level.get(0);
     }
 
     public SHA256Hash getRootHash() {
-        return this.root.hash();
+        return rootHash;
     }
-
-    public Optional<HashTree> getMerkleProof(Transaction t) {
-        return Optional.ofNullable(fringeNodes.get(t.hash()))
-                       .map(f -> buildProof(f, null));
-    }
-
-    private HashTree buildProof(HashTree fringe, HashTree previousNode) {
-        var result = new HashTree(fringe.hash());
-        if (previousNode != null) {
-            if (fringe.left() != null && fringe.left() != previousNode) {
-                result.left(fringe.left());
-                result.right(previousNode);
-            } else if (fringe.right() != null && fringe.right() != previousNode) {
-                result.right(fringe.right());
-                result.left(previousNode);
-            }
-        }
-        if (fringe.parent() != null) {
-            return buildProof(fringe.parent(), fringe);
-        } else {
-            return result;
-        }
-    }
-
-    @Getter
-    @Setter
-    public static class HashTree {
-        private SHA256Hash hash;
-        private HashTree parent;
-        private HashTree left;
-        private HashTree right;
-
-        public HashTree(SHA256Hash hash) {
-            this.hash = hash;
-            this.parent = this.left = this.right = null;
-        }
-    }
-
 }

@@ -4,13 +4,11 @@ import org.junit.jupiter.api.Test;
 
 import rhizome.crypto.SHA256Hash;
 import rhizome.core.merkletree.MerkleTree;
-import rhizome.core.merkletree.MerkleTree.HashTree;
 import rhizome.core.transaction.Transaction;
 import rhizome.core.user.User;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -18,33 +16,20 @@ import java.util.List;
 class MerkleTreeTest {
 
     @Test
-    void singleNodeWorks() {
+    void singleNodeRootIsTheLeafItself() {
         MerkleTree m = new MerkleTree();
         User miner = User.create();
         Transaction a = miner.mine();
         List<Transaction> items = new ArrayList<>();
         items.add(a);
         m.setItems(items);
-        var proof = m.getMerkleProof(a);
         // A single-transaction tree's root is the leaf itself (domain-separated), with no sibling —
         // no artificial self-doubling, matching the standard single-leaf Merkle convention.
-        SHA256Hash leafA = MerkleTree.leafHash(a.hash());
-        assertEquals(leafA, proof.get().hash());
-        assertEquals(leafA, m.getRootHash());
-    }
-
-    private boolean checkProofRecursive(HashTree hashTree) {
-        if (hashTree.left() == null && hashTree.right() == null) {
-            // fringe node
-            return true;
-        } else {
-            if (!MerkleTree.nodeHash(hashTree.left().hash(), hashTree.right().hash()).equals(hashTree.hash())) return false;
-            return checkProofRecursive(hashTree.left()) && checkProofRecursive(hashTree.right());
-        }
+        assertEquals(MerkleTree.leafHash(a.hash()), m.getRootHash());
     }
 
     @Test
-    void singleThreeNodesWorks() {
+    void threeItemsFoldToTheExpectedRoot() {
         MerkleTree m = new MerkleTree();
         User miner = User.create();
         User receiver = User.create();
@@ -56,10 +41,14 @@ class MerkleTreeTest {
         items.add(b);
         items.add(c);
         m.setItems(items);
-        var proof = m.getMerkleProof(a);
 
-        assertEquals(MerkleTree.nodeHash(proof.get().left().hash(), proof.get().right().hash()), proof.get().hash());
-        assertTrue(checkProofRecursive(proof.get()));
+        // Odd level: c's leaf is duplicated as its own sibling, matching setItems' documented fold.
+        SHA256Hash leafA = MerkleTree.leafHash(a.hash());
+        SHA256Hash leafB = MerkleTree.leafHash(b.hash());
+        SHA256Hash leafC = MerkleTree.leafHash(c.hash());
+        SHA256Hash left = MerkleTree.nodeHash(leafA, leafB);
+        SHA256Hash right = MerkleTree.nodeHash(leafC, leafC);
+        assertEquals(MerkleTree.nodeHash(left, right), m.getRootHash());
     }
 
     @Test
@@ -95,11 +84,11 @@ class MerkleTreeTest {
         MerkleTree m2 = new MerkleTree();
         m2.setItems(new ArrayList<>(List.of(a, c, b)));
 
-        assertTrue(!m1.getRootHash().equals(m2.getRootHash()), "root must depend on order");
+        assertNotEquals(m1.getRootHash(), m2.getRootHash(), "root must depend on order");
     }
 
     @Test
-    void largerTreeWorks() {
+    void largerTreeFoldsToADefinedRoot() {
         MerkleTree m = new MerkleTree();
         User miner = User.create();
         User receiver = User.create();
@@ -109,7 +98,12 @@ class MerkleTreeTest {
             items.add(miner.send(receiver, i));
         }
         m.setItems(items);
-        var proof = m.getMerkleProof(items.get(4));
-        assertTrue(checkProofRecursive(proof.get()));
+        assertNotEquals(SHA256Hash.empty(), m.getRootHash());
+
+        // Deterministic: rebuilding from the same (large, odd-at-several-levels) list folds to the
+        // identical root.
+        MerkleTree m2 = new MerkleTree();
+        m2.setItems(items);
+        assertEquals(m.getRootHash(), m2.getRootHash());
     }
 }
