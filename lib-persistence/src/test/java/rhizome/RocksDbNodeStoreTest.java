@@ -95,6 +95,20 @@ class RocksDbNodeStoreTest implements ChainStoreContract, NonceStoreContract, Le
     }
 
     @Test
+    void chainStoreLedgerAndNonceStoreAreMemoized() throws IOException {
+        // Each used to build a NEW view object per call: ChainEngine.init and DomainStateAdapter
+        // could then end up talking to DIFFERENT view instances over the same database, which
+        // NodeStores exists to make impossible (a crash losing nonces the committed blocks already
+        // assumed). The three views being the SAME instance across calls is that guarantee, in a
+        // test a future regression would actually fail.
+        try (RocksDbNodeStore store = new RocksDbNodeStore(tempDir.resolve("db").toString())) {
+            org.junit.jupiter.api.Assertions.assertSame(store.chainStore(), store.chainStore());
+            org.junit.jupiter.api.Assertions.assertSame(store.ledger(), store.ledger());
+            org.junit.jupiter.api.Assertions.assertSame(store.nonceStore(), store.nonceStore());
+        }
+    }
+
+    @Test
     void ledgerChecksArithmetic() throws IOException {
         try (RocksDbNodeStore store = new RocksDbNodeStore(tempDir.resolve("db").toString())) {
             Ledger ledger = store.ledger();

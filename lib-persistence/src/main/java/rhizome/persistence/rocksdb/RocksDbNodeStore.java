@@ -42,7 +42,7 @@ import static rhizome.core.common.Utils.longToBytes;
  * commits a block and its transaction-index entries in one batch; a future
  * refactor can extend the same batch across the ledger.
  */
-public final class RocksDbNodeStore implements AutoCloseable {
+public final class RocksDbNodeStore implements AutoCloseable, rhizome.core.blockchain.NodeStores {
 
     static {
         RocksDB.loadLibrary();
@@ -140,6 +140,16 @@ public final class RocksDbNodeStore implements AutoCloseable {
     private volatile java.util.concurrent.ConcurrentHashMap<rhizome.core.ledger.PublicAddress, Long> pendingNonces;
     private volatile Long pendingNonceHeight;
 
+    // Memoized: chainStore()/ledger()/nonceStore() used to build a NEW view object on every call —
+    // harmless while these views are stateless, and a bug the day a caller compares instances or
+    // relies on identity. ChainEngine.init and DomainStateAdapter now see the SAME three objects
+    // (see NodeStores), which is what makes "these three views are one atomic database" a type-level
+    // fact instead of a convention. Assigned at the end of the constructor, after every field these
+    // views read is already set.
+    private final ChainStore chainStoreView;
+    private final Ledger ledgerView;
+    private final rhizome.core.blockchain.NonceStore nonceStoreView;
+
     public RocksDbNodeStore(String path) throws IOException {
         this(path, 0);
     }
@@ -186,6 +196,11 @@ public final class RocksDbNodeStore implements AutoCloseable {
         this.unclesCf = handles.get(7);
         backfillHeaders();
         catchUpPruning();
+        // Assigned last: each view's constructor only captures RocksDbNodeStore.this, but placing
+        // this after every other field keeps that safety visible rather than deduced.
+        this.chainStoreView = new RocksChainStore();
+        this.ledgerView = new RocksLedger();
+        this.nonceStoreView = new RocksNonceStore();
     }
 
     /**
@@ -276,8 +291,9 @@ public final class RocksDbNodeStore implements AutoCloseable {
         }
     }
 
+    @Override
     public ChainStore chainStore() {
-        return new RocksChainStore();
+        return chainStoreView;
     }
 
     /**
@@ -325,8 +341,9 @@ public final class RocksDbNodeStore implements AutoCloseable {
         }
     }
 
+    @Override
     public Ledger ledger() {
-        return new RocksLedger();
+        return ledgerView;
     }
 
     /** Adds the block commit's staged ledger writes (if any) to {@code batch}, for an atomic flush. */
@@ -359,8 +376,9 @@ public final class RocksDbNodeStore implements AutoCloseable {
     }
 
     /** Persisted next-nonce-per-sender, so the engine need not replay bodies at boot. */
+    @Override
     public rhizome.core.blockchain.NonceStore nonceStore() {
-        return new RocksNonceStore();
+        return nonceStoreView;
     }
 
     /**

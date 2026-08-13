@@ -22,20 +22,19 @@ import rhizome.persistence.rocksdb.RocksDbTokenStore;
  * <p>This is the only place in the tree that knows a snap-sync seed lands in RocksDB. Everything
  * upstream of it works against the interface, which is what lets the bootstrap's refusal branches
  * be exercised against in-memory stores.
+ *
+ * <p>{@code chainStore()}/{@code ledger()}/{@code nonceStore()} delegate straight through to
+ * {@code store}: {@link RocksDbNodeStore} memoizes its own three views (see {@code NodeStores}),
+ * so there is no longer a need to resolve and hold one of them here while the other two re-resolve
+ * on every call — this record used to do exactly that, asymmetrically.
  */
 record RocksBootstrapTarget(RocksDbNodeStore store, RocksDbBoxStore boxStore,
-                            RocksDbTokenStore tokenStore, RocksDbStateStore stateStore,
-                            ChainStore chainStore) implements BootstrapTarget {
+                            RocksDbTokenStore tokenStore, RocksDbStateStore stateStore)
+        implements BootstrapTarget {
 
-    /**
-     * ⚠ {@link RocksDbNodeStore#chainStore()} builds a NEW view object on every call, so the
-     * chain store is resolved once here and held. Binding it as a method reference would hand each
-     * call site a different instance — harmless for the stateless RocksDB view, and a bug the day
-     * a target keeps state.
-     */
-    static RocksBootstrapTarget of(RocksDbNodeStore store, RocksDbBoxStore boxStore,
-                                   RocksDbTokenStore tokenStore, RocksDbStateStore stateStore) {
-        return new RocksBootstrapTarget(store, boxStore, tokenStore, stateStore, store.chainStore());
+    @Override
+    public ChainStore chainStore() {
+        return store.chainStore();
     }
 
     @Override

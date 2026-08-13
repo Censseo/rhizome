@@ -227,7 +227,7 @@ public final class RhizomeNode implements AutoCloseable {
                 for (String peerUrl : config.peers()) {
                     try {
                         if (SnapshotBootstrap.bootstrap(config.params(), snapshot,
-                                RocksBootstrapTarget.of(store, boxStore, tokenStore, stateStore),
+                                new RocksBootstrapTarget(store, boxStore, tokenStore, stateStore),
                                 contractStore, new HttpPeerSource(peerUrl, blockPrivatePeers,
                                     syncHttpClient, peerTokenPolicy),
                                 System.currentTimeMillis(), Path.of(config.dataDir()))) {
@@ -250,9 +250,9 @@ public final class RhizomeNode implements AutoCloseable {
             // Contracts read data boxes (Ergo-style data inputs) through the box processor's
             // session-aware view, so a box written earlier in the block is visible.
             contractProcessor.setBoxReader(boxProcessor::get);
-            var engine = ChainEngine.init(config.params(), store.ledger(), store.chainStore(),
-                store.nonceStore(), snapshot, null, System::currentTimeMillis, verifier, contractProcessor,
-                boxProcessor, tokenProcessor, stateAccumulator);
+            var engine = ChainEngine.init(config.params(), store, snapshot, null,
+                System::currentTimeMillis, verifier, contractProcessor, boxProcessor, tokenProcessor,
+                stateAccumulator);
             var mempool = new MemPool(config.params(), verifier, engine, config.mempoolSize());
             // Every node keeps a live peer set (seeded from config), serves /peers and
             // accepts announcements, so the network can self-organise from a few seeds.

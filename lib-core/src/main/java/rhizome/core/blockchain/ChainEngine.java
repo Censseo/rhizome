@@ -345,6 +345,24 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
     }
 
     /**
+     * As {@link #init}, taking the chain store, ledger and nonce store as ONE {@link NodeStores}
+     * so they cannot come from three different databases. This is the form production wiring
+     * uses; the ledger/store/nonceStore triple above stays for tests that deliberately mix
+     * backends (an in-memory chain store over a durable ledger, and similar).
+     */
+    public static ChainEngine init(NetworkParameters params, NodeStores stores,
+                                   LedgerSnapshot snapshot, SHA256Hash expectedGenesisHash,
+                                   LongSupplier nowMillis, SignatureVerifier verifier,
+                                   ContractProcessor contractProcessor,
+                                   rhizome.core.box.BoxProcessor boxProcessor,
+                                   rhizome.core.token.TokenProcessor tokenProcessor,
+                                   rhizome.core.state.StateAccumulator stateAccumulator) {
+        return init(params, stores.ledger(), stores.chainStore(), stores.nonceStore(), snapshot,
+            expectedGenesisHash, nowMillis, verifier, contractProcessor, boxProcessor,
+            tokenProcessor, stateAccumulator);
+    }
+
+    /**
      * Boot recovery for a torn multi-store commit (audit S3) or a torn popBlock revert (audit:
      * revert-path tear). A block's state commits in program order — contract, box, token
      * processors, then the state accumulator, then the atomic block/height/ledger batch last —

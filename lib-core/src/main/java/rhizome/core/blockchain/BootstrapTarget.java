@@ -4,7 +4,6 @@ import java.util.List;
 
 import rhizome.core.block.BlockHeader;
 import rhizome.core.box.BoxStore;
-import rhizome.core.ledger.Ledger;
 import rhizome.core.state.RootStore;
 import rhizome.core.state.SmtNodeStore;
 import rhizome.core.token.TokenStore;
@@ -34,13 +33,10 @@ import rhizome.core.token.TokenStore;
  * intersection bound would make the in-memory target impossible to write, which is precisely the
  * target this port exists to allow.
  */
-public interface BootstrapTarget {
+public interface BootstrapTarget extends NodeStores {
 
-    ChainStore chainStore();
-
-    Ledger ledger();
-
-    NonceStore nonceStore();
+    // chainStore(), ledger(), nonceStore() come from NodeStores: a bootstrap seeds one coherent
+    // node database, not three unrelated stores.
 
     BoxStore boxes();
 
