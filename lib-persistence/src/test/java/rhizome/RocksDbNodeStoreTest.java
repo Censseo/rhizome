@@ -555,6 +555,7 @@ class RocksDbNodeStoreTest implements ChainStoreContract, NonceStoreContract, Le
             new org.rocksdb.ColumnFamilyDescriptor("txindex".getBytes()),
             new org.rocksdb.ColumnFamilyDescriptor("meta".getBytes()),
             new org.rocksdb.ColumnFamilyDescriptor("ledger".getBytes()),
+            new org.rocksdb.ColumnFamilyDescriptor("ledger_journal".getBytes()),
             new org.rocksdb.ColumnFamilyDescriptor("nonces".getBytes()),
             new org.rocksdb.ColumnFamilyDescriptor("uncles".getBytes()));
     }

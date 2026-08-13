@@ -1,6 +1,7 @@
 package rhizome.core.ledger;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import rhizome.core.transaction.TransactionAmount;
@@ -9,10 +10,15 @@ import rhizome.core.transaction.TransactionAmount;
  * In-memory {@link Ledger} reference implementation, with the same checked
  * arithmetic as the persistent stores (underflow/overflow throw). Used by the
  * light node, tooling and tests; the durable path is RocksDB (lib-persistence).
+ *
+ * <p>Keeps the per-block undo journal in memory (the RocksDB ledger persists it), so
+ * {@link #revertBlock} can reverse an applied block by replaying the journal instead of
+ * re-deriving each inverse — the same protocol as the durable store.
  */
 public final class InMemoryLedger implements Ledger {
 
     private final Map<PublicAddress, Long> balances = new HashMap<>();
+    private final Map<Long, List<LedgerOp>> journals = new HashMap<>();
 
     @Override
     public boolean hasWallet(PublicAddress wallet) {
@@ -58,6 +64,31 @@ public final class InMemoryLedger implements Ledger {
     @Override
     public void forEachBalance(java.util.function.ObjLongConsumer<PublicAddress> consumer) {
         balances.forEach(consumer::accept);
+    }
+
+    @Override
+    public void applyBlock(long height, List<LedgerOp> ops) {
+        if (journals.containsKey(height)) {
+            throw new IllegalStateException("ledger already has a journal at height " + height);
+        }
+        journals.put(height, List.copyOf(ops));
+    }
+
+    @Override
+    public boolean revertBlock(long height) {
+        List<LedgerOp> journal = journals.remove(height);
+        if (journal == null) {
+            return false;
+        }
+        for (int i = journal.size() - 1; i >= 0; i--) {
+            journal.get(i).revert(this);
+        }
+        return true;
+    }
+
+    @Override
+    public void pruneJournals(long minHeight) {
+        journals.keySet().removeIf(h -> h < minHeight);
     }
 
     private void add(PublicAddress wallet, TransactionAmount amt) {

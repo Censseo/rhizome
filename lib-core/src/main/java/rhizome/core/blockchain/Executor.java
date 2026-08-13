@@ -367,6 +367,12 @@ public final class Executor {
             for (BlockStateProcessor domain : domains) {
                 domain.commit(blockImpl.id());
             }
+            // Record the ledger undo journal for this block: every mutation just applied, in
+            // application order, so a reorg can replay the exact inverses instead of re-deriving
+            // them arithmetically from the transaction (audit: one undo protocol, and a journal
+            // for the ledger). A ledger without a journal (the genesis ledger, tests) ignores it
+            // and its reorg path falls back to the mirrors.
+            ledger.applyBlock(height, toLedgerOps(applied));
             // Report every touched ledger address (each applied op names its wallet) so the
             // caller can read final balances for the state accumulator.
             if (touchedLedger != null) {
@@ -696,6 +702,19 @@ public final class Executor {
         }
     }
 
+    /** The applied ledger mutations as journal entries, in application order. */
+    private static List<rhizome.core.ledger.LedgerOp> toLedgerOps(List<AppliedOp> applied) {
+        List<rhizome.core.ledger.LedgerOp> ops = new ArrayList<>(applied.size());
+        for (AppliedOp op : applied) {
+            ops.add(new rhizome.core.ledger.LedgerOp(
+                op.op() == AppliedOp.Op.WITHDRAW
+                    ? rhizome.core.ledger.LedgerOp.Op.WITHDRAW
+                    : rhizome.core.ledger.LedgerOp.Op.DEPOSIT,
+                op.wallet(), op.amount().amount()));
+        }
+        return ops;
+    }
+
     /**
      * Undoes a previously applied block: the exact inverse of
      * {@link #executeBlock}'s mutations, in reverse order. The block must be the
@@ -717,6 +736,15 @@ public final class Executor {
     /** As {@link #rollbackBlock}, with both domains guaranteed non-null. */
     private static void undoBlock(Block block, Ledger ledger, ContractProcessor processor,
                                   BoxProcessor boxProcessor, long height, NetworkParameters params) {
+        // The ledger's own undo journal, recorded by executeBlock, is the exact inverse of every
+        // ledger mutation the block applied — no arithmetic re-derivation from the transaction,
+        // no receipts walk, no mirrors to keep in sync (audit: one undo protocol, and a journal
+        // for the ledger; the four re-derivation mirrors have each diverged at least once). A
+        // ledger without a journal (the genesis ledger; heights committed before the journal
+        // existed; tests using a bare store) falls back to the re-derivation below.
+        if (ledger.revertBlock(height)) {
+            return;
+        }
         List<Transaction> transactions = block.transactions();
         Transaction coinbase = transactions.stream()
             .filter(t -> t.isTransactionFee())

@@ -1,10 +1,19 @@
 package rhizome.core.ledger;
 
+import java.util.List;
+
 import rhizome.core.transaction.TransactionAmount;
 
 /**
  * Wallet balance store. Implementations live in lib-persistence so that
  * lib-core stays free of any storage backend dependency.
+ *
+ * <p>The per-block undo journal ({@link #applyBlock}/{@link #revertBlock}) is part of the
+ * same protocol the box, token and contract stores speak: the executor records the ledger
+ * mutations a block applies, and a reorg replays them back through the journal instead of
+ * re-deriving each inverse arithmetically from the transaction (audit: one undo protocol, and
+ * a journal for the ledger). Stores that keep no journal (e.g. the genesis ledger, which is
+ * never reverted) leave the defaults; their reorg path falls back to the arithmetic mirrors.
  */
 public interface Ledger {
 
@@ -38,5 +47,30 @@ public interface Ledger {
      */
     default void forEachBalance(java.util.function.ObjLongConsumer<PublicAddress> consumer) {
         throw new UnsupportedOperationException("this ledger does not support enumeration");
+    }
+
+    /**
+     * Records the undo journal for one block: every ledger mutation {@code executeBlock}
+     * applied, in application order. The default keeps nothing (the reorg path re-derives
+     * the inverses arithmetically); a durable ledger persists the journal so a reorg after
+     * a restart can still reverse the block exactly.
+     */
+    default void applyBlock(long height, List<LedgerOp> ops) {
+        // no journal kept — see the class javadoc
+    }
+
+    /**
+     * Reverts the ledger changes of the block at {@code height} from its undo journal. The
+     * default does nothing — callers must fall back to their arithmetic mirrors.
+     *
+     * @return true if a journal was found and applied
+     */
+    default boolean revertBlock(long height) {
+        return false;
+    }
+
+    /** Drops journals for heights below {@code minHeight}, matching the store prune schedule. */
+    default void pruneJournals(long minHeight) {
+        // nothing kept — see the class javadoc
     }
 }

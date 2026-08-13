@@ -397,6 +397,13 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
                 stateAccumulator.revertBlock(h);
             }
         }
+        // The ledger's undo journal rewinds the same way: a torn commit (or a power loss leaving
+        // the ledger a block ahead) must not leave ledger mutations without their block. No-op
+        // when the height has no journal, so sweeping the window is safe on a normal boot (audit:
+        // one undo protocol, and a journal for the ledger).
+        for (long h = chainHeight + params.maxReorgDepth(); h > chainHeight; h--) {
+            ledger.revertBlock(h);
+        }
         long scanTop = chainHeight + params.maxReorgDepth();
         for (long h = scanTop; h > chainHeight; h--) {
             revertStateDomains(h);
@@ -713,6 +720,13 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
                 // max-depth reorg still needs (see BlockStateProcessor.pruneToChainTip).
                 for (BlockStateProcessor domain : stateDomains) {
                     domain.pruneToChainTip(b.id());
+                }
+                // The ledger's undo journal prunes on the same height schedule as the box/token/
+                // contract journals: retained at least maxReorgDepth deep, dropped below (audit:
+                // one undo protocol). A ledger without a journal is a no-op.
+                long ledgerCutoff = b.id() - params.maxReorgDepth();
+                if (ledgerCutoff > 0) {
+                    ledger.pruneJournals(ledgerCutoff);
                 }
                 if (onBlockApplied != null) {
                     onBlockApplied.accept(b.id()); // fast/non-blocking by contract (see setter)

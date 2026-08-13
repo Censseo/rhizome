@@ -17,6 +17,7 @@ import rhizome.core.blockchain.ChainStore;
 import rhizome.crypto.SHA256Hash;
 import rhizome.core.ledger.Ledger;
 import rhizome.core.ledger.LedgerException;
+import rhizome.core.ledger.LedgerJournalCodec;
 import rhizome.persistence.PersistenceException;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.transaction.Transaction;
@@ -43,6 +44,14 @@ public final class RocksDbNodeStore extends RocksDbStore implements rhizome.core
     private static final byte[] CF_TXINDEX = "txindex".getBytes();
     private static final byte[] CF_META = "meta".getBytes();
     private static final byte[] CF_LEDGER = "ledger".getBytes();
+    /**
+     * Persisted per-block ledger undo journal (height BE(8) -> serialized LedgerOp list), so a
+     * reorg can reverse a block's ledger mutations after a restart without re-deriving each
+     * inverse from the transaction (audit: one undo protocol, and a journal for the ledger).
+     * Written by the executor's executeBlock alongside the block commit; pruned on the same
+     * height schedule as the box/token/contract journals.
+     */
+    private static final byte[] CF_LEDGER_JOURNAL = "ledger_journal".getBytes();
     private static final byte[] CF_NONCES = "nonces".getBytes();
     /**
      * Bodies of uncles referenced by canonical blocks, keyed by block hash. The engine's orphan
@@ -76,6 +85,7 @@ public final class RocksDbNodeStore extends RocksDbStore implements rhizome.core
     private final ColumnFamilyHandle txIndexCf;
     private final ColumnFamilyHandle metaCf;
     private final ColumnFamilyHandle ledgerCf;
+    private final ColumnFamilyHandle ledgerJournalCf;
     private final ColumnFamilyHandle noncesCf;
     private final ColumnFamilyHandle unclesCf;
 
@@ -94,6 +104,12 @@ public final class RocksDbNodeStore extends RocksDbStore implements rhizome.core
      * (like today) observes mid-block ledger state never corrupts the map.
      */
     private volatile java.util.concurrent.ConcurrentHashMap<rhizome.core.ledger.PublicAddress, Long> pendingLedger;
+    /**
+     * The current block's ledger undo journal, staged so it flushes in the SAME atomic batch as
+     * the block, height and ledger writes (audit: one undo protocol — the journal must never be
+     * a block ahead of the mutations it undoes). Set with the block commit; cleared with it.
+     */
+    private volatile java.util.Map<Long, byte[]> pendingLedgerJournal;
 
     /**
      * Account-nonce writes staged for the current block, flushed in the SAME batch as the block
@@ -129,15 +145,17 @@ public final class RocksDbNodeStore extends RocksDbStore implements rhizome.core
      *                   uncle depth, difficulty/median windows).
      */
     public RocksDbNodeStore(String path, int keepBlocks) throws IOException {
-        super(path, "node store", CF_BLOCKS, CF_HEADERS, CF_TXINDEX, CF_META, CF_LEDGER, CF_NONCES, CF_UNCLES);
+        super(path, "node store", CF_BLOCKS, CF_HEADERS, CF_TXINDEX, CF_META, CF_LEDGER, CF_LEDGER_JOURNAL,
+            CF_NONCES, CF_UNCLES);
         this.keepBlocks = keepBlocks;
         this.blocksCf = handles.get(1);
         this.headersCf = handles.get(2);
         this.txIndexCf = handles.get(3);
         this.metaCf = handles.get(4);
         this.ledgerCf = handles.get(5);
-        this.noncesCf = handles.get(6);
-        this.unclesCf = handles.get(7);
+        this.ledgerJournalCf = handles.get(6);
+        this.noncesCf = handles.get(7);
+        this.unclesCf = handles.get(8);
         backfillHeaders();
         catchUpPruning();
         // Assigned last: each view's constructor only captures RocksDbNodeStore.this, but placing
@@ -299,6 +317,12 @@ public final class RocksDbNodeStore extends RocksDbStore implements rhizome.core
                     ByteBuffer.allocate(8).putLong(e.getValue()).array());
             }
         }
+        var journal = pendingLedgerJournal;
+        if (journal != null) {
+            for (var e : journal.entrySet()) {
+                batch.put(ledgerJournalCf, longToBytes(e.getKey()), e.getValue());
+            }
+        }
     }
 
     /** Adds the block commit's staged nonce writes and watermark (if any) to {@code batch}. */
@@ -427,6 +451,7 @@ public final class RocksDbNodeStore extends RocksDbStore implements rhizome.core
                 // place after a failure would silently merge them into the NEXT block's commit
                 // (audit F9).
                 pendingLedger = null;
+                pendingLedgerJournal = null;
                 pendingNonces = null;
                 pendingNonceHeight = null;
             }
@@ -438,6 +463,7 @@ public final class RocksDbNodeStore extends RocksDbStore implements rhizome.core
                 throw new IllegalStateException("a block commit is already open"); // audit F9
             }
             pendingLedger = new java.util.concurrent.ConcurrentHashMap<>();
+            pendingLedgerJournal = new java.util.concurrent.ConcurrentHashMap<>();
             pendingNonces = new java.util.concurrent.ConcurrentHashMap<>();
             pendingNonceHeight = null;
         }
@@ -445,6 +471,7 @@ public final class RocksDbNodeStore extends RocksDbStore implements rhizome.core
         @Override
         public void discardBlockCommit() {
             pendingLedger = null;
+            pendingLedgerJournal = null;
             pendingNonces = null;
             pendingNonceHeight = null;
         }
@@ -511,6 +538,7 @@ public final class RocksDbNodeStore extends RocksDbStore implements rhizome.core
                 throw new LedgerException("Failed to pop block " + height, e);
             } finally {
                 pendingLedger = null; // same failed-commit rule as append (audit F9)
+                pendingLedgerJournal = null;
                 pendingNonces = null;
                 pendingNonceHeight = null;
             }
@@ -649,6 +677,52 @@ public final class RocksDbNodeStore extends RocksDbStore implements rhizome.core
                 for (it.seekToFirst(); it.isValid(); it.next()) {
                     consumer.accept(PublicAddress.of(it.key()), checkedLong(it.value()));
                 }
+            }
+        }
+
+        @Override
+        public void applyBlock(long height, java.util.List<rhizome.core.ledger.LedgerOp> ops) {
+            if (ops.isEmpty()) {
+                return; // no journal to keep — same empty-journal rule as the box/token/contract stores
+            }
+            byte[] encoded = LedgerJournalCodec.encode(ops);
+            var pending = pendingLedger;
+            if (pending != null) {
+                // Inside a block commit: stage so the journal flushes atomically with the block,
+                // the height and the ledger writes themselves (audit: one undo protocol).
+                pendingLedgerJournal.put(height, encoded);
+                return;
+            }
+            put(ledgerJournalCf, longToBytes(height), encoded);
+        }
+
+        @Override
+        public boolean revertBlock(long height) {
+            byte[] encoded = raw(ledgerJournalCf, longToBytes(height));
+            if (encoded == null) {
+                return false;
+            }
+            java.util.List<rhizome.core.ledger.LedgerOp> journal = LedgerJournalCodec.decode(encoded);
+            for (int i = journal.size() - 1; i >= 0; i--) {
+                rhizome.core.ledger.LedgerOp op = journal.get(i);
+                long prior = op.amount();
+                long current = balanceOrZero(op.wallet());
+                long next = op.op() == rhizome.core.ledger.LedgerOp.Op.WITHDRAW
+                    ? current + prior  // the reverse of a withdraw is a credit
+                    : current - prior; // the reverse of a deposit is a debit
+                setValue(op.wallet(), next);
+            }
+            delete(ledgerJournalCf, longToBytes(height));
+            return true;
+        }
+
+        @Override
+        public void pruneJournals(long minHeight) {
+            try {
+                // Synced, consistent with every other delete in this store (audit: prune durability).
+                db.deleteRange(ledgerJournalCf, writeOptions, longToBytes(0), longToBytes(minHeight));
+            } catch (RocksDBException e) {
+                throw new LedgerException("failed to prune ledger journals", e);
             }
         }
     }
