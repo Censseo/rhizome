@@ -35,8 +35,14 @@ public interface HostState {
     /** Records an event log emitted by the contract during this call. */
     void emitLog(byte[] topic, byte[] data);
 
-    /** Event logs emitted during this call, in emission order. */
-    java.util.List<LogEntry> logs();
+    /**
+     * Event logs emitted during this call, in emission order. Default empty: a host that feeds a
+     * live sink to {@link #emitLog} (see {@code PersistentHostState.setLogSink}) has no need to
+     * also buffer them here, since nothing downstream reads this once a live sink is wired.
+     */
+    default java.util.List<LogEntry> logs() {
+        return java.util.List.of();
+    }
 
     /** The executing contract's own address (EVM ADDRESS); empty when not applicable. */
     default byte[] selfAddress() {

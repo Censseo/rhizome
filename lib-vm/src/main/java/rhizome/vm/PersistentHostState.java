@@ -34,7 +34,6 @@ public final class PersistentHostState implements HostState {
     // state-root change order — keep it the explicit insertion order, not hash order (audit:
     // deterministic journal ordering).
     private final Map<ByteKey, byte[]> pending = new LinkedHashMap<>();
-    private final java.util.List<LogEntry> logs = new java.util.ArrayList<>();
     private byte[] output = new byte[0];
     private java.util.function.BiConsumer<byte[], byte[]> logSink;
 
@@ -127,14 +126,12 @@ public final class PersistentHostState implements HostState {
 
     @Override
     public void emitLog(byte[] topic, byte[] data) {
-        LogEntry entry = new LogEntry(topic, data);
-        logs.add(entry);
-        // Live sink, when wired: the consumer sees the log AT EMISSION TIME, so logs of a
-        // call tree can be collected in exact causal order — buffering them per-frame and
-        // appending after each execution inverts parents against nested calls (audit: log
-        // ordering).
+        // Live sink only: the consumer sees the log AT EMISSION TIME, so logs of a call tree can
+        // be collected in exact causal order — buffering them per-frame and appending after each
+        // execution inverts parents against nested calls (audit: log ordering). Nothing downstream
+        // reads HostState.logs() once a sink is wired, so this does not also buffer into a list.
         if (logSink != null) {
-            logSink.accept(entry.topic(), entry.data());
+            logSink.accept(topic, data);
         }
     }
 
@@ -196,8 +193,6 @@ public final class PersistentHostState implements HostState {
         }
     }
 
-    @Override
-    public java.util.List<LogEntry> logs() {
-        return java.util.List.copyOf(logs);
-    }
+    // logs() is not overridden: HostState's default (empty) is correct here — every real
+    // consumer wires a live log sink (see setLogSink) instead of reading this back.
 }
