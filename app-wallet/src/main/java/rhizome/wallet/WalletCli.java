@@ -3,6 +3,7 @@ package rhizome.wallet;
 import java.math.BigDecimal;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Map;
 
 import rhizome.core.blockchain.Contracts;
 import rhizome.core.common.Constants;
@@ -53,8 +54,14 @@ public final class WalletCli {
             usage();
             System.exit(2);
         }
+        int code;
         try {
-            dispatch(args);
+            code = dispatch(args);
+        } catch (ChainIdMismatchException e) {
+            // A node (or an explicit expectation) the key file is not pinned to: the signature
+            // could be replayed onto another chain, so the command refuses and exits 1.
+            System.err.println("ERROR: " + e.getMessage());
+            code = 1;
         } catch (IllegalArgumentException | java.io.IOException | WalletClient.WalletException e) {
             // Bad CLI input and unreachable/hostile nodes are ordinary outcomes, not crashes: a
             // raw stack trace buries the one line that matters (audit INF-7). Nothing sensitive
@@ -64,39 +71,62 @@ public final class WalletCli {
             if ("1".equals(System.getenv("RHIZOME_WALLET_DEBUG"))) {
                 e.printStackTrace();
             }
-            System.exit(2);
+            code = 2;
         }
+        // main is the ONLY site that calls System.exit: every command reports its outcome as a
+        // returned code, so the exit plumbing is testable without forking a process.
+        System.exit(code);
     }
 
-    private static void dispatch(String[] args) throws Exception {
-        switch (args[0]) {
-            case "keygen" -> keygen(args);
-            case "address" -> address(args);
-            case "balance" -> balance(args);
-            case "send" -> send(args);
-            case "deploy" -> deploy(args);
-            case "call" -> call(args);
-            case "box-create" -> boxCreate(args);
-            case "box-update" -> boxUpdate(args);
-            case "box-spend" -> boxSpend(args);
-            case "box-show" -> boxShow(args);
-            case "box-list" -> boxList(args);
-            case "call-readonly" -> callReadonly(args);
-            case "token-mint" -> tokenMint(args);
-            case "token-transfer" -> tokenTransfer(args);
-            case "token-burn" -> tokenBurn(args);
-            case "token-show" -> tokenShow(args);
-            case "token-balance" -> tokenBalance(args);
-            case "token-list" -> tokenList(args);
-            default -> {
-                System.err.println("Unknown command: " + args[0]);
-                usage();
-                System.exit(2);
-            }
-        }
+    @FunctionalInterface
+    private interface Handler {
+        int run(String[] args) throws Exception;
     }
 
-    private static void keygen(String[] args) throws Exception {
+    /**
+     * The one place a command name is bound to its handler — a table, not a switch, so the
+     * binding is data and every command is reachable from its name in exactly one line. Each
+     * handler starts with its own arity gate (before any network I/O) and returns its exit
+     * code; {@code WalletCliDispatchTest} pins both properties offline.
+     */
+    private static final Map<String, Handler> COMMANDS = Map.ofEntries(
+        Map.entry("keygen", WalletCli::keygen),
+        Map.entry("address", WalletCli::address),
+        Map.entry("balance", WalletCli::balance),
+        Map.entry("send", WalletCli::send),
+        Map.entry("deploy", WalletCli::deploy),
+        Map.entry("call", WalletCli::call),
+        Map.entry("box-create", WalletCli::boxCreate),
+        Map.entry("box-update", WalletCli::boxUpdate),
+        Map.entry("box-spend", WalletCli::boxSpend),
+        Map.entry("box-show", WalletCli::boxShow),
+        Map.entry("box-list", WalletCli::boxList),
+        Map.entry("call-readonly", WalletCli::callReadonly),
+        Map.entry("token-mint", WalletCli::tokenMint),
+        Map.entry("token-transfer", WalletCli::tokenTransfer),
+        Map.entry("token-burn", WalletCli::tokenBurn),
+        Map.entry("token-show", WalletCli::tokenShow),
+        Map.entry("token-balance", WalletCli::tokenBalance),
+        Map.entry("token-list", WalletCli::tokenList)
+    );
+
+    /**
+     * Dispatches one CLI invocation to its handler. Returns the process exit code; the handler's
+     * outcome (0, or 1 when a submitted transaction did not report SUCCESS) is the return value,
+     * never a {@code System.exit} inside the command body. Package-visible for testing (same
+     * pattern as {@link #gasParam}).
+     */
+    static int dispatch(String[] args) throws Exception {
+        Handler handler = COMMANDS.get(args[0]);
+        if (handler == null) {
+            System.err.println("Unknown command: " + args[0]);
+            usage();
+            return 2;
+        }
+        return handler.run(args);
+    }
+
+    private static int keygen(String[] args) throws Exception {
         require(args, 2, "keygen <keyfile> [--passphrase-file <path>] [--plaintext] [--overwrite]");
         Wallet wallet = Wallet.create();
         // Existing key files are refused unless --overwrite is given: re-running keygen on a live
@@ -106,23 +136,26 @@ public final class WalletCli {
             hasFlag(args, "--overwrite"));
         System.out.println("Created wallet " + args[1]);
         System.out.println("Address: " + wallet.address().toHexString());
+        return 0;
     }
 
-    private static void address(String[] args) throws Exception {
+    private static int address(String[] args) throws Exception {
         require(args, 2, "address <keyfile> [--passphrase-file <path>]");
         System.out.println(Wallet.load(Path.of(args[1]), passphraseFromFlag(args)).address().toHexString());
+        return 0;
     }
 
-    private static void balance(String[] args) {
+    private static int balance(String[] args) {
         require(args, 3, "balance <nodeUrl> <address>");
         warnIfInsecureNodeUrl(args[1]);
         var info = walletClient(args).walletInfo(PublicAddress.of(args[2]));
         System.out.printf("balance: %s PDN (%d base units)%n",
             Helpers.toPDN(info.balance()), info.balance());
         System.out.println("nextNonce: " + info.nextNonce());
+        return 0;
     }
 
-    private static void send(String[] args) throws Exception {
+    private static int send(String[] args) throws Exception {
         require(args, 5, "send <nodeUrl> <keyfile> <to> <amount> [fee] [--expect-chain-id <n>] [--passphrase-file <path>]");
         warnIfInsecureNodeUrl(args[1]);
         WalletClient client = walletClient(args);
@@ -142,8 +175,9 @@ public final class WalletCli {
         System.out.println("txid: " + tx.hashContents().toHexString());
         System.out.println("status: " + status);
         if (!"SUCCESS".equals(status)) {
-            System.exit(1);
+            return 1;
         }
+        return 0;
     }
 
     private static final long DEFAULT_GAS_LIMIT = 10_000_000L;
@@ -201,7 +235,7 @@ public final class WalletCli {
         return new long[] {gasLimit, gasPrice};
     }
 
-    private static void deploy(String[] args) throws Exception {
+    private static int deploy(String[] args) throws Exception {
         require(args, 4, "deploy <nodeUrl> <keyfile> <wasmfile> [gasLimit] [gasPrice] [--expect-chain-id <n>] [--passphrase-file <path>]");
         warnIfInsecureNodeUrl(args[1]);
         WalletClient client = walletClient(args);
@@ -218,11 +252,12 @@ public final class WalletCli {
         System.out.println("contract: " + Contracts.deriveAddress(wallet.address(), nonce).toHexString());
         System.out.println("status: " + status);
         if (!"SUCCESS".equals(status)) {
-            System.exit(1);
+            return 1;
         }
+        return 0;
     }
 
-    private static void call(String[] args) throws Exception {
+    private static int call(String[] args) throws Exception {
         require(args, 5, "call <nodeUrl> <keyfile> <contract> <hexInput> [gasLimit] [gasPrice] [--expect-chain-id <n>] [--passphrase-file <path>]");
         warnIfInsecureNodeUrl(args[1]);
         WalletClient client = walletClient(args);
@@ -240,13 +275,14 @@ public final class WalletCli {
         System.out.println("txid: " + tx.hashContents().toHexString());
         System.out.println("status: " + status);
         if (!"SUCCESS".equals(status)) {
-            System.exit(1);
+            return 1;
         }
+        return 0;
     }
 
     // ---- data boxes ----
 
-    private static void boxCreate(String[] args) throws Exception {
+    private static int boxCreate(String[] args) throws Exception {
         require(args, 4, "box-create <nodeUrl> <keyfile> <value> [--owner <addr>] [--fee <fee>] [--reg <type>:<val>]... [--expect-chain-id <n>] [--passphrase-file <path>]");
         warnIfInsecureNodeUrl(args[1]);
         WalletClient client = walletClient(args);
@@ -266,11 +302,12 @@ public final class WalletCli {
         System.out.println("box: " + Utils.bytesToHex(rhizome.core.box.Box.deriveId(wallet.address(), nonce)));
         System.out.println("status: " + status);
         if (!"SUCCESS".equals(status)) {
-            System.exit(1);
+            return 1;
         }
+        return 0;
     }
 
-    private static void boxUpdate(String[] args) throws Exception {
+    private static int boxUpdate(String[] args) throws Exception {
         require(args, 4, "box-update <nodeUrl> <keyfile> <boxId> [--topup <amt>] [--fee <fee>] [--reg <type>:<val>]... [--expect-chain-id <n>] [--passphrase-file <path>]");
         warnIfInsecureNodeUrl(args[1]);
         WalletClient client = walletClient(args);
@@ -289,11 +326,12 @@ public final class WalletCli {
         System.out.println("box: " + args[3]);
         System.out.println("status: " + status);
         if (!"SUCCESS".equals(status)) {
-            System.exit(1);
+            return 1;
         }
+        return 0;
     }
 
-    private static void boxSpend(String[] args) throws Exception {
+    private static int boxSpend(String[] args) throws Exception {
         require(args, 4, "box-spend <nodeUrl> <keyfile> <boxId> [--fee <fee>] [--expect-chain-id <n>] [--passphrase-file <path>]");
         warnIfInsecureNodeUrl(args[1]);
         WalletClient client = walletClient(args);
@@ -310,32 +348,36 @@ public final class WalletCli {
         System.out.println("box: " + args[3]);
         System.out.println("status: " + status);
         if (!"SUCCESS".equals(status)) {
-            System.exit(1);
+            return 1;
         }
+        return 0;
     }
 
-    private static void boxShow(String[] args) {
+    private static int boxShow(String[] args) {
         require(args, 3, "box-show <nodeUrl> <boxId>");
         warnIfInsecureNodeUrl(args[1]);
         System.out.println(walletClient(args).box(hexId(args[2], "boxId")));
+        return 0;
     }
 
-    private static void boxList(String[] args) {
+    private static int boxList(String[] args) {
         require(args, 3, "box-list <nodeUrl> <ownerAddr>");
         warnIfInsecureNodeUrl(args[1]);
         System.out.println(walletClient(args).boxesByOwner(PublicAddress.of(args[2])));
+        return 0;
     }
 
-    private static void callReadonly(String[] args) {
+    private static int callReadonly(String[] args) {
         require(args, 4, "call-readonly <nodeUrl> <contract> <hexInput>");
         warnIfInsecureNodeUrl(args[1]);
         byte[] input = args[3].isEmpty() ? new byte[0] : Utils.hexStringToByteArray(args[3]);
         System.out.println(walletClient(args).callReadonly(PublicAddress.of(args[2]), input));
+        return 0;
     }
 
     // ---- native tokens ----
 
-    private static void tokenMint(String[] args) throws Exception {
+    private static int tokenMint(String[] args) throws Exception {
         require(args, 7, "token-mint <nodeUrl> <keyfile> <symbol> <name> <amount> <decimals> [--fee <fee>] [--expect-chain-id <n>] [--passphrase-file <path>]");
         warnIfInsecureNodeUrl(args[1]);
         WalletClient client = walletClient(args);
@@ -358,11 +400,12 @@ public final class WalletCli {
             rhizome.core.token.TokenMeta.deriveId(wallet.address(), nonce)));
         System.out.println("status: " + status);
         if (!"SUCCESS".equals(status)) {
-            System.exit(1);
+            return 1;
         }
+        return 0;
     }
 
-    private static void tokenTransfer(String[] args) throws Exception {
+    private static int tokenTransfer(String[] args) throws Exception {
         require(args, 6, "token-transfer <nodeUrl> <keyfile> <tokenId> <to> <amount> [--fee <fee>] [--expect-chain-id <n>] [--passphrase-file <path>]");
         // Validate the recipient BEFORE loading the wallet: a checksum typo should not cost a
         // passphrase prompt and a scrypt round to discover.
@@ -371,19 +414,19 @@ public final class WalletCli {
         String tokenId = hexId(args[3], "tokenId");
         long amount = tokenAmount(args[5]);
         Wallet wallet = Wallet.load(Path.of(args[2]), passphraseFromFlag(args));
-        submitTokenAmount(args, wallet, TransactionKind.TOKEN_TRANSFER, recipient, tokenId, amount);
+        return submitTokenAmount(args, wallet, TransactionKind.TOKEN_TRANSFER, recipient, tokenId, amount);
     }
 
-    private static void tokenBurn(String[] args) throws Exception {
+    private static int tokenBurn(String[] args) throws Exception {
         require(args, 5, "token-burn <nodeUrl> <keyfile> <tokenId> <amount> [--fee <fee>] [--expect-chain-id <n>] [--passphrase-file <path>]");
         String tokenId = hexId(args[3], "tokenId");
         long amount = tokenAmount(args[4]);
         Wallet wallet = Wallet.load(Path.of(args[2]), passphraseFromFlag(args));
-        submitTokenAmount(args, wallet, TransactionKind.TOKEN_BURN, wallet.address(), tokenId, amount);
+        return submitTokenAmount(args, wallet, TransactionKind.TOKEN_BURN, wallet.address(), tokenId, amount);
     }
 
     /** The wallet is loaded/decrypted ONCE by the caller — a second load here would re-prompt for the passphrase and re-run scrypt. */
-    private static void submitTokenAmount(String[] args, Wallet wallet, TransactionKind kind,
+    private static int submitTokenAmount(String[] args, Wallet wallet, TransactionKind kind,
                                           PublicAddress to, String tokenIdHex, long amount) throws Exception {
         warnIfInsecureNodeUrl(args[1]);
         WalletClient client = walletClient(args);
@@ -398,27 +441,31 @@ public final class WalletCli {
         System.out.println("token: " + tokenIdHex);
         System.out.println("status: " + status);
         if (!"SUCCESS".equals(status)) {
-            System.exit(1);
+            return 1;
         }
+        return 0;
     }
 
-    private static void tokenShow(String[] args) {
+    private static int tokenShow(String[] args) {
         require(args, 3, "token-show <nodeUrl> <tokenId>");
         warnIfInsecureNodeUrl(args[1]);
         System.out.println(walletClient(args).token(hexId(args[2], "tokenId")));
+        return 0;
     }
 
-    private static void tokenBalance(String[] args) {
+    private static int tokenBalance(String[] args) {
         require(args, 4, "token-balance <nodeUrl> <tokenId> <address>");
         warnIfInsecureNodeUrl(args[1]);
         System.out.println(walletClient(args)
             .tokenBalance(hexId(args[2], "tokenId"), PublicAddress.of(args[3])));
+        return 0;
     }
 
-    private static void tokenList(String[] args) {
+    private static int tokenList(String[] args) {
         require(args, 3, "token-list <nodeUrl> <holderAddr>");
         warnIfInsecureNodeUrl(args[1]);
         System.out.println(walletClient(args).tokensByHolder(PublicAddress.of(args[2])));
+        return 0;
     }
 
     /** Collects {@code --reg <type>:<value>} pairs, in order, into box registers. */
@@ -701,14 +748,9 @@ public final class WalletCli {
         // the GCM payload, so reading it requires the passphrase already resolved at load
         // (a legacy cleartext pin next to the envelope is still surfaced by load).
         Wallet.TofuPin pin = wallet.chainIdPin();
-        ChainIdDecision decision;
-        try {
-            decision = decideChainId(nodeChainId, expected, pin);
-        } catch (ChainIdMismatchException e) {
-            System.err.println("ERROR: " + e.getMessage());
-            System.exit(1);
-            return -1; // unreachable: System.exit does not return
-        }
+        // A mismatch aborts signing: ChainIdMismatchException propagates to main, which prints
+        // the reason and exits 1.
+        ChainIdDecision decision = decideChainId(nodeChainId, expected, pin);
         if (decision.pin()) {
             // Persisting the (re-)pin on an encrypted key file re-seals the payload, which
             // needs the passphrase — re-resolve it through the same helper used at load. If it
@@ -807,10 +849,14 @@ public final class WalletCli {
             + " what the node tells it. Use https:// (or loopback) and pass --expect-chain-id (audit F2).");
     }
 
+    /**
+     * Fails on a command with too few positionals. Throws rather than exiting so the arity gate
+     * is testable offline; {@link #main} turns the resulting {@link IllegalArgumentException}
+     * into exit code 2, the same code the exit-based gate used.
+     */
     private static void require(String[] args, int n, String usage) {
         if (args.length < n) {
-            System.err.println("usage: " + usage);
-            System.exit(2);
+            throw new IllegalArgumentException("usage: " + usage);
         }
     }
 
