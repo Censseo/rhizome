@@ -95,7 +95,7 @@ final class BlockStateChanges {
             if (op instanceof TokenStore.TokenOp.MetaSet ms) {
                 out.add(StateChange.set(StateKeys.TOKEN_META, ms.meta().id(), ms.meta().serialize()));
             } else if (op instanceof TokenStore.TokenOp.BalanceSet bs) {
-                byte[] rawKey = concat(bs.tokenId(), bs.address());
+                byte[] rawKey = StateKeys.tokenBalanceKey(bs.tokenId(), bs.address());
                 out.add(bs.amount() == 0
                     ? StateChange.delete(StateKeys.TOKEN_BALANCE, rawKey)
                     : StateChange.set(StateKeys.TOKEN_BALANCE, rawKey, longBytesBE(bs.amount())));
@@ -113,7 +113,7 @@ final class BlockStateChanges {
             if (ch.code()) {
                 out.add(StateChange.set(StateKeys.CONTRACT_CODE, ch.contract().toBytes(), ch.value()));
             } else {
-                byte[] rawKey = concat(ch.contract().toBytes(), ch.key());
+                byte[] rawKey = StateKeys.concat(ch.contract().toBytes(), ch.key());
                 out.add(StateChange.set(StateKeys.CONTRACT_STORAGE, rawKey, ch.value()));
             }
         }
@@ -122,13 +122,5 @@ final class BlockStateChanges {
     /** Big-endian 8 bytes — the committed encoding of every numeric state value. */
     static byte[] longBytesBE(long value) {
         return Utils.longToBytes(value);
-    }
-
-    /** ⚠ Consensus byte order: {@code a} first. Both callers commit to it via the state root. */
-    static byte[] concat(byte[] a, byte[] b) {
-        byte[] out = new byte[a.length + b.length];
-        System.arraycopy(a, 0, out, 0, a.length);
-        System.arraycopy(b, 0, out, a.length, b.length);
-        return out;
     }
 }

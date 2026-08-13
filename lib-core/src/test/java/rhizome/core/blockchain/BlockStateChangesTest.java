@@ -50,7 +50,7 @@ class BlockStateChangesTest {
         assertEquals(1, out.size());
         StateChange change = out.get(0);
         assertEquals(StateKeys.TOKEN_BALANCE, change.domain());
-        assertArrayEquals(BlockStateChanges.concat(TOKEN_ID, holder.toBytes()), change.rawKey(),
+        assertArrayEquals(StateKeys.tokenBalanceKey(TOKEN_ID, holder.toBytes()), change.rawKey(),
             "the raw key is tokenId then address — the reverse is equally well-formed and wrong");
         assertArrayEquals(Utils.longToBytes(42L), change.value(),
             "balances commit as big-endian 8 bytes");
@@ -77,7 +77,7 @@ class BlockStateChangesTest {
 
         assertEquals(1, out.size());
         assertEquals(StateKeys.CONTRACT_STORAGE, out.get(0).domain());
-        assertArrayEquals(BlockStateChanges.concat(contract.toBytes(), STORAGE_KEY), out.get(0).rawKey(),
+        assertArrayEquals(StateKeys.concat(contract.toBytes(), STORAGE_KEY), out.get(0).rawKey(),
             "the raw key is contract then slot");
     }
 

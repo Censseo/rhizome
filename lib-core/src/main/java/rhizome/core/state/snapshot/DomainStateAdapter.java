@@ -1,7 +1,6 @@
 package rhizome.core.state.snapshot;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 
 import rhizome.core.blockchain.NonceStore;
@@ -67,7 +66,7 @@ public final class DomainStateAdapter implements StateSource, StateSink {
             case StateKeys.TOKEN_META -> tokens.forEachMeta(meta -> out.accept(meta.id(), meta.serialize()));
             case StateKeys.TOKEN_BALANCE -> tokens.forEachBalance((tokenId, addr, amount) -> {
                 if (amount != 0) {
-                    out.accept(concat(tokenId, addr), Utils.longToBytes(amount));
+                    out.accept(StateKeys.tokenBalanceKey(tokenId, addr), Utils.longToBytes(amount));
                 }
             });
             case StateKeys.CONTRACT_CODE, StateKeys.CONTRACT_STORAGE -> {
@@ -89,11 +88,10 @@ public final class DomainStateAdapter implements StateSource, StateSink {
             case StateKeys.BOX -> pendingBoxes.add(BoxStore.BoxMutation.write(Box.deserialize(value)));
             case StateKeys.TOKEN_META ->
                 pendingTokens.add(new TokenStore.TokenOp.MetaSet(TokenMeta.deserialize(value)));
-            case StateKeys.TOKEN_BALANCE ->
-                // Balance keys are tokenId(32) ‖ address(25).
-                pendingTokens.add(new TokenStore.TokenOp.BalanceSet(
-                    Arrays.copyOfRange(key, 0, 32), Arrays.copyOfRange(key, 32, key.length),
-                    Utils.bytesToLong(value)));
+            case StateKeys.TOKEN_BALANCE -> {
+                byte[][] split = StateKeys.splitTokenBalanceKey(key);
+                pendingTokens.add(new TokenStore.TokenOp.BalanceSet(split[0], split[1], Utils.bytesToLong(value)));
+            }
             case StateKeys.CONTRACT_CODE, StateKeys.CONTRACT_STORAGE -> {
                 if (contractSink == null) {
                     throw new IllegalStateException("snapshot carries contract state but no contract sink is wired");
@@ -126,12 +124,5 @@ public final class DomainStateAdapter implements StateSource, StateSink {
         } else if (target < current) {
             ledger.withdraw(wallet, new TransactionAmount(current - target));
         }
-    }
-
-    private static byte[] concat(byte[] a, byte[] b) {
-        byte[] out = new byte[a.length + b.length];
-        System.arraycopy(a, 0, out, 0, a.length);
-        System.arraycopy(b, 0, out, a.length, b.length);
-        return out;
     }
 }

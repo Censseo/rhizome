@@ -26,7 +26,40 @@ public final class StateKeys {
     /** Account nonce: raw key = address(25), value = next-expected nonce(8, big-endian). */
     public static final byte ACCOUNT_NONCE = 0x07;
 
+    /** Width of a token id ({@link #TOKEN_META}'s raw key, and the leading half of {@link #TOKEN_BALANCE}'s). */
+    public static final int TOKEN_ID_BYTES = 32;
+
     private StateKeys() {}
+
+    /**
+     * {@code a ‖ b}. The composite raw-key layout for {@link #TOKEN_BALANCE} and
+     * {@link #CONTRACT_STORAGE} — both committed-state encoders (block application in
+     * {@code BlockStateChanges}, snapshot export/import in {@code DomainStateAdapter}) share
+     * this one function rather than each concatenating by hand, since transposing the two
+     * halves produces an equally well-formed key that silently forks the state root.
+     */
+    public static byte[] concat(byte[] a, byte[] b) {
+        byte[] out = new byte[a.length + b.length];
+        System.arraycopy(a, 0, out, 0, a.length);
+        System.arraycopy(b, 0, out, a.length, b.length);
+        return out;
+    }
+
+    /** {@link #TOKEN_BALANCE} raw key: {@code tokenId ‖ address}. */
+    public static byte[] tokenBalanceKey(byte[] tokenId, byte[] address) {
+        return concat(tokenId, address);
+    }
+
+    /**
+     * Splits a {@link #TOKEN_BALANCE} raw key back into {@code {tokenId, address}} — the exact
+     * inverse of {@link #tokenBalanceKey}, so encode and decode cannot drift independently.
+     */
+    public static byte[][] splitTokenBalanceKey(byte[] key) {
+        return new byte[][] {
+            java.util.Arrays.copyOfRange(key, 0, TOKEN_ID_BYTES),
+            java.util.Arrays.copyOfRange(key, TOKEN_ID_BYTES, key.length),
+        };
+    }
 
     /** The SMT key for {@code rawKey} in {@code domain}: {@code SHA-256(domain ‖ rawKey)}. */
     public static byte[] key(byte domain, byte[] rawKey) {
