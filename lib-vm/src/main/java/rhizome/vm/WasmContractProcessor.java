@@ -559,7 +559,14 @@ public final class WasmContractProcessor implements ContractProcessor {
         }
     }
 
-    private void retainChanges(long blockHeight, List<ContractChange> changes) {
+    /**
+     * Retains one height's forward changes under the {@link #MAX_RETAINED_CHANGE_BYTES} budget.
+     * Package-private so tests can drive the retention path directly, like {@link #retainLogs}:
+     * a block over the budget is unreachable through the VM (the block size limit and the gas
+     * schedule keep one block's changes under it), but the eviction loop must still never drop
+     * the height being retained — the state-root collection reads it back immediately.
+     */
+    void retainChanges(long blockHeight, List<ContractChange> changes) {
         synchronized (retentionLock) {
             List<ContractChange> previous = changesByHeight.put(blockHeight, changes);
             if (previous != null) {
@@ -567,11 +574,15 @@ public final class WasmContractProcessor implements ContractProcessor {
             }
             retainedChangeBytes += changeBytes(changes);
             while (retainedChangeBytes > MAX_RETAINED_CHANGE_BYTES) {
-                Map.Entry<Long, List<ContractChange>> evicted = changesByHeight.pollFirstEntry();
-                if (evicted == null) {
+                // Peek before removing: pollFirstEntry() would evict the just-retained height
+                // itself when one block alone exceeds the budget, and the state-root collection
+                // would then read an empty contract domain — a consensus divergence.
+                Map.Entry<Long, List<ContractChange>> oldest = changesByHeight.firstEntry();
+                if (oldest == null || oldest.getKey() == blockHeight) {
                     break;
                 }
-                retainedChangeBytes -= changeBytes(evicted.getValue());
+                changesByHeight.remove(oldest.getKey());
+                retainedChangeBytes -= changeBytes(oldest.getValue());
             }
         }
     }

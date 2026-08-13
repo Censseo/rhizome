@@ -387,6 +387,22 @@ class WasmContractProcessorPersistenceTest {
         assertFalse(processor.logs(heights).isEmpty(), "the most recent height is always kept");
     }
 
+    @Test
+    void aHeightOverTheChangeBudgetIsNeverEvicted() {
+        // One block whose forward changes alone exceed MAX_RETAINED_CHANGE_BYTES: the unguarded
+        // pollFirstEntry() loop evicted the just-retained height itself, so the state-root
+        // collection read an EMPTY contract domain for a block that carried contract writes —
+        // the root would diverge between nodes that evicted and nodes that did not. The retained
+        // height the state root is about to read must always survive its own retention.
+        WasmContractProcessor processor = new WasmContractProcessor(new WasmVm(), new DurableTestStore());
+        List<ContractProcessor.ContractChange> huge = List.of(new ContractProcessor.ContractChange(
+            false, PublicAddress.random(), new byte[] {1},
+            new byte[(int) (WasmContractProcessor.MAX_RETAINED_CHANGE_BYTES + 1)]));
+        processor.retainChanges(1, huge);
+        assertEquals(1, processor.changes(1).size(),
+            "the height the state root reads must never be evicted by its own retention");
+    }
+
     // ---- bounded journal/receipt decoding (audit: unbounded decode allocations) ----
 
     @Test
