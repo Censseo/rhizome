@@ -1,5 +1,12 @@
 plugins {
     id 'java-library'
+    // ContractStoreContract: the double-apply/journal/receipt contract every ContractStore owes,
+    // run against InMemoryContractStore here and RocksDbContractStore in lib-persistence. A test
+    // fixture rather than src/main for the same reason as lib-core's ChainEngineTestAccess: it
+    // exists for tests and has no business in the runtime jar. ContractStore lives in lib-vm (not
+    // lib-core) because lib-vm owns the domain logic that drives it — see BootstrapTarget's
+    // javadoc for why the port itself is placed here — so its conformance suite follows it.
+    id 'java-test-fixtures'
 }
 
 dependencies {
@@ -24,4 +31,9 @@ dependencies {
     // ChainEngineTestAccess: the reorg tests here pop the tip, which ChainEngine keeps
     // package-private on purpose. Test-scoped, so nothing in the published jar can reach it.
     testImplementation testFixtures(project(':lib-core'))
+
+    // @Test on ContractStoreContract's default methods must stay visible to the implementing test
+    // classes here and in lib-persistence — hence Api, not Implementation (see the plugin block
+    // above for why this fixture exists).
+    testFixturesApi "org.junit.jupiter:junit-jupiter:${junitVersion}"
 }

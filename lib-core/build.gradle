@@ -24,4 +24,11 @@ dependencies {
     implementation "org.slf4j:slf4j-api:${slf4jVersion}"
 
     compileOnly 'org.jetbrains:annotations:24.1.0'
+
+    // The store-conformance suites (BoxStoreContract, TokenStoreContract, ...) are JUnit test
+    // interfaces: their @Test default methods must stay VISIBLE to the implementing test classes
+    // in lib-persistence and here, so `Api` — under `Implementation` the annotations would compile
+    // but vanish from consumers' compile classpath and the inherited tests would silently not be
+    // discovered. The root `subprojects` block only wires JUnit onto src/test, not testFixtures.
+    testFixturesApi "org.junit.jupiter:junit-jupiter:${junitVersion}"
 }

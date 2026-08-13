@@ -30,9 +30,14 @@ dependencies {
 
     implementation "org.slf4j:slf4j-api:${slf4jVersion}"
 
-    // ChainEngineTestAccess: the crash-recovery tests here pop the tip, which ChainEngine keeps
-    // package-private on purpose. Test-scoped, so nothing in the published jar can reach it.
+    // ChainEngineTestAccess (reorg tests pop the tip, package-private on purpose) AND
+    // BoxStoreContract/TokenStoreContract/ChainStoreContract/NonceStoreContract/LedgerContract
+    // (the store-conformance suites RocksDb{Box,Token}StoreTest etc. implement, proving this
+    // backend satisfies the same contract the in-memory stores do). Test-scoped, so nothing in
+    // the published jar can reach them.
     testImplementation testFixtures(project(':lib-core'))
+    // ContractStoreContract: same reasoning, for RocksDbContractStoreTest.
+    testImplementation testFixtures(project(':lib-vm'))
 
     testRuntimeOnly "ch.qos.logback:logback-classic:${logbackVersion}"
 }

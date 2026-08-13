@@ -30,6 +30,10 @@ ext {
     // Runtime-only logging backend. Kept on the latest 1.5.x patch: 1.5.13 fixed CVE-2024-12798 /
     // CVE-2024-12801 (config-time expression/DTD injection). Do not drop below 1.5.13.
     logbackVersion = '1.5.38'
+    // Hoisted so the store-conformance testFixtures (lib-core, lib-vm) declare the SAME JUnit the
+    // subprojects block below pulls in for src/test — otherwise '5.9.1' would sit as a literal in
+    // two more places, the exact drift this project pins versions to prevent.
+    junitVersion = '5.9.1'
 }
 
 subprojects {
@@ -52,7 +56,7 @@ subprojects {
 
     dependencies {
         // Use JUnit Jupiter for testing.
-        testImplementation 'org.junit.jupiter:junit-jupiter:5.9.1'
+        testImplementation "org.junit.jupiter:junit-jupiter:${junitVersion}"
         // Gradle 9 no longer auto-detects the launcher; required to run tests.
         testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
     }
