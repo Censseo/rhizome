@@ -45,16 +45,10 @@ public final class ChainSynchronizer {
     /** Extra blocks fetched beyond the fork depth during pre-validation. */
     static final int PREFETCH_EXTRA = 2 * Constants.BLOCKS_PER_FETCH;
 
-    /** Hard cap on exponential-probe steps in the ancestor search, so it stays O(log height). */
-    private static final int MAX_ANCESTOR_PROBES = 64;
-
     private final ChainEngine engine;
-    /**
-     * Retarget memo shared across sync rounds for the stateless header-chain gate (same design as
-     * HeaderSynchronizer's: self-invalidating by boundary-header hash, guarded by its own monitor).
-     */
-    private final java.util.TreeMap<Long, HeaderChain.DifficultyCheckpoint> difficultyMemo =
-        new java.util.TreeMap<>();
+    /** Retarget memo for the stateless header-chain gate — see {@link DifficultyMemo}, shared with
+     *  HeaderSynchronizer (self-invalidating by boundary-header hash, guarded by its own monitor). */
+    private final DifficultyMemo difficultyMemo = new DifficultyMemo();
 
     public ChainSynchronizer(ChainEngine engine) {
         this.engine = engine;
@@ -117,65 +111,20 @@ public final class ChainSynchronizer {
     }
 
     /**
-     * Highest height at which our block and the peer's agree. Block-locator search — exponential
-     * probes down from the shared tip to bracket the fork, then a binary search inside — so it costs
-     * O(log height) peer round-trips instead of one per block (audit M6). This fallback path fetches
-     * a FULL block per probe (peer.blockHash → GET /block, up to ~1 MiB), so the linear walk let a
-     * peer that 404s /headers (forcing this fallback) tie up a sync thread for height×latency by
-     * never matching; the logarithmic locator caps that at ~O(log height) fetches. Agreement is
-     * monotonic on a coherent chain (blocks match up to the fork and diverge after), which makes the
-     * search exact — the same locator HeaderSynchronizer uses.
+     * Highest height at which our block and the peer's agree — the shared block-locator search
+     * (exponential probes to bracket the fork, then a binary search inside, O(log height) peer
+     * round-trips — audit M6), with the peer's hash read through the full-block transport: a
+     * FULL block per probe (peer.blockHash → GET /block, up to ~1 MiB), because this fallback
+     * path exists precisely for peers that do not serve /headers. The headers-first path runs
+     * the same locator over peer.headers — see {@link AncestorLocator}.
      */
     private long findCommonAncestor(PeerSource peer) {
-        long top = Math.min(engine.height(), peer.height());
-        if (top < GenesisBlock.GENESIS_ID) {
-            return GenesisBlock.GENESIS_ID - 1;
-        }
-        if (agrees(peer, top)) {
-            return top; // peer simply extends our chain
-        }
-        // Phase 1: exponential backoff to bracket the fork between a known match (low) and a
-        // known mismatch (high).
-        long high = top;   // known mismatch
-        long low = -1;     // known match (none yet)
-        long step = 1;
-        long h = top - 1;
-        int probes = 0;
-        while (h >= GenesisBlock.GENESIS_ID && probes < MAX_ANCESTOR_PROBES) {
-            probes++;
-            if (agrees(peer, h)) {
-                low = h;
-                break;
-            }
-            high = h;
-            if (h == GenesisBlock.GENESIS_ID) {
-                break; // genesis itself differs: no common block, not even genesis
-            }
-            long next = h - step;
-            step <<= 1;
-            h = Math.max(next, GenesisBlock.GENESIS_ID);
-        }
-        if (low < 0) {
-            return GenesisBlock.GENESIS_ID - 1; // no common block, not even genesis
-        }
-        // Phase 2: binary search for the highest match in (low, high).
-        while (high - low > 1) {
-            long mid = low + (high - low) / 2;
-            if (agrees(peer, mid)) {
-                low = mid;
-            } else {
-                high = mid;
-            }
-        }
-        return low;
-    }
-
-    private boolean agrees(PeerSource peer, long h) {
         // headerAt, not blockAt (audit F4): headers survive body pruning and hash identically
         // (BlockImpl.hash() delegates to BlockHeader), so the fork probe still works on a pruned
         // node — blockAt would throw below the prune watermark and an honest archive peer would be
         // misjudged as PEER_INVALID instead of simply diverging below the reorg horizon.
-        return engine.headerAt(h).hash().equals(peer.blockHash(h));
+        return AncestorLocator.findCommonAncestor(engine.height(), peer.height(),
+            h -> engine.headerAt(h).hash(), peer::blockHash);
     }
 
     /**
@@ -308,15 +257,8 @@ public final class ChainSynchronizer {
         for (Block block : branch) {
             branchHeaders.add(BlockHeader.of(block));
         }
-        HeaderChain.Result validated;
-        synchronized (difficultyMemo) {
-            validated = HeaderChain.validate(
-                engine.params(), engine::headerAt, forkHeight, branchHeaders, engine.nowMillis(), difficultyMemo);
-            // Same bounding as HeaderSynchronizer: entries at/below this fork are ancient history a
-            // later round re-derives in O(1) from a newer checkpoint (the memo is self-invalidating
-            // by boundary-header hash, so a losing branch can never leave a wrong-chain value).
-            difficultyMemo.headMap(forkHeight, true).clear();
-        }
+        HeaderChain.Result validated = difficultyMemo.validate(
+            engine.params(), engine::headerAt, forkHeight, branchHeaders, engine.nowMillis());
         if (!validated.valid()) {
             return Result.PEER_INVALID;
         }

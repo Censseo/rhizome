@@ -32,22 +32,11 @@ public final class HeaderSynchronizer {
     /** Max heights advanced in one round, so a hostile "I'm at height 10^9" peer costs a bounded download. */
     static final long MAX_HEADER_WINDOW = 20_000;
 
-    /** Hard cap on exponential-probe steps in the ancestor search, so it stays O(log height). */
-    private static final int MAX_ANCESTOR_PROBES = 64;
-
     private final ChainEngine engine;
     private final ChainSynchronizer fallback;
-    /**
-     * Retarget memo shared across sync rounds (audit: O(height) difficulty-fold DoS).
-     * {@code HeaderChain.validate} used to refold the difficulty from genesis before the first
-     * PoW check on every call — O(forkHeight) header reads per round, so a long chain made each
-     * sync round (and each hostile "I'm heavier" probe) pay a genesis-length walk. Entries are
-     * self-invalidating by boundary-header hash (see {@code HeaderChain.DifficultyCheckpoint}),
-     * so a reorg or a losing branch can never leave a wrong-chain value behind. Guarded by the
-     * map's own monitor: {@code validate} reads and mutates it.
-     */
-    private final java.util.TreeMap<Long, HeaderChain.DifficultyCheckpoint> difficultyMemo =
-        new java.util.TreeMap<>();
+    /** Retarget memo for the stateless header-chain gate — see {@link DifficultyMemo}, shared with
+     *  ChainSynchronizer (self-invalidating by boundary-header hash, guarded by its own monitor). */
+    private final DifficultyMemo difficultyMemo = new DifficultyMemo();
 
     public HeaderSynchronizer(ChainEngine engine) {
         this.engine = engine;
@@ -131,16 +120,8 @@ public final class HeaderSynchronizer {
         if (branch == null) {
             return ChainSynchronizer.Result.PEER_INVALID;
         }
-        HeaderChain.Result validated;
-        synchronized (difficultyMemo) {
-            validated = HeaderChain.validate(
-                engine.params(), engine::headerAt, forkHeight, branch, engine.nowMillis(), difficultyMemo);
-            // Bound the memo: one entry per retarget boundary accumulates for the process
-            // lifetime otherwise (monotone ~height/lookback growth). Anything at or below the
-            // fork we just validated against is ancient history a future round will re-derive
-            // in O(1) from a later checkpoint, so dropping it costs nothing (audit follow-up).
-            difficultyMemo.headMap(forkHeight, true).clear();
-        }
+        HeaderChain.Result validated = difficultyMemo.validate(
+            engine.params(), engine::headerAt, forkHeight, branch, engine.nowMillis());
         if (!validated.valid()) {
             return ChainSynchronizer.Result.PEER_INVALID;
         }
@@ -191,59 +172,16 @@ public final class HeaderSynchronizer {
     }
 
     /**
-     * Highest height at which our header and the peer's agree. Uses a block-locator style
-     * search — exponential probes down from the shared tip to bracket the fork, then a binary
-     * search inside the bracket — so it costs O(log height) peer round-trips instead of one per
-     * block. A slow/hostile peer can therefore no longer tie up the sync thread for
-     * height×timeout by never matching (audit M2). Agreement is monotonic on a coherent chain
-     * (headers match up to the fork and diverge after), which is what makes the search exact.
+     * Highest height at which our header and the peer's agree — the shared block-locator search
+     * (exponential probes to bracket the fork, then a binary search inside, O(log height) peer
+     * round-trips instead of one per block — audit M2), with the peer's hash read through the
+     * headers transport, ~150 B per probe. The full-block fallback runs the same locator over
+     * peer.blockHash — see {@link AncestorLocator}. A slow/hostile peer can no longer tie up the
+     * sync thread for height×timeout by never matching.
      */
     private long findCommonAncestor(PeerSource peer) {
-        long top = Math.min(engine.height(), peer.height());
-        if (top < GenesisBlock.GENESIS_ID) {
-            return GenesisBlock.GENESIS_ID - 1;
-        }
-        if (agrees(peer, top)) {
-            return top; // peer simply extends our chain
-        }
-        // Phase 1: exponential backoff to bracket the fork between a known match (low) and a
-        // known mismatch (high).
-        long high = top;   // known mismatch
-        long low = -1;     // known match (none yet)
-        long step = 1;
-        long h = top - 1;
-        int probes = 0;
-        while (h >= GenesisBlock.GENESIS_ID && probes < MAX_ANCESTOR_PROBES) {
-            probes++;
-            if (agrees(peer, h)) {
-                low = h;
-                break;
-            }
-            high = h;
-            if (h == GenesisBlock.GENESIS_ID) {
-                break; // genesis itself differs: no common block, not even genesis
-            }
-            long next = h - step;
-            step <<= 1;
-            h = Math.max(next, GenesisBlock.GENESIS_ID);
-        }
-        if (low < 0) {
-            return GenesisBlock.GENESIS_ID - 1;
-        }
-        // Phase 2: binary search for the highest match in (low, high).
-        while (high - low > 1) {
-            long mid = low + (high - low) / 2;
-            if (agrees(peer, mid)) {
-                low = mid;
-            } else {
-                high = mid;
-            }
-        }
-        return low;
-    }
-
-    private boolean agrees(PeerSource peer, long h) {
-        return engine.headerAt(h).hash().equals(peerHeaderHash(peer, h));
+        return AncestorLocator.findCommonAncestor(engine.height(), peer.height(),
+            h -> engine.headerAt(h).hash(), h -> peerHeaderHash(peer, h));
     }
 
     private static rhizome.crypto.SHA256Hash peerHeaderHash(PeerSource peer, long h) {
