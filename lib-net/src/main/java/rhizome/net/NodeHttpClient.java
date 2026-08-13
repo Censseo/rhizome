@@ -147,7 +147,8 @@ public final class NodeHttpClient {
                 InputStream in = response.body();
                 openBody.set(in); // publish so a deadline expiry can cancel the JDK exchange
                 try (in) {
-                    return new String(readBounded(in, RESPONSE_CAP, request.uri().getPath()), StandardCharsets.UTF_8);
+                    return new String(PeerExchange.readBounded(in, RESPONSE_CAP,
+                        "node " + request.uri().getPath() + " response"), StandardCharsets.UTF_8);
                 }
             });
         } catch (IOException e) {
@@ -156,16 +157,6 @@ public final class NodeHttpClient {
             Thread.currentThread().interrupt();
             throw new NodeUnavailableException("interrupted: " + request.uri(), e);
         }
-    }
-
-    /** Reads the stream, aborting if it would exceed {@code maxBytes} (never buffers past the cap). */
-    private static byte[] readBounded(InputStream in, long maxBytes, String path) throws IOException {
-        // One byte over the cap is fetched to distinguish "exactly at cap" from "over".
-        byte[] data = in.readNBytes(Math.toIntExact(Math.min(maxBytes + 1, Integer.MAX_VALUE)));
-        if (data.length > maxBytes) {
-            throw new IOException("node " + path + " response exceeds " + maxBytes + " bytes");
-        }
-        return data;
     }
 
     /** Signals a transport-level failure talking to the node. */

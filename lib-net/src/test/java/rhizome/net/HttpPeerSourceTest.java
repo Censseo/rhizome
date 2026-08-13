@@ -76,7 +76,7 @@ class HttpPeerSourceTest {
             }
             exchange.close();
         });
-        var source = new HttpPeerSource(baseUrl, false, HttpPeerSource.newClient(), Duration.ofMillis(500));
+        var source = new HttpPeerSource(baseUrl, false, PeerExchange.newClient(), Duration.ofMillis(500));
         long t0 = System.nanoTime();
         var ex = assertThrows(HttpPeerSource.PeerUnavailableException.class, source::height);
         long elapsedMs = (System.nanoTime() - t0) / 1_000_000;
@@ -219,7 +219,7 @@ class HttpPeerSourceTest {
             exchange.getResponseBody().write(body);
             exchange.close();
         });
-        assertEquals(42L, new HttpPeerSource(baseUrl, false, HttpPeerSource.newClient(),
+        assertEquals(42L, new HttpPeerSource(baseUrl, false, PeerExchange.newClient(),
             PeerTokenPolicy.unsafeTrustAllForTests("s3cret")).height());
         assertEquals("Bearer s3cret", seen.get());
         // A tokenless source sends no Authorization header at all.
@@ -242,7 +242,7 @@ class HttpPeerSourceTest {
             exchange.close();
         });
         var policy = new PeerTokenPolicy("s3cret", java.util.List.of(baseUrl));
-        assertEquals(42L, new HttpPeerSource(baseUrl, false, HttpPeerSource.newClient(), policy).height());
+        assertEquals(42L, new HttpPeerSource(baseUrl, false, PeerExchange.newClient(), policy).height());
         org.junit.jupiter.api.Assertions.assertNull(seen.get(),
             "the peer token must never travel over cleartext http, configured or not");
     }

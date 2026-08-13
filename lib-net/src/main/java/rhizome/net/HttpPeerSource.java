@@ -108,7 +108,7 @@ public final class HttpPeerSource implements PeerSource {
      *        resolved IP so a DNS rebind cannot redirect the fetch to an internal service (SSRF).
      */
     public HttpPeerSource(String baseUrl, boolean blockPrivateHosts) {
-        this(baseUrl, blockPrivateHosts, newClient());
+        this(baseUrl, blockPrivateHosts, PeerExchange.newClient());
     }
 
     /**
@@ -142,11 +142,6 @@ public final class HttpPeerSource implements PeerSource {
         this.client = client;
         this.requestDeadline = requestDeadline;
         this.tokenPolicy = tokenPolicy;
-    }
-
-    /** A default JDK client with the standard connect timeout; callers that share one build it once. */
-    public static HttpClient newClient() {
-        return HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
     }
 
     @Override
@@ -348,7 +343,7 @@ public final class HttpPeerSource implements PeerSource {
                     InputStream in = response.body();
                     openBody.set(in); // publish so a deadline expiry can cancel the JDK exchange
                     try (in) {
-                        return readBounded(in, maxBytes, path);
+                        return PeerExchange.readBounded(in, maxBytes, "peer " + path + " response");
                     }
                 });
             } catch (ThrottledException throttled) {
@@ -423,16 +418,6 @@ public final class HttpPeerSource implements PeerSource {
             return false; // shutting down: give up rather than swallow the interrupt
         }
         return true;
-    }
-
-    /** Reads the stream, aborting if it would exceed {@code maxBytes} (never buffers past the cap). */
-    private static byte[] readBounded(InputStream in, long maxBytes, String path) throws IOException {
-        // One byte over the cap is fetched to distinguish "exactly at cap" from "over".
-        byte[] data = in.readNBytes(Math.toIntExact(Math.min(maxBytes + 1, Integer.MAX_VALUE)));
-        if (data.length > maxBytes) {
-            throw new IOException("peer " + path + " response exceeds " + maxBytes + " bytes");
-        }
-        return data;
     }
 
     /**

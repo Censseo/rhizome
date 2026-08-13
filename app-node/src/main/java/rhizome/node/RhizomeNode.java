@@ -218,7 +218,7 @@ public final class RhizomeNode implements AutoCloseable {
             // One shared HTTP client for all sync rounds, so a fresh client (and its selector
             // thread + connection pool) is not built per peer per round (audit net #1). Built here
             // because the snap bootstrap just below is already a peer fetch.
-            java.net.http.HttpClient syncHttpClient = HttpPeerSource.newClient();
+            java.net.http.HttpClient syncHttpClient = PeerExchange.newClient();
 
             // RHIZOME_SYNC=snap on an empty data dir: adopt a peer's verified state snapshot at
             // a buried pivot instead of replaying history; falls back to full sync when no peer

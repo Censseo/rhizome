@@ -1,6 +1,5 @@
 package rhizome.net;
 
-import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -236,7 +235,7 @@ public final class PeerBroadcaster implements AutoCloseable {
                 InputStream in = response.body();
                 openBody.set(in); // publish so a deadline expiry can cancel the JDK exchange
                 try (in) {
-                    readBounded(in, MAX_REPLY_BYTES);
+                    PeerExchange.readBounded(in, MAX_REPLY_BYTES, "broadcast reply");
                 }
                 return null;
             });
@@ -244,15 +243,6 @@ public final class PeerBroadcaster implements AutoCloseable {
             Thread.currentThread().interrupt();
         } catch (Exception e) {
             log.debug("broadcast to {} failed: {}", url, e.toString());
-        }
-    }
-
-    /** Reads the stream, aborting if it would exceed {@code maxBytes} (never buffers past the cap). */
-    private static void readBounded(InputStream in, long maxBytes) throws IOException {
-        // One byte over the cap is fetched to distinguish "exactly at cap" from "over".
-        byte[] data = in.readNBytes(Math.toIntExact(Math.min(maxBytes + 1, Integer.MAX_VALUE)));
-        if (data.length > maxBytes) {
-            throw new IOException("broadcast reply exceeds " + maxBytes + " bytes");
         }
     }
 

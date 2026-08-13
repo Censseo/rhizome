@@ -1,6 +1,5 @@
 package rhizome.net;
 
-import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -213,7 +212,8 @@ public final class PeerDiscovery {
             InputStream in = resp.body();
             openBody.set(in); // publish so a deadline expiry can cancel the JDK exchange
             try (in) {
-                return new String(readBounded(in, MAX_PEERS_BODY_BYTES), StandardCharsets.UTF_8);
+                return new String(PeerExchange.readBounded(in, MAX_PEERS_BODY_BYTES, "/peers response"),
+                    StandardCharsets.UTF_8);
             }
         });
         // Depth-bounded parse (audit F11): an over-deep /peers body fails the round as an
@@ -222,16 +222,6 @@ public final class PeerDiscovery {
         // Bound how many addresses one peer can contribute per round, so a single malicious
         // peer cannot flood the registry with sybil URLs (PEX amplification / eclipse).
         return arr.toList().stream().map(Object::toString).limit(MAX_PEX_PER_PEER).toList();
-    }
-
-    /** Reads the stream, aborting if it would exceed {@code maxBytes} (never buffers past the cap). */
-    private static byte[] readBounded(InputStream in, long maxBytes) throws IOException {
-        // One byte over the cap is fetched to distinguish "exactly at cap" from "over".
-        byte[] data = in.readNBytes(Math.toIntExact(Math.min(maxBytes + 1, Integer.MAX_VALUE)));
-        if (data.length > maxBytes) {
-            throw new IOException("/peers response exceeds " + maxBytes + " bytes");
-        }
-        return data;
     }
 
     private void announceToPinned(String pinned, String originalPeer) throws Exception {
@@ -256,7 +246,7 @@ public final class PeerDiscovery {
             InputStream in = resp.body();
             openBody.set(in); // publish so a deadline expiry can cancel the JDK exchange
             try (in) {
-                readBounded(in, MAX_PEERS_BODY_BYTES);
+                PeerExchange.readBounded(in, MAX_PEERS_BODY_BYTES, "/add_peer response");
             }
             return null;
         });
