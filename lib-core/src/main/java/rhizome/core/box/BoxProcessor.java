@@ -10,12 +10,16 @@ import rhizome.core.transaction.TransactionKind;
  * Runs box transactions for the {@link rhizome.core.blockchain.Executor}, without
  * touching the ledger (the executor applies the fee and value movements via its own
  * rolled-back ledger ops). Box state writes are staged in a per-block session:
- * {@link #begin()} opens it, {@link #run} validates and accumulates each box op, and
- * the executor ends the block with exactly one of {@link #commit(long)} (accepted)
- * or {@link #discard()} (rejected), so box state moves atomically with the block.
+ * {@link rhizome.core.blockchain.BlockStateProcessor#begin()} opens it,
+ * {@link #run} validates and accumulates each box op, and the executor ends the
+ * block with exactly one of {@link rhizome.core.blockchain.BlockStateProcessor#commit(long)}
+ * (accepted) or {@link rhizome.core.blockchain.BlockStateProcessor#discard()} (rejected),
+ * so box state moves atomically with the block.
  *
- * <p>Mirrors {@link rhizome.core.blockchain.ContractProcessor}; consensus depends
- * only on this interface, never on the persistence layer.
+ * <p>The session lifecycle — begin, commit, discard, revert, prune — is declared once, on
+ * {@link rhizome.core.blockchain.BlockStateProcessor}; this interface adds only the box
+ * domain's own surface. Consensus depends only on these interfaces, never on the
+ * persistence layer.
  */
 public interface BoxProcessor extends rhizome.core.blockchain.BlockStateProcessor {
 
@@ -24,9 +28,6 @@ public interface BoxProcessor extends rhizome.core.blockchain.BlockStateProcesso
      * is still rejected, by {@code available()} rather than by a null test.
      */
     BoxProcessor NONE = new AbsentBoxProcessor();
-
-    /** Opens a fresh box session for one block. */
-    void begin();
 
     /**
      * Validates and applies one box transaction against the open session. Must not
@@ -41,15 +42,6 @@ public interface BoxProcessor extends rhizome.core.blockchain.BlockStateProcesso
      */
     BoxResult run(TransactionKind kind, PublicAddress from, PublicAddress to,
                   long amount, long nonce, byte[] data, long height);
-
-    /** Persists the session and records an undo journal for {@code blockHeight}. */
-    void commit(long blockHeight);
-
-    /** Drops the session (block rejected), committing nothing. */
-    void discard();
-
-    /** Undoes the box-state changes committed for {@code blockHeight} (reorg). */
-    void revertBlock(long blockHeight);
 
     /** Per-box-transaction receipts for {@code blockHeight}, in block order (reorg ledger reversal). */
     List<BoxReceipt> receipts(long blockHeight);

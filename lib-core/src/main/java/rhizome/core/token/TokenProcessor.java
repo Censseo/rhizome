@@ -11,7 +11,8 @@ import rhizome.core.transaction.TransactionKind;
  * {@link rhizome.core.blockchain.Executor}. Token balances live in the token store, not
  * the native ledger, so a token op moves no PDN — only the transaction fee does, which
  * the executor applies. Token state is staged in a per-block session that commits
- * atomically with the block, exactly like boxes and contracts.
+ * atomically with the block, exactly like boxes and contracts; the session lifecycle is
+ * declared once, on {@link rhizome.core.blockchain.BlockStateProcessor}.
  */
 public interface TokenProcessor extends rhizome.core.blockchain.BlockStateProcessor {
 
@@ -21,17 +22,9 @@ public interface TokenProcessor extends rhizome.core.blockchain.BlockStateProces
      */
     TokenProcessor NONE = new AbsentTokenProcessor();
 
-    void begin();
-
     /** Validates and applies one token transaction against the open session (no ledger effect). */
     TokenResult run(TransactionKind kind, PublicAddress from, PublicAddress to,
                     long nonce, byte[] data, long height);
-
-    void commit(long blockHeight);
-
-    void discard();
-
-    void revertBlock(long blockHeight);
 
     /** Token lifecycle events emitted by {@code blockHeight}'s transactions (agent event feed). */
     default List<TokenEvent> events(long blockHeight) {

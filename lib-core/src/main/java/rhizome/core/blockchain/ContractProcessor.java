@@ -11,11 +11,12 @@ import rhizome.core.transaction.TransactionKind;
  * ledger ops). Implemented in the VM module, so consensus depends only on this
  * interface — never on the WASM runtime.
  *
- * <p>Contract state writes are staged in a per-block <em>session</em>: {@link #begin()}
- * opens it, {@link #run} accumulates the successful calls' writes, and the executor
- * ends the block with exactly one of {@link #commit()} (block accepted) or
- * {@link #discard()} (block rejected), so contract state moves atomically with the
- * block.
+ * <p>Contract state writes are staged in a per-block <em>session</em>: {@link
+ * BlockStateProcessor#begin()} opens it, {@link #run} accumulates the successful calls'
+ * writes, and the executor ends the block with exactly one of {@link
+ * BlockStateProcessor#commit(long)} (block accepted) or {@link BlockStateProcessor#discard()}
+ * (block rejected), so contract state moves atomically with the block. The session lifecycle
+ * is declared once, on {@link BlockStateProcessor}.
  */
 public interface ContractProcessor extends BlockStateProcessor {
 
@@ -26,9 +27,6 @@ public interface ContractProcessor extends BlockStateProcessor {
      */
     ContractProcessor NONE = new AbsentContractProcessor();
 
-    /** Opens a fresh state session for one block. */
-    void begin();
-
     /**
      * Executes one contract transaction against the open session. Must not mutate the
      * ledger. A revert or out-of-gas is reported via {@link ContractResult#success()}
@@ -38,23 +36,6 @@ public interface ContractProcessor extends BlockStateProcessor {
      */
     ContractResult run(PublicAddress from, TransactionKind kind, PublicAddress to,
                        byte[] data, long value, long gasLimit, long nonce);
-
-    /**
-     * Persists the session (block accepted) and records an undo journal for
-     * {@code blockHeight}, so the block's contract-state changes can be reverted
-     * later on a reorg.
-     */
-    void commit(long blockHeight);
-
-    /** Drops the session (block rejected), committing nothing. */
-    void discard();
-
-    /**
-     * Undoes the contract-state changes committed for {@code blockHeight}, restoring
-     * the exact pre-block state. Called by the engine when a block is popped in a
-     * reorg. A height with no recorded journal is a no-op.
-     */
-    void revertBlock(long blockHeight);
 
     /**
      * Per-contract-transaction receipts for {@code blockHeight}, in block order — the
