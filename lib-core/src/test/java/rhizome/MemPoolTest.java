@@ -130,6 +130,18 @@ class MemPoolTest {
         return t;
     }
 
+    private Transaction tokenMint(long nonce) {
+        Transaction t = TransactionImpl.builder()
+            .from(sender).to(PublicAddress.random())
+            .amount(new TransactionAmount(0)).fee(new TransactionAmount(0))
+            .chainId(params.chainId()).nonce(nonce).signingKey(key)
+            .kind(rhizome.core.transaction.TransactionKind.TOKEN_MINT)
+            .data(new byte[] {1, 2, 3}).gasLimit(0).gasPrice(0)
+            .build();
+        t.sign(priv);
+        return t;
+    }
+
     @Test
     void rejectsBoxTransactionBeforeItsActivationHeight() {
         // A box tx submitted before boxActivationHeight would be selected into candidate blocks and
@@ -147,6 +159,27 @@ class MemPoolTest {
         acc.height = 99; // next block 100 == activation: now includable
         assertEquals(ExecutionStatus.SUCCESS, pool.addTransaction(boxCreate(0)));
         assertEquals(1, pool.size());
+    }
+
+    @Test
+    void activationGateDoesNotOverflowTheConfirmedHeightSentinel() {
+        // AccountView.confirmedHeight() uses Long.MAX_VALUE as the "past every activation"
+        // sentinel. The admission gate must judge the NEXT block subtractively
+        // (confirmedHeight < activation - 1); any activeAt(confirmedHeight + 1) form overflows
+        // the sentinel to Long.MIN_VALUE and REFUSES a domain that activated long ago — the
+        // pool would drop valid box/token traffic forever. The sentinel must admit.
+        NetworkParameters activated = params.toBuilder()
+            .boxActivationHeight(100).tokenActivationHeight(100).build();
+        MutableAccounts acc = new MutableAccounts();
+        acc.balances.put(sender, 1_000_000L);
+        MemPool pool = new MemPool(activated, verifier, acc, 100);
+        acc.height = Long.MAX_VALUE; // the sentinel itself
+
+        assertEquals(ExecutionStatus.SUCCESS, pool.addTransaction(boxCreate(0)),
+            "a box tx at the sentinel is past activation and must be admitted");
+        assertEquals(ExecutionStatus.SUCCESS, pool.addTransaction(tokenMint(1)),
+            "a token tx at the sentinel is past activation and must be admitted");
+        assertEquals(2, pool.size());
     }
 
     @Test

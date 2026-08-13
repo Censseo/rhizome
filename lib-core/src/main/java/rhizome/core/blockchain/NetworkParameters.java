@@ -410,6 +410,42 @@ public final class NetworkParameters {
     }
 
     /**
+     * Whether box transactions are valid in a block at {@code height} (see
+     * {@link #boxActivationHeight}). The executor judges the block's own height through this;
+     * the mempool judges the NEXT block through {@link #boxActiveForNextBlock}. One predicate
+     * per domain, like {@link #consensusV2(long)}, so the admission side and the validation
+     * side can never disagree on where the boundary falls.
+     */
+    public boolean boxActiveAt(long height) {
+        return height >= boxActivationHeight;
+    }
+
+    /**
+     * Whether token transactions are valid in a block at {@code height} (see
+     * {@link #tokenActivationHeight}); the token twin of {@link #boxActiveAt}.
+     */
+    public boolean tokenActiveAt(long height) {
+        return height >= tokenActivationHeight;
+    }
+
+    /**
+     * Whether box transactions are valid in the block AFTER the one at {@code confirmedHeight} —
+     * the height the mempool judges a pooled transaction against. Expressed subtractively on
+     * purpose: {@code confirmedHeight} may be the {@code Long.MAX_VALUE} "past every activation"
+     * sentinel of {@code AccountView.confirmedHeight()}, and an
+     * {@code activeAt(confirmedHeight + 1)} form would overflow the sentinel to
+     * {@code Long.MIN_VALUE} and refuse a domain that activated long ago.
+     */
+    public boolean boxActiveForNextBlock(long confirmedHeight) {
+        return boxActivationHeight <= 0 || confirmedHeight >= boxActivationHeight - 1;
+    }
+
+    /** The token twin of {@link #boxActiveForNextBlock}, with the same sentinel-safe subtraction. */
+    public boolean tokenActiveForNextBlock(long confirmedHeight) {
+        return tokenActivationHeight <= 0 || confirmedHeight >= tokenActivationHeight - 1;
+    }
+
+    /**
      * The Pufferfish2 cost parameters in force for a block at {@code height}: the genesis
      * costs below {@link #powUpgradeHeight} (or always, when no upgrade is scheduled), the
      * "after" costs from the upgrade height on.

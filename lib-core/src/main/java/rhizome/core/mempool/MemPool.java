@@ -190,15 +190,14 @@ public final class MemPool {
         // or above its activation height; the executor otherwise hard-fails such a tx (BOX_UNAVAILABLE /
         // TOKEN_UNAVAILABLE), which aborts the WHOLE block. Without this gate a pre-activation box/token
         // tx would be admitted, selected into every candidate block, and halt production until activation.
-        // Reject it here so it never enters the pool. Compared as `confirmedHeight < activation - 1` to
-        // avoid overflowing the Long.MAX_VALUE "no gating" sentinel; the shipped networks activate at 0.
+        // Reject it here so it never enters the pool. The predicate judges the NEXT block and compares
+        // subtractively on purpose — see NetworkParameters.boxActiveForNextBlock for the Long.MAX_VALUE
+        // sentinel that forbids a +1 form.
         long confirmedHeight = accounts.confirmedHeight();
-        if (tx.kind().isBox() && params.boxActivationHeight() > 0
-            && confirmedHeight < params.boxActivationHeight() - 1) {
+        if (tx.kind().isBox() && !params.boxActiveForNextBlock(confirmedHeight)) {
             return BOX_UNAVAILABLE;
         }
-        if (tx.kind().isToken() && params.tokenActivationHeight() > 0
-            && confirmedHeight < params.tokenActivationHeight() - 1) {
+        if (tx.kind().isToken() && !params.tokenActiveForNextBlock(confirmedHeight)) {
             return TOKEN_UNAVAILABLE;
         }
         if (!tx.senderBindingValid()) {

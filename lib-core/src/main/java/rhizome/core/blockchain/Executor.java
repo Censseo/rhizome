@@ -213,7 +213,7 @@ public final class Executor {
                 }
             }
             if (tx.kind().isBox()) {
-                if (!boxProcessor.available() || height < params.boxActivationHeight()) {
+                if (!boxProcessor.available() || !params.boxActiveAt(height)) {
                     return BOX_UNAVAILABLE;
                 }
                 // Box ops run no VM and cost no gas; the gas fields are reserved and must
@@ -242,7 +242,7 @@ public final class Executor {
                 }
             }
             if (tx.kind().isToken()) {
-                if (!tokenProcessor.available() || height < params.tokenActivationHeight()) {
+                if (!tokenProcessor.available() || !params.tokenActiveAt(height)) {
                     return TOKEN_UNAVAILABLE;
                 }
                 // Token ops run no VM, cost no gas, and move no PDN — the token amount lives
