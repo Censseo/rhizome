@@ -262,7 +262,7 @@ public final class ChainSynchronizer {
         if (!validated.valid()) {
             return Result.PEER_INVALID;
         }
-        int cmp = validated.work().compareTo(localWorkAboveFork(forkHeight));
+        int cmp = validated.work().compareTo(ReorgSupport.localWorkAboveFork(engine, forkHeight));
         if (cmp < 0) {
             // Claimed heavy, proved light: a structurally valid branch that merely loses the fork race
             // is not a protocol violation — return NO_CHANGE so an honest total-heavier/base-lighter
@@ -310,16 +310,8 @@ public final class ChainSynchronizer {
             if (engine.height() - forkHeight > engine.params().maxReorgDepth()) {
                 return Result.REORG_TOO_DEEP;
             }
-            // Uncle-inclusive chain weight before we touch anything — the authoritative GHOST metric (§3.7).
-            BigInteger localTotal = engine.totalWork();
-            SHA256Hash localTip = engine.tipHash();
-            List<Block> localBranch = new ArrayList<>();
-            for (long h = forkHeight + 1; h <= engine.height(); h++) {
-                localBranch.add(engine.blockAt(h));
-            }
-            while (engine.height() > forkHeight) {
-                engine.popBlock();
-            }
+            // The capture-and-pop shared with the header path — one sequence, one order.
+            ReorgSupport.LocalBranch local = ReorgSupport.captureAndPop(engine, forkHeight);
 
             for (Block block : branch) {
                 // addValidatedBody, not addBlock: this exact block's header passed HeaderChain
@@ -340,7 +332,7 @@ public final class ChainSynchronizer {
                     status = engine.addValidatedBody(block);
                 }
                 if (status != ExecutionStatus.SUCCESS) {
-                    restore(forkHeight, localBranch);
+                    ReorgSupport.restore(engine, forkHeight, local.blocks());
                     return Result.PEER_INVALID;
                 }
             }
@@ -352,15 +344,15 @@ public final class ChainSynchronizer {
             // An EXACT total tie is decided by the same deterministic tip-hash tiebreak the gate applied
             // (smaller hex wins) — the equal-rate-camp case that would otherwise stay split forever
             // (testnet campaign S5/S7 replay).
-            int totalCmp = engine.totalWork().compareTo(localTotal);
+            int totalCmp = engine.totalWork().compareTo(local.totalWork());
             if (totalCmp < 0 || (totalCmp == 0
-                    && engine.tipHash().toHexString().compareTo(localTip.toHexString()) >= 0)) {
-                restore(forkHeight, localBranch);
+                    && engine.tipHash().toHexString().compareTo(local.tipHash().toHexString()) >= 0)) {
+                ReorgSupport.restore(engine, forkHeight, local.blocks());
                 return Result.NO_CHANGE;
             }
             // The branch we just replaced is valid work that lost the fork race; keep its
             // blocks as orphans so a later block can reference them as uncles (GHOST).
-            for (Block block : localBranch) {
+            for (Block block : local.blocks()) {
                 engine.registerOrphan(block);
             }
             return Result.REORGED;
@@ -403,47 +395,5 @@ public final class ChainSynchronizer {
             return null;
         }
         return out;
-    }
-
-    /**
-     * Local PoW above the fork, base work only — the symmetric counterpart of the branch total
-     * {@link HeaderChain#validate} returns (each block's own {@code 2^difficulty}, deliberately NOT
-     * the uncle work, audit M4: committed uncle refs are unverified at this stateless stage, so
-     * counting them would let a cheap branch inflate its claimed work ~3× and force a pop/restore
-     * cycle before the fakes are rejected). Read from HEADERS, not bodies (audit F4), so a pruned
-     * node whose fork sits below the watermark answers the gate instead of throwing.
-     */
-    private BigInteger localWorkAboveFork(long forkHeight) {
-        BigInteger work = BigInteger.ZERO;
-        for (long h = forkHeight + 1; h <= engine.height(); h++) {
-            work = work.add(BlockWork.of(engine.headerAt(h).difficulty()));
-        }
-        return work;
-    }
-
-    private void restore(long forkHeight, List<Block> localBranch) {
-        while (engine.height() > forkHeight) {
-            engine.popBlock();
-        }
-        for (Block block : localBranch) {
-            // restoreBlock (not addBlock): these blocks were canonical here, so their uncle refs were
-            // already fully validated; re-checking them against the orphan pool would let a hostile
-            // peer that churned the pool (evicting a referenced uncle) turn a rejected reorg into a
-            // forced full resync (audit V5). Any OTHER failure is still a genuine invariant breach.
-            ExecutionStatus status = engine.restoreBlock(block);
-            if (status != ExecutionStatus.SUCCESS) {
-                // Re-adding a just-canonical block must otherwise succeed; a failure would silently
-                // leave the node permanently shorter. Fail loud so a full resync recovers the suffix
-                // instead of continuing truncated (audit: restore self-truncation), and mark the
-                // engine's degraded state so the condition is observable to the API layer (audit:
-                // silent restore failure) — cleared below once a restore fully succeeds.
-                String reason = "failed to restore local branch at " + block.id()
-                    + " after a rejected reorg: " + status + " — a full resync is required";
-                engine.markDegraded(reason, false); // a later full restore genuinely heals this
-                log.error("{}", reason);
-                throw new IllegalStateException(reason);
-            }
-        }
-        engine.clearDegraded(); // the local branch is whole again
     }
 }

@@ -125,7 +125,7 @@ public final class HeaderSynchronizer {
         if (!validated.valid()) {
             return ChainSynchronizer.Result.PEER_INVALID;
         }
-        int cmp = validated.work().compareTo(localWorkAboveFork(forkHeight));
+        int cmp = validated.work().compareTo(ReorgSupport.localWorkAboveFork(engine, forkHeight));
         if (cmp < 0) {
             // Claimed heavy, proved light: the branch is structurally valid (PoW/continuity/difficulty
             // all held) but not base-heavier, so it simply loses the fork race — NOT a protocol
@@ -274,9 +274,7 @@ public final class HeaderSynchronizer {
         // prevent). It is closed in finally AFTER the restore/adopt view completes, and never held
         // across the header download, which already completed above (only the body apply streams,
         // by design).
-        List<Block> localBranch = new ArrayList<>();
-        BigInteger[] capturedTotal = new BigInteger[1];
-        SHA256Hash[] capturedTip = new SHA256Hash[1];
+        ReorgSupport.LocalBranch[] captured = new ReorgSupport.LocalBranch[1];
         boolean[] opened = new boolean[1];
         ChainSynchronizer.Result early;
         try {
@@ -293,17 +291,10 @@ public final class HeaderSynchronizer {
                     return ChainSynchronizer.Result.NO_CHANGE; // a window is already open (defensive)
                 }
                 opened[0] = true;
-                capturedTotal[0] = engine.totalWork();
-                // The local tip is captured alongside the total: the phase-3 GHOST vote breaks an
-                // exact-total tie by comparing tip hashes, and it must compare the state as it was
-                // atomically with the pop, not a tip that the producer raced past.
-                capturedTip[0] = engine.tipHash();
-                for (long h = forkHeight + 1; h <= engine.height(); h++) {
-                    localBranch.add(engine.blockAt(h));
-                }
-                while (engine.height() > forkHeight) {
-                    engine.popBlock();
-                }
+                // The capture-and-pop shared with the full-block path — one sequence, one order:
+                // the captured tip is what the phase-3 GHOST tiebreak must compare against, and
+                // it must be the state as it was atomically with the pop, not a raced tip.
+                captured[0] = ReorgSupport.captureAndPop(engine, forkHeight);
                 return null; // phase 1 complete, window open — phases 2/3 run outside this view
             });
         } catch (RuntimeException | Error phase1Failure) {
@@ -320,15 +311,15 @@ public final class HeaderSynchronizer {
             return early;
         }
         try {
-            return applyAndAdopt(peer, forkHeight, branch, localBranch, capturedTotal[0], capturedTip[0]);
+            return applyAndAdopt(peer, forkHeight, branch, captured[0]);
         } finally {
             engine.endReorgWindow();
         }
     }
 
     private ChainSynchronizer.Result applyAndAdopt(PeerSource peer, long forkHeight,
-                                                   List<BlockHeader> branch, List<Block> localBranch,
-                                                   BigInteger localTotal, SHA256Hash localTip) {
+                                                   List<BlockHeader> branch,
+                                                   ReorgSupport.LocalBranch local) {
         // Phase 2 — fetch and apply the peer bodies. Network I/O, so deliberately OUTSIDE the lock.
         boolean applied;
         try {
@@ -344,7 +335,7 @@ public final class HeaderSynchronizer {
             // phase 1 found it, then let the failure propagate (retried next round, never a ban).
             try {
                 engine.withConsistentView(() -> {
-                    restore(forkHeight, localBranch);
+                    ReorgSupport.restore(engine, forkHeight, local.blocks());
                     return null;
                 });
             } catch (RuntimeException | Error restoreFailure) {
@@ -358,7 +349,7 @@ public final class HeaderSynchronizer {
         // Phase 3 — adopt or restore, atomically so restore cannot race a producer/submit add.
         return engine.withConsistentView(() -> {
             if (!applied) {
-                restore(forkHeight, localBranch);
+                ReorgSupport.restore(engine, forkHeight, local.blocks());
                 return ChainSynchronizer.Result.PEER_INVALID;
             }
             // GHOST fork choice (§3.7, audit S4). The base-only header gate is the anti-DoS PREFILTER —
@@ -372,59 +363,19 @@ public final class HeaderSynchronizer {
             // decided by the same deterministic tip-hash tiebreak the gate applied (smaller hex wins),
             // so the adopted side is the one every node agrees on; a liar whose validated total came
             // out equal but whose tip loses is restored exactly as before.
-            int totalCmp = engine.totalWork().compareTo(localTotal);
+            int totalCmp = engine.totalWork().compareTo(local.totalWork());
             if (totalCmp < 0 || (totalCmp == 0 && engine.tipHash().toHexString()
-                    .compareTo(localTip.toHexString()) >= 0)) {
-                restore(forkHeight, localBranch);
+                    .compareTo(local.tipHash().toHexString()) >= 0)) {
+                ReorgSupport.restore(engine, forkHeight, local.blocks());
                 return ChainSynchronizer.Result.NO_CHANGE;
             }
             // The branch we replaced is valid work that lost the fork race; keep its blocks as
             // orphans so a later block can reference them as uncles (GHOST).
-            for (Block block : localBranch) {
+            for (Block block : local.blocks()) {
                 engine.registerOrphan(block);
             }
             return ChainSynchronizer.Result.REORGED;
         });
-    }
-
-    private void restore(long forkHeight, List<Block> localBranch) {
-        while (engine.height() > forkHeight) {
-            engine.popBlock();
-        }
-        for (Block block : localBranch) {
-            // restoreBlock trusts our own already-validated uncle refs instead of re-checking them
-            // against the orphan pool: an attacker who flooded the pool with fresh siblings to evict a
-            // referenced uncle, then forced this failed reorg, can no longer turn it into a forced full
-            // resync (audit V5). Uncle work/rewards derive from the committed refs, so restoration is
-            // exact. Any other failure remains a genuine invariant breach and still fails loud below.
-            ExecutionStatus status = engine.restoreBlock(block);
-            if (status != ExecutionStatus.SUCCESS) {
-                // Re-adding a block that was canonical moments ago must otherwise succeed. Swallowing a
-                // failure would leave the node permanently shorter than it started, silently (audit:
-                // restore self-truncation). Fail loud instead so it is caught and a full resync
-                // recovers the suffix, rather than continuing in a silently-truncated state. The
-                // engine's degraded marker makes the condition observable to the API layer (audit:
-                // silent restore failure) — cleared below once a restore fully succeeds.
-                String reason = "failed to restore local branch at " + block.id()
-                    + " after a rejected reorg: " + status + " — a full resync is required";
-                engine.markDegraded(reason, false); // a later full restore genuinely heals this
-                log.error("{}", reason);
-                throw new IllegalStateException(reason);
-            }
-        }
-        engine.clearDegraded(); // the local branch is whole again
-    }
-
-    private BigInteger localWorkAboveFork(long forkHeight) {
-        // Base work only, matching HeaderChain's base-only branch total: the reorg gate compares
-        // like with like and never lets unverifiable committed uncle work (on either side) drive a
-        // pop/restore decision (audit M4). Uncle work still decides true fork choice via
-        // engine.totalWork() once the bodies validate.
-        BigInteger work = BigInteger.ZERO;
-        for (long h = forkHeight + 1; h <= engine.height(); h++) {
-            work = work.add(BlockWork.of(engine.headerAt(h).difficulty()));
-        }
-        return work;
     }
 
     /**
