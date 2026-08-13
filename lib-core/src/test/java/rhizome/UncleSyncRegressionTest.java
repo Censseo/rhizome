@@ -196,7 +196,7 @@ class UncleSyncRegressionTest {
         Result result = new ChainSynchronizer(freshNode).syncFrom(new FullPeer(peer) {
             @Override
             public List<BlockHeader> headers(long start, long end) {
-                throw new UnsupportedOperationException("no /headers");
+                return null;
             }
         });
 
@@ -211,7 +211,7 @@ class UncleSyncRegressionTest {
         ChainEngine canonical = buildCanonicalChainWithUncle();
         ChainEngine freshNode = newEngine();
 
-        // A peer predating the orphan endpoint (default throws UnsupportedOperationException):
+        // A peer predating the orphan endpoint (the default answers null):
         // the chain cannot be validated, so the peer is rejected — but the node must stay
         // consistent and able to sync a chain it CAN validate afterwards.
         Result result = new HeaderSynchronizer(freshNode).syncFrom(new PeerSource() {

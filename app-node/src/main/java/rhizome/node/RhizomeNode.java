@@ -702,9 +702,10 @@ public final class RhizomeNode implements AutoCloseable {
                 // Transport failures are not misbehaviour; PeerDiscovery prunes the
                 // persistently unreachable. Only protocol violations earn ban score.
                 log.debug("Peer {} unavailable: {}", peerUrl, e.getMessage());
-            } catch (HttpPeerSource.PeerProtocolException e) {
+            } catch (rhizome.core.blockchain.PeerProtocolException e) {
                 // Malformed protocol data (junk scalars, absurd snapshot chunk counts) is a
                 // protocol violation like serving an invalid chain — penalize accordingly.
+                // Caught as the PORT type: any transport adapter speaks this vocabulary.
                 penalize(peerUrl, PENALTY_INVALID, "served malformed protocol data");
             } catch (Throwable e) {
                 // Every Error is fatal-by-doctrine here: a HostFault is a LOCAL store/infra

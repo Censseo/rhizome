@@ -236,12 +236,11 @@ public final class HttpPeerSource implements PeerSource {
 
     @Override
     public SnapshotInfo snapshotInfo() {
-        String body;
-        try {
-            body = new String(getBytes("/state/snapshot/info", SCALAR_CAP, true), StandardCharsets.UTF_8);
-        } catch (UnsupportedOperationException noSnapshot) {
+        byte[] bytes = getBytesOrNullOn404("/state/snapshot/info", SCALAR_CAP);
+        if (bytes == null) {
             return null; // peer has no materialised snapshot (404) — not an error
         }
+        String body = new String(bytes, StandardCharsets.UTF_8);
         try {
             JSONObject info = PeerJson.parseObject(body); // depth-bounded (audit F11)
             long pivotHeight = info.getLong("pivotHeight");
@@ -270,9 +269,12 @@ public final class HttpPeerSource implements PeerSource {
 
     @Override
     public List<BlockHeader> headers(long start, long end) {
-        // A peer predating the /headers endpoint answers 404; surface it as "unsupported"
-        // so the synchronizer falls back to full-block sync (D7) instead of banning.
-        byte[] body = getBytes("/headers?start=" + start + "&end=" + end, HEADER_STREAM_CAP, true);
+        // A peer predating the /headers endpoint answers 404; surface it as null so the
+        // synchronizer falls back to full-block sync (D7) instead of banning.
+        byte[] body = getBytesOrNullOn404("/headers?start=" + start + "&end=" + end, HEADER_STREAM_CAP);
+        if (body == null) {
+            return null;
+        }
         return HeaderCodec.decodeAll(body);
     }
 
@@ -299,23 +301,16 @@ public final class HttpPeerSource implements PeerSource {
     }
 
     private byte[] getBytes(String path, long maxBytes) {
-        return getBytes(path, maxBytes, false);
-    }
-
-    private byte[] getBytes(String path, long maxBytes, boolean notFoundMeansUnsupported) {
-        return fetch(path, maxBytes, notFoundMeansUnsupported ? NotFound.UNSUPPORTED : NotFound.ERROR);
+        return fetch(path, maxBytes, false);
     }
 
     /** 404 → {@code null} ("absent"); any other non-200 is a transport failure. */
     private byte[] getBytesOrNullOn404(String path, long maxBytes) {
-        return fetch(path, maxBytes, NotFound.NULL);
+        return fetch(path, maxBytes, true);
     }
 
-    /** How a 404 is surfaced: transport error, endpoint-unsupported, or plain "absent". */
-    private enum NotFound { ERROR, UNSUPPORTED, NULL }
-
-    /** Fetches {@code path}, applying the {@link NotFound} mode on a 404; throws on other errors. */
-    private byte[] fetch(String path, long maxBytes, NotFound notFound) {
+    /** Fetches {@code path}, with a 404 mapping to {@code null} when {@code nullOn404}; throws on other errors. */
+    private byte[] fetch(String path, long maxBytes, boolean nullOn404) {
         HttpRequest request = PeerExchange.pinnedRequest(originalUrl, path, blockPrivateHosts,
                 tokenPolicy, originalUrl)
             .timeout(requestDeadline)
@@ -330,10 +325,7 @@ public final class HttpPeerSource implements PeerSource {
                     HttpResponse<InputStream> response = exchange.client().send(request, HttpResponse.BodyHandlers.ofInputStream());
                     if (response.statusCode() != 200) {
                         response.body().close();
-                        if (response.statusCode() == 404 && notFound == NotFound.UNSUPPORTED) {
-                            throw new UnsupportedOperationException("peer lacks " + path);
-                        }
-                        if (response.statusCode() == 404 && notFound == NotFound.NULL) {
+                        if (response.statusCode() == 404 && nullOn404) {
                             return null;
                         }
                         throw statusFailure(path, response);
@@ -486,11 +478,11 @@ public final class HttpPeerSource implements PeerSource {
      * Signals a MALFORMED peer response: the transport worked, but the peer served junk no
      * honest node would emit (an unparseable height/work/block, an out-of-range snapshot chunk
      * count). Distinct from {@link PeerUnavailableException} so the sync round can penalise the
-     * peer's ban score instead of shrugging it off as an outage (audit F9). Unchecked because
-     * it must propagate through the {@link PeerSource} interface, whose methods declare no
-     * checked exceptions, up to the sync-round catch site.
+     * peer's ban score instead of shrugging it off as an outage (audit F9). Extends the
+     * lib-core type so the ban signal is part of the port's vocabulary, not this adapter's;
+     * the nested name keeps the net-layer call sites unchanged.
      */
-    public static final class PeerProtocolException extends RuntimeException {
+    public static final class PeerProtocolException extends rhizome.core.blockchain.PeerProtocolException {
         public PeerProtocolException(String message) {
             super(message);
         }

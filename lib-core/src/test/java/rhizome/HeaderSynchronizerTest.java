@@ -261,10 +261,10 @@ class HeaderSynchronizerTest {
         ChainEngine peer = newEngine();
         mine(peer, PublicAddress.random(), new AtomicLong(0), 4);
 
-        // A peer predating /headers: headers() throws, so the synchroniser must fall back.
+        // A peer predating /headers: headers() answers null, so the synchroniser must fall back.
         EnginePeer legacy = new EnginePeer(peer) {
             @Override public List<BlockHeader> headers(long start, long end) {
-                throw new UnsupportedOperationException("no /headers");
+                return null;
             }
         };
 
@@ -382,13 +382,13 @@ class HeaderSynchronizerTest {
 
         EnginePeer legacyB = new EnginePeer(b) {
             @Override public List<BlockHeader> headers(long start, long end) {
-                throw new UnsupportedOperationException("no /headers");
+                return null;
             }
         };
         new HeaderSynchronizer(a).syncFrom(legacyB);
         EnginePeer legacyA = new EnginePeer(a) {
             @Override public List<BlockHeader> headers(long start, long end) {
-                throw new UnsupportedOperationException("no /headers");
+                return null;
             }
         };
         new HeaderSynchronizer(b).syncFrom(legacyA);

@@ -21,9 +21,9 @@ import rhizome.crypto.SHA256Hash;
  * far cheaper than before. Only once the headers prove the work do we download
  * bodies, each verified against its validated header before execution.
  *
- * <p>A peer that predates the {@code /headers} endpoint makes {@link PeerSource#headers}
- * throw {@link UnsupportedOperationException}; the synchroniser transparently
- * falls back to the full-block {@link ChainSynchronizer} for that peer (D7).
+ * <p>A peer that predates the {@code /headers} endpoint answers {@code null} from
+ * {@link PeerSource#headers}; the synchroniser transparently falls back to the full-block
+ * {@link ChainSynchronizer} for that peer (D7).
  */
 public final class HeaderSynchronizer {
 
@@ -74,19 +74,25 @@ public final class HeaderSynchronizer {
             // peerTotal is read ONCE per round and carried down: the tiebreak below compares it
             // against our total, and a second HTTP read here could race our own chain advancing
             // between the two calls. One read, one consistent decision (and no extra round-trip).
-            return headersFirstSync(peer, peerTotal);
-        } catch (UnsupportedOperationException headersUnsupported) {
-            // Older peer without /headers: fall back to the full-block path.
-            return fallback.syncFrom(peer);
+            ChainSynchronizer.Result result = headersFirstSync(peer, peerTotal);
+            if (result == null) {
+                // Older peer without /headers: fall back to the full-block path.
+                return fallback.syncFrom(peer);
+            }
+            return result;
+        } catch (LocalSaturationException e) {
+            throw e; // local backpressure, not a peer fault: syncFrom maps it to NO_CHANGE
         }
     }
 
+    /**
+     * The headers-first pass, or {@code null} when the first header probe answered null — the
+     * peer predates {@code /headers} — and the caller must fall back to full-block sync.
+     */
     private ChainSynchronizer.Result headersFirstSync(PeerSource peer, BigInteger peerTotal) {
-        long forkHeight;
+        Long forkLong;
         try {
-            forkHeight = findCommonAncestor(peer); // first call touches peer.headers → may fall back
-        } catch (UnsupportedOperationException headersUnsupported) {
-            throw headersUnsupported; // peer lacks /headers: let syncFrom fall back to full blocks
+            forkLong = findCommonAncestor(peer); // first call touches peer.headers → may fall back
         } catch (LocalSaturationException e) {
             throw e; // local backpressure, not a peer fault: syncFrom maps it to NO_CHANGE
         } catch (PeerUnavailableException e) {
@@ -99,9 +105,13 @@ public final class HeaderSynchronizer {
         } catch (RuntimeException e) {
             // A peer that throws or returns an empty/garbage response while we probe for the common
             // ancestor is invalid, exactly like the fetch phases below — it must not propagate out of
-            // the sync pass (audit V6c). (UnsupportedOperationException is re-thrown above.)
+            // the sync pass (audit V6c).
             return ChainSynchronizer.Result.PEER_INVALID;
         }
+        if (forkLong == null) {
+            return null; // peer lacks /headers: syncFrom falls back to full blocks
+        }
+        long forkHeight = forkLong;
         if (forkHeight < GenesisBlock.GENESIS_ID) {
             return ChainSynchronizer.Result.INCOMPATIBLE; // genesis mismatch: different network
         }
@@ -179,13 +189,18 @@ public final class HeaderSynchronizer {
      * peer.blockHash — see {@link AncestorLocator}. A slow/hostile peer can no longer tie up the
      * sync thread for height×timeout by never matching.
      */
-    private long findCommonAncestor(PeerSource peer) {
+    private Long findCommonAncestor(PeerSource peer) {
         return AncestorLocator.findCommonAncestor(engine.height(), peer.height(),
             h -> engine.headerAt(h).hash(), h -> peerHeaderHash(peer, h));
     }
 
+    /** The peer's header hash at {@code h}, or {@code null} — the peer predates {@code /headers}
+     *  — which aborts the locator so the caller falls back to full-block sync. */
     private static rhizome.crypto.SHA256Hash peerHeaderHash(PeerSource peer, long h) {
         List<BlockHeader> one = peer.headers(h, h);
+        if (one == null) {
+            return null;
+        }
         if (one.isEmpty()) {
             throw new IllegalStateException("peer returned no header at " + h);
         }
@@ -198,10 +213,14 @@ public final class HeaderSynchronizer {
         try {
             for (long start = from; start <= to; start += Constants.BLOCK_HEADERS_PER_FETCH) {
                 long end = Math.min(to, start + Constants.BLOCK_HEADERS_PER_FETCH - 1);
-                out.addAll(peer.headers(start, end));
+                List<BlockHeader> batch = peer.headers(start, end);
+                if (batch == null) {
+                    // The probes above answered, so this peer serves /headers — a null RANGE
+                    // fetch is an inconsistent response, junk rather than "unsupported".
+                    return null;
+                }
+                out.addAll(batch);
             }
-        } catch (UnsupportedOperationException e) {
-            throw e; // let syncFrom fall back to full-block sync
         } catch (LocalSaturationException e) {
             throw e; // local backpressure, not a peer fault: null would read as PEER_INVALID
         } catch (PeerUnavailableException e) {

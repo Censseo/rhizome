@@ -123,8 +123,14 @@ public final class ChainSynchronizer {
         // (BlockImpl.hash() delegates to BlockHeader), so the fork probe still works on a pruned
         // node — blockAt would throw below the prune watermark and an honest archive peer would be
         // misjudged as PEER_INVALID instead of simply diverging below the reorg horizon.
-        return AncestorLocator.findCommonAncestor(engine.height(), peer.height(),
+        // peer::blockHash never answers null (junk throws PeerProtocolException from the adapter);
+        // a null here would mean the adapter lied about the transport — junk either way.
+        Long ancestor = AncestorLocator.findCommonAncestor(engine.height(), peer.height(),
             h -> engine.headerAt(h).hash(), peer::blockHash);
+        if (ancestor == null) {
+            throw new PeerProtocolException("peer block probes answered nothing");
+        }
+        return ancestor;
     }
 
     /**
@@ -228,7 +234,7 @@ public final class ChainSynchronizer {
             throw e; // local backpressure must not degrade into a peer-invalid verdict
         } catch (PeerUnavailableException e) {
             throw e; // transport failure: retried next round, never PEER_INVALID
-        } catch (RuntimeException e) { // UnsupportedOperationException included: no orphan endpoint
+        } catch (RuntimeException e) { // malformed body: leave the block unverifiable, retried elsewhere
             return null;
         }
     }

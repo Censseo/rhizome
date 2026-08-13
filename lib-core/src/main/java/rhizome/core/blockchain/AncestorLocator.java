@@ -33,7 +33,10 @@ final class AncestorLocator {
 
     /**
      * Highest height at which the local chain and the peer's agree, or
-     * {@code GenesisBlock.GENESIS_ID - 1} when not even genesis matches.
+     * {@code GenesisBlock.GENESIS_ID - 1} when not even genesis matches, or {@code null} when
+     * {@code peerHashAt} returned null — the caller's signal that the peer does not serve the
+     * transport being probed (headers-first against a pre-{@code /headers} peer), which
+     * aborts the search so the caller can fall back.
      *
      * @param localHeight  the local chain height
      * @param peerHeight   the peer's self-reported height
@@ -41,16 +44,21 @@ final class AncestorLocator {
      *                     identically to the block — audit F4 — so a pruned node probes exactly
      *                     like an archive node)
      * @param peerHashAt   the peer's header hash at a height, via whichever transport the caller
-     *                     runs (blockHash for the full-block fallback, headers otherwise)
+     *                     runs (blockHash for the full-block fallback, headers otherwise); null
+     *                     aborts the search as "transport unsupported"
      */
-    static long findCommonAncestor(long localHeight, long peerHeight,
+    static Long findCommonAncestor(long localHeight, long peerHeight,
                                    LongFunction<SHA256Hash> localHashAt,
                                    LongFunction<SHA256Hash> peerHashAt) {
         long top = Math.min(localHeight, peerHeight);
         if (top < GenesisBlock.GENESIS_ID) {
-            return GenesisBlock.GENESIS_ID - 1;
+            return (long) GenesisBlock.GENESIS_ID - 1;
         }
-        if (localHashAt.apply(top).equals(peerHashAt.apply(top))) {
+        SHA256Hash peerTop = peerHashAt.apply(top);
+        if (peerTop == null) {
+            return null; // peer does not serve this transport: caller falls back
+        }
+        if (localHashAt.apply(top).equals(peerTop)) {
             return top; // peer simply extends our chain
         }
         // Phase 1: exponential backoff to bracket the fork between a known match (low) and a
@@ -62,7 +70,11 @@ final class AncestorLocator {
         int probes = 0;
         while (h >= GenesisBlock.GENESIS_ID && probes < MAX_ANCESTOR_PROBES) {
             probes++;
-            if (localHashAt.apply(h).equals(peerHashAt.apply(h))) {
+            SHA256Hash peerHash = peerHashAt.apply(h);
+            if (peerHash == null) {
+                return null; // peer does not serve this transport: caller falls back
+            }
+            if (localHashAt.apply(h).equals(peerHash)) {
                 low = h;
                 break;
             }
@@ -75,12 +87,16 @@ final class AncestorLocator {
             h = Math.max(next, GenesisBlock.GENESIS_ID);
         }
         if (low < 0) {
-            return GenesisBlock.GENESIS_ID - 1; // no common block, not even genesis
+            return (long) GenesisBlock.GENESIS_ID - 1; // no common block, not even genesis
         }
         // Phase 2: binary search for the highest match in (low, high).
         while (high - low > 1) {
             long mid = low + (high - low) / 2;
-            if (localHashAt.apply(mid).equals(peerHashAt.apply(mid))) {
+            SHA256Hash peerHash = peerHashAt.apply(mid);
+            if (peerHash == null) {
+                return null; // peer does not serve this transport: caller falls back
+            }
+            if (localHashAt.apply(mid).equals(peerHash)) {
                 low = mid;
             } else {
                 high = mid;

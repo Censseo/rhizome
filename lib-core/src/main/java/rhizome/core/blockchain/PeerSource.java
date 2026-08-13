@@ -26,12 +26,13 @@ public interface PeerSource {
 
     /**
      * Peer block headers in the inclusive range — the cheap path the headers-first
-     * synchronizer validates before downloading any body. A peer (or adapter) that
-     * predates the {@code /headers} endpoint throws {@link UnsupportedOperationException},
-     * which the synchronizer treats as a signal to fall back to full-block sync (D7).
+     * synchronizer validates before downloading any body. {@code null} when the peer (or
+     * adapter) predates the {@code /headers} endpoint, which the synchronizer reads as a
+     * signal to fall back to full-block sync (D7). A malformed range is not "unsupported":
+     * it is junk, thrown as {@link PeerProtocolException}.
      */
     default List<BlockHeader> headers(long start, long end) {
-        throw new UnsupportedOperationException("peer does not support headers-first sync");
+        return null;
     }
 
     /**
@@ -46,15 +47,16 @@ public interface PeerSource {
 
     /**
      * The orphan block body behind an uncle reference's hash, or {@code null} when the peer
-     * no longer holds it (its orphan pool is a bounded LRU). A block carries only the
-     * {@link rhizome.core.block.UncleRef} (hash + difficulty + miner), never the body, so a
-     * node syncing a chain with uncle-bearing blocks cannot pass {@code validateUncles}
-     * without fetching the referenced orphans on demand (audit: uncle-sync blocker — a fresh
-     * node's empty pool made every honest chain past the first uncle unsynchronisable).
-     * A peer that predates this endpoint throws {@link UnsupportedOperationException}.
+     * no longer holds it (its orphan pool is a bounded LRU) or predates the endpoint. A block
+     * carries only the {@link rhizome.core.block.UncleRef} (hash + difficulty + miner), never
+     * the body, so a node syncing a chain with uncle-bearing blocks cannot pass
+     * {@code validateUncles} without fetching the referenced orphans on demand (audit:
+     * uncle-sync blocker — a fresh node's empty pool made every honest chain past the first
+     * uncle unsynchronisable). A malformed body is junk, not "absent": {@link
+     * PeerProtocolException}.
      */
     default Block orphan(SHA256Hash hash) {
-        throw new UnsupportedOperationException("peer does not serve orphans");
+        return null;
     }
 
     /**
@@ -66,9 +68,13 @@ public interface PeerSource {
         return null;
     }
 
-    /** One snapshot chunk (encoded {@link rhizome.core.state.snapshot.SnapshotChunk}) by index. */
+    /**
+     * One snapshot chunk (encoded {@link rhizome.core.state.snapshot.SnapshotChunk}) by index.
+     * The capability gate is {@link #snapshotInfo()}: a caller must only fetch chunks from a
+     * peer that advertised a snapshot, so the default is unreachable by contract.
+     */
     default byte[] snapshotChunk(int index) {
-        throw new UnsupportedOperationException("peer does not serve state snapshots");
+        throw new IllegalStateException("snapshotChunk called on a peer that advertised no snapshot");
     }
 
     record SnapshotInfo(long pivotHeight, byte[] stateRoot, int chunkCount) {}

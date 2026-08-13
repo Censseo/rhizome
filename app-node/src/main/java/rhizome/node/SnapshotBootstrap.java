@@ -277,7 +277,12 @@ final class SnapshotBootstrap {
         try {
             for (long start = from; start <= to; start += Constants.BLOCK_HEADERS_PER_FETCH) {
                 long end = Math.min(to, start + Constants.BLOCK_HEADERS_PER_FETCH - 1);
-                out.addAll(peer.headers(start, end));
+                List<BlockHeader> batch = peer.headers(start, end);
+                if (batch == null) {
+                    log.warn("Header fetch for bootstrap failed: peer predates /headers");
+                    return null;
+                }
+                out.addAll(batch);
             }
         } catch (RuntimeException e) {
             log.warn("Header fetch for bootstrap failed: {}", e.toString());
