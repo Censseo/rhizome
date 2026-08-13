@@ -13,6 +13,7 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 
 import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -23,12 +24,16 @@ import rhizome.core.block.BlockImpl;
 import rhizome.core.blockchain.ChainEngine;
 import rhizome.core.blockchain.ChainEngineTestAccess;
 import rhizome.core.blockchain.ChainStore;
+import rhizome.core.blockchain.ChainStoreContract;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
+import rhizome.core.blockchain.NonceStore;
+import rhizome.core.blockchain.NonceStoreContract;
 import rhizome.crypto.PowAlgorithm;
 import rhizome.crypto.PrivateKey;
 import rhizome.crypto.PublicKey;
 import rhizome.core.ledger.Ledger;
+import rhizome.core.ledger.LedgerContract;
 import rhizome.core.ledger.LedgerException;
 import rhizome.core.ledger.LedgerSnapshot;
 import rhizome.core.ledger.PublicAddress;
@@ -38,10 +43,49 @@ import rhizome.core.transaction.Transaction;
 import rhizome.core.transaction.TransactionAmount;
 import rhizome.persistence.rocksdb.RocksDbNodeStore;
 
-class RocksDbNodeStoreTest {
+/**
+ * RocksDB-specific node-store behaviour: header backfill, pruning, legacy-database migration,
+ * and persistence across a reopen — none of which an in-memory store can exhibit. The baseline
+ * append/pop/index and chain-store/nonce-store/ledger behaviour both backends already satisfy
+ * lives in {@link ChainStoreContract}, {@link NonceStoreContract} and {@link LedgerContract},
+ * which this class also implements — see {@code InMemoryChainStoreTest},
+ * {@code InMemoryNonceStoreTest} and {@code InMemoryLedgerTest} for the other side.
+ */
+class RocksDbNodeStoreTest implements ChainStoreContract, NonceStoreContract, LedgerContract {
 
     @TempDir
     Path tempDir;
+
+    private RocksDbNodeStore opened;
+
+    private RocksDbNodeStore openStore() throws IOException {
+        if (opened == null) {
+            opened = new RocksDbNodeStore(tempDir.resolve("contract-db").toString());
+        }
+        return opened;
+    }
+
+    @Override
+    public ChainStore newChainStore() throws Exception {
+        return openStore().chainStore();
+    }
+
+    @Override
+    public NonceStore newNonceStore() throws Exception {
+        return openStore().nonceStore();
+    }
+
+    @Override
+    public Ledger newLedger() throws Exception {
+        return openStore().ledger();
+    }
+
+    @AfterEach
+    void closeContractStore() {
+        if (opened != null) {
+            opened.close();
+        }
+    }
 
     private NetworkParameters fastParams() {
         return NetworkParameters.testnet().toBuilder()
