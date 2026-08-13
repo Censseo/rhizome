@@ -1,13 +1,9 @@
 package rhizome.persistence.rocksdb;
 
-import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 
-import org.rocksdb.ColumnFamilyDescriptor;
 import org.rocksdb.ColumnFamilyHandle;
-import org.rocksdb.DBOptions;
-import org.rocksdb.RocksDB;
 import org.rocksdb.RocksDBException;
 import org.rocksdb.WriteBatch;
 import org.rocksdb.WriteOptions;
@@ -23,17 +19,9 @@ import rhizome.vm.StorageChange;
  * per-contract storage in another (keyed by {@code address || key}). Native store
  * for the full node; the in-memory store remains the light/test path.
  */
-public final class RocksDbContractStore implements ContractStore, AutoCloseable {
+public final class RocksDbContractStore extends RocksDbStore implements ContractStore {
 
     private static final Logger log = LoggerFactory.getLogger(RocksDbContractStore.class);
-
-    static {
-        // The WriteOptions field initializers below call native methods at construction time:
-        // without this, a JVM that opens a contract store BEFORE any other store crashed with
-        // UnsatisfiedLinkError — long masked in the test suite by another store loading the
-        // library first into the shared test JVM (audit 17th pass, latent).
-        RocksDB.loadLibrary();
-    }
 
     private static final byte[] CF_CODE = "contract_code".getBytes();
     private static final byte[] CF_STORAGE = "contract_storage".getBytes();
@@ -44,62 +32,17 @@ public final class RocksDbContractStore implements ContractStore, AutoCloseable 
     // rollback can reverse a block's contract-tx ledger effects even after a restart (audit F3).
     private static final byte[] CF_RECEIPTS = "contract_receipts".getBytes();
 
-    private final RocksDB db;
-    private final DBOptions dbOptions;
-    private final ColumnFamilyHandle defaultCf;
     private final ColumnFamilyHandle codeCf;
     private final ColumnFamilyHandle storageCf;
     private final ColumnFamilyHandle journalCf;
     private final ColumnFamilyHandle receiptsCf;
-    // Synced: the block commit must be durable before the node reports the height applied (audit F3).
-    private final WriteOptions writeOptions = new WriteOptions().setSync(true);
-    // Unsynced: snapshot import seeds every contract code/storage slot through the straight-through
-    // path, where a per-slot fsync made snap-sync effectively unusable (audit perf). WAL writes are
-    // still process-crash-safe; the next synced batch in this database (applyBlock, journal/receipt
-    // writes) fsyncs the shared WAL and covers the tail, and syncWal every BULK_SYNC_EVERY writes
-    // bounds the power-loss tail in between.
-    private static final long BULK_SYNC_EVERY = 4096;
-    private final WriteOptions bulkWriteOptions = new WriteOptions().setSync(false);
-    private long bulkWritesSinceSync;
 
-    /** Throttles the unsynced bulk-write tail: one WAL fsync per {@link #BULK_SYNC_EVERY} writes. */
-    private void noteBulkWrite() throws RocksDBException {
-        if (++bulkWritesSinceSync >= BULK_SYNC_EVERY) {
-            db.syncWal();
-            bulkWritesSinceSync = 0;
-        }
-    }
-
-    public RocksDbContractStore(String path) throws IOException {
-        List<ColumnFamilyDescriptor> descriptors = List.of(
-            new ColumnFamilyDescriptor(RocksDB.DEFAULT_COLUMN_FAMILY),
-            new ColumnFamilyDescriptor(CF_CODE),
-            new ColumnFamilyDescriptor(CF_STORAGE),
-            new ColumnFamilyDescriptor(CF_JOURNAL),
-            new ColumnFamilyDescriptor(CF_RECEIPTS));
-        List<ColumnFamilyHandle> handles = new ArrayList<>();
-        // DBOptions is kept and closed in close() AFTER db.close(): never while the DB is live
-        // (rocksdbjni keeps referencing it — closing it live corrupts the native heap), and not
-        // at all was a native-handle leak (audit F12).
-        DBOptions options = new DBOptions()
-            .setCreateIfMissing(true)
-            .setCreateMissingColumnFamilies(true);
-        try {
-            this.db = RocksDB.open(options, path, descriptors, handles);
-        } catch (RocksDBException e) {
-            options.close();
-            throw new IOException("Failed to open contract store at " + path, e);
-        }
-        this.dbOptions = options;
-        this.defaultCf = handles.get(0);
+    public RocksDbContractStore(String path) throws java.io.IOException {
+        super(path, "contract store", CF_CODE, CF_STORAGE, CF_JOURNAL, CF_RECEIPTS);
         this.codeCf = handles.get(1);
         this.storageCf = handles.get(2);
         this.journalCf = handles.get(3);
         this.receiptsCf = handles.get(4);
-    }
-
-    private static byte[] heightKey(long height) {
-        return java.nio.ByteBuffer.allocate(Long.BYTES).putLong(height).array();
     }
 
     @Override
@@ -109,7 +52,7 @@ public final class RocksDbContractStore implements ContractStore, AutoCloseable 
 
     @Override
     public byte[] getJournal(long height) {
-        return get(journalCf, heightKey(height));
+        return raw(journalCf, heightKey(height));
     }
 
     @Override
@@ -124,7 +67,7 @@ public final class RocksDbContractStore implements ContractStore, AutoCloseable 
 
     @Override
     public byte[] getReceipts(long height) {
-        return get(receiptsCf, heightKey(height));
+        return raw(receiptsCf, heightKey(height));
     }
 
     @Override
@@ -160,7 +103,7 @@ public final class RocksDbContractStore implements ContractStore, AutoCloseable 
 
     @Override
     public byte[] getCode(PublicAddress contract) {
-        return get(codeCf, contract.toBytes());
+        return raw(codeCf, contract.toBytes());
     }
 
     // Code/storage slot writes go through the bulk path: they are the snapshot-import seeding
@@ -178,7 +121,7 @@ public final class RocksDbContractStore implements ContractStore, AutoCloseable 
 
     @Override
     public byte[] getStorage(PublicAddress contract, byte[] key) {
-        return get(storageCf, slot(contract, key));
+        return raw(storageCf, slot(contract, key));
     }
 
     @Override
@@ -222,7 +165,7 @@ public final class RocksDbContractStore implements ContractStore, AutoCloseable 
         // All slot mutations AND the undo journal AND the receipts land in ONE synced WriteBatch:
         // a crash mid-flush can no longer leave storage half-applied with no journal to rewind it
         // (audit F1), and the receipts no longer cost a second fsync per block (audit perf).
-        if (get(journalCf, heightKey(height)) != null) {
+        if (raw(journalCf, heightKey(height)) != null) {
             // A double-apply would capture the already-mutated state as the journal's "prior" (audit F10).
             throw new IllegalStateException("contract store already has a journal at height " + height);
         }
@@ -278,48 +221,6 @@ public final class RocksDbContractStore implements ContractStore, AutoCloseable 
         }
     }
 
-    private byte[] get(ColumnFamilyHandle cf, byte[] key) {
-        try {
-            return db.get(cf, key);
-        } catch (RocksDBException e) {
-            throw new IllegalStateException("contract store read failed", e);
-        }
-    }
-
-    private void put(ColumnFamilyHandle cf, byte[] key, byte[] value) {
-        try {
-            db.put(cf, writeOptions, key, value);
-        } catch (RocksDBException e) {
-            throw new IllegalStateException("contract store write failed", e);
-        }
-    }
-
-    private void delete(ColumnFamilyHandle cf, byte[] key) {
-        try {
-            db.delete(cf, writeOptions, key);
-        } catch (RocksDBException e) {
-            throw new IllegalStateException("contract store delete failed", e);
-        }
-    }
-
-    private void putBulk(ColumnFamilyHandle cf, byte[] key, byte[] value) {
-        try {
-            db.put(cf, bulkWriteOptions, key, value);
-            noteBulkWrite();
-        } catch (RocksDBException e) {
-            throw new IllegalStateException("contract store write failed", e);
-        }
-    }
-
-    private void deleteBulk(ColumnFamilyHandle cf, byte[] key) {
-        try {
-            db.delete(cf, bulkWriteOptions, key);
-            noteBulkWrite();
-        } catch (RocksDBException e) {
-            throw new IllegalStateException("contract store delete failed", e);
-        }
-    }
-
     @Override
     public void forEachCode(java.util.function.BiConsumer<PublicAddress, byte[]> consumer) {
         try (org.rocksdb.RocksIterator it = db.newIterator(codeCf)) {
@@ -350,12 +251,7 @@ public final class RocksDbContractStore implements ContractStore, AutoCloseable 
     @Override
     public void syncToDisk() {
         // fsync any bulk-seeded writes not yet covered by a synced batch (snapshot-import tail).
-        try {
-            db.syncWal();
-        } catch (RocksDBException e) {
-            throw new IllegalStateException("contract store WAL sync failed", e);
-        }
-        bulkWritesSinceSync = 0;
+        syncWal();
     }
 
     @Override
@@ -368,14 +264,6 @@ public final class RocksDbContractStore implements ContractStore, AutoCloseable 
         } catch (RuntimeException e) {
             log.warn("contract store WAL sync on close failed; closing anyway", e);
         }
-        defaultCf.close();
-        codeCf.close();
-        storageCf.close();
-        journalCf.close();
-        receiptsCf.close();
-        writeOptions.close();
-        bulkWriteOptions.close();
-        db.close();
-        dbOptions.close(); // after the DB: rocksdbjni references the options while the DB is live
+        super.close();
     }
 }

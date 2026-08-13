@@ -1,6 +1,5 @@
 package rhizome.persistence.rocksdb;
 
-import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
@@ -8,11 +7,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-import org.rocksdb.ColumnFamilyDescriptor;
 import org.rocksdb.ColumnFamilyHandle;
-import org.rocksdb.DBOptions;
 import org.rocksdb.ReadOptions;
-import org.rocksdb.RocksDB;
 import org.rocksdb.RocksDBException;
 import org.rocksdb.RocksIterator;
 import org.rocksdb.Snapshot;
@@ -23,7 +19,6 @@ import org.slf4j.LoggerFactory;
 import rhizome.core.state.RootStore;
 import rhizome.core.state.SmtNodeStore;
 
-import static rhizome.core.common.Utils.bytesToLong;
 import static rhizome.core.common.Utils.longToBytes;
 
 /**
@@ -32,40 +27,15 @@ import static rhizome.core.common.Utils.longToBytes;
  * immutable and keyed by their hash, so old roots stay resolvable for reorg reversal;
  * roots are 32 bytes per height, keyed by big-endian height for ordered iteration.
  */
-public final class RocksDbStateStore implements SmtNodeStore, RootStore, AutoCloseable {
-
-    static {
-        RocksDB.loadLibrary();
-    }
+public final class RocksDbStateStore extends RocksDbStore implements SmtNodeStore, RootStore {
 
     private static final Logger log = LoggerFactory.getLogger(RocksDbStateStore.class);
 
     private static final byte[] CF_NODES = "smt_nodes".getBytes();
     private static final byte[] CF_ROOTS = "state_roots".getBytes();
 
-    private final RocksDB db;
-    private final DBOptions dbOptions;
-    private final ColumnFamilyHandle defaultCf;
     private final ColumnFamilyHandle nodesCf;
     private final ColumnFamilyHandle rootsCf;
-    // Synced: roots and flushed node batches advance the committed state height (audit F3).
-    private final WriteOptions writeOptions = new WriteOptions().setSync(true);
-    // Unsynced: snapshot import rebuilds the whole tree through the straight-through put (~depth
-    // node writes per imported entry), where a per-node fsync made snap-sync effectively unusable
-    // (audit perf). WAL writes are still process-crash-safe; the synced putRoot that commits the
-    // imported root fsyncs the shared WAL and covers the tail, and syncWal every BULK_SYNC_EVERY
-    // writes bounds the power-loss tail in between.
-    private static final long BULK_SYNC_EVERY = 4096;
-    private final WriteOptions bulkWriteOptions = new WriteOptions().setSync(false);
-    private long bulkWritesSinceSync;
-
-    /** Throttles the unsynced bulk-write tail: one WAL fsync per {@link #BULK_SYNC_EVERY} writes. */
-    private void noteBulkWrite() throws RocksDBException {
-        if (++bulkWritesSinceSync >= BULK_SYNC_EVERY) {
-            db.syncWal();
-            bulkWritesSinceSync = 0;
-        }
-    }
 
     /**
      * SMT nodes staged for the block being applied, keyed by hash hex (audit P8). Applying a block
@@ -93,30 +63,14 @@ public final class RocksDbStateStore implements SmtNodeStore, RootStore, AutoClo
         }
     }
 
-    public RocksDbStateStore(String path) throws IOException {
-        List<ColumnFamilyDescriptor> descriptors = List.of(
-            new ColumnFamilyDescriptor(RocksDB.DEFAULT_COLUMN_FAMILY),
-            new ColumnFamilyDescriptor(CF_NODES),
-            new ColumnFamilyDescriptor(CF_ROOTS));
-        List<ColumnFamilyHandle> handles = new ArrayList<>();
-        // DBOptions is kept and closed in close() AFTER db.close(): never while the DB is live
-        // (rocksdbjni keeps referencing it — closing it live corrupts the native heap), and not
-        // at all was a native-handle leak (audit F12).
-        DBOptions options = new DBOptions().setCreateIfMissing(true).setCreateMissingColumnFamilies(true);
-        try {
-            this.db = RocksDB.open(options, path, descriptors, handles);
-        } catch (RocksDBException e) {
-            options.close();
-            throw new IOException("Failed to open state store at " + path, e);
-        }
-        this.dbOptions = options;
-        this.defaultCf = handles.get(0);
+    public RocksDbStateStore(String path) throws java.io.IOException {
+        super(path, "state store", CF_NODES, CF_ROOTS);
         this.nodesCf = handles.get(1);
         this.rootsCf = handles.get(2);
         // Cache the GC watermark so the per-block pruneBelow never reads RocksDB on the
         // consensus path; the sweep thread refreshes the field after each persist.
         byte[] watermark = raw(defaultCf, GC_SWEPT_THROUGH_KEY);
-        this.gcSweptThrough = watermark == null ? 0 : bytesToLong(watermark);
+        this.gcSweptThrough = watermark == null ? 0 : rhizome.core.common.Utils.bytesToLong(watermark);
     }
 
     // ---- SmtNodeStore ----
@@ -147,12 +101,7 @@ public final class RocksDbStateStore implements SmtNodeStore, RootStore, AutoClo
         if (protectedWrites != null) {
             protectedWrites.add(new ByteKey(hash));
         }
-        try {
-            db.put(nodesCf, bulkWriteOptions, hash, node); // unsynced, see bulkWriteOptions
-            noteBulkWrite();
-        } catch (RocksDBException e) {
-            throw new IllegalStateException("state node write failed", e);
-        }
+        putBulk(nodesCf, hash, node); // unsynced, see bulkWriteOptions
     }
 
     @Override
@@ -207,27 +156,19 @@ public final class RocksDbStateStore implements SmtNodeStore, RootStore, AutoClo
 
     @Override
     public void putRoot(long height, byte[] root) {
-        try {
-            db.put(rootsCf, writeOptions, longToBytes(height), root);
-        } catch (RocksDBException e) {
-            throw new IllegalStateException("state root write failed", e);
-        }
+        put(rootsCf, longToBytes(height), root);
     }
 
     @Override
     public void deleteRoot(long height) {
-        try {
-            db.delete(rootsCf, writeOptions, longToBytes(height));
-        } catch (RocksDBException e) {
-            throw new IllegalStateException("state root delete failed", e);
-        }
+        delete(rootsCf, longToBytes(height));
     }
 
     @Override
     public long latestHeight() {
         try (RocksIterator it = db.newIterator(rootsCf)) {
             it.seekToLast();
-            return it.isValid() ? bytesToLong(it.key()) : -1;
+            return it.isValid() ? rhizome.core.common.Utils.bytesToLong(it.key()) : -1;
         }
     }
 
@@ -497,7 +438,7 @@ public final class RocksDbStateStore implements SmtNodeStore, RootStore, AutoClo
     }
 
     private void persistGcWatermark(long floor) throws RocksDBException {
-        db.put(defaultCf, writeOptions, GC_SWEPT_THROUGH_KEY, longToBytes(floor));
+        put(defaultCf, GC_SWEPT_THROUGH_KEY, longToBytes(floor));
         gcSweptThrough = floor;
     }
 
@@ -545,14 +486,6 @@ public final class RocksDbStateStore implements SmtNodeStore, RootStore, AutoClo
         return true;
     }
 
-    private byte[] raw(ColumnFamilyHandle cf, byte[] key) {
-        try {
-            return db.get(cf, key);
-        } catch (RocksDBException e) {
-            throw new IllegalStateException("state store read failed", e);
-        }
-    }
-
     @Override
     public void close() {
         // Stop an in-flight GC sweep BEFORE touching the handles: rocksdbjni's isOwningHandle
@@ -590,16 +523,10 @@ public final class RocksDbStateStore implements SmtNodeStore, RootStore, AutoClo
         // failure here must NOT abort close(): leaking native CF/DB handles on the shutdown
         // path is worse than a best-effort fsync lost on a store that is about to be closed.
         try {
-            db.syncWal();
-        } catch (RocksDBException e) {
+            syncWal();
+        } catch (RuntimeException e) {
             log.warn("state store WAL sync on close failed; closing anyway", e);
         }
-        defaultCf.close();
-        nodesCf.close();
-        rootsCf.close();
-        writeOptions.close();
-        bulkWriteOptions.close();
-        db.close();
-        dbOptions.close(); // after the DB: rocksdbjni references the options while the DB is live
+        super.close();
     }
 }

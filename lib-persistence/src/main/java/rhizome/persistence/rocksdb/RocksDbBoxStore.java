@@ -1,15 +1,11 @@
 package rhizome.persistence.rocksdb;
 
-import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
-import org.rocksdb.ColumnFamilyDescriptor;
 import org.rocksdb.ColumnFamilyHandle;
-import org.rocksdb.DBOptions;
-import org.rocksdb.RocksDB;
 import org.rocksdb.RocksDBException;
 import org.rocksdb.RocksIterator;
 import org.rocksdb.WriteBatch;
@@ -38,11 +34,7 @@ import static rhizome.core.common.Utils.longToBytes;
  *       (what {@code Executor.rollbackBlock} needs to reverse soft-reverts after a restart)</li>
  * </ul>
  */
-public final class RocksDbBoxStore implements BoxStore, AutoCloseable {
-
-    static {
-        RocksDB.loadLibrary();
-    }
+public final class RocksDbBoxStore extends RocksDbStore implements BoxStore {
 
     private static final byte[] CF_BOXES = "boxes".getBytes();
     private static final byte[] CF_OWNER = "box_owner".getBytes();
@@ -51,40 +43,14 @@ public final class RocksDbBoxStore implements BoxStore, AutoCloseable {
     private static final byte[] CF_RECEIPTS = "box_receipts".getBytes();
     private static final byte[] EMPTY = new byte[0];
 
-    private final RocksDB db;
-    private final DBOptions dbOptions;
-    private final ColumnFamilyHandle defaultCf;
     private final ColumnFamilyHandle boxesCf;
     private final ColumnFamilyHandle ownerCf;
     private final ColumnFamilyHandle expiryCf;
     private final ColumnFamilyHandle journalCf;
     private final ColumnFamilyHandle receiptsCf;
-    // Synced: apply/revert batches move box state across a height boundary (audit F3).
-    private final WriteOptions writeOptions = new WriteOptions().setSync(true);
 
-    public RocksDbBoxStore(String path) throws IOException {
-        List<ColumnFamilyDescriptor> descriptors = List.of(
-            new ColumnFamilyDescriptor(RocksDB.DEFAULT_COLUMN_FAMILY),
-            new ColumnFamilyDescriptor(CF_BOXES),
-            new ColumnFamilyDescriptor(CF_OWNER),
-            new ColumnFamilyDescriptor(CF_EXPIRY),
-            new ColumnFamilyDescriptor(CF_JOURNAL),
-            new ColumnFamilyDescriptor(CF_RECEIPTS));
-        List<ColumnFamilyHandle> handles = new ArrayList<>();
-        // DBOptions is kept and closed in close() AFTER db.close(): never while the DB is live
-        // (rocksdbjni keeps referencing it — closing it live corrupts the native heap), and not
-        // at all was a native-handle leak (audit F12).
-        DBOptions options = new DBOptions()
-            .setCreateIfMissing(true)
-            .setCreateMissingColumnFamilies(true);
-        try {
-            this.db = RocksDB.open(options, path, descriptors, handles);
-        } catch (RocksDBException e) {
-            options.close();
-            throw new IOException("Failed to open box store at " + path, e);
-        }
-        this.dbOptions = options;
-        this.defaultCf = handles.get(0);
+    public RocksDbBoxStore(String path) throws java.io.IOException {
+        super(path, "box store", CF_BOXES, CF_OWNER, CF_EXPIRY, CF_JOURNAL, CF_RECEIPTS);
         this.boxesCf = handles.get(1);
         this.ownerCf = handles.get(2);
         this.expiryCf = handles.get(3);
@@ -355,47 +321,6 @@ public final class RocksDbBoxStore implements BoxStore, AutoCloseable {
         return journal;
     }
 
-    // ---- helpers ----
-
-    private byte[] raw(ColumnFamilyHandle cf, byte[] key) {
-        try {
-            return db.get(cf, key);
-        } catch (RocksDBException e) {
-            throw new IllegalStateException("box store read failed", e);
-        }
-    }
-
-    private static boolean startsWith(byte[] array, byte[] prefix) {
-        for (int i = 0; i < prefix.length; i++) {
-            if (array[i] != prefix[i]) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    private static long bytesToLong(byte[] b, int offset) {
-        // Fixed-width values are auto-written (8 bytes): a short record means store corruption —
-        // fail with a diagnosable IllegalStateException, not a raw ArrayIndexOutOfBoundsException
-        // (audit: fixed-width decode).
-        if (b.length < offset + 8) {
-            throw new IllegalStateException("corrupt box store: expected 8-byte value at offset "
-                + offset + ", array length " + b.length);
-        }
-        long v = 0;
-        for (int i = 0; i < 8; i++) {
-            v = (v << 8) | (b[offset + i] & 0xFFL);
-        }
-        return v;
-    }
-
-    private static byte[] concat(byte[] a, byte[] b) {
-        byte[] out = new byte[a.length + b.length];
-        System.arraycopy(a, 0, out, 0, a.length);
-        System.arraycopy(b, 0, out, a.length, b.length);
-        return out;
-    }
-
     @Override
     public void forEachBox(java.util.function.Consumer<Box> consumer) {
         try (RocksIterator it = db.newIterator(boxesCf)) {
@@ -403,18 +328,5 @@ public final class RocksDbBoxStore implements BoxStore, AutoCloseable {
                 consumer.accept(Box.deserialize(it.value()));
             }
         }
-    }
-
-    @Override
-    public void close() {
-        defaultCf.close();
-        boxesCf.close();
-        ownerCf.close();
-        expiryCf.close();
-        journalCf.close();
-        receiptsCf.close();
-        writeOptions.close();
-        db.close();
-        dbOptions.close(); // after the DB: rocksdbjni references the options while the DB is live
     }
 }

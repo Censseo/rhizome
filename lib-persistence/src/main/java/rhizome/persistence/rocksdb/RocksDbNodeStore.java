@@ -2,15 +2,10 @@ package rhizome.persistence.rocksdb;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.util.ArrayList;
 import java.util.List;
 
-import org.rocksdb.ColumnFamilyDescriptor;
 import org.rocksdb.ColumnFamilyHandle;
-import org.rocksdb.DBOptions;
-import org.rocksdb.RocksDB;
 import org.rocksdb.RocksDBException;
-import org.rocksdb.RocksIterator;
 import org.rocksdb.WriteBatch;
 import org.rocksdb.WriteOptions;
 
@@ -27,7 +22,6 @@ import rhizome.core.ledger.PublicAddress;
 import rhizome.core.transaction.Transaction;
 import rhizome.core.transaction.TransactionAmount;
 
-import static rhizome.core.common.Utils.bytesToLong;
 import static rhizome.core.common.Utils.longToBytes;
 
 /**
@@ -42,11 +36,7 @@ import static rhizome.core.common.Utils.longToBytes;
  * commits a block and its transaction-index entries in one batch; a future
  * refactor can extend the same batch across the ledger.
  */
-public final class RocksDbNodeStore implements AutoCloseable, rhizome.core.blockchain.NodeStores {
-
-    static {
-        RocksDB.loadLibrary();
-    }
+public final class RocksDbNodeStore extends RocksDbStore implements rhizome.core.blockchain.NodeStores {
 
     private static final byte[] CF_BLOCKS = "blocks".getBytes();
     private static final byte[] CF_HEADERS = "headers".getBytes();
@@ -81,9 +71,6 @@ public final class RocksDbNodeStore implements AutoCloseable, rhizome.core.block
     /** Bodies for the most recent {@code keepBlocks} heights are retained (0 = archive, keep all). */
     private final int keepBlocks;
 
-    private final RocksDB db;
-    private final DBOptions dbOptions;
-    private final ColumnFamilyHandle defaultCf;
     private final ColumnFamilyHandle blocksCf;
     private final ColumnFamilyHandle headersCf;
     private final ColumnFamilyHandle txIndexCf;
@@ -91,29 +78,9 @@ public final class RocksDbNodeStore implements AutoCloseable, rhizome.core.block
     private final ColumnFamilyHandle ledgerCf;
     private final ColumnFamilyHandle noncesCf;
     private final ColumnFamilyHandle unclesCf;
-    // Synced: every write that advances (or rewinds) the chain height must be fsync-durable
-    // before the node reports the block applied (audit F3).
-    private final WriteOptions writeOptions = new WriteOptions().setSync(true);
-    // Unsynced: bulk seeding (genesis balances, snapshot import, the boot nonce re-sync) writes one
-    // entry per wallet/sender straight through, where a per-entry fsync made snap-sync effectively
-    // unusable (audit perf). WAL writes are still process-crash-safe; any later SYNCED write in this
-    // database (the genesis append, beginBootstrap, markSyncedThrough) fsyncs the shared WAL and so
-    // covers the whole tail, and syncWal every BULK_SYNC_EVERY writes bounds the power-loss tail
-    // in between.
-    private static final long BULK_SYNC_EVERY = 4096;
-    private final WriteOptions bulkWriteOptions = new WriteOptions().setSync(false);
-    private long bulkWritesSinceSync;
 
     /** Headers per WriteBatch in {@link #bootstrapHeaders} (audit: unbounded bootstrap batch). */
     private static final int BOOTSTRAP_BATCH_CHUNK = 10_000;
-
-    /** Throttles the unsynced bulk-write tail: one WAL fsync per {@link #BULK_SYNC_EVERY} writes. */
-    private void noteBulkWrite() throws RocksDBException {
-        if (++bulkWritesSinceSync >= BULK_SYNC_EVERY) {
-            db.syncWal();
-            bulkWritesSinceSync = 0;
-        }
-    }
 
     /**
      * Ledger writes staged for the current block, so they commit in the SAME atomic {@link WriteBatch}
@@ -162,31 +129,8 @@ public final class RocksDbNodeStore implements AutoCloseable, rhizome.core.block
      *                   uncle depth, difficulty/median windows).
      */
     public RocksDbNodeStore(String path, int keepBlocks) throws IOException {
+        super(path, "node store", CF_BLOCKS, CF_HEADERS, CF_TXINDEX, CF_META, CF_LEDGER, CF_NONCES, CF_UNCLES);
         this.keepBlocks = keepBlocks;
-        List<ColumnFamilyDescriptor> descriptors = List.of(
-            new ColumnFamilyDescriptor(RocksDB.DEFAULT_COLUMN_FAMILY),
-            new ColumnFamilyDescriptor(CF_BLOCKS),
-            new ColumnFamilyDescriptor(CF_HEADERS),
-            new ColumnFamilyDescriptor(CF_TXINDEX),
-            new ColumnFamilyDescriptor(CF_META),
-            new ColumnFamilyDescriptor(CF_LEDGER),
-            new ColumnFamilyDescriptor(CF_NONCES),
-            new ColumnFamilyDescriptor(CF_UNCLES));
-        List<ColumnFamilyHandle> handles = new ArrayList<>();
-        // DBOptions is kept and closed in close() AFTER db.close(): never while the DB is live
-        // (rocksdbjni keeps referencing it — closing it live corrupts the native heap), and not
-        // at all was a native-handle leak (audit F12).
-        DBOptions options = new DBOptions()
-            .setCreateIfMissing(true)
-            .setCreateMissingColumnFamilies(true);
-        try {
-            this.db = RocksDB.open(options, path, descriptors, handles);
-        } catch (RocksDBException e) {
-            options.close();
-            throw new IOException("Failed to open RocksDB at " + path, e);
-        }
-        this.dbOptions = options;
-        this.defaultCf = handles.get(0);
         this.blocksCf = handles.get(1);
         this.headersCf = handles.get(2);
         this.txIndexCf = handles.get(3);
@@ -388,55 +332,24 @@ public final class RocksDbNodeStore implements AutoCloseable, rhizome.core.block
      * refuse to run on half-seeded data rather than silently diverging (audit M8).
      */
     public void beginBootstrap() {
-        try {
-            db.put(metaCf, writeOptions, BOOTSTRAP_KEY, new byte[] {1});
-        } catch (RocksDBException e) {
-            throw new PersistenceException("failed to set bootstrap marker", e);
-        }
+        put(metaCf, BOOTSTRAP_KEY, new byte[] {1});
     }
 
     /** Clears the bootstrap marker after every store has been seeded and committed. */
     public void endBootstrap() {
-        try {
-            db.delete(metaCf, writeOptions, BOOTSTRAP_KEY);
-        } catch (RocksDBException e) {
-            throw new PersistenceException("failed to clear bootstrap marker", e);
-        }
+        delete(metaCf, BOOTSTRAP_KEY);
     }
 
     /** True if a previous bootstrap did not finish — the on-disk state must be treated as inconsistent. */
     public boolean bootstrapInProgress() {
-        try {
-            return db.get(metaCf, BOOTSTRAP_KEY) != null;
-        } catch (RocksDBException e) {
-            throw new PersistenceException("failed to read bootstrap marker", e);
-        }
+        return raw(metaCf, BOOTSTRAP_KEY) != null;
     }
 
     @Override
     public void close() {
         // Best-effort fsync of any bulk-seeded writes not yet covered by a synced batch.
-        try {
-            db.syncWal();
-        } catch (RocksDBException e) {
-            throw new PersistenceException("failed to sync WAL on close", e);
-        }
-        defaultCf.close();
-        blocksCf.close();
-        headersCf.close();
-        txIndexCf.close();
-        metaCf.close();
-        ledgerCf.close();
-        noncesCf.close();
-        unclesCf.close();
-        writeOptions.close();
-        bulkWriteOptions.close();
-        db.close();
-        dbOptions.close(); // after the DB: rocksdbjni references the options while the DB is live
-    }
-
-    private static byte[] heightKey(long height) {
-        return longToBytes(height);
+        syncWal();
+        super.close();
     }
 
     // ---- ChainStore view ----
@@ -450,29 +363,21 @@ public final class RocksDbNodeStore implements AutoCloseable, rhizome.core.block
 
         @Override
         public Block blockAt(long height) {
-            try {
-                byte[] value = db.get(blocksCf, heightKey(height));
-                if (value == null) {
-                    throw new IllegalArgumentException("No block at height " + height);
-                }
-                return BlockCodec.decode(value);
-            } catch (RocksDBException e) {
-                throw new LedgerException("Failed to read block " + height, e);
+            byte[] value = raw(blocksCf, heightKey(height));
+            if (value == null) {
+                throw new IllegalArgumentException("No block at height " + height);
             }
+            return BlockCodec.decode(value);
         }
 
         @Override
         public BlockHeader headerAt(long height) {
-            try {
-                byte[] value = db.get(headersCf, heightKey(height));
-                if (value != null) {
-                    return HeaderCodec.decode(value);
-                }
-                // No stored header (should not happen post-backfill); fall back to the body.
-                return BlockHeader.of(blockAt(height));
-            } catch (RocksDBException e) {
-                throw new LedgerException("Failed to read header " + height, e);
+            byte[] value = raw(headersCf, heightKey(height));
+            if (value != null) {
+                return HeaderCodec.decode(value);
             }
+            // No stored header (should not happen post-backfill); fall back to the body.
+            return BlockHeader.of(blockAt(height));
         }
 
         @Override
@@ -549,21 +454,13 @@ public final class RocksDbNodeStore implements AutoCloseable, rhizome.core.block
             if (height == GENESIS_HEIGHT) {
                 return true;
             }
-            try {
-                return db.get(blocksCf, heightKey(height)) != null;
-            } catch (RocksDBException e) {
-                throw new LedgerException("Failed to probe body " + height, e);
-            }
+            return raw(blocksCf, heightKey(height)) != null;
         }
 
         @Override
         public long prunedBelow() {
-            try {
-                byte[] value = db.get(metaCf, PRUNED_BELOW_KEY);
-                return value == null ? 0 : checkedLong(value);
-            } catch (RocksDBException e) {
-                throw new LedgerException("Failed to read prune watermark", e);
-            }
+            byte[] value = raw(metaCf, PRUNED_BELOW_KEY);
+            return value == null ? 0 : checkedLong(value);
         }
 
         @Override
@@ -631,31 +528,19 @@ public final class RocksDbNodeStore implements AutoCloseable, rhizome.core.block
 
         @Override
         public Block uncleAt(SHA256Hash hash) {
-            try {
-                byte[] value = db.get(unclesCf, hash.raw());
-                return value == null ? null : BlockCodec.decode(value);
-            } catch (RocksDBException e) {
-                throw new LedgerException("Failed to read uncle " + hash.toHexString(), e);
-            }
+            byte[] value = raw(unclesCf, hash.raw());
+            return value == null ? null : BlockCodec.decode(value);
         }
 
         @Override
         public boolean hasTransaction(SHA256Hash contentHash) {
-            try {
-                return db.get(txIndexCf, contentHash.raw()) != null;
-            } catch (RocksDBException e) {
-                throw new LedgerException("Failed to read tx index", e);
-            }
+            return raw(txIndexCf, contentHash.raw()) != null;
         }
 
         @Override
         public Long transactionHeight(SHA256Hash contentHash) {
-            try {
-                byte[] value = db.get(txIndexCf, contentHash.raw());
-                return value == null ? null : checkedLong(value);
-            } catch (RocksDBException e) {
-                throw new LedgerException("Failed to read tx index", e);
-            }
+            byte[] value = raw(txIndexCf, contentHash.raw());
+            return value == null ? null : checkedLong(value);
         }
     }
 
@@ -742,11 +627,7 @@ public final class RocksDbNodeStore implements AutoCloseable, rhizome.core.block
                     return ByteBuffer.allocate(8).putLong(staged).array();
                 }
             }
-            try {
-                return db.get(ledgerCf, wallet.toBytes());
-            } catch (RocksDBException e) {
-                throw new LedgerException("Failed to read wallet", e);
-            }
+            return raw(ledgerCf, wallet.toBytes());
         }
 
         private void setValue(PublicAddress wallet, long amount) {
@@ -759,17 +640,12 @@ public final class RocksDbNodeStore implements AutoCloseable, rhizome.core.block
                 pending.put(wallet, amount);
                 return;
             }
-            try {
-                db.put(ledgerCf, bulkWriteOptions, wallet.toBytes(), ByteBuffer.allocate(8).putLong(amount).array());
-                noteBulkWrite();
-            } catch (RocksDBException e) {
-                throw new LedgerException("Failed to write wallet value", e);
-            }
+            putBulk(ledgerCf, wallet.toBytes(), ByteBuffer.allocate(8).putLong(amount).array());
         }
 
         @Override
         public void forEachBalance(java.util.function.ObjLongConsumer<PublicAddress> consumer) {
-            try (RocksIterator it = db.newIterator(ledgerCf)) {
+            try (org.rocksdb.RocksIterator it = db.newIterator(ledgerCf)) {
                 for (it.seekToFirst(); it.isValid(); it.next()) {
                     consumer.accept(PublicAddress.of(it.key()), checkedLong(it.value()));
                 }
@@ -792,12 +668,8 @@ public final class RocksDbNodeStore implements AutoCloseable, rhizome.core.block
                     return Math.max(0L, staged);
                 }
             }
-            try {
-                byte[] value = db.get(noncesCf, sender.toBytes());
-                return value == null ? 0L : checkedLong(value);
-            } catch (RocksDBException e) {
-                throw new LedgerException("Failed to read account nonce", e);
-            }
+            byte[] value = raw(noncesCf, sender.toBytes());
+            return value == null ? 0L : checkedLong(value);
         }
 
         @Override
@@ -811,26 +683,17 @@ public final class RocksDbNodeStore implements AutoCloseable, rhizome.core.block
                 pending.put(sender, next);
                 return;
             }
-            try {
-                if (next <= 0) {
-                    db.delete(noncesCf, bulkWriteOptions, sender.toBytes());
-                } else {
-                    db.put(noncesCf, bulkWriteOptions, sender.toBytes(), longToBytes(next));
-                }
-                noteBulkWrite();
-            } catch (RocksDBException e) {
-                throw new LedgerException("Failed to write account nonce", e);
+            if (next <= 0) {
+                deleteBulk(noncesCf, sender.toBytes());
+            } else {
+                putBulk(noncesCf, sender.toBytes(), longToBytes(next));
             }
         }
 
         @Override
         public long syncedThroughHeight() {
-            try {
-                byte[] value = db.get(metaCf, NONCE_HEIGHT_KEY);
-                return value == null ? 0 : checkedLong(value);
-            } catch (RocksDBException e) {
-                throw new LedgerException("Failed to read nonce sync height", e);
-            }
+            byte[] value = raw(metaCf, NONCE_HEIGHT_KEY);
+            return value == null ? 0 : checkedLong(value);
         }
 
         @Override
@@ -841,16 +704,12 @@ public final class RocksDbNodeStore implements AutoCloseable, rhizome.core.block
                 pendingNonceHeight = height;
                 return;
             }
-            try {
-                db.put(metaCf, writeOptions, NONCE_HEIGHT_KEY, longToBytes(height));
-            } catch (RocksDBException e) {
-                throw new LedgerException("Failed to write nonce sync height", e);
-            }
+            put(metaCf, NONCE_HEIGHT_KEY, longToBytes(height));
         }
 
         @Override
         public void forEach(java.util.function.ObjLongConsumer<PublicAddress> consumer) {
-            try (RocksIterator it = db.newIterator(noncesCf)) {
+            try (org.rocksdb.RocksIterator it = db.newIterator(noncesCf)) {
                 for (it.seekToFirst(); it.isValid(); it.next()) {
                     consumer.accept(PublicAddress.of(it.key()), checkedLong(it.value()));
                 }
@@ -861,14 +720,14 @@ public final class RocksDbNodeStore implements AutoCloseable, rhizome.core.block
     /**
      * Reads a fixed-width 8-byte big-endian value written by this store (heights, balances,
      * nonces, works). A short record means store corruption — fail with a diagnosable
-     * IllegalStateException instead of the raw BufferUnderflowException the ByteBuffer decode
-     * would throw (audit: fixed-width decode).
+     * exception instead of the raw BufferUnderflowException the ByteBuffer decode would throw
+     * (audit: fixed-width decode).
      */
-    private static long checkedLong(byte[] value) {
+    private long checkedLong(byte[] value) {
         if (value.length != Long.BYTES) {
-            throw new IllegalStateException("corrupt node store: expected 8-byte value, got "
+            throw new PersistenceException("corrupt node store: expected 8-byte value, got "
                 + value.length);
         }
-        return bytesToLong(value);
+        return rhizome.core.common.Utils.bytesToLong(value);
     }
 }

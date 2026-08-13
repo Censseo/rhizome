@@ -1,15 +1,11 @@
 package rhizome.persistence.rocksdb;
 
-import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
-import org.rocksdb.ColumnFamilyDescriptor;
 import org.rocksdb.ColumnFamilyHandle;
-import org.rocksdb.DBOptions;
-import org.rocksdb.RocksDB;
 import org.rocksdb.RocksDBException;
 import org.rocksdb.RocksIterator;
 import org.rocksdb.WriteBatch;
@@ -30,11 +26,7 @@ import static rhizome.core.common.Utils.longToBytes;
  * {@code token_holder} ({@code address ‖ tokenId}, present iff balance &gt; 0),
  * {@code token_journal} (height -> undo journal).
  */
-public final class RocksDbTokenStore implements TokenStore, AutoCloseable {
-
-    static {
-        RocksDB.loadLibrary();
-    }
+public final class RocksDbTokenStore extends RocksDbStore implements TokenStore {
 
     private static final byte[] CF_META = "token_meta".getBytes();
     private static final byte[] CF_BALANCE = "token_balance".getBytes();
@@ -44,38 +36,14 @@ public final class RocksDbTokenStore implements TokenStore, AutoCloseable {
     private static final byte[] EMPTY = new byte[0];
     private static final int ADDR = 25;
 
-    private final RocksDB db;
-    private final DBOptions dbOptions;
-    private final ColumnFamilyHandle defaultCf;
     private final ColumnFamilyHandle metaCf;
     private final ColumnFamilyHandle balanceCf;
     private final ColumnFamilyHandle minterCf;
     private final ColumnFamilyHandle holderCf;
     private final ColumnFamilyHandle journalCf;
-    // Synced: apply/revert batches move token state across a height boundary (audit F3).
-    private final WriteOptions writeOptions = new WriteOptions().setSync(true);
 
-    public RocksDbTokenStore(String path) throws IOException {
-        List<ColumnFamilyDescriptor> descriptors = List.of(
-            new ColumnFamilyDescriptor(RocksDB.DEFAULT_COLUMN_FAMILY),
-            new ColumnFamilyDescriptor(CF_META),
-            new ColumnFamilyDescriptor(CF_BALANCE),
-            new ColumnFamilyDescriptor(CF_MINTER),
-            new ColumnFamilyDescriptor(CF_HOLDER),
-            new ColumnFamilyDescriptor(CF_JOURNAL));
-        List<ColumnFamilyHandle> handles = new ArrayList<>();
-        // DBOptions is kept and closed in close() AFTER db.close(): never while the DB is live
-        // (rocksdbjni keeps referencing it — closing it live corrupts the native heap), and not
-        // at all was a native-handle leak (audit F12).
-        DBOptions options = new DBOptions().setCreateIfMissing(true).setCreateMissingColumnFamilies(true);
-        try {
-            this.db = RocksDB.open(options, path, descriptors, handles);
-        } catch (RocksDBException e) {
-            options.close();
-            throw new IOException("Failed to open token store at " + path, e);
-        }
-        this.dbOptions = options;
-        this.defaultCf = handles.get(0);
+    public RocksDbTokenStore(String path) throws java.io.IOException {
+        super(path, "token store", CF_META, CF_BALANCE, CF_MINTER, CF_HOLDER, CF_JOURNAL);
         this.metaCf = handles.get(1);
         this.balanceCf = handles.get(2);
         this.minterCf = handles.get(3);
@@ -315,47 +283,6 @@ public final class RocksDbTokenStore implements TokenStore, AutoCloseable {
         return journal;
     }
 
-    // ---- helpers ----
-
-    private byte[] raw(ColumnFamilyHandle cf, byte[] key) {
-        try {
-            return db.get(cf, key);
-        } catch (RocksDBException e) {
-            throw new IllegalStateException("token store read failed", e);
-        }
-    }
-
-    private static boolean startsWith(byte[] array, byte[] prefix) {
-        for (int i = 0; i < prefix.length; i++) {
-            if (array[i] != prefix[i]) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    private static long bytesToLong(byte[] b, int offset) {
-        // Fixed-width values are auto-written (8 bytes): a short record means store corruption —
-        // fail with a diagnosable IllegalStateException, not a raw ArrayIndexOutOfBoundsException
-        // (audit: fixed-width decode).
-        if (b.length < offset + 8) {
-            throw new IllegalStateException("corrupt token store: expected 8-byte value at offset "
-                + offset + ", array length " + b.length);
-        }
-        long v = 0;
-        for (int i = 0; i < 8; i++) {
-            v = (v << 8) | (b[offset + i] & 0xFFL);
-        }
-        return v;
-    }
-
-    private static byte[] concat(byte[] a, byte[] b) {
-        byte[] out = new byte[a.length + b.length];
-        System.arraycopy(a, 0, out, 0, a.length);
-        System.arraycopy(b, 0, out, a.length, b.length);
-        return out;
-    }
-
     @Override
     public void forEachMeta(java.util.function.Consumer<TokenMeta> consumer) {
         try (RocksIterator it = db.newIterator(metaCf)) {
@@ -375,18 +302,5 @@ public final class RocksDbTokenStore implements TokenStore, AutoCloseable {
                     bytesToLong(it.value(), 0));
             }
         }
-    }
-
-    @Override
-    public void close() {
-        defaultCf.close();
-        metaCf.close();
-        balanceCf.close();
-        minterCf.close();
-        holderCf.close();
-        journalCf.close();
-        writeOptions.close();
-        db.close();
-        dbOptions.close(); // after the DB: rocksdbjni references the options while the DB is live
     }
 }
