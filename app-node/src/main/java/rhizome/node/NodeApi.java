@@ -926,11 +926,11 @@ public final class NodeApi {
      * <p>With {@code protectReads} it instead gates EVERY route (any method) — the
      * RHIZOME_PROTECT_READS private-node switch: the read surface (stats, balances, SSE logs) is
      * otherwise public by design even with a token configured (audit: no read protection). The
-     * static SPA/docs shell is EXEMPT ({@link #isSpaShell}): a browser cannot attach a bearer to a
-     * plain navigation, so gating {@code /} or {@code /dashboard/app.js} would make the embedded
-     * explorer unreachable (audit 17th pass). The shell is static content identical for every
-     * client; the SPA's own fetches ({@code /stats}, {@code /blocks}, …) carry the bearer and stay
-     * gated.
+     * static SPA/docs shell is EXEMPT ({@link RoutePolicy.Guard#SPA_SHELL}): a browser cannot
+     * attach a bearer to a plain navigation, so gating {@code /} or {@code /dashboard/app.js}
+     * would make the embedded explorer unreachable (audit 17th pass). The shell is static content
+     * identical for every client; the SPA's own fetches ({@code /stats}, {@code /blocks}, …) carry
+     * the bearer and stay gated.
      *
      * <p>An unroutable path ({@code path == null}) is gated under protectReads and ungated
      * otherwise, exactly as before: the router answers 400/404 for it either way.
@@ -943,21 +943,6 @@ public final class NodeApi {
             return !RoutePolicy.guarded(route, RoutePolicy.Guard.SPA_SHELL);
         }
         return RoutePolicy.guarded(route, RoutePolicy.Guard.TOKEN);
-    }
-
-    /**
-     * True for the static SPA/docs shell served to browsers: {@code GET /}, {@code /dashboard}
-     * and the asset trees under {@code /dashboard/} and {@code /docs/}. These paths serve only
-     * bundled static files (no chain data), so exempting them from the protectReads bearer
-     * leaks nothing a client could not read out of the jar.
-     *
-     * <p>{@code /dashboard} and {@code /docs} (no trailing slash) are shell too: ActiveJ hangs a
-     * wildcard route off the node itself, so both reach the same static handler as
-     * {@code /docs/index.md} does. Classifying them as chain data made {@code /docs} bearer-gated
-     * while {@code /docs/} was not, for identical content.
-     */
-    private static boolean isSpaShell(HttpRequest request, String path) {
-        return RoutePolicy.guarded(RoutePolicy.lookup(request, path), RoutePolicy.Guard.SPA_SHELL);
     }
 
     /** Constant-time check of {@code Authorization: Bearer <token>} against the configured token. */

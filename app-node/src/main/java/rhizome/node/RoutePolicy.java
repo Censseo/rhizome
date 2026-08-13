@@ -18,7 +18,8 @@ import static io.activej.http.HttpMethod.POST;
  *
  * <p>This policy used to live in five hand-maintained lists of path literals inside the middleware
  * ({@code requestCost}, {@code isConsensusLockRead}, {@code isTokenProtectedRoute},
- * {@code isPeerProtocolRequest}, {@code isSpaShell}), each with a permissive fallthrough. Nothing
+ * {@code isPeerProtocolRequest}, and a since-removed SPA-shell check), each with a permissive
+ * fallthrough. Nothing
  * tied registering a route to classifying it, so a route omitted from a list was not a compile
  * error, not a test failure, and not visible in review — it simply became free, or ungated, or
  * Host-checked on the wrong side. Two of the 41 routes had drifted that way: {@code /boxes} and
@@ -42,7 +43,13 @@ final class RoutePolicy {
     enum Guard {
         /** Gated by RHIZOME_API_TOKEN even when protectReads is off. */
         TOKEN,
-        /** Static SPA/docs content: exempt from protectReads, since a navigation carries no bearer. */
+        /**
+         * Static SPA/docs content: exempt from protectReads, since a navigation carries no
+         * bearer. Covers {@code GET /}, {@code /dashboard} and {@code /docs} (no trailing slash —
+         * ActiveJ hangs a wildcard route off the node itself, so both reach the same static
+         * handler as the {@code /dashboard/*}/{@code /docs/*} trees), and the asset trees
+         * themselves.
+         */
         SPA_SHELL,
         /** Exempt from the Host allowlist — peers legitimately send arbitrary Host headers. */
         PEER_PROTOCOL,
