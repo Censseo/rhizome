@@ -28,9 +28,9 @@ import rhizome.persistence.rocksdb.RocksDbTokenStore;
  * across four lifecycle methods, so every reader had to know which method had already run; here
  * the record's constructor is the proof that all of them have.
  *
- * @param syncHttpClient one shared client for every sync round, so a fresh client (and its
- *                       selector thread + connection pool) is not built per peer per round, and
- *                       keep-alive is reused (audit net #1)
+ * @param exchange the one shared HTTP exchange for sync rounds, PEX and gossip, so a fresh
+ *                       client (and its selector thread + connection pool) is not built per peer
+ *                       per round or per component, and keep-alive is reused (audit net #1)
  * @param blockPrivatePeers refuse/pin SSRF-prone (loopback / private / metadata) peer hosts. On by
  *                       default on every node; only RHIZOME_ALLOW_PRIVATE_PEERS=true opts out
  *                       (audit F4)
@@ -53,7 +53,7 @@ record NodeComponents(
     PeerRegistry registry,
     PeerBroadcaster broadcaster,
     PeerTokenPolicy peerTokenPolicy,
-    java.net.http.HttpClient syncHttpClient,
+    rhizome.net.PeerExchange exchange,
     boolean blockPrivatePeers,
     Set<String> allowedHosts) implements AutoCloseable {
 

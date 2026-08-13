@@ -5,7 +5,6 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.math.BigInteger;
 import java.net.URI;
-import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
@@ -92,7 +91,7 @@ public final class HttpPeerSource implements PeerSource {
      *  pinning rewrites the host to an IP literal, which would never match a hostname-configured
      *  trusted peer. */
     private final String originalUrl;
-    private final HttpClient client;
+    private final PeerExchange exchange;
     private final Duration requestDeadline;
     /** Decides whether the RHIZOME_PEER_TOKEN secret may be presented to this peer (configured
      *  + https only); never logged (audit: peer token exfiltration via gossip). */
@@ -108,38 +107,38 @@ public final class HttpPeerSource implements PeerSource {
      *        resolved IP so a DNS rebind cannot redirect the fetch to an internal service (SSRF).
      */
     public HttpPeerSource(String baseUrl, boolean blockPrivateHosts) {
-        this(baseUrl, blockPrivateHosts, PeerExchange.newClient());
+        this(baseUrl, blockPrivateHosts, new PeerExchange());
     }
 
     /**
-     * As above, but reusing a caller-provided {@link HttpClient}. The sync loop creates one source per
+     * As above, but sharing a caller-provided {@link PeerExchange}. The sync loop creates one source per
      * peer per round; each JDK {@code HttpClient} spawns a selector-manager thread and its own
      * connection pool that is never closed, so building one per round churned threads/sockets and reused
      * no keep-alive connection (audit net #1). The DNS pin is still recomputed per source, so sharing the
-     * client does not weaken the anti-rebinding guarantee — it only shares the transport.
+     * exchange does not weaken the anti-rebinding guarantee — it only shares the transport.
      */
-    public HttpPeerSource(String baseUrl, boolean blockPrivateHosts, HttpClient client) {
-        this(baseUrl, blockPrivateHosts, client, REQUEST_DEADLINE);
+    public HttpPeerSource(String baseUrl, boolean blockPrivateHosts, PeerExchange exchange) {
+        this(baseUrl, blockPrivateHosts, exchange, REQUEST_DEADLINE);
     }
 
     /** As above, presenting the token only where {@code tokenPolicy} allows it. */
-    public HttpPeerSource(String baseUrl, boolean blockPrivateHosts, HttpClient client,
+    public HttpPeerSource(String baseUrl, boolean blockPrivateHosts, PeerExchange exchange,
                           PeerTokenPolicy tokenPolicy) {
-        this(baseUrl, blockPrivateHosts, client, REQUEST_DEADLINE, tokenPolicy);
+        this(baseUrl, blockPrivateHosts, exchange, REQUEST_DEADLINE, tokenPolicy);
     }
 
     /** As above, with an explicit whole-exchange deadline (package-private for tests). */
-    HttpPeerSource(String baseUrl, boolean blockPrivateHosts, HttpClient client, Duration requestDeadline) {
-        this(baseUrl, blockPrivateHosts, client, requestDeadline, PeerTokenPolicy.none());
+    HttpPeerSource(String baseUrl, boolean blockPrivateHosts, PeerExchange exchange, Duration requestDeadline) {
+        this(baseUrl, blockPrivateHosts, exchange, requestDeadline, PeerTokenPolicy.none());
     }
 
     /** As above, with an explicit whole-exchange deadline and a token policy. */
-    HttpPeerSource(String baseUrl, boolean blockPrivateHosts, HttpClient client, Duration requestDeadline,
+    HttpPeerSource(String baseUrl, boolean blockPrivateHosts, PeerExchange exchange, Duration requestDeadline,
                    PeerTokenPolicy tokenPolicy) {
         String trimmed = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
         this.originalUrl = trimmed;
         this.baseUrl = PeerHosts.pin(trimmed, blockPrivateHosts);
-        this.client = client;
+        this.exchange = exchange;
         this.requestDeadline = requestDeadline;
         this.tokenPolicy = tokenPolicy;
     }
@@ -197,7 +196,7 @@ public final class HttpPeerSource implements PeerSource {
                 AtomicReference<AutoCloseable> openBody = new AtomicReference<>();
                 AtomicLong lastActivity = new AtomicLong(System.nanoTime());
                 return BodyReadDeadline.callIdle(requestDeadline, openBody, lastActivity, () -> {
-                    HttpResponse<InputStream> response = client.send(request, HttpResponse.BodyHandlers.ofInputStream());
+                    HttpResponse<InputStream> response = exchange.client().send(request, HttpResponse.BodyHandlers.ofInputStream());
                     if (response.statusCode() != 200) {
                         response.body().close();
                         throw statusFailure(path, response);
@@ -329,7 +328,7 @@ public final class HttpPeerSource implements PeerSource {
                 // slow-drip peer hang the sync thread mid-body (audit F1).
                 AtomicReference<AutoCloseable> openBody = new AtomicReference<>();
                 return BodyReadDeadline.call(requestDeadline, openBody, () -> {
-                    HttpResponse<InputStream> response = client.send(request, HttpResponse.BodyHandlers.ofInputStream());
+                    HttpResponse<InputStream> response = exchange.client().send(request, HttpResponse.BodyHandlers.ofInputStream());
                     if (response.statusCode() != 200) {
                         response.body().close();
                         if (response.statusCode() == 404 && notFound == NotFound.UNSUPPORTED) {

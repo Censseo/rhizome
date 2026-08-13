@@ -2,7 +2,6 @@ package rhizome.net;
 
 import java.io.InputStream;
 import java.net.URI;
-import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
@@ -61,7 +60,7 @@ public final class PeerBroadcaster implements AutoCloseable {
 
     private final Supplier<Collection<String>> peers;
     private final boolean blockPrivateHosts;
-    private final HttpClient http;
+    private final PeerExchange exchange;
     private final ExecutorService pool;
     private final long maxQueuedBytes;
     /** Bytes currently retained by queued/running sends; a send is charged at submit and
@@ -88,17 +87,23 @@ public final class PeerBroadcaster implements AutoCloseable {
     /** As above, presenting the token only to peers {@code tokenPolicy} trusts. */
     public PeerBroadcaster(Supplier<Collection<String>> peers, boolean blockPrivateHosts,
                            PeerTokenPolicy tokenPolicy) {
-        this(peers, blockPrivateHosts, tokenPolicy, MAX_QUEUED_BYTES);
+        this(peers, blockPrivateHosts, tokenPolicy, new PeerExchange());
+    }
+
+    /** As above, sharing the node-wide exchange (one client for sync, PEX and gossip). */
+    public PeerBroadcaster(Supplier<Collection<String>> peers, boolean blockPrivateHosts,
+                           PeerTokenPolicy tokenPolicy, PeerExchange exchange) {
+        this(peers, blockPrivateHosts, tokenPolicy, exchange, MAX_QUEUED_BYTES);
     }
 
     /** As above, with an explicit queued-bytes budget (package-private for tests). */
     PeerBroadcaster(Supplier<Collection<String>> peers, boolean blockPrivateHosts,
-                    PeerTokenPolicy tokenPolicy, long maxQueuedBytes) {
+                    PeerTokenPolicy tokenPolicy, PeerExchange exchange, long maxQueuedBytes) {
         this.peers = peers;
         this.blockPrivateHosts = blockPrivateHosts;
         this.tokenPolicy = tokenPolicy;
+        this.exchange = exchange;
         this.maxQueuedBytes = maxQueuedBytes;
-        this.http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build();
         // Bounded queue: newest blocks/txs win, memory stays capped even if several peers are
         // slow/unresponsive. The byte budget (enforced in post()) is the primary bound; on a
         // count-full queue the NEW send is dropped — never the oldest — so a discarded task's
@@ -231,7 +236,8 @@ public final class PeerBroadcaster implements AutoCloseable {
             // peer could hold a broadcast pool thread indefinitely.
             AtomicReference<AutoCloseable> openBody = new AtomicReference<>();
             BodyReadDeadline.call(SEND_DEADLINE, openBody, () -> {
-                HttpResponse<InputStream> response = http.send(request, HttpResponse.BodyHandlers.ofInputStream());
+                HttpResponse<InputStream> response = exchange.client().send(request,
+                    HttpResponse.BodyHandlers.ofInputStream());
                 InputStream in = response.body();
                 openBody.set(in); // publish so a deadline expiry can cancel the JDK exchange
                 try (in) {

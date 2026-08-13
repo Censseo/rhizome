@@ -10,16 +10,33 @@ import java.time.Duration;
  * applies.
  *
  * <p>Before this type, the four exchange implementations (sync, PEX, gossip, the CLI node
- * client) each carried their own copy of the bounded body read — in three different
- * signatures — and each built its own JDK {@link HttpClient}, so one selector-manager thread
- * and one connection pool lived per component (and, for sync, one per peer per round until
- * the shared client arrived). {@link #readBounded} and {@link #newClient} are the two halves
- * of that duplication, kept static because they carry no per-node state: the bounds and the
- * connect timeout are protocol constants, not configuration.
+ * client) each built their own JDK {@link HttpClient} — at connect timeouts of 3 s and 5 s,
+ * inconsistently — so one selector-manager thread and one connection pool lived per component
+ * (and, for sync, one per peer per round until the first shared client arrived). A node now
+ * builds exactly ONE {@code PeerExchange} and hands it to sync, PEX and gossip: one selector
+ * thread, one keep-alive pool, one connect timeout.
+ *
+ * <p>The bounded body read ({@link #readBounded}) and the client factory ({@link #newClient})
+ * are static because they carry no per-node state: the bounds and the connect timeout are
+ * protocol constants, not configuration.
  */
 public final class PeerExchange {
 
-    private PeerExchange() {
+    private final HttpClient client;
+
+    /** An exchange over a freshly built default client. */
+    public PeerExchange() {
+        this(newClient());
+    }
+
+    /** An exchange over a caller-provided client, so several components share one transport. */
+    public PeerExchange(HttpClient client) {
+        this.client = client;
+    }
+
+    /** The shared client every request this exchange makes goes through. */
+    public HttpClient client() {
+        return client;
     }
 
     /**

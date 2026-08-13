@@ -2,7 +2,6 @@ package rhizome.net;
 
 import java.io.InputStream;
 import java.net.URI;
-import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
@@ -59,7 +58,7 @@ public final class PeerDiscovery {
     private final PeerRegistry registry;
     private final String selfUrl;
     private final boolean blockPrivateHosts;
-    private final HttpClient http;
+    private final PeerExchange exchange;
     private final Duration fetchDeadline;
     /** Decides whether the RHIZOME_PEER_TOKEN secret may be presented to a given peer
      *  (configured + https only); never logged (audit: peer token exfiltration via gossip). */
@@ -85,6 +84,12 @@ public final class PeerDiscovery {
         this(registry, selfUrl, blockPrivateHosts, FETCH_DEADLINE, tokenPolicy);
     }
 
+    /** As above, sharing the node-wide exchange (one client for sync, PEX and gossip). */
+    public PeerDiscovery(PeerRegistry registry, String selfUrl, boolean blockPrivateHosts,
+                         PeerTokenPolicy tokenPolicy, PeerExchange exchange) {
+        this(registry, selfUrl, blockPrivateHosts, FETCH_DEADLINE, tokenPolicy, exchange);
+    }
+
     /** As above, with an explicit per-exchange deadline (package-private for tests). */
     PeerDiscovery(PeerRegistry registry, String selfUrl, boolean blockPrivateHosts, Duration fetchDeadline) {
         this(registry, selfUrl, blockPrivateHosts, fetchDeadline, PeerTokenPolicy.none());
@@ -93,12 +98,18 @@ public final class PeerDiscovery {
     /** As above, with an explicit per-exchange deadline and a token policy. */
     PeerDiscovery(PeerRegistry registry, String selfUrl, boolean blockPrivateHosts, Duration fetchDeadline,
                   PeerTokenPolicy tokenPolicy) {
+        this(registry, selfUrl, blockPrivateHosts, fetchDeadline, tokenPolicy, new PeerExchange());
+    }
+
+    /** As above, with an explicit per-exchange deadline, a token policy and the shared exchange. */
+    PeerDiscovery(PeerRegistry registry, String selfUrl, boolean blockPrivateHosts, Duration fetchDeadline,
+                  PeerTokenPolicy tokenPolicy, PeerExchange exchange) {
         this.registry = registry;
         this.selfUrl = selfUrl;
         this.blockPrivateHosts = blockPrivateHosts;
         this.fetchDeadline = fetchDeadline;
         this.tokenPolicy = tokenPolicy;
-        this.http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build();
+        this.exchange = exchange;
         // Bounded queue + discard-oldest (the PeerBroadcaster pattern): a fixed pool's default
         // unbounded LinkedBlockingQueue would let one round's tasks accumulate without limit if
         // the workers stall (audit F2). Dropped tasks' futures never complete, so invokeAll
@@ -200,7 +211,7 @@ public final class PeerDiscovery {
         // could otherwise park a pool thread in InputStream.read until the round budget cut it.
         AtomicReference<AutoCloseable> openBody = new AtomicReference<>();
         String body = BodyReadDeadline.call(fetchDeadline, openBody, () -> {
-            HttpResponse<InputStream> resp = http.send(
+            HttpResponse<InputStream> resp = exchange.client().send(
                 PeerAuth.withToken(HttpRequest.newBuilder(URI.create(pinned + "/peers")),
                         tokenPolicy.tokenFor(originalPeer))
                     .timeout(fetchDeadline).GET().build(),
@@ -236,7 +247,7 @@ public final class PeerDiscovery {
         // reply is a tiny JSON status, so anything large is a hostile drip, not a peer to keep.
         AtomicReference<AutoCloseable> openBody = new AtomicReference<>();
         BodyReadDeadline.call(fetchDeadline, openBody, () -> {
-            HttpResponse<InputStream> resp = http.send(
+            HttpResponse<InputStream> resp = exchange.client().send(
                 PeerAuth.withToken(HttpRequest.newBuilder(URI.create(pinned + "/add_peer")),
                         tokenPolicy.tokenFor(originalPeer))
                     .timeout(fetchDeadline)

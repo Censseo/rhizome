@@ -91,7 +91,7 @@ class PeerBroadcasterTest {
         long bodySize = BlockCodec.encode(block).length;
         long budget = bodySize * 2 + bodySize / 2; // admits exactly 2 sends of this body
         try (var broadcaster = new PeerBroadcaster(() -> Collections.nCopies(10, peer), false,
-                PeerTokenPolicy.none(), budget)) {
+                PeerTokenPolicy.none(), new PeerExchange(), budget)) {
             broadcaster.broadcastBlock(block); // the fan-out loop runs on the caller
             // Both counters are charged/dropped on the CALLER thread inside post(), so the
             // exact counts are scheduling-independent; admitted sends cannot release early
@@ -109,7 +109,7 @@ class PeerBroadcasterTest {
         var block = block(8);
         long bodySize = BlockCodec.encode(block).length;
         try (var broadcaster = new PeerBroadcaster(() -> Collections.nCopies(300, peer), false,
-                PeerTokenPolicy.none(), Long.MAX_VALUE)) {
+                PeerTokenPolicy.none(), new PeerExchange(), Long.MAX_VALUE)) {
             broadcaster.broadcastBlock(block);
             // Gate on all 4 workers being occupied by a stalled send: from here on no worker can
             // take a queued task, so the queue contents — and thus the byte charge — are frozen.

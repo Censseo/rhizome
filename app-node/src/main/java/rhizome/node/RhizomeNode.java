@@ -3,6 +3,7 @@ package rhizome.node;
 import rhizome.net.HttpPeerSource;
 import rhizome.net.PeerBroadcaster;
 import rhizome.net.PeerDiscovery;
+import rhizome.net.PeerExchange;
 import rhizome.net.PeerRegistry;
 import rhizome.net.PeerBanList;
 import rhizome.net.PeerTokenPolicy;
@@ -215,10 +216,10 @@ public final class RhizomeNode implements AutoCloseable {
                     + config.dataDir() + ") is inconsistent — delete it and restart to re-bootstrap");
             }
 
-            // One shared HTTP client for all sync rounds, so a fresh client (and its selector
-            // thread + connection pool) is not built per peer per round (audit net #1). Built here
-            // because the snap bootstrap just below is already a peer fetch.
-            java.net.http.HttpClient syncHttpClient = PeerExchange.newClient();
+            // One shared HTTP exchange for sync rounds, PEX and gossip, so a fresh client (and its
+            // selector thread + connection pool) is not built per peer per round or per component
+            // (audit net #1). Built here because the snap bootstrap just below is already a peer fetch.
+            PeerExchange exchange = new PeerExchange();
 
             // RHIZOME_SYNC=snap on an empty data dir: adopt a peer's verified state snapshot at
             // a buried pivot instead of replaying history; falls back to full sync when no peer
@@ -229,7 +230,7 @@ public final class RhizomeNode implements AutoCloseable {
                         if (SnapshotBootstrap.bootstrap(config.params(), snapshot,
                                 new RocksBootstrapTarget(store, boxStore, tokenStore, stateStore),
                                 contractStore, new HttpPeerSource(peerUrl, blockPrivatePeers,
-                                    syncHttpClient, peerTokenPolicy),
+                                    exchange, peerTokenPolicy),
                                 System.currentTimeMillis(), Path.of(config.dataDir()))) {
                             break;
                         }
@@ -268,7 +269,8 @@ public final class RhizomeNode implements AutoCloseable {
             // peer that already has an item rejects it and won't gossip on). Assembled here rather
             // than after the socket opens — as startGossip() did — because the broadcaster takes
             // nothing but the peer set and the config, and no request can arrive before start().
-            var broadcaster = new PeerBroadcaster(registry::snapshot, blockPrivatePeers, peerTokenPolicy);
+            var broadcaster = new PeerBroadcaster(registry::snapshot, blockPrivatePeers,
+                peerTokenPolicy, exchange);
             opened.push(broadcaster::close);
 
             // Snapshot spools live with the stores, not the OS temp dir (often a tmpfs → the whole
@@ -312,7 +314,7 @@ public final class RhizomeNode implements AutoCloseable {
 
             return new NodeComponents(store, contractStore, boxStore, tokenStore, stateStore,
                 verifier, engine, mempool, service, banList, registry, broadcaster, peerTokenPolicy,
-                syncHttpClient, blockPrivatePeers, allowedHosts);
+                exchange, blockPrivatePeers, allowedHosts);
         } catch (Throwable t) {
             releaseQuietly(opened);
             throw t;
@@ -483,7 +485,7 @@ public final class RhizomeNode implements AutoCloseable {
             }
 
             var discovery = new PeerDiscovery(c.registry(), config.selfUrl(), c.blockPrivatePeers(),
-                c.peerTokenPolicy());
+                c.peerTokenPolicy(), c.exchange());
             ScheduledExecutorService syncScheduler = Executors.newScheduledThreadPool(2, r -> {
                 Thread t = new Thread(r, "rhizome-net");
                 t.setDaemon(true);
@@ -670,7 +672,7 @@ public final class RhizomeNode implements AutoCloseable {
             peersTried++;
             try {
                 ChainSynchronizer.Result result = synchronizer.syncFrom(
-                    new HttpPeerSource(peerUrl, c.blockPrivatePeers(), c.syncHttpClient(),
+                    new HttpPeerSource(peerUrl, c.blockPrivatePeers(), c.exchange(),
                         c.peerTokenPolicy()));
                 // Any Result at all means the peer answered well-formed protocol data, so it is
                 // a real Rhizome node and from here on it can earn ban score — including for the
