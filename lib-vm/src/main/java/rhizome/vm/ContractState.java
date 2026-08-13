@@ -13,8 +13,8 @@ import rhizome.core.ledger.PublicAddress;
  * throws, journal writes that no-op, and an {@code applyBlock} that would happily commit a block
  * into a scratch buffer. It now implements only this.
  *
- * <p>{@link ContractExecutor}, {@link PersistentHostState} and {@link StorageChange} take this
- * type for the same reason: each uses two or three of these methods and none of the rest.
+ * <p>{@link PersistentHostState} and {@link StorageChange} take this type for the same reason:
+ * each uses two or three of these methods and none of the rest.
  */
 public interface ContractState {
 

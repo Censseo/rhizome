@@ -11,8 +11,8 @@ package rhizome.vm;
  * <p>This was one interface with twenty members and three disjoint audiences. It is now the
  * composition of the three roles — {@link ContractState}, {@link ContractSnapshotStore},
  * {@link ContractJournalStore} — so a consumer declares the role it uses:
- * {@link ContractExecutor}, {@link PersistentHostState}, {@link StorageChange} and
- * {@link SessionContractStore} take {@code ContractState}; only the durable store and the
+ * {@link PersistentHostState}, {@link StorageChange} and {@link SessionContractStore} take
+ * {@code ContractState}; only the durable store and the
  * processor that drives it need the whole thing. Every implementation and every existing call
  * site still sees the same twenty members through this type — the split narrows what callers
  * <em>ask for</em>, not what stores provide.

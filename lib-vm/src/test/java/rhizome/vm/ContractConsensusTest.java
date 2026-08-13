@@ -222,6 +222,37 @@ class ContractConsensusTest {
         assertEquals(1, engine.nextNonce(sender));
     }
 
+    private Transaction callTxWithGasLimit(long nonce, PublicAddress contract, long gasLimit) {
+        Transaction t = TransactionImpl.builder()
+            .from(sender).to(contract)
+            .amount(new TransactionAmount(0)).fee(new TransactionAmount(0))
+            .chainId(params.chainId()).nonce(nonce).signingKey(key)
+            .kind(TransactionKind.CALL).data(new byte[0]).gasLimit(gasLimit).gasPrice(1)
+            .build();
+        t.sign(priv);
+        return t;
+    }
+
+    @Test
+    void outOfGasCallIsIncludedChargesItsCapAndCommitsNoState() {
+        // A gasLimit below GasSchedule.CALL_BASE (500) runs out of gas on the intrinsic call
+        // charge itself: the block stays valid (like the missing-contract case above), but the
+        // capped gas is still charged as a fee to the miner, and the counter's storage write —
+        // reached only after the call succeeds — never happens.
+        PublicAddress contract = Contracts.deriveAddress(sender, 0);
+        assertEquals(ExecutionStatus.SUCCESS, mineBlock(List.of(deployTx(0, COUNTER))));
+        long senderBeforeCall = ledger.getWalletValue(sender).amount();
+        long minerBeforeCall = ledger.getWalletValue(miner).amount();
+        long callBlockReward = params.miningReward(engine.height() + 1);
+
+        assertEquals(ExecutionStatus.SUCCESS, mineBlock(List.of(callTxWithGasLimit(1, contract, 50))));
+
+        assertEquals(null, contracts.getStorage(contract, new byte[] {0}), "out-of-gas call never wrote the counter");
+        assertEquals(senderBeforeCall - 50, ledger.getWalletValue(sender).amount(), "sender charged exactly the capped gas");
+        assertEquals(minerBeforeCall + callBlockReward + 50, ledger.getWalletValue(miner).amount(),
+            "miner paid the block reward plus exactly the capped gas");
+    }
+
     /** Re-init the engine over a fresh ledger with the given consensus gas caps. */
     private void withGasCaps(long maxTxGas, long maxBlockGas) {
         params = params.toBuilder().maxTxGas(maxTxGas).maxBlockGas(maxBlockGas).build();
