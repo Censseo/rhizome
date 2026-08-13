@@ -319,6 +319,16 @@ public final class NetworkParameters {
         if (consensusV2Height < 0) {
             throw new IllegalArgumentException("consensusV2Height must be >= 0");
         }
+        // A negative activation height would invert the box/token predicates (every height
+        // reads "active", including the Long.MAX_VALUE sentinel edge in the mempool gate) —
+        // a misconfiguration must fail fast at node startup, not silently activate domains
+        // on every chain this node validates.
+        if (boxActivationHeight < 0) {
+            throw new IllegalArgumentException("boxActivationHeight must be >= 0");
+        }
+        if (tokenActivationHeight < 0) {
+            throw new IllegalArgumentException("tokenActivationHeight must be >= 0");
+        }
         // Degenerate consensus constants must fail fast at build time, not mid-chain under the
         // engine lock (audit: unvalidated params): a zero lookback divides by zero on every
         // retarget boundary, a negative one loops the difficulty fold, a non-positive window or

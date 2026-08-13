@@ -1,7 +1,9 @@
 package rhizome;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
@@ -128,5 +130,44 @@ class NetworkParametersTest {
                 devnet.difficultyLookback(), 0);
         }
         assertEquals(devnet.maxDifficulty(), difficulty);
+    }
+
+    @Test
+    void rejectsNegativeActivationHeights() {
+        // A negative activation height would invert the box/token predicates (every height
+        // reads "active", including the Long.MAX_VALUE sentinel edge in the mempool gate).
+        assertThrows(IllegalArgumentException.class,
+            () -> NetworkParameters.testnet().toBuilder().boxActivationHeight(-1).build());
+        assertThrows(IllegalArgumentException.class,
+            () -> NetworkParameters.testnet().toBuilder().tokenActivationHeight(-1).build());
+        // Bounds are accepted: 0 = from genesis, positive = gated.
+        NetworkParameters.testnet().toBuilder().boxActivationHeight(0).build();
+        NetworkParameters.testnet().toBuilder().tokenActivationHeight(100).build();
+    }
+
+    @Test
+    void activationPredicatesCarryTheBoundary() {
+        // The predicates are the single expression of where each domain activates: the executor
+        // judges the block's own height, the mempool the next block. Both sides must land on the
+        // same boundary — exactly at the activation height and one below it.
+        NetworkParameters params = NetworkParameters.testnet().toBuilder()
+            .boxActivationHeight(100).tokenActivationHeight(200).build();
+        assertFalse(params.boxActiveAt(99));
+        assertTrue(params.boxActiveAt(100));
+        assertFalse(params.tokenActiveAt(199));
+        assertTrue(params.tokenActiveAt(200));
+
+        // Next-block judgement: confirmed 98 means next block 99 < 100 → still gated;
+        // confirmed 99 means next block 100 == activation → admitted.
+        assertFalse(params.boxActiveForNextBlock(98));
+        assertTrue(params.boxActiveForNextBlock(99));
+        assertFalse(params.tokenActiveForNextBlock(198));
+        assertTrue(params.tokenActiveForNextBlock(199));
+
+        // The Long.MAX_VALUE sentinel is past every activation: both judgements admit.
+        assertTrue(params.boxActiveForNextBlock(Long.MAX_VALUE));
+        assertTrue(params.tokenActiveForNextBlock(Long.MAX_VALUE));
+        assertTrue(params.boxActiveAt(Long.MAX_VALUE));
+        assertTrue(params.tokenActiveAt(Long.MAX_VALUE));
     }
 }
