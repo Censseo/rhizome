@@ -68,4 +68,56 @@ public interface LedgerContract {
         ledger.revertDeposit(wallet, new TransactionAmount(50));
         assertEquals(100L, ledger.getWalletValue(wallet).amount());
     }
+
+    /**
+     * The exact-inverse property that makes a reorg safe: a sequence of ledger operations
+     * followed by their exact inverses, in reverse order, must restore the WHOLE ledger —
+     * not just the few wallets a test author thought to check. A reorg path that re-derives
+     * an inverse arithmetically (the four hand-written mirrors documented in Executor)
+     * passes a hand-picked assertion and diverges every node's balances after a reorg.
+     *
+     * <p>Zero balances are omitted from the comparison, deliberately: a reverted credit
+     * leaves the wallet key behind at zero, documented as fork-safe because block validity is
+     * a pure function of balance, never of key presence (audit consensus Finding 1).
+     */
+    @Test
+    default void applyThenRevertRestoresTheWholeLedgerByteForByte() throws Exception {
+        Ledger ledger = newLedger();
+        PublicAddress alice = PublicAddress.random();
+        PublicAddress bob = PublicAddress.random();
+        PublicAddress carol = PublicAddress.random();
+        ledger.createWallet(alice);
+        ledger.deposit(alice, new TransactionAmount(10_000));
+        ledger.createWallet(bob);
+        ledger.deposit(bob, new TransactionAmount(5_000));
+        String before = wholeLedgerBytes(ledger);
+
+        // Apply: transfers, fees, a fresh wallet.
+        ledger.withdraw(alice, new TransactionAmount(1_000));
+        ledger.deposit(bob, new TransactionAmount(1_000));
+        ledger.withdraw(bob, new TransactionAmount(250));
+        ledger.createWallet(carol);
+        ledger.deposit(carol, new TransactionAmount(250));
+
+        // Revert in exact reverse order with the exact inverse operations.
+        ledger.revertDeposit(carol, new TransactionAmount(250));
+        ledger.revertSend(bob, new TransactionAmount(250));
+        ledger.revertDeposit(bob, new TransactionAmount(1_000));
+        ledger.revertSend(alice, new TransactionAmount(1_000));
+
+        assertEquals(before, wholeLedgerBytes(ledger),
+            "applying then reverting must restore the whole ledger, byte for byte");
+    }
+
+    /** The ledger's entire content as a deterministic, order-independent byte string. */
+    private static String wholeLedgerBytes(Ledger ledger) {
+        java.util.List<String> parts = new java.util.ArrayList<>();
+        ledger.forEachBalance((address, amount) -> {
+            if (amount != 0) {
+                parts.add(address.toHexString() + Long.toHexString(amount));
+            }
+        });
+        parts.sort(String::compareTo);
+        return String.join("|", parts);
+    }
 }

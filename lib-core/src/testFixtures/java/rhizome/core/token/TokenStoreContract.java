@@ -114,4 +114,51 @@ public interface TokenStoreContract {
         store.applyBlock(5, List.of(new TokenStore.TokenOp.MetaSet(m)));
         assertEquals(m, store.getMeta(m.id()));
     }
+
+    /**
+     * The exact-inverse property that makes a reorg safe: applying {@code N} blocks and then
+     * reverting them in reverse order must restore the WHOLE store, byte for byte — not just
+     * the few keys a test author thought to check. A journal that captures a wrong "prior"
+     * (or the wrong order, or misses an op) passes a hand-picked assertion and corrupts a
+     * max-depth reorg on the network.
+     */
+    @Test
+    default void applyThenRevertRestoresTheWholeStoreByteForByte() throws Exception {
+        TokenStore store = newTokenStore();
+        PublicAddress minter = PublicAddress.random();
+        PublicAddress holder = PublicAddress.random();
+        TokenMeta a = meta(minter, 0, 1_000);
+        TokenMeta b = meta(minter, 1, 500);
+
+        String before = wholeStoreBytes(store);
+        store.applyBlock(2, List.of(
+            new TokenStore.TokenOp.MetaSet(a),
+            new TokenStore.TokenOp.MetaSet(b),
+            new TokenStore.TokenOp.BalanceSet(a.id(), holder.toBytes(), 1_000)));
+
+        // Block 3: transfer 400 to holder, then burn a's balance to zero (index removal).
+        store.applyBlock(3, List.of(
+            new TokenStore.TokenOp.BalanceSet(a.id(), minter.toBytes(), 600),
+            new TokenStore.TokenOp.BalanceSet(a.id(), holder.toBytes(), 400)));
+        store.applyBlock(4, List.of(new TokenStore.TokenOp.BalanceSet(a.id(), holder.toBytes(), 0)));
+        assertTrue(!wholeStoreBytes(store).equals(before),
+            "the later blocks must actually change the store for the test to mean anything");
+
+        store.revertBlock(4);
+        store.revertBlock(3);
+        store.revertBlock(2);
+        assertEquals(before, wholeStoreBytes(store),
+            "reverting N blocks must restore the store to its pre-apply state, byte for byte");
+    }
+
+    /** The store's entire content as a deterministic, order-independent byte string. */
+    private static String wholeStoreBytes(TokenStore store) {
+        java.util.List<String> parts = new java.util.ArrayList<>();
+        store.forEachMeta(m -> parts.add(rhizome.core.common.Utils.bytesToHex(m.serialize())));
+        store.forEachBalance((tokenId, address, amount) -> parts.add(
+            rhizome.core.common.Utils.bytesToHex(tokenId) + rhizome.core.common.Utils.bytesToHex(address)
+                + Long.toHexString(amount)));
+        parts.sort(String::compareTo);
+        return String.join("|", parts);
+    }
 }

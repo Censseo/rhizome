@@ -1,8 +1,10 @@
 package rhizome.vm;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
 
@@ -161,5 +163,56 @@ public interface ContractStoreContract {
         store.applyBlock(5, List.of(StorageChange.putStorage(contract, key, new byte[] {1})), new byte[] {7});
         assertArrayEquals(new byte[] {1}, store.getStorage(contract, key));
         assertArrayEquals(new byte[] {7}, store.getJournal(5));
+    }
+
+    /**
+     * The exact-inverse property that makes a reorg safe: applying {@code N} blocks and then
+     * reverting them in reverse order must restore the WHOLE store, byte for byte — not just
+     * the few keys a test author thought to check. A journal that captures a wrong "prior"
+     * (or the wrong order, or misses a change) passes a hand-picked assertion and corrupts a
+     * max-depth reorg on the network.
+     */
+    @Test
+    default void applyThenRevertRestoresTheWholeStoreByteForByte() throws Exception {
+        ContractStore store = newContractStore();
+        PublicAddress contract = PublicAddress.random();
+        byte[] keyA = {0};
+        byte[] keyB = {1};
+        store.putStorage(contract, keyA, new byte[] {1});
+        store.putCode(contract, new byte[] {0x00, 0x61, 0x73, 0x6d});
+        String before = wholeStoreBytes(store);
+
+        store.applyBlock(10, List.of(
+            StorageChange.putStorage(contract, keyA, new byte[] {2}),
+            StorageChange.putStorage(contract, keyB, new byte[] {3})), new byte[] {9});
+        store.applyBlock(11, List.of(
+            StorageChange.putStorage(contract, keyA, new byte[] {4}),
+            StorageChange.deleteStorage(contract, keyB),
+            StorageChange.putCode(contract, new byte[] {0x00, 0x61, 0x73, 0x6d, 5})), new byte[] {8});
+        assertTrue(!wholeStoreBytes(store).equals(before),
+            "the later blocks must actually change the store for the test to mean anything");
+
+        // Restores are the priors in final application order (reverse journal order).
+        store.revertBlock(11, List.of(
+            StorageChange.putStorage(contract, keyA, new byte[] {2}),
+            StorageChange.deleteStorage(contract, keyB),
+            StorageChange.putCode(contract, new byte[] {0x00, 0x61, 0x73, 0x6d})));
+        store.revertBlock(10, List.of(
+            StorageChange.putStorage(contract, keyA, new byte[] {1}),
+            StorageChange.deleteStorage(contract, keyB)));
+        assertEquals(before, wholeStoreBytes(store),
+            "reverting N blocks must restore the store to its pre-apply state, byte for byte");
+    }
+
+    /** The store's entire content as a deterministic, order-independent byte string. */
+    private static String wholeStoreBytes(ContractStore store) {
+        java.util.List<String> parts = new java.util.ArrayList<>();
+        store.forEachCode((contract, code) -> parts.add(
+            "C" + contract.toHexString() + rhizome.core.common.Utils.bytesToHex(code)));
+        store.forEachStorage((contract, key, value) -> parts.add(
+            "S" + contract.toHexString() + rhizome.core.common.Utils.bytesToHex(key)
+                + rhizome.core.common.Utils.bytesToHex(value)));
+        parts.sort(String::compareTo);
+        return String.join("|", parts);
     }
 }

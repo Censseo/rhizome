@@ -148,4 +148,53 @@ public interface BoxStoreContract {
         store.applyBlock(5, List.of(BoxStore.BoxMutation.write(a)));
         assertEquals(a, store.get(a.id()));
     }
+
+    /**
+     * The exact-inverse property that makes a reorg safe: applying {@code N} blocks and then
+     * reverting them in reverse order must restore the WHOLE store, byte for byte — not just
+     * the few keys a test author thought to check. A journal that captures a wrong "prior"
+     * (or the wrong order, or misses a mutation) passes a hand-picked assertion and corrupts
+     * a max-depth reorg on the network.
+     */
+    @Test
+    default void applyThenRevertRestoresTheWholeStoreByteForByte() throws Exception {
+        BoxStore store = newBoxStore();
+        PublicAddress owner = PublicAddress.random();
+        Box a = box(owner, 0, 1000, 5);
+        Box b = box(owner, 1, 500, 6);
+        Box c = box(PublicAddress.random(), 0, 250, 7);
+
+        String before = wholeStoreBytes(store);
+        store.applyBlock(2, List.of(
+            BoxStore.BoxMutation.write(a),
+            BoxStore.BoxMutation.write(b),
+            BoxStore.BoxMutation.write(c)));
+
+        // Block 3: update b, delete c, write a fresh box.
+        Box b2 = b.updated(750, List.of(BoxRegister.i64(9)), 3);
+        Box d = box(owner, 2, 125, 3);
+        store.applyBlock(3, List.of(
+            BoxStore.BoxMutation.write(b2),
+            BoxStore.BoxMutation.delete(c.id()),
+            BoxStore.BoxMutation.write(d)));
+        assertTrue(wholeStoreBytes(store).length() > before.length(),
+            "the second block must actually change the store for the test to mean anything");
+
+        store.revertBlock(3);
+        store.revertBlock(2);
+        assertEquals(before, wholeStoreBytes(store),
+            "reverting N blocks must restore the store to its pre-apply state, byte for byte");
+    }
+
+    /** The store's entire content as a deterministic, order-independent byte string. */
+    private static String wholeStoreBytes(BoxStore store) {
+        java.util.List<byte[]> serialized = new java.util.ArrayList<>();
+        store.forEachBox(box -> serialized.add(box.serialize()));
+        serialized.sort(java.util.Arrays::compare);
+        StringBuilder out = new StringBuilder();
+        for (byte[] bytes : serialized) {
+            out.append(rhizome.core.common.Utils.bytesToHex(bytes));
+        }
+        return out.toString();
+    }
 }
