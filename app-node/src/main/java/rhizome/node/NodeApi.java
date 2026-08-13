@@ -359,9 +359,12 @@ public final class NodeApi {
             // Resolve the path the ROUTER will dispatch on, once, and classify every gate below
             // against it. request.getPath() is the raw slice and does NOT agree with the router
             // (see routingKey): classifying on it let "/submit/" reach the block-ingest handler
-            // while missing the bearer gate, the push shed and the submit budget.
+            // while missing the bearer gate, the push shed and the submit budget. The route is
+            // resolved once here and shared by the cost and by every guard below — the table is
+            // the only place a path literal is allowed to classify a request.
             String path = routingKey(request);
-            int cost = requestCost(node, request, path);
+            RoutePolicy.Route route = RoutePolicy.lookup(request, path);
+            int cost = requestCost(node, request, path, route);
             String client = clientKey(request, trustXff);
             if (!limiter.allow(client, cost)) {
                 return errorJson(429, "rate limited").toPromise();
@@ -370,7 +373,7 @@ public final class NodeApi {
             // feeding invalid blocks / corrupt-signature transactions is refused BEFORE the
             // token check and the body decode, for the strike window. A per-client-key shed
             // like the limiter above — never an aggregate gate, so honest peers are unaffected.
-            if ((isSubmitPost(request, path) || isAddTransactionPost(request, path)) && node.isPushShed(client)) {
+            if (RoutePolicy.guarded(route, RoutePolicy.Guard.PUSH_SHED) && node.isPushShed(client)) {
                 return errorJson(429, "push temporarily refused").toPromise();
             }
             // Optional bearer-token gate (RHIZOME_API_TOKEN) on the state-changing/operator
@@ -381,14 +384,14 @@ public final class NodeApi {
             // With protectReads (RHIZOME_PROTECT_READS) EVERY route is gated instead — the
             // private-node/private-explorer switch (audit: no read protection) — except the
             // static SPA/docs shell, which a plain browser navigation cannot bear a token for.
-            if (apiToken != null && isTokenProtectedRoute(request, path, protectReads) && !bearerMatches(request, apiToken)) {
+            if (apiToken != null && isTokenProtectedRoute(route, protectReads) && !bearerMatches(request, apiToken)) {
                 return errorJson(401, "unauthorized").toPromise();
             }
             // Aggregate (all-IP) budget for the explorer reads that decode blocks under the consensus
             // lock: the per-IP limiter above cannot stop a distributed flood from summing past it, so a
             // process-wide bucket bounds the total lock-guarded decode work on the event-loop thread
             // (audit 5th-pass, net Finding 2). Shed over-budget reads before they touch the store.
-            if (isConsensusLockRead(request, path) && !node.tryReadBudget(cost)) {
+            if (RoutePolicy.guarded(route, RoutePolicy.Guard.READ_BUDGET) && !node.tryReadBudget(cost)) {
                 return errorJson(429, "read budget exceeded").toPromise();
             }
             // Aggregate submit gate, consumed BEFORE the /submit handler decodes the block body. The
@@ -396,7 +399,7 @@ public final class NodeApi {
             // triggers both run on the event-loop thread; the per-IP limiter cannot stop a distributed
             // flood from summing past it. Shedding here — rather than inside submitBlock, after the
             // decode already ran — closes the decode-before-gate asymmetry (audit S6).
-            if (isSubmitPost(request, path) && !node.trySubmitBudget()) {
+            if (RoutePolicy.guarded(route, RoutePolicy.Guard.SUBMIT_BUDGET) && !node.trySubmitBudget()) {
                 return errorJson(429, "submit throttled").toPromise();
             }
             // Aggregate mempool-admission gate, consumed BEFORE the tx body is decoded — symmetric
@@ -404,7 +407,7 @@ public final class NodeApi {
             // the event-loop thread and never caches invalid signatures, so without an aggregate cap
             // a distributed corrupt-signature flood sums past the per-IP limiter and pins the loop
             // (audit M1).
-            if (isAddTransactionPost(request, path) && !node.tryMempoolSigBudget()) {
+            if (RoutePolicy.guarded(route, RoutePolicy.Guard.MEMPOOL_BUDGET) && !node.tryMempoolSigBudget()) {
                 return errorJson(429, "transaction throttled").toPromise();
             }
             // DNS-rebinding Host check for ALL browser-reachable requests when an allowlist is
@@ -412,7 +415,7 @@ public final class NodeApi {
             // (/stats, /wallet, /logs, …) through the attacker's hostname (audit F6). The P2P
             // protocol endpoints fail open (peers send whatever Host) so peering isn't broken;
             // a missing Host header also fails open (HTTP/1.0 / non-browser CLI clients).
-            if (allowedHosts != null && !allowedHosts.isEmpty() && !isPeerProtocolRequest(request, path)) {
+            if (allowedHosts != null && !allowedHosts.isEmpty() && !RoutePolicy.guarded(route, RoutePolicy.Guard.PEER_PROTOCOL)) {
                 String host = request.getHeader(H_HOST);
                 if (host != null && !host.isEmpty()
                     && !allowedHosts.contains(host.toLowerCase(java.util.Locale.ROOT))) {
@@ -785,14 +788,16 @@ public final class NodeApi {
      * (the state-snapshot chunk) can be charged proportionally to the bytes they will serve.
      */
     static int requestCost(NodeService node, HttpRequest request) {
-        return requestCost(node, request, routingKey(request));
+        String path = routingKey(request);
+        return requestCost(node, request, path, RoutePolicy.lookup(request, path));
     }
 
     /**
-     * As above, against a {@link #routingKey(HttpRequest)} the caller already computed — the
-     * middleware resolves the key once per request and hands the same value to every classifier.
+     * As above, against a {@link #routingKey(HttpRequest)} and a {@link RoutePolicy.Route} the
+     * caller already resolved — the middleware resolves both once per request and hands the same
+     * values to every classifier.
      */
-    private static int requestCost(NodeService node, HttpRequest request, String path) {
+    private static int requestCost(NodeService node, HttpRequest request, String path, RoutePolicy.Route route) {
         if (path == null) {
             return 1; // unroutable: the router rejects it before any handler work
         }
@@ -853,7 +858,6 @@ public final class NodeApi {
             return NodeService.LOG_SCAN_WINDOW;
         }
         // Everything else is a flat weight declared in RoutePolicy; an unmatched path costs 1.
-        RoutePolicy.Route route = RoutePolicy.lookup(request, path);
         if (route != null && route.cost() != RoutePolicy.Cost.DYNAMIC) {
             return route.cost();
         }
@@ -876,46 +880,6 @@ public final class NodeApi {
     }
 
     /**
-     * The reads charged to the process-wide aggregate read budget (NodeService.tryReadBudget) so
-     * a distributed flood can't sum past the per-IP limiter and pin the event loop / contend the
-     * consensus lock (audit 5th-pass, net Finding 2). Two families:
-     * <ul>
-     *   <li>the browser-facing explorer reads ({@code /stats}, {@code /blocks}, {@code /block},
-     *       {@code /transaction}, {@code /address_txs}), which fully decode blocks from RocksDB
-     *       under the consensus lock;</li>
-     *   <li>the peer-serving heavyweights {@code /sync}, {@code /headers} and
-     *       {@code /state/snapshot/chunk}: /sync and /headers run the same lock-guarded store
-     *       reads per block served, and all three amplify egress by up to hundreds of blocks (or
-     *       ~16 MiB) per request, so leaving them ungated let a flood of "peers" drive unbounded
-     *       lock-holding reads and outbound bandwidth at cost ~1 (audit: aggregate bound on the
-     *       sync/snapshot serving paths). Honest sync still fits the aggregate budget — it is
-     *       sized far above any plausible convergence traffic.</li>
-     *   <li>the box/token listings {@code /boxes} and {@code /tokens}, which fan a single request
-     *       into ~101 and ~201 lock-guarded store reads. They were outside this gate <em>and</em>
-     *       at the default cost of 1, so they escaped both bounds at once.</li>
-     * </ul>
-     *
-     * <p>Deliberately NOT here: {@code /scan/boxes} and {@code /logs}. Both are weighted, but
-     * {@code ChainEngine.scanBoxes} runs OUTSIDE the consensus lock behind the stamp seqlock, and
-     * {@code /logs} does per-height map/store reads rather than lock-guarded block decodes — this
-     * gate bounds lock contention specifically, not store I/O in general.
-     */
-    private static boolean isConsensusLockRead(HttpRequest request, String path) {
-        return RoutePolicy.guarded(RoutePolicy.lookup(request, path), RoutePolicy.Guard.READ_BUDGET);
-    }
-
-    /** True for a POST /submit — the block-ingest route whose body decode must be gated (audit S6). */
-    private static boolean isSubmitPost(HttpRequest request, String path) {
-        return request.getMethod() == POST && "/submit".equals(path);
-    }
-
-    /** True for a POST /add_transaction(JSON) — the tx-ingest routes gated like /submit (audit M1). */
-    private static boolean isAddTransactionPost(HttpRequest request, String path) {
-        return request.getMethod() == POST
-            && ("/add_transaction".equals(path) || "/add_transaction_json".equals(path));
-    }
-
-    /**
      * The state-changing/operator routes gated by {@code RHIZOME_API_TOKEN} when configured
      * (audit F4). The P2P protocol endpoints ({@code /sync}, {@code /headers}, {@code /blocks},
      * {@code /peers}, {@code /block_count}, {@code /total_work}) deliberately stay open so
@@ -932,11 +896,10 @@ public final class NodeApi {
      * identical for every client; the SPA's own fetches ({@code /stats}, {@code /blocks}, …) carry
      * the bearer and stay gated.
      *
-     * <p>An unroutable path ({@code path == null}) is gated under protectReads and ungated
+     * <p>An unroutable path ({@code route == null}) is gated under protectReads and ungated
      * otherwise, exactly as before: the router answers 400/404 for it either way.
      */
-    private static boolean isTokenProtectedRoute(HttpRequest request, String path, boolean protectReads) {
-        RoutePolicy.Route route = RoutePolicy.lookup(request, path);
+    private static boolean isTokenProtectedRoute(RoutePolicy.Route route, boolean protectReads) {
         if (protectReads) {
             // Private node: everything but the static shell, including a path that matches no
             // route (the router answers 404 for it either way).
@@ -956,16 +919,6 @@ public final class NodeApi {
         return java.security.MessageDigest.isEqual(
             header.substring("Bearer ".length()).getBytes(StandardCharsets.UTF_8),
             token.getBytes(StandardCharsets.UTF_8));
-    }
-
-    /**
-     * The P2P protocol surface: endpoints a peer's sync/PEX/gossip clients call. These fail open
-     * on the Host-allowlist check (audit F6) because peers legitimately send whatever Host (and
-     * no Origin) — gating them would break peering. Everything else (the browser-reachable data
-     * endpoints) is Host-checked when an allowlist is configured.
-     */
-    private static boolean isPeerProtocolRequest(HttpRequest request, String path) {
-        return RoutePolicy.guarded(RoutePolicy.lookup(request, path), RoutePolicy.Guard.PEER_PROTOCOL);
     }
 
     /**

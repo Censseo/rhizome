@@ -51,15 +51,50 @@ final class RoutePolicy {
          * themselves.
          */
         SPA_SHELL,
-        /** Exempt from the Host allowlist — peers legitimately send arbitrary Host headers. */
+        /**
+         * Exempt from the Host allowlist — peers legitimately send arbitrary Host headers. The
+         * P2P protocol surface: endpoints a peer's sync/PEX/gossip clients call. They fail open
+         * on the Host-allowlist check (audit F6) because peers send whatever Host (and no Origin)
+         * — gating them would break peering. Everything else (the browser-reachable data
+         * endpoints) is Host-checked when an allowlist is configured.
+         */
         PEER_PROTOCOL,
-        /** Charged against the process-wide consensus-lock read budget. */
+        /**
+         * Charged against the process-wide aggregate read budget (NodeService.tryReadBudget) so a
+         * distributed flood can't sum past the per-IP limiter and pin the event loop / contend
+         * the consensus lock (audit 5th-pass, net Finding 2). The family: the browser-facing
+         * explorer reads ({@code /stats}, {@code /blocks}, {@code /block}, {@code /transaction},
+         * {@code /address_txs}), which fully decode blocks from RocksDB under the consensus lock;
+         * the peer-serving heavyweights {@code /sync}, {@code /headers} and
+         * {@code /state/snapshot/chunk}, which run the same lock-guarded store reads per block
+         * served and amplify egress by up to hundreds of blocks (or ~16 MiB) per request; and the
+         * box/token listings {@code /boxes} and {@code /tokens}, which fan one request into ~101
+         * and ~201 lock-guarded store reads. Deliberately NOT here: {@code /scan/boxes} and
+         * {@code /logs} — the former runs OUTSIDE the consensus lock behind the stamp seqlock,
+         * the latter does per-height map/store reads rather than lock-guarded block decodes; this
+         * budget bounds lock contention specifically, not store I/O in general.
+         */
         READ_BUDGET,
-        /** Charged against the aggregate submit budget. */
+        /**
+         * Charged against the aggregate submit budget, consumed BEFORE the {@code /submit}
+         * handler decodes the block body: the decode (up to the block-size cap, ~25 000 tx
+         * allocations) and the memory-hard PoW hash it triggers both run on the event-loop
+         * thread, so a distributed flood must be shed before the decode (audit S6).
+         */
         SUBMIT_BUDGET,
-        /** Charged against the aggregate mempool-signature budget. */
+        /**
+         * Charged against the aggregate mempool-signature budget, consumed BEFORE the tx body is
+         * decoded — symmetric to the submit budget: the {@code /add_transaction} routes run one
+         * Ed25519 verify per admission on the event-loop thread and never cache invalid
+         * signatures, so a corrupt-signature flood must be shed at the gate (audit M1).
+         */
         MEMPOOL_BUDGET,
-        /** Subject to the push-abuse early shed. */
+        /**
+         * Subject to the push-abuse early shed: the two tx ingests plus {@code /submit}, refused
+         * BEFORE the token check and the body decode for the strike window of a client that kept
+         * feeding invalid blocks / corrupt-signature transactions (audit: gossip push ban-score).
+         * A per-client-key shed, never an aggregate gate, so honest peers are unaffected.
+         */
         PUSH_SHED,
     }
 
