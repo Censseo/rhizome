@@ -6,7 +6,8 @@ import java.util.Map;
 import rhizome.core.ledger.PublicAddress;
 
 /**
- * {@link HostState} backed by a {@link ContractStore}, scoped to one contract and
+ * {@link HostState} backed by a {@link ContractState} (the narrow point-access role of
+ * {@link ContractStore}), scoped to one contract and
  * one call. Writes are buffered in memory and only pushed to the store by
  * {@link #commit()}, which the executor calls on success — so a reverted or
  * out-of-gas call leaves persistent storage untouched (transactional execution).
