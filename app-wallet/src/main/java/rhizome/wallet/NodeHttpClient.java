@@ -1,4 +1,4 @@
-package rhizome.net;
+package rhizome.wallet;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -14,14 +14,18 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import rhizome.net.BodyReadDeadline;
+import rhizome.net.PeerAuth;
+import rhizome.net.PeerExchange;
+
 /**
- * Blocking JDK-client transport for a node's HTTP API, shared by CLI-side
- * consumers (the wallet, tools). Unlike {@link HttpPeerSource} — which speaks
- * the peer-sync protocol and treats transport failures as peer misbehaviour —
- * this client returns the node's response body as-is on any status code (the
- * API answers 4xx with a JSON status/error the caller wants to surface), and
- * every read is bounded so a hostile or broken endpoint can never hand back an
- * unbounded body.
+ * Blocking JDK-client transport for a node's HTTP API, used by the wallet CLI. Unlike
+ * {@code HttpPeerSource} — which speaks the peer-sync protocol and treats transport failures
+ * as peer misbehaviour — this client returns the node's response body as-is on any status
+ * code (the API answers 4xx with a JSON status/error the caller wants to surface), and
+ * every read is bounded so a hostile or broken endpoint can never hand back an unbounded
+ * body. The whole-exchange deadline and the bounded read come from lib-net's shared
+ * {@link BodyReadDeadline} / {@link PeerExchange} machinery.
  */
 public final class NodeHttpClient {
 
@@ -49,7 +53,7 @@ public final class NodeHttpClient {
     public NodeHttpClient(String baseUrl, String bearerToken) {
         this.baseUrl = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
         this.bearerToken = cleartextGuard(this.baseUrl, bearerToken);
-        this.http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
+        this.http = PeerExchange.newClient();
     }
 
     /**

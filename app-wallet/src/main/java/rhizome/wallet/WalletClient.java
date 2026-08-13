@@ -4,7 +4,6 @@ import org.json.JSONObject;
 
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.transaction.Transaction;
-import rhizome.net.NodeHttpClient;
 import rhizome.net.PeerJson;
 
 /** Talks to a node's HTTP API on the wallet's behalf (query state, submit transfers). */

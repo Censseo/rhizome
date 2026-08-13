@@ -12,13 +12,16 @@ import java.net.http.HttpRequest;
  *
  * <p>The token is a shared secret, never logged and never served back: it is only
  * ever written into the {@code Authorization} header of requests this node initiates.
+ *
+ * <p>Public because the CLI-side node client (in app-wallet) attaches the same bearer to its
+ * own requests; the peer-side users go through {@link PeerExchange#pinnedRequest}.
  */
-final class PeerAuth {
+public final class PeerAuth {
 
     private PeerAuth() {}
 
     /** Attaches {@code Authorization: Bearer <token>} to the builder when a token is configured. */
-    static HttpRequest.Builder withToken(HttpRequest.Builder builder, String token) {
+    public static HttpRequest.Builder withToken(HttpRequest.Builder builder, String token) {
         if (token != null && !token.isEmpty()) {
             builder.header("Authorization", "Bearer " + token);
         }

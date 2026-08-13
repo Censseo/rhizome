@@ -4,10 +4,13 @@ plugins {
 
 dependencies {
     implementation project(':lib-core')
-    // Node HTTP transport (NodeHttpClient) shared with the p2p layer.
+    // The node-API transport the wallet drives, plus lib-net's deadline/bounded-read machinery
+    // (BodyReadDeadline, PeerExchange) it is built on.
     implementation project(':lib-net')
 
     implementation "org.json:json:${jsonVersion}"
+    // NodeHttpClient logs the cleartext-token guards directly.
+    implementation "org.slf4j:slf4j-api:${slf4jVersion}"
 
     runtimeOnly "ch.qos.logback:logback-classic:${logbackVersion}"
 

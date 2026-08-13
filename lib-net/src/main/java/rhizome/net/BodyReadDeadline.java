@@ -26,8 +26,12 @@ import java.util.concurrent.atomic.AtomicReference;
  * the response stream the task published is closed, which cancels the underlying JDK exchange
  * and unblocks the worker. Deadline expiry is surfaced as an {@link IOException} so the
  * existing transport-failure handling applies unchanged.
+ *
+ * <p>Public because the CLI-side node client (in app-wallet) runs the same whole-exchange
+ * deadline over its own requests; the peer-side users are {@link HttpPeerSource},
+ * {@link PeerDiscovery} and {@link PeerBroadcaster}.
  */
-final class BodyReadDeadline {
+public final class BodyReadDeadline {
 
     private BodyReadDeadline() {}
 
@@ -64,7 +68,7 @@ final class BodyReadDeadline {
      * @throws BodyReadSaturatedException if the LOCAL worker pool is saturated (not a peer fault)
      * @throws InterruptedException if the CALLING thread is interrupted while waiting
      */
-    static <T> T call(Duration timeout, AtomicReference<AutoCloseable> openBody, Callable<T> exchange)
+    public static <T> T call(Duration timeout, AtomicReference<AutoCloseable> openBody, Callable<T> exchange)
             throws IOException, InterruptedException {
         Future<T> future = submit(exchange);
         try {
@@ -94,7 +98,7 @@ final class BodyReadDeadline {
      * @throws BodyReadSaturatedException if the LOCAL worker pool is saturated (not a peer fault)
      * @throws InterruptedException if the CALLING thread is interrupted while waiting
      */
-    static <T> T callIdle(Duration idleTimeout, AtomicReference<AutoCloseable> openBody,
+    public static <T> T callIdle(Duration idleTimeout, AtomicReference<AutoCloseable> openBody,
                           AtomicLong lastActivityNanos, Callable<T> exchange)
             throws IOException, InterruptedException {
         Future<T> future = submit(exchange);
