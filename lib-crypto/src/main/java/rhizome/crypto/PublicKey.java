@@ -14,7 +14,7 @@ import java.util.Optional;
 // canonical 32-byte encoding is memoised here (see encoded()) so equals/hashCode stop paying
 // an Ed25519PublicKeyParameters.getEncoded() clone per comparison (audit). The public surface
 // — constructor, key() accessor, factories — is unchanged from the record.
-public final class PublicKey implements SimpleHashType {
+public final class PublicKey {
 
     public static final int SIZE = 32;
 
@@ -97,11 +97,6 @@ public final class PublicKey implements SimpleHashType {
 
     public Ed25519PublicKeyParameters get() {
         return key.orElse(null);
-    }
-
-    @Override
-    public int getSize() {
-        return SIZE;
     }
 
     // Ed25519PublicKeyParameters implements neither equals nor hashCode, so compare the

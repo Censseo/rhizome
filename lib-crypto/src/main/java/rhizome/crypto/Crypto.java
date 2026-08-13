@@ -21,6 +21,18 @@ public class Crypto {
     /** One shared, thread-safe CSPRNG for key generation; avoids a reseed on every {@code new SecureRandom()}. */
     private static final SecureRandom KEYGEN_RNG = new SecureRandom();
 
+    /** {@code size} zero bytes — the canonical "empty" value for a fixed-width hash/address/key. */
+    public static byte[] emptyBytes(int size) {
+        return new byte[size];
+    }
+
+    /** {@code size} random bytes, off the shared CSPRNG above (not a fresh {@code SecureRandom} per call). */
+    public static byte[] randomBytes(int size) {
+        byte[] bytes = new byte[size];
+        KEYGEN_RNG.nextBytes(bytes);
+        return bytes;
+    }
+
     /**
      * Signs a raw digest. RESERVED for transaction hashes (consensus): it applies no domain
      * separation, so it must never be exposed as a general signing oracle over attacker-chosen

@@ -4,7 +4,7 @@ import java.util.Arrays;
 
 import static rhizome.crypto.Hex.hexStringToByteArray;
 
-public record RIPEMD160Hash(byte[] hash) implements SimpleHashType {
+public record RIPEMD160Hash(byte[] hash) {
 
     // Defensive copies on the way in AND out, exactly like SHA256Hash (audit): aliasing the
     // caller's array lets post-wrap mutation corrupt equals/hashCode of every map keyed on it.
@@ -18,11 +18,11 @@ public record RIPEMD160Hash(byte[] hash) implements SimpleHashType {
     }
 
     public static RIPEMD160Hash empty() {
-        return new RIPEMD160Hash(SimpleHashType.empty(SIZE));
+        return new RIPEMD160Hash(Crypto.emptyBytes(SIZE));
     }
 
     public static RIPEMD160Hash random() {
-        return new RIPEMD160Hash(SimpleHashType.random(SIZE));
+        return new RIPEMD160Hash(Crypto.randomBytes(SIZE));
     }
 
     public static RIPEMD160Hash of(byte[] bytes) {
@@ -54,12 +54,7 @@ public record RIPEMD160Hash(byte[] hash) implements SimpleHashType {
     }
 
     public static final int SIZE = 20;
-    @Override
-    public int getSize() {
-        return SIZE;
-    }
 
-    @Override
     public byte[] toBytes() {
         return hash.clone();
     }

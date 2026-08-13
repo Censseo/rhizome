@@ -7,7 +7,7 @@ import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters;
 import static rhizome.crypto.Hex.bytesToHex;
 import static rhizome.crypto.Hex.hexStringToByteArray;
 
-public record PrivateKey(Ed25519PrivateKeyParameters key) implements SimpleHashType {
+public record PrivateKey(Ed25519PrivateKeyParameters key) {
 
     public static PrivateKey of(byte[] bytes) {
         if (bytes == null || bytes.length != SIZE) {
@@ -66,10 +66,6 @@ public record PrivateKey(Ed25519PrivateKeyParameters key) implements SimpleHashT
     }
 
     public static final int SIZE = 32;
-    @Override
-    public int getSize() {
-        return SIZE;
-    }
 
     // Never leak key material into logs/stack traces: the record default would defer to
     // Ed25519PrivateKeyParameters.toString(), whose output is a library implementation detail

@@ -2,19 +2,19 @@ package rhizome.core.transaction;
 
 import java.util.Arrays;
 
-import rhizome.crypto.SimpleHashType;
+import rhizome.crypto.Crypto;
 
 import static rhizome.crypto.Hex.bytesToHex;
 import static rhizome.crypto.Hex.hexStringToByteArray;
 
-public record TransactionSignature(byte[] signature) implements SimpleHashType {
+public record TransactionSignature(byte[] signature) {
 
     public static TransactionSignature empty() {
-        return new TransactionSignature(SimpleHashType.empty(SIZE));
+        return new TransactionSignature(Crypto.emptyBytes(SIZE));
     }
 
     public static TransactionSignature random() {
-        return new TransactionSignature(SimpleHashType.random(SIZE));
+        return new TransactionSignature(Crypto.randomBytes(SIZE));
     }
 
     public static TransactionSignature of(byte[] bytes) {
@@ -47,8 +47,4 @@ public record TransactionSignature(byte[] signature) implements SimpleHashType {
     }
 
     public static final int SIZE = 64;
-    @Override
-    public int getSize() {
-        return SIZE;
-    }
 }

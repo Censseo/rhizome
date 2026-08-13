@@ -7,9 +7,9 @@ import java.util.Arrays;
 
 import org.bouncycastle.crypto.digests.RIPEMD160Digest;
 import org.bouncycastle.crypto.digests.SHA256Digest;
+import rhizome.crypto.Crypto;
 import rhizome.crypto.PublicKey;
 import rhizome.crypto.SignatureScheme;
-import rhizome.crypto.SimpleHashType;
 
 /**
  * A 25-byte address: {@code version(1) || body(20) || checksum(4)}.
@@ -23,9 +23,11 @@ import rhizome.crypto.SimpleHashType;
  * carry no meaningful version byte and no checksum, which is why checksum validation is a
  * capability callers opt into rather than a parse-time rule.
  */
-public record PublicAddress(byte[] address) implements SimpleHashType {
+public record PublicAddress(byte[] address) {
     public PublicAddress {
-        checkSize(address);
+        if (address.length != SIZE) {
+            throw new IllegalArgumentException("Invalid address size");
+        }
         // Own the array on the way IN, mirroring toBytes()'s defensive copy on the way OUT
         // (audit B-3): a caller retaining the passed reference could otherwise mutate this
         // address, silently corrupting equals/hashCode of every map keyed on it. The clone is
@@ -38,11 +40,11 @@ public record PublicAddress(byte[] address) implements SimpleHashType {
     }
 
     public static PublicAddress empty() {
-        return new PublicAddress(SimpleHashType.empty(SIZE));
+        return new PublicAddress(Crypto.emptyBytes(SIZE));
     }
 
     public static PublicAddress random() {
-        return new PublicAddress(SimpleHashType.random(SIZE));
+        return new PublicAddress(Crypto.randomBytes(SIZE));
     }
 
     /** Classical Ed25519 address: {@code 0x00 || RIPEMD160(SHA256(pubkey)) || checksum}. */
@@ -216,9 +218,4 @@ public record PublicAddress(byte[] address) implements SimpleHashType {
     private static final int BODY_SIZE = 20;
     /** Trailing checksum width — {@code SIZE == BODY_OFFSET + BODY_SIZE + CHECKSUM_SIZE}. */
     private static final int CHECKSUM_SIZE = 4;
-
-    @Override
-    public int getSize() {
-        return SIZE;
-    }
 }
