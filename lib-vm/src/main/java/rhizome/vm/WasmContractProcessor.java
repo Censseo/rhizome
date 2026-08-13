@@ -1,15 +1,13 @@
 package rhizome.vm;
 
 import java.util.List;
-import java.util.Map;
-import java.util.concurrent.ConcurrentNavigableMap;
-import java.util.concurrent.ConcurrentSkipListMap;
 
 import rhizome.core.blockchain.ContractProcessor;
 import rhizome.core.blockchain.ContractProcessor.ContractChange;
 import rhizome.core.blockchain.ContractProcessor.ContractLog;
 import rhizome.core.blockchain.Contracts;
 import rhizome.core.ledger.PublicAddress;
+import rhizome.core.state.HeightRetainedIndex;
 import rhizome.core.transaction.TransactionKind;
 
 /**
@@ -34,19 +32,19 @@ public final class WasmContractProcessor implements ContractProcessor {
     private List<ContractLog> currentLogs = new java.util.ArrayList<>();
 
     /**
-     * Undo journals of recently committed blocks, keyed by height, for reorg reversal.
-     * All four per-height maps are {@link ConcurrentSkipListMap}: keys are block heights, so
-     * ascending order IS the eviction order (oldest height first), and byte-budget eviction
-     * takes the victim via {@code pollFirstEntry()} in O(log n) instead of scanning
-     * {@code Collections.min(keySet())} per evicted height. Concurrent because reads
-     * ({@link #logs}/{@link #receipts}/{@link #changes} queries, incl. API threads off the
-     * engine lock) run lock-free while every mutation serializes on {@link #retentionLock} /
-     * {@link #logRetentionLock}.
+     * Per-height retention for reorg reversal, bounded by heights AND bytes — see
+     * {@link HeightRetainedIndex}, shared with the box and token processors. Four independent
+     * index instances, one per domain: byte accounting serializes on each index's own monitor,
+     * and reads ({@link #logs}/{@link #receipts}/{@link #changes} queries) run lock-free on the
+     * height-keyed maps inside. Mutating one domain never blocks another. Safe because every
+     * writer of these indexes runs under the engine lock and the only off-lock reader is
+     * {@code NodeService.logsAt} — a reader of {@link #logsByHeight} alone, so it contends with
+     * nothing the consensus path mutates concurrently.
      */
-    private final ConcurrentNavigableMap<Long, List<ContractUndo>> journals = new ConcurrentSkipListMap<>();
-    private final ConcurrentNavigableMap<Long, List<ContractReceipt>> receiptsByHeight = new ConcurrentSkipListMap<>();
-    private final ConcurrentNavigableMap<Long, List<ContractLog>> logsByHeight = new ConcurrentSkipListMap<>();
-    private final ConcurrentNavigableMap<Long, List<ContractChange>> changesByHeight = new ConcurrentSkipListMap<>();
+    private final HeightRetainedIndex<ContractUndo> journals;
+    private final HeightRetainedIndex<ContractReceipt> receiptsByHeight;
+    private final HeightRetainedIndex<ContractLog> logsByHeight;
+    private final HeightRetainedIndex<ContractChange> changesByHeight;
 
     /**
      * Bounds on the RAM {@link #logsByHeight} retains. Event logs are a best-effort query
@@ -58,11 +56,6 @@ public final class WasmContractProcessor implements ContractProcessor {
      */
     static final int MAX_LOGS_PER_HEIGHT = 4_096;
     static final long MAX_RETAINED_LOG_BYTES = 64L * 1024 * 1024;
-    private long retainedLogBytes;
-    /** Serializes every {@link #retainedLogBytes} mutation (retain/revert/prune) so the counter
-     *  never drifts from the map contents when these run on different threads. Reads stay
-     *  lock-free on the concurrent map. */
-    private final Object logRetentionLock = new Object();
 
     /**
      * Byte budgets on the RAM the per-height journals / receipts / forward-changes retain
@@ -82,12 +75,6 @@ public final class WasmContractProcessor implements ContractProcessor {
     static final long MAX_RETAINED_JOURNAL_BYTES = 64L * 1024 * 1024;
     static final long MAX_RETAINED_RECEIPT_BYTES = 16L * 1024 * 1024;
     static final long MAX_RETAINED_CHANGE_BYTES = 64L * 1024 * 1024;
-    private long retainedJournalBytes;
-    private long retainedReceiptBytes;
-    private long retainedChangeBytes;
-    /** Serializes every mutation of the three retention counters above (commit/revert/prune/
-     *  load-through/evict), exactly as {@link #logRetentionLock} does for logs. */
-    private final Object retentionLock = new Object();
 
     /**
      * Cadence of the amortized durable interval prune ({@code pruneThrough} range tombstones).
@@ -115,6 +102,14 @@ public final class WasmContractProcessor implements ContractProcessor {
         this.vm = vm;
         this.baseStore = baseStore;
         this.retainDepth = retainDepth;
+        this.journals = new HeightRetainedIndex<>(retainDepth, MAX_RETAINED_JOURNAL_BYTES,
+            WasmContractProcessor::journalBytes);
+        this.receiptsByHeight = new HeightRetainedIndex<>(retainDepth, MAX_RETAINED_RECEIPT_BYTES,
+            WasmContractProcessor::receiptBytes);
+        this.logsByHeight = new HeightRetainedIndex<>(retainDepth, MAX_RETAINED_LOG_BYTES,
+            WasmContractProcessor::logBytes);
+        this.changesByHeight = new HeightRetainedIndex<>(retainDepth, MAX_RETAINED_CHANGE_BYTES,
+            WasmContractProcessor::changeBytes);
     }
 
     /**
@@ -423,7 +418,7 @@ public final class WasmContractProcessor implements ContractProcessor {
                 encodedReceipts = null;
                 byte[] persisted = baseStore.getJournal(blockHeight);
                 if (persisted != null) {
-                    retainJournal(blockHeight, ContractJournalCodec.decode(persisted));
+                    journals.retain(blockHeight, ContractJournalCodec.decode(persisted));
                 }
             }
             if (!changes.isEmpty()) {
@@ -437,7 +432,10 @@ public final class WasmContractProcessor implements ContractProcessor {
             // overload).
             baseStore.putReceipts(blockHeight, encodedReceipts);
         }
-        retainReceipts(blockHeight, currentReceipts);
+        // Deliberately unconditional, unlike the box processor's isEmpty() guard: a receipt-free
+        // block still retains (and prunes, and reverts) an empty entry, byte-accounted at zero —
+        // preserving the exact call sequence the persistence tests pin.
+        receiptsByHeight.retain(blockHeight, currentReceipts);
         if (!currentLogs.isEmpty()) {
             retainLogs(blockHeight, currentLogs);
         }
@@ -459,9 +457,10 @@ public final class WasmContractProcessor implements ContractProcessor {
 
     @Override
     public List<ContractReceipt> receipts(long blockHeight) {
-        List<ContractReceipt> cached = receiptsByHeight.get(blockHeight);
-        if (cached != null) {
-            return cached;
+        // has(), not a null test: the index's get() returns List.of() on a miss, so a null
+        // check would treat an absent height as a cache hit and skip the durable fallback.
+        if (receiptsByHeight.has(blockHeight)) {
+            return receiptsByHeight.get(blockHeight);
         }
         // RAM miss (evicted past the byte budget, or this process restarted after the block
         // committed): fall back to the durable copy so a reorg can still reverse the block's
@@ -472,43 +471,28 @@ public final class WasmContractProcessor implements ContractProcessor {
             return List.of();
         }
         List<ContractReceipt> decoded = decodeReceipts(persisted);
-        retainReceipts(blockHeight, decoded);
+        receiptsByHeight.retain(blockHeight, decoded);
         return decoded;
     }
 
     @Override
     public List<ContractLog> logs(long blockHeight) {
-        return logsByHeight.getOrDefault(blockHeight, List.of());
+        return logsByHeight.get(blockHeight);
     }
 
     /**
      * Retains one height's logs under the {@link #MAX_LOGS_PER_HEIGHT} / {@link
      * #MAX_RETAINED_LOG_BYTES} budget, evicting the oldest heights (LRU by height) once the byte
-     * budget is exceeded. Logs are a best-effort service, not consensus, so truncation and
-     * eviction never affect validation. Package-private so tests can drive the retention path
-     * without executing 64 MiB of real logs.
+     * budget is exceeded. The per-height entry cap lives here — the shared index has no
+     * equivalent — and the index owns the byte budget and the eviction. Logs are a best-effort
+     * service, not consensus, so truncation and eviction never affect validation.
+     * Package-private so tests can drive the retention path without executing 64 MiB of real logs.
      */
     void retainLogs(long blockHeight, List<ContractLog> logs) {
         List<ContractLog> kept = logs.size() > MAX_LOGS_PER_HEIGHT
             ? List.copyOf(logs.subList(0, MAX_LOGS_PER_HEIGHT))
             : logs;
-        synchronized (logRetentionLock) {
-            // Replacing an existing height must net out the previous entry's bytes, or the
-            // counter double-counts and the byte budget drifts (audit follow-up).
-            List<ContractLog> previous = logsByHeight.put(blockHeight, kept);
-            if (previous != null) {
-                retainedLogBytes -= logBytes(previous);
-            }
-            retainedLogBytes += logBytes(kept);
-            while (retainedLogBytes > MAX_RETAINED_LOG_BYTES) {
-                // Oldest height first — the map is sorted by height, so the victim is the head.
-                Map.Entry<Long, List<ContractLog>> evicted = logsByHeight.pollFirstEntry();
-                if (evicted == null) {
-                    break;
-                }
-                retainedLogBytes -= logBytes(evicted.getValue());
-            }
-        }
+        logsByHeight.retain(blockHeight, kept);
     }
 
     /** Approximate retained size of one height's logs: address + topic + data per entry. */
@@ -521,70 +505,21 @@ public final class WasmContractProcessor implements ContractProcessor {
     }
 
     // ---- byte-budgeted retention for journals / receipts / changes (audit: RAM retention) ----
-    // Mirror of the log budget: a fixed byte cap per map, evicting the OLDEST heights past it.
-    // Eviction is RAM-only — the durable copies (journal/receipt hooks) are deleted solely by
-    // the height-scheduled prune, so every read path keeps its store-level fallback.
-
-    private void retainJournal(long blockHeight, List<ContractUndo> journal) {
-        synchronized (retentionLock) {
-            List<ContractUndo> previous = journals.put(blockHeight, journal);
-            if (previous != null) {
-                retainedJournalBytes -= journalBytes(previous);
-            }
-            retainedJournalBytes += journalBytes(journal);
-            while (retainedJournalBytes > MAX_RETAINED_JOURNAL_BYTES) {
-                Map.Entry<Long, List<ContractUndo>> evicted = journals.pollFirstEntry();
-                if (evicted == null) {
-                    break;
-                }
-                retainedJournalBytes -= journalBytes(evicted.getValue());
-            }
-        }
-    }
-
-    private void retainReceipts(long blockHeight, List<ContractReceipt> receipts) {
-        synchronized (retentionLock) {
-            List<ContractReceipt> previous = receiptsByHeight.put(blockHeight, receipts);
-            if (previous != null) {
-                retainedReceiptBytes -= receiptBytes(previous);
-            }
-            retainedReceiptBytes += receiptBytes(receipts);
-            while (retainedReceiptBytes > MAX_RETAINED_RECEIPT_BYTES) {
-                Map.Entry<Long, List<ContractReceipt>> evicted = receiptsByHeight.pollFirstEntry();
-                if (evicted == null) {
-                    break;
-                }
-                retainedReceiptBytes -= receiptBytes(evicted.getValue());
-            }
-        }
-    }
+    // The shared HeightRetainedIndex enforces a fixed byte cap per map, evicting the OLDEST
+    // heights past it. Eviction is RAM-only — the durable copies (journal/receipt hooks) are
+    // deleted solely by the height-scheduled prune, so every read path keeps its store-level
+    // fallback. The index never evicts the height being retained: the state-root collection
+    // reads it back immediately after commit.
 
     /**
      * Retains one height's forward changes under the {@link #MAX_RETAINED_CHANGE_BYTES} budget.
      * Package-private so tests can drive the retention path directly, like {@link #retainLogs}:
      * a block over the budget is unreachable through the VM (the block size limit and the gas
-     * schedule keep one block's changes under it), but the eviction loop must still never drop
-     * the height being retained — the state-root collection reads it back immediately.
+     * schedule keep one block's changes under it), but the index's eviction guard — the retained
+     * height is never its own victim — is consensus-critical and must stay assertable.
      */
     void retainChanges(long blockHeight, List<ContractChange> changes) {
-        synchronized (retentionLock) {
-            List<ContractChange> previous = changesByHeight.put(blockHeight, changes);
-            if (previous != null) {
-                retainedChangeBytes -= changeBytes(previous);
-            }
-            retainedChangeBytes += changeBytes(changes);
-            while (retainedChangeBytes > MAX_RETAINED_CHANGE_BYTES) {
-                // Peek before removing: pollFirstEntry() would evict the just-retained height
-                // itself when one block alone exceeds the budget, and the state-root collection
-                // would then read an empty contract domain — a consensus divergence.
-                Map.Entry<Long, List<ContractChange>> oldest = changesByHeight.firstEntry();
-                if (oldest == null || oldest.getKey() == blockHeight) {
-                    break;
-                }
-                changesByHeight.remove(oldest.getKey());
-                retainedChangeBytes -= changeBytes(oldest.getValue());
-            }
-        }
+        changesByHeight.retain(blockHeight, changes);
     }
 
     /** Approximate retained size of one height's journal: tag + address + key + prior per entry. */
@@ -621,31 +556,15 @@ public final class WasmContractProcessor implements ContractProcessor {
 
     @Override
     public List<ContractChange> changes(long blockHeight) {
-        return changesByHeight.getOrDefault(blockHeight, List.of());
+        return changesByHeight.get(blockHeight);
     }
 
     @Override
     public void revertBlock(long blockHeight) {
-        synchronized (retentionLock) {
-            List<ContractReceipt> removedReceipts = receiptsByHeight.remove(blockHeight);
-            if (removedReceipts != null) {
-                retainedReceiptBytes -= receiptBytes(removedReceipts);
-            }
-            List<ContractChange> removedChanges = changesByHeight.remove(blockHeight);
-            if (removedChanges != null) {
-                retainedChangeBytes -= changeBytes(removedChanges);
-            }
-            List<ContractUndo> removedJournals = journals.remove(blockHeight);
-            if (removedJournals != null) {
-                retainedJournalBytes -= journalBytes(removedJournals);
-            }
-        }
-        synchronized (logRetentionLock) {
-            List<ContractLog> removedLogs = logsByHeight.remove(blockHeight);
-            if (removedLogs != null) {
-                retainedLogBytes -= logBytes(removedLogs);
-            }
-        }
+        receiptsByHeight.forget(blockHeight);
+        changesByHeight.forget(blockHeight);
+        journals.forget(blockHeight);
+        logsByHeight.forget(blockHeight);
         // The STORE decodes its own journal and drops it, the receipts AND the restores as one
         // atomic unit (audit: who decodes the journal). The processor's RAM copy above is a
         // byte-budgeted cache only — the durable store always has the journal when the cache
@@ -738,51 +657,20 @@ public final class WasmContractProcessor implements ContractProcessor {
      */
     @Override
     public void pruneToChainTip(long chainTip) {
-        long cutoff = chainTip - retainDepth;
-        if (cutoff <= 0) {
-            return;
-        }
-        synchronized (retentionLock) {
-            journals.entrySet().removeIf(e -> {
-                if (e.getKey() <= cutoff) {
-                    baseStore.deleteJournal(e.getKey()); // drop the durable copy too
-                    retainedJournalBytes -= journalBytes(e.getValue());
-                    return true;
-                }
-                return false;
-            });
-            receiptsByHeight.entrySet().removeIf(e -> {
-                if (e.getKey() <= cutoff) {
-                    baseStore.deleteReceipts(e.getKey()); // receipts prune on the journal schedule (F3)
-                    retainedReceiptBytes -= receiptBytes(e.getValue());
-                    return true;
-                }
-                return false;
-            });
-            changesByHeight.entrySet().removeIf(e -> {
-                if (e.getKey() <= cutoff) {
-                    retainedChangeBytes -= changeBytes(e.getValue());
-                    return true;
-                }
-                return false;
-            });
-        }
-        synchronized (logRetentionLock) {
-            logsByHeight.entrySet().removeIf(e -> {
-                if (e.getKey() <= cutoff) {
-                    retainedLogBytes -= logBytes(e.getValue());
-                    return true;
-                }
-                return false;
-            });
-        }
+        // headMap(cutoff, true) instead of a full-map removeIf: the index's key order makes the
+        // expired prefix the head, so the prune visits only the heights it drops.
+        journals.pruneThrough(chainTip, baseStore::deleteJournal); // drop the durable copy too
+        receiptsByHeight.pruneThrough(chainTip, baseStore::deleteReceipts); // receipts prune on the journal schedule (F3)
+        changesByHeight.pruneThrough(chainTip, null);
+        logsByHeight.pruneThrough(chainTip, null);
         // Interval prune of the durable rows, AMORTIZED to every PRUNE_INTERVAL commits: the
         // per-height deletes above only reach heights still present in the RAM maps, which are
         // EMPTY after a restart — without an interval prune, every journal/receipt written
         // before it would stay on disk forever. The deleteRange fsync is not worth paying per
         // block for that rare backlog (audit perf); the reorg window is covered exactly by the
         // per-height deletes, and this prune only ever lags it.
-        if (cutoff - lastIntervalPruneCutoff >= PRUNE_INTERVAL) {
+        long cutoff = chainTip - retainDepth;
+        if (cutoff > 0 && cutoff - lastIntervalPruneCutoff >= PRUNE_INTERVAL) {
             baseStore.pruneThrough(cutoff);
             lastIntervalPruneCutoff = cutoff;
         }
