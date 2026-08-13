@@ -128,13 +128,20 @@ public final class HeightRetainedIndex<T> {
         expired.clear();
     }
 
-    /** Retained payload size, for tests and diagnostics. */
-    synchronized long retainedBytes() {
+    /**
+     * Retained payload size, for tests and diagnostics. Public because the VM tests in
+     * {@code lib-vm} assert on it across the module boundary (the only module that cannot
+     * see package-private members of this package).
+     */
+    public synchronized long retainedBytes() {
         return retainedBytes;
     }
 
-    /** Retained height count, for tests and diagnostics. */
-    int retainedHeights() {
+    /**
+     * Retained height count, for tests and diagnostics — public for the same reason as
+     * {@link #retainedBytes()}.
+     */
+    public int retainedHeights() {
         return byHeight.size();
     }
 }

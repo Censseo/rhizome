@@ -497,22 +497,22 @@ public final class WasmContractProcessor implements ContractProcessor {
             // counter double-counts and the byte budget drifts (audit follow-up).
             List<ContractLog> previous = logsByHeight.put(blockHeight, kept);
             if (previous != null) {
-                retainedLogBytes -= retainedBytes(previous);
+                retainedLogBytes -= logBytes(previous);
             }
-            retainedLogBytes += retainedBytes(kept);
+            retainedLogBytes += logBytes(kept);
             while (retainedLogBytes > MAX_RETAINED_LOG_BYTES) {
                 // Oldest height first — the map is sorted by height, so the victim is the head.
                 Map.Entry<Long, List<ContractLog>> evicted = logsByHeight.pollFirstEntry();
                 if (evicted == null) {
                     break;
                 }
-                retainedLogBytes -= retainedBytes(evicted.getValue());
+                retainedLogBytes -= logBytes(evicted.getValue());
             }
         }
     }
 
     /** Approximate retained size of one height's logs: address + topic + data per entry. */
-    private static long retainedBytes(List<ContractLog> logs) {
+    private static long logBytes(List<ContractLog> logs) {
         long bytes = 0;
         for (ContractLog log : logs) {
             bytes += PublicAddress.SIZE + log.topic().length + log.data().length;
@@ -643,7 +643,7 @@ public final class WasmContractProcessor implements ContractProcessor {
         synchronized (logRetentionLock) {
             List<ContractLog> removedLogs = logsByHeight.remove(blockHeight);
             if (removedLogs != null) {
-                retainedLogBytes -= retainedBytes(removedLogs);
+                retainedLogBytes -= logBytes(removedLogs);
             }
         }
         // The STORE decodes its own journal and drops it, the receipts AND the restores as one
@@ -770,7 +770,7 @@ public final class WasmContractProcessor implements ContractProcessor {
         synchronized (logRetentionLock) {
             logsByHeight.entrySet().removeIf(e -> {
                 if (e.getKey() <= cutoff) {
-                    retainedLogBytes -= retainedBytes(e.getValue());
+                    retainedLogBytes -= logBytes(e.getValue());
                     return true;
                 }
                 return false;
