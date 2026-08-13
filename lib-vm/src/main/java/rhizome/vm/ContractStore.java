@@ -80,26 +80,34 @@ public interface ContractStore extends ContractState, ContractSnapshotStore, Con
     }
 
     /**
-     * Reverts one block: applies {@code restores} (the block's undo journal turned back into
-     * mutations — each entry's <em>prior</em> value, or a delete where the key did not exist
-     * before the block), drops the persisted journal at {@code height}, AND drops the block's
-     * persisted receipts, as a single atomic unit where the store supports it.
+     * Reverts one block: reads the block's persisted undo journal at {@code height} and applies
+     * it back — the store decodes its own journal, exactly like {@code BoxStore} and {@code
+     * TokenStore} do, rather than requiring the caller to have turned it into mutations already
+     * (audit: who decodes the journal). The revert restores every prior value (a null prior is a
+     * delete), drops the persisted journal, AND drops the block's persisted receipts, as a single
+     * atomic unit where the store supports it.
      *
-     * <p>{@code restores} must already be in final application order (the caller applies its
-     * journal in reverse, so that repeated writes to the same key restore the earliest prior).
-     * An empty list still drops the journal and receipts: a receipts-carrying block can have
-     * no journal (e.g. a reverting CALL that touched no storage).
+     * <p>A missing journal still drops the journal and receipts: a receipts-carrying block can
+     * have no journal (e.g. a reverting CALL that touched no storage). The receipts MUST travel
+     * in the same unit as the restores: deleted separately and first, a crash between the two
+     * writes left the journal present but the receipts gone, so the rollback guard aborted every
+     * subsequent reorg attempt and wedged the node on its fork (audit: revert-path tear).
      *
-     * <p>The receipts MUST travel in the same unit as the restores: deleted separately and
-     * first, a crash between the two writes left the journal present but the receipts gone, so
-     * the rollback guard aborted every subsequent reorg attempt and wedged the node on its
-     * fork (audit: revert-path tear).
-     *
-     * <p>The default implementation loops the per-operation methods, then
-     * {@link #deleteJournal}, then {@link #deleteReceipts} — correct, just not atomic.
+     * <p>The default implementation reads the journal, decodes it via
+     * {@link ContractJournalCodec}, loops the per-operation methods, then {@link #deleteJournal},
+     * then {@link #deleteReceipts} — correct, just not atomic.
      */
-    default void revertBlock(long height, java.util.List<StorageChange> restores) {
-        for (StorageChange restore : restores) {
+    default void revertBlock(long height) {
+        byte[] journal = getJournal(height);
+        boolean hasReceipts = getReceipts(height) != null;
+        if (journal == null && !hasReceipts) {
+            // Nothing committed at this height (e.g. a transfer-only block): the revert is a
+            // strict no-op, not an empty atomic unit. Boot recovery replays reverts over heights
+            // that may have nothing, and an empty write here is pure cost (audit: empty reverts).
+            return;
+        }
+        for (StorageChange restore : journal == null ? java.util.List.<StorageChange>of()
+                : ContractJournalCodec.restores(journal)) {
             restore.applyTo(this);
         }
         deleteJournal(height);

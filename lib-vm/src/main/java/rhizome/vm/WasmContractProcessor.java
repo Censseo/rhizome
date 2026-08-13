@@ -412,7 +412,7 @@ public final class WasmContractProcessor implements ContractProcessor {
             // block carries neither mutations nor receipts — an empty synced batch is a wasted
             // fsync. A receipts-only block (e.g. a reverting CALL) still rides applyBlock with a
             // null journal, so the receipts stay in the one atomic batch.
-            byte[] encodedJournal = journal.isEmpty() ? null : encodeJournal(journal);
+            byte[] encodedJournal = journal.isEmpty() ? null : ContractJournalCodec.encode(journal);
             if (encodedJournal != null) {
                 retainJournal(blockHeight, journal);
             }
@@ -614,7 +614,6 @@ public final class WasmContractProcessor implements ContractProcessor {
 
     @Override
     public void revertBlock(long blockHeight) {
-        List<ContractUndo> journal;
         synchronized (retentionLock) {
             List<ContractReceipt> removedReceipts = receiptsByHeight.remove(blockHeight);
             if (removedReceipts != null) {
@@ -624,9 +623,9 @@ public final class WasmContractProcessor implements ContractProcessor {
             if (removedChanges != null) {
                 retainedChangeBytes -= changeBytes(removedChanges);
             }
-            journal = journals.remove(blockHeight);
-            if (journal != null) {
-                retainedJournalBytes -= journalBytes(journal);
+            List<ContractUndo> removedJournals = journals.remove(blockHeight);
+            if (removedJournals != null) {
+                retainedJournalBytes -= journalBytes(removedJournals);
             }
         }
         synchronized (logRetentionLock) {
@@ -635,52 +634,18 @@ public final class WasmContractProcessor implements ContractProcessor {
                 retainedLogBytes -= retainedBytes(removedLogs);
             }
         }
-        if (journal == null) {
-            // Not in memory (evicted past the byte budget, or this process restarted after the
-            // block committed): fall back to the durable journal so the reorg can still be
-            // reversed exactly (audit M9).
-            byte[] persisted = baseStore.getJournal(blockHeight);
-            if (persisted == null) {
-                if (baseStore.getReceipts(blockHeight) == null) {
-                    return; // nothing committed for this height (e.g. a transfer-only block)
-                }
-                // Receipts without a journal: a receipts-only block (a reverting CALL that
-                // touched no storage). Drop them through the same atomic revert unit.
-            } else {
-                journal = decodeJournal(persisted);
-            }
-        }
-        // Map the journal back to restore mutations — a null prior means the key did not exist
-        // before the block, so the restore is a delete — applied in reverse so repeated writes to
-        // the same key restore the earliest prior. The restores, the journal drop AND the receipts
-        // drop commit as one atomic unit where the store supports it (audit store F1, revert tear):
-        // deleting the receipts separately and first let a crash strand the journal without the
-        // receipts, which wedged every later reorg attempt on the rollback guard.
-        List<StorageChange> restores = new java.util.ArrayList<>(journal == null ? 0 : journal.size());
-        if (journal != null) {
-            for (int i = journal.size() - 1; i >= 0; i--) {
-                ContractUndo u = journal.get(i);
-                if (u.isCode()) {
-                    restores.add(u.prior() == null
-                        ? StorageChange.deleteCode(u.contract())
-                        : StorageChange.putCode(u.contract(), u.prior()));
-                } else {
-                    restores.add(u.prior() == null
-                        ? StorageChange.deleteStorage(u.contract(), u.key())
-                        : StorageChange.putStorage(u.contract(), u.key(), u.prior()));
-                }
-            }
-        }
-        baseStore.revertBlock(blockHeight, restores);
+        // The STORE decodes its own journal and drops it, the receipts AND the restores as one
+        // atomic unit (audit: who decodes the journal). The processor's RAM copy above is a
+        // byte-budgeted cache only — the durable store always has the journal when the cache
+        // does (both are pruned by the same height schedule), so delegating the revert is safe
+        // even after an eviction or a restart (audit M9).
+        baseStore.revertBlock(blockHeight);
     }
 
     // ---- persistent journal codec (audit M9) ----
-    // Layout: count(4) then per entry: isCode(1) | contract(25) | keyLen(4,-1=null) | key
-    //         | priorLen(4,-1=null) | prior.
-
-    /** Smallest possible serialized journal entry: isCode(1) + address(25) + keyLen(4) + priorLen(4). */
-    private static final int MIN_JOURNAL_RECORD_BYTES = 1 + rhizome.core.ledger.PublicAddress.SIZE
-        + Integer.BYTES + Integer.BYTES;
+    // The journal's wire format lives in ContractJournalCodec: the processor ENCODES what the
+    // sessions produce, and every store DECODES the same bytes on revert — one codec, one
+    // layout, so a journal written by this processor is reversible by any store.
 
     /** Smallest possible serialized receipt: gasUsed(8) + success(1) + transferCount(4). */
     private static final int MIN_RECEIPT_RECORD_BYTES = Long.BYTES + 1 + Integer.BYTES;
@@ -688,71 +653,6 @@ public final class WasmContractProcessor implements ContractProcessor {
     /** Smallest possible serialized transfer: from(25) + to(25) + amount(8). */
     private static final int MIN_TRANSFER_RECORD_BYTES =
         2 * rhizome.core.ledger.PublicAddress.SIZE + Long.BYTES;
-
-    private static byte[] encodeJournal(List<ContractUndo> journal) {
-        int size = Integer.BYTES;
-        for (ContractUndo u : journal) {
-            size += 1 + rhizome.core.ledger.PublicAddress.SIZE + Integer.BYTES
-                + (u.key() == null ? 0 : u.key().length) + Integer.BYTES
-                + (u.prior() == null ? 0 : u.prior().length);
-        }
-        java.nio.ByteBuffer b = java.nio.ByteBuffer.allocate(size);
-        b.putInt(journal.size());
-        for (ContractUndo u : journal) {
-            b.put((byte) (u.isCode() ? 1 : 0));
-            b.put(u.contract().toBytes());
-            putNullable(b, u.key());
-            putNullable(b, u.prior());
-        }
-        return b.array();
-    }
-
-    static List<ContractUndo> decodeJournal(byte[] bytes) {
-        java.nio.ByteBuffer b = java.nio.ByteBuffer.wrap(bytes);
-        int count = b.getInt();
-        // Bound count by the bytes actually present BEFORE pre-dimensioning: count is read from
-        // the store, and a corrupt/truncated buffer must fail cleanly, not pre-allocate a
-        // multi-GB list (audit: unbounded decode allocations).
-        if (count < 0 || count > b.remaining() / MIN_JOURNAL_RECORD_BYTES) {
-            throw new IllegalArgumentException("corrupt journal: count " + count
-                + " exceeds buffer (" + b.remaining() + " bytes)");
-        }
-        List<ContractUndo> journal = new java.util.ArrayList<>(count);
-        for (int i = 0; i < count; i++) {
-            boolean isCode = b.get() != 0;
-            byte[] addr = new byte[rhizome.core.ledger.PublicAddress.SIZE];
-            b.get(addr);
-            byte[] key = getNullable(b);
-            byte[] prior = getNullable(b);
-            journal.add(new ContractUndo(isCode, rhizome.core.ledger.PublicAddress.of(addr), key, prior));
-        }
-        return journal;
-    }
-
-    private static void putNullable(java.nio.ByteBuffer b, byte[] value) {
-        if (value == null) {
-            b.putInt(-1);
-        } else {
-            b.putInt(value.length);
-            b.put(value);
-        }
-    }
-
-    private static byte[] getNullable(java.nio.ByteBuffer b) {
-        int len = b.getInt();
-        if (len < 0) {
-            return null;
-        }
-        // Never allocate past what the buffer actually holds: len comes from the store, so a
-        // corrupt record must fail cleanly instead of allocating gigabytes (audit F5-class).
-        if (len > b.remaining()) {
-            throw new IllegalArgumentException("corrupt buffer: length " + len
-                + " exceeds remaining " + b.remaining());
-        }
-        byte[] out = new byte[len];
-        b.get(out);
-        return out;
-    }
 
     // ---- persistent receipt codec (audit F3) ----
     // Fixed, compact record per receipt, in the journal codec's style:

@@ -12,8 +12,10 @@ import org.junit.jupiter.api.io.TempDir;
 
 import rhizome.core.ledger.PublicAddress;
 import rhizome.persistence.rocksdb.RocksDbContractStore;
+import rhizome.vm.ContractJournalCodec;
 import rhizome.vm.ContractStore;
 import rhizome.vm.ContractStoreContract;
+import rhizome.vm.ContractUndo;
 import rhizome.vm.StorageChange;
 
 /**
@@ -100,16 +102,18 @@ class RocksDbContractStoreTest implements ContractStoreContract {
     void receiptsSurviveReopenAndAreDroppedByRevert() throws Exception {
         PublicAddress contract = PublicAddress.random();
         byte[] key = {0};
+        byte[] journal = ContractJournalCodec.encode(List.of(
+            new ContractUndo(false, contract, key, new byte[] {1})));
         try (var store = new RocksDbContractStore(dir.toString())) {
             store.putStorage(contract, key, new byte[] {1});
             store.applyBlock(10, List.of(StorageChange.putStorage(contract, key, new byte[] {2})),
-                new byte[] {9}, new byte[] {7, 7, 7});
+                journal, new byte[] {7, 7, 7});
         }
         // The block's journal AND receipts are on disk, not in memory.
         try (var store = new RocksDbContractStore(dir.toString())) {
             org.junit.jupiter.api.Assertions.assertArrayEquals(new byte[] {7, 7, 7}, store.getReceipts(10));
-            org.junit.jupiter.api.Assertions.assertArrayEquals(new byte[] {9}, store.getJournal(10));
-            store.revertBlock(10, List.of(StorageChange.putStorage(contract, key, new byte[] {1})));
+            org.junit.jupiter.api.Assertions.assertArrayEquals(journal, store.getJournal(10));
+            store.revertBlock(10); // the store decodes its own journal
         }
         // The revert's drops are durable too.
         try (var store = new RocksDbContractStore(dir.toString())) {

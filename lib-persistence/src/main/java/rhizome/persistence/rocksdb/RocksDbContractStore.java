@@ -11,6 +11,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import rhizome.core.ledger.PublicAddress;
+import rhizome.vm.ContractJournalCodec;
 import rhizome.vm.ContractStore;
 import rhizome.vm.StorageChange;
 
@@ -186,14 +187,24 @@ public final class RocksDbContractStore extends RocksDbStore implements Contract
     }
 
     @Override
-    public void revertBlock(long height, List<StorageChange> restores) {
-        // The restores, the journal drop AND the receipts drop commit as one atomic unit
-        // (audit F1). The receipts must ride this batch: deleted separately and first, a crash
-        // between the two writes left the journal present but the receipts gone, and the
-        // rollback guard then aborted every reorg retry — the node wedged on its fork.
+    public void revertBlock(long height) {
+        // The restores (decoded from the store's OWN journal — see ContractStore.revertBlock),
+        // the journal drop AND the receipts drop commit as one atomic unit (audit F1). The
+        // receipts must ride this batch: deleted separately and first, a crash between the two
+        // writes left the journal present but the receipts gone, and the rollback guard then
+        // aborted every reorg retry — the node wedged on its fork.
+        byte[] journal = raw(journalCf, heightKey(height));
+        byte[] encodedReceipts = raw(receiptsCf, heightKey(height));
+        if (journal == null && encodedReceipts == null) {
+            // Nothing committed at this height: strict no-op, no empty synced batch. Boot
+            // recovery replays reverts over heights that may have nothing (audit: empty reverts).
+            return;
+        }
         try (WriteBatch batch = new WriteBatch()) {
-            for (StorageChange restore : restores) {
-                stage(batch, restore);
+            if (journal != null) {
+                for (StorageChange restore : ContractJournalCodec.restores(journal)) {
+                    stage(batch, restore);
+                }
             }
             batch.delete(journalCf, heightKey(height));
             batch.delete(receiptsCf, heightKey(height));
