@@ -260,7 +260,10 @@ public final class Executor {
             }
             // Consensus fee floor — the SAME rule MemPool.addTransaction applies at admission,
             // promoted into validation from consensusV2Height on (audit: fee floor was
-            // mempool-only). Without it a miner
+            // mempool-only). The rule itself is one expression, shared with the mempool —
+            // {@link FeePolicy#underMinFee}; only the activation gate differs (the mempool
+            // applies the floor unconditionally, which is the stricter, safe direction).
+            // Without the consensus copy a miner
             // could include zero-fee transfers the relay policy refuses: amount 0 + fee 0 minted
             // a permanent ledger entry per transfer (deposit created the recipient wallet), and
             // gasPrice-0 calls ran compute no honest node was paid for. The rule is identical to
@@ -270,9 +273,7 @@ public final class Executor {
             // fee 0 by the payload rule above. Networks keep the floor at 0 to disable it.
             // Below consensusV2Height the legacy rule applies: no consensus floor at all, so
             // blocks already accepted with under-floor fees re-verify unchanged.
-            if (consensusV2 && params.minFee() > 0
-                && tx.kind() != rhizome.core.transaction.TransactionKind.BOX_COLLECT
-                && minerRevenue(tx) < params.minFee()) {
+            if (consensusV2 && FeePolicy.underMinFee(params, tx)) {
                 return TRANSACTION_FEE_TOO_LOW;
             }
             SHA256Hash id = t.hashContents();
@@ -401,24 +402,6 @@ public final class Executor {
                 fatal.addSuppressed(cleanupFailure);
             }
             throw fatal;
-        }
-    }
-
-    /**
-     * The revenue a miner earns from {@code tx}: the plain fee for value/box/token ops; for a
-     * contract call the fee plus its declared gas budget ({@code gasLimit × gasPrice}, saturating)
-     * — the same upper bound the mempool uses for its admission floor, so the consensus fee floor
-     * above accepts exactly what the relay policy admits. Deterministic at block-assembly time,
-     * when gasUsed is still unknown.
-     */
-    private static long minerRevenue(Transaction tx) {
-        if (!tx.kind().isContract()) {
-            return tx.fee().amount();
-        }
-        try {
-            return Math.addExact(tx.fee().amount(), Math.multiplyExact(tx.gasLimit(), tx.gasPrice()));
-        } catch (ArithmeticException overflow) {
-            return Long.MAX_VALUE;
         }
     }
 

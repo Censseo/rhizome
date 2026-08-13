@@ -11,6 +11,7 @@ import java.util.TreeMap;
 import java.util.concurrent.locks.ReentrantLock;
 
 import rhizome.core.block.Block;
+import rhizome.core.blockchain.FeePolicy;
 import rhizome.core.blockchain.NetworkParameters;
 import rhizome.core.blockchain.SignatureVerifier;
 import rhizome.crypto.SHA256Hash;
@@ -157,11 +158,15 @@ public final class MemPool {
         }
         // Optional minimum-fee floor (0 = disabled, the default on testnet), so an operator can
         // refuse free transactions at admission rather than have the pool fill with zero-fee spam
-        // (audit L5). Contract calls pay through gas, not the fee field, so their declared gas
+        // (audit L5). The rule itself is one expression, shared with the executor —
+        // FeePolicy.underMinFee, the consensus copy gated on consensusV2Height; the pool applies
+        // it unconditionally, which is the stricter, safe direction below the activation (a
+        // pooled under-floor transaction would poison every candidate block once it lands).
+        // Contract calls pay through gas, not the fee field, so their declared gas
         // budget counts toward the floor — its full value is already locked by the cumulative
         // balance check below, and their realized revenue is bounded below by the intrinsic CALL
         // gas charge, so a zero-fee, zero-gasPrice call can never sneak past a positive floor.
-        if (params.minFee() > 0 && minerRevenue(tx) < params.minFee()) {
+        if (FeePolicy.underMinFee(params, tx)) {
             return TRANSACTION_FEE_TOO_LOW;
         }
         if (tx.kind().isContract() && (tx.gasLimit() < 0 || tx.gasPrice() < 0)) {
@@ -234,21 +239,21 @@ public final class MemPool {
             if (pending != null && (replaced = pending.get(tx.nonce())) != null) {
                 // Replace-by-fee (RBF_MIN_BUMP_PERCENT): a LIVE pooled transaction (in the sender's
                 // contiguous, currently-minable nonce run) may be replaced by one paying strictly
-                // more TO THE MINER — compared on minerRevenue (fee + declared gas budget for
-                // calls), the same metric as the admission floor, so a CALL cannot be "replaced"
-                // by a tx with a higher plain fee but lower actual revenue (audit follow-up).
-                // Without a bump rule a sender whose fee became uncompetitive could never raise
-                // it (its only resubmit was rejected as a duplicate), and a free replacement
-                // would let anyone churn slots. A PARKED transaction is never replaced here —
-                // it expires by TTL or yields to the capacity eviction instead.
-                long oldRevenue = minerRevenue(replaced);
+                // more TO THE MINER — compared on FeePolicy.minerRevenue (fee + declared gas
+                // budget for calls), the same metric as the admission floor, so a CALL cannot be
+                // "replaced" by a tx with a higher plain fee but lower actual revenue (audit
+                // follow-up). Without a bump rule a sender whose fee became uncompetitive could
+                // never raise it (its only resubmit was rejected as a duplicate), and a free
+                // replacement would let anyone churn slots. A PARKED transaction is never
+                // replaced here — it expires by TTL or yields to the capacity eviction instead.
+                long oldRevenue = FeePolicy.minerRevenue(replaced);
                 long required;
                 try {
                     required = Math.addExact(oldRevenue, Math.max(1, oldRevenue / RBF_MIN_BUMP_PERCENT));
                 } catch (ArithmeticException overflow) {
                     return TRANSACTION_FEE_TOO_LOW; // an astronomical old revenue cannot be bumped
                 }
-                if (minerRevenue(tx) < required || !isLive(pending, confirmedNonce, tx.nonce())) {
+                if (FeePolicy.minerRevenue(tx) < required || !isLive(pending, confirmedNonce, tx.nonce())) {
                     return INVALID_TRANSACTION_NONCE; // duplicate nonce without a sufficient bump
                 }
             }
@@ -364,36 +369,18 @@ public final class MemPool {
     }
 
     /**
-     * The revenue a miner can earn from {@code tx}: the plain fee for value/box/token ops; for a
-     * contract call the fee plus its declared gas budget ({@code gasLimit × gasPrice}, saturating)
-     * — an upper bound on the realized {@code gasUsed × gasPrice}, deterministic at assembly time
-     * when gasUsed is still unknown. Used for the minFee admission floor and the RBF bump
-     * (audit M9) — NOT for selection ordering, see {@link #priorityRate}.
-     */
-    private static long minerRevenue(Transaction tx) {
-        if (!tx.kind().isContract()) {
-            return tx.fee().amount();
-        }
-        try {
-            return Math.addExact(tx.fee().amount(), Math.multiplyExact(tx.gasLimit(), tx.gasPrice()));
-        } catch (ArithmeticException overflow) {
-            return Long.MAX_VALUE;
-        }
-    }
-
-    /**
      * Selection priority: miner revenue per unit of declared block weight — {@code gasLimit}
      * for a contract call, 1 for a fixed-cost op (so its priority is simply its fee). Ordering
-     * on raw {@link #minerRevenue} let a transaction buy the front of every block with gas it
-     * never pays: a CALL that reverts immediately is charged only {@code gasUsed × gasPrice}
-     * (CALL_BASE) but could declare up to maxBlockGas, outranking all honest traffic for the
-     * cost of a temporarily locked balance. Bitcoin/Ethereum order by a rate (sat/vB, gas
-     * price) for exactly this reason. {@code minerRevenue} stays the metric for the admission
-     * floor and RBF, where the total locked value is what matters.
+     * on raw {@link FeePolicy#minerRevenue} let a transaction buy the front of every block with
+     * gas it never pays: a CALL that reverts immediately is charged only {@code gasUsed ×
+     * gasPrice} (CALL_BASE) but could declare up to maxBlockGas, outranking all honest traffic
+     * for the cost of a temporarily locked balance. Bitcoin/Ethereum order by a rate (sat/vB,
+     * gas price) for exactly this reason. {@code FeePolicy.minerRevenue} stays the metric for
+     * the admission floor and RBF, where the total locked value is what matters.
      */
     private static long priorityRate(Transaction tx) {
         long weight = tx.kind().isContract() ? Math.max(1L, tx.gasLimit()) : 1L;
-        return minerRevenue(tx) / weight;
+        return FeePolicy.minerRevenue(tx) / weight;
     }
 
     /**
