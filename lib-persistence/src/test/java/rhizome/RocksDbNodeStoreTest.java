@@ -156,7 +156,10 @@ class RocksDbNodeStoreTest implements ChainStoreContract, NonceStoreContract, Le
             PublicAddress sender = PublicAddress.of(key);
             snapshot.put(sender, new TransactionAmount(1_000_000L));
 
-            ChainEngine engine = ChainEngine.init(params, ledger, chain, snapshot, null, clock::get);
+            // Via NodeStores (store implements it): ledger/chain/nonceStore are the SAME memoized
+            // instances the local variables above already hold, so this is not a second database.
+            ChainEngine engine = ChainEngine.init(params, store, snapshot, null, clock::get,
+                null, null, null, null, null);
             PublicAddress recipient = PublicAddress.random();
             PublicAddress miner = PublicAddress.random();
 
@@ -189,8 +192,9 @@ class RocksDbNodeStoreTest implements ChainStoreContract, NonceStoreContract, Le
         PublicAddress miner = PublicAddress.random();
         Block uncle;
         try (RocksDbNodeStore store = new RocksDbNodeStore(path)) {
-            ChainEngine engine = ChainEngine.init(params, store.ledger(), store.chainStore(),
-                new LedgerSnapshot("test", 0, params.chainId()), null, clock::get);
+            ChainEngine engine = ChainEngine.init(params, store,
+                new LedgerSnapshot("test", 0, params.chainId()), null, clock::get,
+                null, null, null, null, null);
             uncle = mine(engine, params, miner, List.of(), clock);
             store.chainStore().putUncle(uncle.hash(), uncle);
             Block back = store.chainStore().uncleAt(uncle.hash());
@@ -225,7 +229,8 @@ class RocksDbNodeStoreTest implements ChainStoreContract, NonceStoreContract, Le
         rhizome.crypto.SHA256Hash tipAfter;
 
         try (RocksDbNodeStore store = new RocksDbNodeStore(path)) {
-            ChainEngine engine = ChainEngine.init(params, store.ledger(), store.chainStore(), snapshot, null, clock::get);
+            ChainEngine engine = ChainEngine.init(params, store, snapshot, null, clock::get,
+                null, null, null, null, null);
             Transaction send = Transaction.of(sender, PublicAddress.random(), new TransactionAmount(100_000),
                 key, new TransactionAmount(0), clock.get(), params.chainId(), 0);
             send.sign(priv);
@@ -236,7 +241,8 @@ class RocksDbNodeStoreTest implements ChainStoreContract, NonceStoreContract, Le
 
         // Reopen: derived state (height, tip, work, nonces) must rebuild from disk.
         try (RocksDbNodeStore store = new RocksDbNodeStore(path)) {
-            ChainEngine reloaded = ChainEngine.init(params, store.ledger(), store.chainStore(), snapshot, null, clock::get);
+            ChainEngine reloaded = ChainEngine.init(params, store, snapshot, null, clock::get,
+                null, null, null, null, null);
             assertEquals(2, reloaded.height());
             assertEquals(tipAfter, reloaded.tipHash());
             assertEquals(workAfter, reloaded.totalWork());
@@ -255,7 +261,8 @@ class RocksDbNodeStoreTest implements ChainStoreContract, NonceStoreContract, Le
 
         try (RocksDbNodeStore store = new RocksDbNodeStore(path)) {
             ChainStore chain = store.chainStore();
-            ChainEngine engine = ChainEngine.init(params, store.ledger(), chain, snapshot, null, clock::get);
+            ChainEngine engine = ChainEngine.init(params, store, snapshot, null, clock::get,
+                null, null, null, null, null);
             for (int i = 0; i < 3; i++) {
                 assertEquals(ExecutionStatus.SUCCESS, engine.addBlock(mine(engine, params, miner, List.of(), clock)));
             }
@@ -333,8 +340,9 @@ class RocksDbNodeStoreTest implements ChainStoreContract, NonceStoreContract, Le
         AtomicLong clock = new AtomicLong(0);
         PublicAddress miner = PublicAddress.random();
         try (RocksDbNodeStore store = new RocksDbNodeStore(path)) {
-            ChainEngine engine = ChainEngine.init(params, store.ledger(), store.chainStore(),
-                new LedgerSnapshot("test", 0, params.chainId()), null, clock::get);
+            ChainEngine engine = ChainEngine.init(params, store,
+                new LedgerSnapshot("test", 0, params.chainId()), null, clock::get,
+                null, null, null, null, null);
             for (int i = 0; i < 3; i++) {
                 assertEquals(ExecutionStatus.SUCCESS, engine.addBlock(mine(engine, params, miner, List.of(), clock)));
             }
@@ -386,8 +394,9 @@ class RocksDbNodeStoreTest implements ChainStoreContract, NonceStoreContract, Le
         try (RocksDbNodeStore store = new RocksDbNodeStore(path, keep)) {
             ChainStore chain = store.chainStore();
             // A pruned node must persist nonces (it cannot rebuild them from discarded bodies).
-            ChainEngine engine = ChainEngine.init(params, store.ledger(), chain, store.nonceStore(),
-                new LedgerSnapshot("test", 0, params.chainId()), null, clock::get, null, null, null, null, null);
+            ChainEngine engine = ChainEngine.init(params, store,
+                new LedgerSnapshot("test", 0, params.chainId()), null, clock::get,
+                null, null, null, null, null);
             for (int i = 0; i < 10; i++) {
                 assertEquals(ExecutionStatus.SUCCESS, engine.addBlock(mine(engine, params, miner, List.of(), clock)));
             }
@@ -412,8 +421,8 @@ class RocksDbNodeStoreTest implements ChainStoreContract, NonceStoreContract, Le
         // Reopen the pruned store: derived state rebuilds header-only from the persisted
         // nonces, without touching a single (now-absent) old body.
         try (RocksDbNodeStore store = new RocksDbNodeStore(path, keep)) {
-            ChainEngine reloaded = ChainEngine.init(params, store.ledger(), store.chainStore(),
-                store.nonceStore(), new LedgerSnapshot("test", 0, params.chainId()), null, clock::get,
+            ChainEngine reloaded = ChainEngine.init(params, store,
+                new LedgerSnapshot("test", 0, params.chainId()), null, clock::get,
                 null, null, null, null, null);
             assertEquals(11, reloaded.height());
             assertEquals(11 - keep + 1, store.chainStore().prunedBelow());
@@ -429,8 +438,9 @@ class RocksDbNodeStoreTest implements ChainStoreContract, NonceStoreContract, Le
         // Build a full archive of 8 blocks.
         AtomicLong clock = new AtomicLong(0);
         try (RocksDbNodeStore store = new RocksDbNodeStore(path)) {
-            ChainEngine engine = ChainEngine.init(params, store.ledger(), store.chainStore(),
-                new LedgerSnapshot("test", 0, params.chainId()), null, clock::get);
+            ChainEngine engine = ChainEngine.init(params, store,
+                new LedgerSnapshot("test", 0, params.chainId()), null, clock::get,
+                null, null, null, null, null);
             for (int i = 0; i < 7; i++) {
                 assertEquals(ExecutionStatus.SUCCESS, engine.addBlock(mine(engine, params, miner, List.of(), clock)));
             }
@@ -465,8 +475,8 @@ class RocksDbNodeStoreTest implements ChainStoreContract, NonceStoreContract, Le
 
         // Build a chain of three blocks each carrying one account transaction (nonces 0,1,2).
         try (RocksDbNodeStore store = new RocksDbNodeStore(path)) {
-            ChainEngine engine = ChainEngine.init(params, store.ledger(), store.chainStore(),
-                store.nonceStore(), snapshot, null, clock::get, null, null, null, null, null);
+            ChainEngine engine = ChainEngine.init(params, store, snapshot, null, clock::get,
+                null, null, null, null, null);
             for (int n = 0; n < 3; n++) {
                 Transaction send = Transaction.of(sender, PublicAddress.random(), new TransactionAmount(1_000),
                     key, new TransactionAmount(0), clock.get(), params.chainId(), n);

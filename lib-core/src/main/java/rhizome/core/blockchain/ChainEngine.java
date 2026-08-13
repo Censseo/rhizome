@@ -300,7 +300,17 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
             contractProcessor, boxProcessor, tokenProcessor, null);
     }
 
-    /** As {@link #init}, additionally committing an authenticated state root via a {@link rhizome.core.state.StateAccumulator}. */
+    /**
+     * As {@link #init}, additionally committing an authenticated state root via a
+     * {@link rhizome.core.state.StateAccumulator}.
+     *
+     * <p>⚠ Fabricates a volatile {@link InMemoryNonceStore}: test-only. A durable node must pass
+     * its own store's nonce view, or a restart loses nonces the store's other durable views
+     * already assumed committed — see the {@link #init(NetworkParameters, NodeStores,
+     * LedgerSnapshot, SHA256Hash, LongSupplier, SignatureVerifier, ContractProcessor,
+     * rhizome.core.box.BoxProcessor, rhizome.core.token.TokenProcessor,
+     * rhizome.core.state.StateAccumulator) NodeStores overload} for that case.
+     */
     public static ChainEngine init(NetworkParameters params, Ledger ledger, ChainStore store,
                                    LedgerSnapshot snapshot, SHA256Hash expectedGenesisHash,
                                    LongSupplier nowMillis, SignatureVerifier verifier,
