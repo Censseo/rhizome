@@ -104,24 +104,24 @@ public record NodeConfig(
      * checked against its parameters.
      */
     public static NodeConfig fromEnv(java.util.function.UnaryOperator<String> env) {
-        NetworkParameters params = RhizomeNode.parseNetwork(env.apply("RHIZOME_NETWORK"));
+        NetworkParameters params = parseNetwork(env.apply("RHIZOME_NETWORK"));
         NodeConfig config = defaults(params,
             orDefault(env, "RHIZOME_DATA", "./data"),
-            RhizomeNode.parsePort(orDefault(env, "RHIZOME_PORT", "3000")));
+            parsePort(orDefault(env, "RHIZOME_PORT", "3000")));
 
         var b = config.toBuilder();
         present(env, "RHIZOME_SNAPSHOT", v -> b.snapshotPath(Optional.of(v)));
         present(env, "RHIZOME_MINER", v -> b.miner(Optional.of(PublicAddress.of(v))));
         present(env, "RHIZOME_BLOCK_INTERVAL_MS",
-            v -> b.blockIntervalMs(RhizomeNode.parseBlockIntervalMs(v)));
+            v -> b.blockIntervalMs(parseBlockIntervalMs(v)));
         present(env, "RHIZOME_PEERS", v -> b.peers(java.util.Arrays.stream(v.split(","))
             .map(String::trim).filter(p -> !p.isEmpty()).toList()));
-        present(env, "RHIZOME_ADVERTISE", v -> b.advertisedUrl(Optional.of(RhizomeNode.parseAdvertisedUrl(v))));
+        present(env, "RHIZOME_ADVERTISE", v -> b.advertisedUrl(Optional.of(parseAdvertisedUrl(v))));
         present(env, "RHIZOME_BIND_ADDRESS", v -> b.bindAddress(v.trim()));
         present(env, "RHIZOME_API_TOKEN", v -> b.apiToken(Optional.of(v.trim())));
         present(env, "RHIZOME_PEER_TOKEN", v -> b.peerToken(Optional.of(v.trim())));
 
-        b.keepBlocks(RhizomeNode.parseKeepBlocks(env.apply("RHIZOME_PRUNE"), params));
+        b.keepBlocks(parseKeepBlocks(env.apply("RHIZOME_PRUNE"), params));
         b.allowOpenApi(isTrue(env.apply("RHIZOME_ALLOW_OPEN_API")));
         // OR-ed, not overridden: the record field is the programmatic switch (tests use it) and the
         // variable is the operator switch. Documented as a deliberate double source.
@@ -129,8 +129,8 @@ public record NodeConfig(
         b.snapSync("snap".equalsIgnoreCase(trimmed(env.apply("RHIZOME_SYNC"))));
         b.protectReads(isTrue(env.apply("RHIZOME_PROTECT_READS")));
         b.trustXff(isTrue(env.apply("RHIZOME_TRUST_XFF")));
-        b.vote(RhizomeNode.parseVote(env.apply("RHIZOME_VOTE")));
-        b.snapshotEveryBlocks(RhizomeNode.parseSnapshotEvery(env.apply("RHIZOME_SNAPSHOT_EVERY")));
+        b.vote(parseVote(env.apply("RHIZOME_VOTE")));
+        b.snapshotEveryBlocks(parseSnapshotEvery(env.apply("RHIZOME_SNAPSHOT_EVERY")));
 
         String hosts = trimmed(env.apply("RHIZOME_ALLOWED_HOSTS"));
         if ("off".equalsIgnoreCase(hosts)) {
@@ -146,6 +146,148 @@ public record NodeConfig(
     /** The production accessor. */
     public static NodeConfig fromEnv() {
         return fromEnv(System::getenv);
+    }
+
+    /** Safety headroom above the deepest history the engine reads, when pruning. */
+    private static final int PRUNE_MARGIN = 128;
+
+    /**
+     * Retention (in blocks) for this node, from {@code RHIZOME_PRUNE}: absent/0 = archive
+     * (keep every body). A positive value must be at least the deepest history the engine may
+     * read — the reorg window, uncle depth, and the difficulty/median timestamp windows —
+     * plus a safety margin, or the node would prune a body it still needs. Enforced here so a
+     * misconfiguration fails fast at boot rather than mid-reorg.
+     */
+    static int parseKeepBlocks(String env, NetworkParameters params) {
+        if (env == null || env.isBlank()) {
+            return 0;
+        }
+        int requested;
+        try {
+            requested = Integer.parseInt(env.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException("RHIZOME_PRUNE must be an integer, was: " + env, e);
+        }
+        if (requested <= 0) {
+            return 0; // archive
+        }
+        int floor = Math.max(Math.max(params.maxReorgDepth(), params.uncleMaxDepth()),
+            Math.max(params.difficultyLookback(), params.medianTimeWindow())) + PRUNE_MARGIN;
+        if (requested < floor) {
+            throw new IllegalArgumentException("RHIZOME_PRUNE=" + requested
+                + " is below the safe floor of " + floor + " blocks (reorg/uncle/difficulty/median windows)");
+        }
+        return requested;
+    }
+
+    /**
+     * Parses {@code RHIZOME_VOTE} with a clear error and bounds it to the protocol's vote domain
+     * (0 abstain, ±1 storageFeeFactor, ±2 minValuePerByte). An out-of-domain value would either
+     * crash the producer thread with a raw {@link NumberFormatException} or mint blocks the
+     * consensus gate rejects as {@code INVALID_VOTE} (audit: unvalidated config).
+     */
+    static int parseVote(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return 0; // abstain
+        }
+        final int vote;
+        try {
+            vote = Integer.parseInt(raw.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException("RHIZOME_VOTE must be an integer, was: " + raw, e);
+        }
+        if (vote < -2 || vote > 2) {
+            throw new IllegalArgumentException("RHIZOME_VOTE must be in [-2, 2] "
+                + "(0 abstain, ±1 storageFeeFactor, ±2 minValuePerByte), was: " + vote);
+        }
+        return vote;
+    }
+
+    /** Blocks between snapshot materialisations, from {@code RHIZOME_SNAPSHOT_EVERY} (default ~1 day). */
+    static long parseSnapshotEvery(String env) {
+        if (env == null || env.isBlank()) {
+            return DEFAULT_SNAPSHOT_EVERY;
+        }
+        try {
+            return Long.parseLong(env.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException("RHIZOME_SNAPSHOT_EVERY must be an integer, was: " + env, e);
+        }
+    }
+
+    /**
+     * Parses {@code RHIZOME_PORT} with a clear error and a range check (audit: unvalidated
+     * config — a typo'd port previously died with a raw NumberFormatException stack, or bound
+     * a nonsense port).
+     */
+    static int parsePort(String raw) {
+        final int port;
+        try {
+            port = Integer.parseInt(raw.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException("RHIZOME_PORT must be an integer, was: " + raw, e);
+        }
+        if (port < 1 || port > 65535) {
+            throw new IllegalArgumentException("RHIZOME_PORT must be in [1, 65535], was: " + port);
+        }
+        return port;
+    }
+
+    /**
+     * Validates {@code RHIZOME_ADVERTISE}: it must be an http(s) URL with a host. A malformed
+     * value used to be accepted verbatim and then degrade three things at once, silently
+     * (audit I-6): {@link rhizome.net.PeerRegistry}'s self URL (canonicalized to something no peer URL can
+     * equal, so the self-pairing refusal stops firing and the node syncs from itself), the
+     * address handed to peers by PEX, and the {@code Host} allowlist, which drops it and falls
+     * back to the loopback names — locking browsers out of the dashboard over the real hostname.
+     */
+    static String parseAdvertisedUrl(String raw) {
+        String url = raw.trim();
+        try {
+            java.net.URI uri = java.net.URI.create(url);
+            String scheme = uri.getScheme();
+            boolean http = "http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme);
+            if (http && uri.getHost() != null && !uri.getHost().isEmpty()) {
+                return url;
+            }
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException("RHIZOME_ADVERTISE must be an http(s) URL with a host "
+                + "(e.g. https://node.example:3000), was: " + raw, e);
+        }
+        throw new IllegalArgumentException("RHIZOME_ADVERTISE must be an http(s) URL with a host "
+            + "(e.g. https://node.example:3000), was: " + raw);
+    }
+
+    /** Parses {@code RHIZOME_BLOCK_INTERVAL_MS} with a clear error and a positivity check. */
+    static long parseBlockIntervalMs(String raw) {
+        final long interval;
+        try {
+            interval = Long.parseLong(raw.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException("RHIZOME_BLOCK_INTERVAL_MS must be an integer, was: " + raw, e);
+        }
+        if (interval <= 0) {
+            throw new IllegalArgumentException("RHIZOME_BLOCK_INTERVAL_MS must be positive, was: " + interval);
+        }
+        return interval;
+    }
+
+    /**
+     * Resolves {@code RHIZOME_NETWORK} (absent/blank → mainnet). An unrecognised value is a hard
+     * failure, not a fall-through to mainnet: {@code RHIZOME_NETWORK=testnett} used to start the
+     * node on MAINNET without a word — wrong chain, wasted mining, mainnet peers dialled — while
+     * every other config variable already fails fast on a typo (audit B-4). Fail-unsafe defaults
+     * are the one kind of default this node does not get to have.
+     */
+    static NetworkParameters parseNetwork(String raw) {
+        String name = raw == null || raw.isBlank() ? "mainnet" : raw.trim();
+        return switch (name.toLowerCase(java.util.Locale.ROOT)) {
+            case "mainnet" -> NetworkParameters.cleanMainnet();
+            case "testnet" -> NetworkParameters.testnet();
+            case "devnet" -> NetworkParameters.devnet();
+            default -> throw new IllegalArgumentException(
+                "RHIZOME_NETWORK must be one of mainnet, testnet, devnet — was: " + raw);
+        };
     }
 
     private static String trimmed(String raw) {

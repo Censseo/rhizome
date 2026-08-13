@@ -14,34 +14,34 @@ class NodeConfigParsingTest {
 
     @Test
     void voteParsesInsideTheProtocolDomain() {
-        assertEquals(0, RhizomeNode.parseVote("0"));
-        assertEquals(1, RhizomeNode.parseVote(" 1 "));
-        assertEquals(-2, RhizomeNode.parseVote("-2"));
-        assertEquals(2, RhizomeNode.parseVote("2"));
+        assertEquals(0, NodeConfig.parseVote("0"));
+        assertEquals(1, NodeConfig.parseVote(" 1 "));
+        assertEquals(-2, NodeConfig.parseVote("-2"));
+        assertEquals(2, NodeConfig.parseVote("2"));
     }
 
     @Test
     void voteRejectsJunkAndOutOfDomainValues() {
-        assertThrows(IllegalArgumentException.class, () -> RhizomeNode.parseVote("yes"));
-        assertThrows(IllegalArgumentException.class, () -> RhizomeNode.parseVote("3"));
-        assertThrows(IllegalArgumentException.class, () -> RhizomeNode.parseVote("-3"));
-        assertThrows(IllegalArgumentException.class, () -> RhizomeNode.parseVote("99999999999"));
+        assertThrows(IllegalArgumentException.class, () -> NodeConfig.parseVote("yes"));
+        assertThrows(IllegalArgumentException.class, () -> NodeConfig.parseVote("3"));
+        assertThrows(IllegalArgumentException.class, () -> NodeConfig.parseVote("-3"));
+        assertThrows(IllegalArgumentException.class, () -> NodeConfig.parseVote("99999999999"));
     }
 
     @Test
     void portParsesAndIsRangeChecked() {
-        assertEquals(3000, RhizomeNode.parsePort("3000"));
-        assertThrows(IllegalArgumentException.class, () -> RhizomeNode.parsePort("abc"));
-        assertThrows(IllegalArgumentException.class, () -> RhizomeNode.parsePort("0"));
-        assertThrows(IllegalArgumentException.class, () -> RhizomeNode.parsePort("70000"));
+        assertEquals(3000, NodeConfig.parsePort("3000"));
+        assertThrows(IllegalArgumentException.class, () -> NodeConfig.parsePort("abc"));
+        assertThrows(IllegalArgumentException.class, () -> NodeConfig.parsePort("0"));
+        assertThrows(IllegalArgumentException.class, () -> NodeConfig.parsePort("70000"));
     }
 
     @Test
     void blockIntervalParsesAndMustBePositive() {
-        assertEquals(1000L, RhizomeNode.parseBlockIntervalMs("1000"));
-        assertThrows(IllegalArgumentException.class, () -> RhizomeNode.parseBlockIntervalMs("fast"));
-        assertThrows(IllegalArgumentException.class, () -> RhizomeNode.parseBlockIntervalMs("0"));
-        assertThrows(IllegalArgumentException.class, () -> RhizomeNode.parseBlockIntervalMs("-100"));
+        assertEquals(1000L, NodeConfig.parseBlockIntervalMs("1000"));
+        assertThrows(IllegalArgumentException.class, () -> NodeConfig.parseBlockIntervalMs("fast"));
+        assertThrows(IllegalArgumentException.class, () -> NodeConfig.parseBlockIntervalMs("0"));
+        assertThrows(IllegalArgumentException.class, () -> NodeConfig.parseBlockIntervalMs("-100"));
     }
 
     @Test
@@ -50,28 +50,28 @@ class NodeConfigParsingTest {
         // wrong chain and dialled mainnet peers (audit B-4). Absent/blank still means mainnet —
         // that is a documented default, not a misread value.
         assertEquals(rhizome.core.blockchain.NetworkParameters.cleanMainnet().chainId(),
-            RhizomeNode.parseNetwork(null).chainId());
+            NodeConfig.parseNetwork(null).chainId());
         assertEquals(rhizome.core.blockchain.NetworkParameters.cleanMainnet().chainId(),
-            RhizomeNode.parseNetwork("  ").chainId());
+            NodeConfig.parseNetwork("  ").chainId());
         assertEquals(rhizome.core.blockchain.NetworkParameters.testnet().chainId(),
-            RhizomeNode.parseNetwork(" TestNet ").chainId());
+            NodeConfig.parseNetwork(" TestNet ").chainId());
         assertEquals(rhizome.core.blockchain.NetworkParameters.devnet().chainId(),
-            RhizomeNode.parseNetwork("devnet").chainId());
-        assertThrows(IllegalArgumentException.class, () -> RhizomeNode.parseNetwork("testnett"));
-        assertThrows(IllegalArgumentException.class, () -> RhizomeNode.parseNetwork("main"));
-        assertThrows(IllegalArgumentException.class, () -> RhizomeNode.parseNetwork("regtest"));
+            NodeConfig.parseNetwork("devnet").chainId());
+        assertThrows(IllegalArgumentException.class, () -> NodeConfig.parseNetwork("testnett"));
+        assertThrows(IllegalArgumentException.class, () -> NodeConfig.parseNetwork("main"));
+        assertThrows(IllegalArgumentException.class, () -> NodeConfig.parseNetwork("regtest"));
     }
 
     @Test
     void advertisedUrlMustBeAnHttpUrlWithAHost() {
         // A malformed RHIZOME_ADVERTISE was accepted verbatim and then silently degraded the
         // self-pairing refusal, PEX and the Host allowlist (audit I-6).
-        assertEquals("https://node.example:3000", RhizomeNode.parseAdvertisedUrl(" https://node.example:3000 "));
-        assertEquals("http://10.0.0.5:3000", RhizomeNode.parseAdvertisedUrl("http://10.0.0.5:3000"));
-        assertThrows(IllegalArgumentException.class, () -> RhizomeNode.parseAdvertisedUrl("node.example:3000"));
-        assertThrows(IllegalArgumentException.class, () -> RhizomeNode.parseAdvertisedUrl("ftp://node.example"));
-        assertThrows(IllegalArgumentException.class, () -> RhizomeNode.parseAdvertisedUrl("http://"));
-        assertThrows(IllegalArgumentException.class, () -> RhizomeNode.parseAdvertisedUrl("http://[oops"));
+        assertEquals("https://node.example:3000", NodeConfig.parseAdvertisedUrl(" https://node.example:3000 "));
+        assertEquals("http://10.0.0.5:3000", NodeConfig.parseAdvertisedUrl("http://10.0.0.5:3000"));
+        assertThrows(IllegalArgumentException.class, () -> NodeConfig.parseAdvertisedUrl("node.example:3000"));
+        assertThrows(IllegalArgumentException.class, () -> NodeConfig.parseAdvertisedUrl("ftp://node.example"));
+        assertThrows(IllegalArgumentException.class, () -> NodeConfig.parseAdvertisedUrl("http://"));
+        assertThrows(IllegalArgumentException.class, () -> NodeConfig.parseAdvertisedUrl("http://[oops"));
     }
 
     @Test

@@ -23,9 +23,6 @@ import org.slf4j.LoggerFactory;
 
 import rhizome.core.blockchain.BlockProducer;
 import rhizome.core.blockchain.ChainEngine;
-import rhizome.core.blockchain.ChainSynchronizer;
-import rhizome.core.blockchain.HeaderSynchronizer;
-import rhizome.core.blockchain.NetworkParameters;
 import rhizome.core.blockchain.SignatureVerifier;
 import rhizome.core.ledger.LedgerSnapshot;
 import rhizome.core.ledger.SnapshotLoader;
@@ -75,53 +72,6 @@ public final class RhizomeNode implements AutoCloseable {
 
     /** The sockets, threads and schedules, or null until {@link #start()} has opened them. */
     private NodeRuntime runtime;
-
-    // Ban-score costs per sync outcome. Serving an invalid chain (bad PoW, broken
-    // continuity, claimed-heavy-proved-light) is a protocol violation, but the signal
-    // most exposed to races — a peer mid-reorg can transiently serve a chain that reads
-    // as invalid — must not ban on the first strike: PENALTY_INVALID = 34 of 100 takes
-    // three strikes, and the address-wide escalation in PeerBanList keeps port-rotation
-    // attacks compensated (testnet campaign S5: one transient PEER_INVALID during a
-    // reorg eclipsed a healthy node). REORG_TOO_DEEP carries NO penalty at all: a branch
-    // past the reorg horizon is not misbehaviour — on a forked network the losing camp
-    // legitimately diverges deeper than finality — and scoring it accumulated +25/strike
-    // to a 1 h ban, renewed hourly, a permanent mutual lock that prevented the natural
-    // heal (testnet campaign replay: two equal-rate mining camps stayed locked for hours).
-    // A genesis mismatch is usually just a misconfigured wrong-network node.
-    private static final int BAN_THRESHOLD = 100;
-    private static final int PENALTY_INVALID = 34;
-    private static final int PENALTY_INCOMPATIBLE = 10;
-    /** Safety headroom above the deepest history the engine reads, when pruning. */
-    private static final int PRUNE_MARGIN = 128;
-
-    /**
-     * Retention (in blocks) for this node, from {@code RHIZOME_PRUNE}: absent/0 = archive
-     * (keep every body). A positive value must be at least the deepest history the engine may
-     * read — the reorg window, uncle depth, and the difficulty/median timestamp windows —
-     * plus a safety margin, or the node would prune a body it still needs. Enforced here so a
-     * misconfiguration fails fast at boot rather than mid-reorg.
-     */
-    static int parseKeepBlocks(String env, NetworkParameters params) {
-        if (env == null || env.isBlank()) {
-            return 0;
-        }
-        int requested;
-        try {
-            requested = Integer.parseInt(env.trim());
-        } catch (NumberFormatException e) {
-            throw new IllegalArgumentException("RHIZOME_PRUNE must be an integer, was: " + env, e);
-        }
-        if (requested <= 0) {
-            return 0; // archive
-        }
-        int floor = Math.max(Math.max(params.maxReorgDepth(), params.uncleMaxDepth()),
-            Math.max(params.difficultyLookback(), params.medianTimeWindow())) + PRUNE_MARGIN;
-        if (requested < floor) {
-            throw new IllegalArgumentException("RHIZOME_PRUNE=" + requested
-                + " is below the safe floor of " + floor + " blocks (reorg/uncle/difficulty/median windows)");
-        }
-        return requested;
-    }
 
     public RhizomeNode(NodeConfig config) {
         this.config = config;
@@ -257,7 +207,7 @@ public final class RhizomeNode implements AutoCloseable {
             var mempool = new MemPool(config.params(), verifier, engine, config.mempoolSize());
             // Every node keeps a live peer set (seeded from config), serves /peers and
             // accepts announcements, so the network can self-organise from a few seeds.
-            var banList = new PeerBanList(BAN_THRESHOLD, 60 * 60 * 1000L, 4096);
+            var banList = new PeerBanList(SyncDriver.BAN_THRESHOLD, 60 * 60 * 1000L, 4096);
             // Block SSRF-prone (loopback / private / metadata) discovered peers on mainnet, where
             // the node is internet-exposed. Testnet/devnets peer over localhost, so they stay
             // permissive; an operator running mainnet over private infra can opt back in.
@@ -486,6 +436,11 @@ public final class RhizomeNode implements AutoCloseable {
 
             var discovery = new PeerDiscovery(c.registry(), config.selfUrl(), c.blockPrivatePeers(),
                 c.peerTokenPolicy(), c.exchange());
+            // The sync round lives in its own driver once the graph exists; the scheduler only
+            // arms below, so the driver is visible to any direct syncRound() call (tests) from
+            // here on.
+            sync = new SyncDriver(c.engine(), c.registry(), c.service(), c.blockPrivatePeers(),
+                c.exchange(), c.peerTokenPolicy(), config.syncPeriodMs());
             ScheduledExecutorService syncScheduler = Executors.newScheduledThreadPool(2, r -> {
                 Thread t = new Thread(r, "rhizome-net");
                 t.setDaemon(true);
@@ -494,7 +449,7 @@ public final class RhizomeNode implements AutoCloseable {
             // Every scheduled task is wrapped in guarded(): a task whose run() lets ANY Throwable
             // escape is silently unscheduled by ScheduledThreadPoolExecutor — one stray Error would
             // stop that loop forever, with no log line (audit: scheduler task suppression).
-            syncScheduler.scheduleWithFixedDelay(guarded(this::syncRound, "sync round"),
+            syncScheduler.scheduleWithFixedDelay(guarded(sync::syncRound, "sync round"),
                 config.syncPeriodMs(), config.syncPeriodMs(), TimeUnit.MILLISECONDS);
             syncScheduler.scheduleWithFixedDelay(guarded(discovery::round, "peer discovery"),
                 config.syncPeriodMs(), config.syncPeriodMs(), TimeUnit.MILLISECONDS);
@@ -545,29 +500,6 @@ public final class RhizomeNode implements AutoCloseable {
     }
 
     /**
-     * Parses {@code RHIZOME_VOTE} with a clear error and bounds it to the protocol's vote domain
-     * (0 abstain, ±1 storageFeeFactor, ±2 minValuePerByte). An out-of-domain value would either
-     * crash the producer thread with a raw {@link NumberFormatException} or mint blocks the
-     * consensus gate rejects as {@code INVALID_VOTE} (audit: unvalidated config).
-     */
-    static int parseVote(String raw) {
-        if (raw == null || raw.isBlank()) {
-            return 0; // abstain
-        }
-        final int vote;
-        try {
-            vote = Integer.parseInt(raw.trim());
-        } catch (NumberFormatException e) {
-            throw new IllegalArgumentException("RHIZOME_VOTE must be an integer, was: " + raw, e);
-        }
-        if (vote < -2 || vote > 2) {
-            throw new IllegalArgumentException("RHIZOME_VOTE must be in [-2, 2] "
-                + "(0 abstain, ±1 storageFeeFactor, ±2 minValuePerByte), was: " + vote);
-        }
-        return vote;
-    }
-
-    /**
      * Wraps a scheduled task so NO Throwable reaches the scheduler (which would swallow it and
      * cancel all future runs without logging). Everything is caught and logged here instead.
      */
@@ -581,214 +513,15 @@ public final class RhizomeNode implements AutoCloseable {
         };
     }
 
-    /** Blocks between snapshot materialisations, from {@code RHIZOME_SNAPSHOT_EVERY} (default ~1 day). */
-    static long parseSnapshotEvery(String env) {
-        if (env == null || env.isBlank()) {
-            return NodeConfig.DEFAULT_SNAPSHOT_EVERY;
-        }
-        try {
-            return Long.parseLong(env.trim());
-        } catch (NumberFormatException e) {
-            throw new IllegalArgumentException("RHIZOME_SNAPSHOT_EVERY must be an integer, was: " + env, e);
-        }
-    }
-
-    /** Wall-clock budget for one sync round: past this, remaining peers are left for the next round so
-     *  one slow (but not-yet-timed-out) peer, or a long tail of them, cannot starve later peers or delay
-     *  the schedule (audit net #2). A single in-progress sync is never cut — the check is between peers,
-     *  so a legitimate long catch-up from a good peer still completes. */
-    private static final long SYNC_ROUND_BUDGET_MS = 60_000L;
-
     /**
-     * Consecutive rounds without any sync progress (no EXTENDED/REORGED from any peer)
-     * before a WARN is emitted, and the re-emission period for an ongoing stall. At the
-     * default ~10 s sync period, 6 rounds ≈ 1 minute: an operator sees a stalled sync in
-     * minutes, not in a 12-minute log post-mortem (testnet campaign S5).
+     * The sync driver (round loop, stall counters, ban scoring) — built when the graph is
+     * assembled in {@link #startServing}; null before then, like the graph itself.
      */
-    private static final long PROGRESS_WARN_ROUNDS = 6;
+    private SyncDriver sync;
 
-    /** Rotates the per-round starting peer (single sync thread, so no synchronization needed). */
-    private long syncRoundCursor;
-
-    /** Height at the start of the previous round: a height advance between ROUND STARTS resets the
-     *  stall counter (see syncRound). Initialised to -1 so the first round counts as progressing. */
-    private long lastObservedHeight = -1;
-
-    /** Consecutive rounds with neither sync progress nor a height advance (single sync thread). */
-    private long roundsWithoutProgress;
-
-    /** Whether the previous round found every known peer banned (single sync thread). */
-    private boolean eclipsedReported;
-
-    /** One sync round across all known peers; peer failures are isolated. */
+    /** Runs one sync round now (otherwise it runs on the network schedule). */
     public void syncRound() {
-        // Bound once: this runs on the single sync thread, which the scheduler only arms after
-        // start() has published the graph, so the reference cannot change under the round.
-        final NodeComponents c = components;
-        final ChainEngine engine = c.engine();
-        final PeerRegistry registry = c.registry();
-        var synchronizer = new HeaderSynchronizer(engine);
-        java.util.List<String> peers = registry.snapshot();
-        int n = peers.size();
-        if (n == 0) {
-            // NOT a quiet round to skip: an empty registry is the DEEPEST eclipse there is, and it
-            // is also the SHAPE the eclipse actually takes in production — PeerRegistry.penalize
-            // evicts a peer the moment its ban lands, so "every peer banned" almost never means "a
-            // registry full of banned entries" (the state peersSkippedBanned counts) and almost
-            // always means "a registry emptied by evictions". Returning here without publishing
-            // froze /stats on the previous round's counters and emitted no WARN in exactly the
-            // state the metric exists to surface (review follow-up to the S5 fix).
-            publishRoundOutcome(engine.height(), 0, 0, 0, false);
-            return;
-        }
-        // The round's progress baseline: on a healthy gossip-fed network, sync rounds
-        // legitimately do nothing (peers PUSH blocks, so heights advance without any
-        // EXTENDED/REORGED). "No progress" only means something when the HEIGHT is also
-        // frozen — the exact S5 shape (a wedged node keeps 9 healthy peers, extends none,
-        // and no block arrives from anywhere). The height is compared BETWEEN round starts
-        // (not within one round, which lasts milliseconds): blocks land between rounds, so
-        // a node whose chain advances at all — by any path — never counts a stalled round.
-        long heightAtRoundStart = engine.height();
-        int peersTried = 0;
-        int peersSkippedBanned = 0;
-        boolean progressed = false;
-        // Rotate the starting index each round so that if the peers visited first are slow and eat the
-        // round budget, the ones skipped this round are visited first next round — every peer gets a turn.
-        int start = (int) Math.floorMod(syncRoundCursor++, n);
-        long deadline = System.currentTimeMillis() + SYNC_ROUND_BUDGET_MS;
-        for (int i = 0; i < n; i++) {
-            if (System.currentTimeMillis() >= deadline) {
-                log.debug("Sync round budget reached; deferring {} of {} peers to the next round", n - i, n);
-                break;
-            }
-            String peerUrl = peers.get((start + i) % n);
-            // Seeds are trusted anchors: they can never be penalized directly (PeerRegistry.penalize
-            // exempts them), so a seed seen as banned can only be a COLLATERAL ban of its address —
-            // which must not blind the node to its operator-configured anchor (testnet campaign S5).
-            if (!registry.isSeed(peerUrl) && registry.isBanned(peerUrl)) {
-                peersSkippedBanned++;
-                continue;
-            }
-            peersTried++;
-            try {
-                ChainSynchronizer.Result result = synchronizer.syncFrom(
-                    new HttpPeerSource(peerUrl, c.blockPrivatePeers(), c.exchange(),
-                        c.peerTokenPolicy()));
-                // Any Result at all means the peer answered well-formed protocol data, so it is
-                // a real Rhizome node and from here on it can earn ban score — including for the
-                // PEER_INVALID case just below (a node that speaks the protocol and lies IS
-                // misbehaving). Only the malformed-data path can still see an unconfirmed peer;
-                // see penalize (audit B-3).
-                registry.markConfirmed(peerUrl);
-                switch (result) {
-                    case EXTENDED, REORGED -> {
-                        progressed = true;
-                        log.info("Synced from {}: {} -> height {}", peerUrl, result, engine.height());
-                    }
-                    case PEER_INVALID -> penalize(peerUrl, PENALTY_INVALID, "served an invalid chain");
-                    case REORG_TOO_DEEP ->
-                        // Deliberately NO ban score: a branch past the reorg horizon is not
-                        // misbehaviour (the peer cannot help how deep its fork is), and scoring
-                        // it locked forked camps into a mutual 1 h ban, renewed hourly — the
-                        // permanent split the replay measured (see the constant comment).
-                        log.debug("Peer {} is past the reorg horizon (finality); nothing to adopt",
-                            peerUrl);
-                    case INCOMPATIBLE -> penalize(peerUrl, PENALTY_INCOMPATIBLE, "wrong network / genesis");
-                    case PEER_PRUNED ->
-                        log.debug("Peer {} pruned the bodies we need; trying another source", peerUrl);
-                    case NO_CHANGE -> { /* healthy, nothing to do */ }
-                }
-            } catch (HttpPeerSource.PeerUnavailableException e) {
-                // Transport failures are not misbehaviour; PeerDiscovery prunes the
-                // persistently unreachable. Only protocol violations earn ban score.
-                log.debug("Peer {} unavailable: {}", peerUrl, e.getMessage());
-            } catch (rhizome.core.blockchain.PeerProtocolException e) {
-                // Malformed protocol data (junk scalars, absurd snapshot chunk counts) is a
-                // protocol violation like serving an invalid chain — penalize accordingly.
-                // Caught as the PORT type: any transport adapter speaks this vocabulary.
-                penalize(peerUrl, PENALTY_INVALID, "served malformed protocol data");
-            } catch (Throwable e) {
-                // Every Error is fatal-by-doctrine here: a HostFault is a LOCAL store/infra
-                // failure surfaced from contract execution (see HostFault), and a JVM Error
-                // (OutOfMemoryError, NoClassDefFoundError, ...) means this node is unhealthy
-                // regardless of which peer happened to trigger it. Rethrow so the round aborts
-                // and guarded() logs the full stack as an error — the scheduler boundary keeps
-                // the sync loop alive. Only exceptions (bad peer data, per-peer handling bugs)
-                // are isolated to the peer that caused them.
-                if (e instanceof Error err) {
-                    throw err;
-                }
-                log.warn("Sync from {} failed: {}", peerUrl, e.toString());
-            }
-        }
-        publishRoundOutcome(heightAtRoundStart, n, peersTried, peersSkippedBanned, progressed);
-    }
-
-    /**
-     * The round's verdict, observable before the next one starts: a healthy-but-idle round is
-     * indistinguishable from a wedged one by height alone (S5: 12 min, 9 healthy peers, zero log
-     * lines). Publishes the counters so /stats surfaces the difference in seconds, and says it
-     * out loud when a round is doing nothing by construction. Called on EVERY round, the
-     * no-peer-at-all one included — that path used to return early and publish nothing.
-     */
-    private void publishRoundOutcome(long heightAtRoundStart, int peersKnown, int peersTried,
-                                     int peersSkippedBanned, boolean progressed) {
-        if (progressed || heightAtRoundStart != lastObservedHeight) {
-            roundsWithoutProgress = 0;
-        } else {
-            roundsWithoutProgress++;
-        }
-        lastObservedHeight = heightAtRoundStart;
-        // Eclipsed = this round had no usable sync source at all: either the registry is empty
-        // (bans evict, so this is the common shape) or every peer in it was skipped as banned.
-        boolean eclipsed = peersTried == 0 && (peersKnown == 0 || peersSkippedBanned == peersKnown);
-        components.service().recordSyncRound(peersKnown, peersTried, peersSkippedBanned,
-            roundsWithoutProgress, eclipsed);
-        if (eclipsed) {
-            if (!eclipsedReported) {
-                log.warn("sync eclipsed: no usable sync source this round ({} known peer(s), {} skipped "
-                    + "as banned), so nothing can catch up until a ban expires or a peer is discovered",
-                    peersKnown, peersSkippedBanned);
-                eclipsedReported = true;
-            } else if (roundsWithoutProgress > 0 && roundsWithoutProgress % PROGRESS_WARN_ROUNDS == 0) {
-                log.warn("sync still eclipsed after {} stalled round(s): {} known peer(s), {} skipped "
-                    + "as banned; nothing can catch up", roundsWithoutProgress, peersKnown, peersSkippedBanned);
-            }
-        } else {
-            eclipsedReported = false;
-        }
-        if (!eclipsed && roundsWithoutProgress > 0
-                && roundsWithoutProgress % PROGRESS_WARN_ROUNDS == 0) {
-            log.warn("no sync progress and no height advance for {} rounds (~{} s): {} peer(s) tried "
-                + "this round, {} peer(s) skipped as banned",
-                roundsWithoutProgress, roundsWithoutProgress * config.syncPeriodMs() / 1000,
-                peersTried, peersSkippedBanned);
-        }
-    }
-
-    /**
-     * Applies ban score for misbehaviour — but only to a peer that has proven it speaks the
-     * protocol. {@code /add_peer} is unauthenticated on an open node, so an attacker could point
-     * us at any public host: a plain web server answering 200 to everything raises
-     * PeerProtocolException, which used to be worth an immediate ban of the VICTIM's resolved IP
-     * (100 points = the threshold), renewable for as long as the attacker kept re-adding it — a
-     * remote blocklisting primitive that would also refuse the victim's honest node later
-     * (audit B-3). An unconfirmed host is treated as what it is, a wrong address: dropped from
-     * the registry, which also arms the 5-minute host re-admission cooldown.
-     */
-    private void penalize(String peerUrl, int points, String reason) {
-        PeerRegistry registry = components.registry();
-        if (!registry.isConfirmed(peerUrl)) {
-            registry.remove(peerUrl);
-            log.debug("Dropped unconfirmed peer {} ({}) — not a protocol-speaking node, not banned",
-                peerUrl, reason);
-            return;
-        }
-        if (registry.penalize(peerUrl, points)) {
-            log.warn("Banned peer {} ({})", peerUrl, reason);
-        } else {
-            log.debug("Penalized peer {} +{} ({})", peerUrl, points, reason);
-        }
+        sync.syncRound();
     }
 
     /** Runs one peer-discovery round now (otherwise it runs on the network schedule). */
@@ -986,78 +719,4 @@ public final class RhizomeNode implements AutoCloseable {
         Thread.currentThread().join(); // run until killed
     }
 
-    /**
-     * Parses {@code RHIZOME_PORT} with a clear error and a range check (audit: unvalidated
-     * config — a typo'd port previously died with a raw NumberFormatException stack, or bound
-     * a nonsense port).
-     */
-    static int parsePort(String raw) {
-        final int port;
-        try {
-            port = Integer.parseInt(raw.trim());
-        } catch (NumberFormatException e) {
-            throw new IllegalArgumentException("RHIZOME_PORT must be an integer, was: " + raw, e);
-        }
-        if (port < 1 || port > 65535) {
-            throw new IllegalArgumentException("RHIZOME_PORT must be in [1, 65535], was: " + port);
-        }
-        return port;
-    }
-
-    /**
-     * Validates {@code RHIZOME_ADVERTISE}: it must be an http(s) URL with a host. A malformed
-     * value used to be accepted verbatim and then degrade three things at once, silently
-     * (audit I-6): {@link PeerRegistry}'s self URL (canonicalized to something no peer URL can
-     * equal, so the self-pairing refusal stops firing and the node syncs from itself), the
-     * address handed to peers by PEX, and the {@code Host} allowlist, which drops it and falls
-     * back to the loopback names — locking browsers out of the dashboard over the real hostname.
-     */
-    static String parseAdvertisedUrl(String raw) {
-        String url = raw.trim();
-        try {
-            java.net.URI uri = java.net.URI.create(url);
-            String scheme = uri.getScheme();
-            boolean http = "http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme);
-            if (http && uri.getHost() != null && !uri.getHost().isEmpty()) {
-                return url;
-            }
-        } catch (IllegalArgumentException e) {
-            throw new IllegalArgumentException("RHIZOME_ADVERTISE must be an http(s) URL with a host "
-                + "(e.g. https://node.example:3000), was: " + raw, e);
-        }
-        throw new IllegalArgumentException("RHIZOME_ADVERTISE must be an http(s) URL with a host "
-            + "(e.g. https://node.example:3000), was: " + raw);
-    }
-
-    /** Parses {@code RHIZOME_BLOCK_INTERVAL_MS} with a clear error and a positivity check. */
-    static long parseBlockIntervalMs(String raw) {
-        final long interval;
-        try {
-            interval = Long.parseLong(raw.trim());
-        } catch (NumberFormatException e) {
-            throw new IllegalArgumentException("RHIZOME_BLOCK_INTERVAL_MS must be an integer, was: " + raw, e);
-        }
-        if (interval <= 0) {
-            throw new IllegalArgumentException("RHIZOME_BLOCK_INTERVAL_MS must be positive, was: " + interval);
-        }
-        return interval;
-    }
-
-    /**
-     * Resolves {@code RHIZOME_NETWORK} (absent/blank → mainnet). An unrecognised value is a hard
-     * failure, not a fall-through to mainnet: {@code RHIZOME_NETWORK=testnett} used to start the
-     * node on MAINNET without a word — wrong chain, wasted mining, mainnet peers dialled — while
-     * every other config variable already fails fast on a typo (audit B-4). Fail-unsafe defaults
-     * are the one kind of default this node does not get to have.
-     */
-    static rhizome.core.blockchain.NetworkParameters parseNetwork(String raw) {
-        String name = raw == null || raw.isBlank() ? "mainnet" : raw.trim();
-        return switch (name.toLowerCase(java.util.Locale.ROOT)) {
-            case "mainnet" -> rhizome.core.blockchain.NetworkParameters.cleanMainnet();
-            case "testnet" -> rhizome.core.blockchain.NetworkParameters.testnet();
-            case "devnet" -> rhizome.core.blockchain.NetworkParameters.devnet();
-            default -> throw new IllegalArgumentException(
-                "RHIZOME_NETWORK must be one of mainnet, testnet, devnet — was: " + raw);
-        };
-    }
 }
