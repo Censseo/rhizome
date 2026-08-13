@@ -58,6 +58,14 @@ public final class NetworkParameters {
      * consensus change, so it is scheduled at a coordinated height rather than changed in
      * place — blocks below the height keep verifying under the genesis costs, blocks at or
      * above it under the new ones, and no existing block is re-interpreted.
+     *
+     * <p><b>Polarity:</b> 0 means <em>never</em> here — the inverse of
+     * {@link #consensusV2Height}, {@link #boxActivationHeight} and
+     * {@link #tokenActivationHeight}, where 0 means <em>from genesis</em>. The inversion is
+     * the historical configuration semantics each field shipped with; unifying the polarities
+     * would be a network-configuration change (every network's upgrade schedule would need a
+     * re-specified height), not a refactor, so the polarities stay and this note pins the
+     * difference. See {@link #powCostsAt} for the one consumer.
      */
     @lombok.Builder.Default
     private final long powUpgradeHeight = 0;
@@ -84,6 +92,9 @@ public final class NetworkParameters {
      * like {@link #powUpgradeHeight}: blocks below the height keep verifying under the legacy
      * rules, blocks at or above it under V2. On a fresh chain (clean mainnet/testnet) 0 is
      * correct — V2 applies from genesis and there is no history to reinterpret.
+     *
+     * <p><b>Polarity:</b> 0 means <em>from genesis</em> (the {@link #powUpgradeHeight} field is
+     * the inverse: 0 = never there).
      */
     @lombok.Builder.Default
     private final long consensusV2Height = 0;
@@ -212,7 +223,12 @@ public final class NetworkParameters {
     private final long nephewRewardDivisor = 32;
 
     // --- Data boxes ---
-    /** Height at which box transactions become valid (0 = from genesis). */
+    /**
+     * Height at which box transactions become valid (0 = from genesis). Judged by the executor
+     * through {@link #boxActiveAt} and by the mempool through {@link #boxActiveForNextBlock} —
+     * never by a raw height comparison. Polarity: 0 = from genesis, like {@link #consensusV2Height}
+     * and unlike {@link #powUpgradeHeight} (0 = never).
+     */
     @lombok.Builder.Default
     private final long boxActivationHeight = 0;
     /** Maximum serialized size of a box, in bytes. */
@@ -235,7 +251,11 @@ public final class NetworkParameters {
     private final int maxBoxCollectsPerBlock = 32;
 
     // --- Native tokens ---
-    /** Height at which token transactions become valid (0 = from genesis). */
+    /**
+     * Height at which token transactions become valid (0 = from genesis). Judged by the executor
+     * through {@link #tokenActiveAt} and by the mempool through {@link #tokenActiveForNextBlock}.
+     * Polarity: 0 = from genesis, like {@link #boxActivationHeight}.
+     */
     @lombok.Builder.Default
     private final long tokenActivationHeight = 0;
     /** Maximum bytes of a token symbol (UTF-8). */
