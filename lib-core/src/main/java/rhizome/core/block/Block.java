@@ -74,6 +74,22 @@ public sealed interface Block permits BlockImpl {
             + (long) uncleCount * (SHA256Hash.SIZE + Integer.BYTES + rhizome.core.ledger.PublicAddress.SIZE);
     }
 
+    /**
+     * Exact serialized byte length without building the wire form: the {@link #fixedOverheadBytes}
+     * base plus each transaction's {@link Transaction#sizeBytes()}. This is the ONE serialized-size
+     * formula: {@code ChainEngine.addBlock} (the consensus size-cap check) and
+     * {@code UncleRegistry.registerOrphan} (the orphan body-retention bound) both call it, so a
+     * future edit of the wire layout cannot drift one site ahead of the other — the failure that
+     * already bit the assembler once (see {@link #fixedOverheadBytes}).
+     */
+    default long serializedSize() {
+        long size = fixedOverheadBytes(uncles().size());
+        for (Transaction t : transactions()) {
+            size += t.sizeBytes();
+        }
+        return size;
+    }
+
     public BlockDto serialize();
     default BlockDto serialize(Block block) {
         return serializer().serialize(block);

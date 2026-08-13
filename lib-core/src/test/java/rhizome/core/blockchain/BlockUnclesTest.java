@@ -366,6 +366,69 @@ class BlockUnclesTest {
         return b;
     }
 
+    /** A mined block with an explicit timestamp (sub-second gaps, for fast retargets). */
+    private static BlockImpl mineAtTs(NetworkParameters p, long height, SHA256Hash parent,
+                                      List<UncleRef> uncles, PublicAddress coinbaseTo,
+                                      int difficulty, long ts) {
+        var b = (BlockImpl) BlockImpl.builder().id((int) height).timestamp(ts).difficulty(difficulty)
+            .lastBlockHash(parent).uncles(new java.util.ArrayList<>(uncles)).build();
+        b.addTransaction(Transaction.of(coinbaseTo, new TransactionAmount(p.miningReward(height))));
+        var tree = new MerkleTree();
+        tree.setItems(b.transactions());
+        b.merkleRoot(tree.getRootHash());
+        b.nonce(Miner.mineNonce(b.hash(), b.difficulty(), p.powAlgorithm()));
+        return b;
+    }
+
+    /**
+     * L19 lock: the difficulty threshold {@code selectUncles} applies is the tip's difficulty AT
+     * THE CALL — precisely the value that becomes an explicit parameter when the GHOST cluster
+     * moves out of the engine. An orphan one bit harder than the old tip must become offerable
+     * the moment a retarget raises the tip's difficulty past it; a selection reading a stale
+     * (pre-retarget) value would keep excluding it, and would pass every fixed-difficulty test.
+     */
+    @Test
+    void selectUnclesUsesTheTipDifficultyOfTheMoment() {
+        NetworkParameters p = NetworkParameters.testnet().toBuilder()
+            .powAlgorithm(PowAlgorithm.SHA256).genesisDifficulty(4).minDifficulty(4).maxDifficulty(64)
+            .difficultyLookback(10).desiredBlockTimeSec(1).minBlockTimeSec(0)
+            .maxFutureBlockTimeSec(1_000_000).build();
+        AtomicLong clk = new AtomicLong(10_000_000L);
+        ChainEngine eng = ChainEngine.init(p, new InMemoryLedger(), new InMemoryChainStore(),
+            new LedgerSnapshot("t", 0, p.chainId()), null, clk::get);
+
+        // Fill the first window fast (1 ms apart) but stop one block short of the boundary:
+        // difficulty is still the genesis 4.
+        for (long ts = 1; eng.height() < 9; ts++) {
+            assertEquals(ExecutionStatus.SUCCESS, eng.addBlock(mineAtTs(p, eng.height() + 1,
+                eng.tipHash(), List.of(), PublicAddress.random(), eng.difficulty(), ts)));
+        }
+        assertEquals(4, eng.difficulty());
+
+        // An orphan one bit harder than the tip is NOT offerable while the tip sits at 4...
+        BlockImpl tooHard = mineAt(p, clk, 9, eng.blockAt(8).hash(), List.of(), 500,
+            PublicAddress.random(), 5);
+        eng.registerOrphan(tooHard);
+        assertTrue(eng.selectUncles().isEmpty(),
+            "one bit above the tip's difficulty must not be offered");
+
+        // ...and the block closing the first retarget window raises the tip's difficulty past
+        // it, so the SAME orphan becomes offerable without re-registration.
+        assertEquals(ExecutionStatus.SUCCESS, eng.addBlock(mineAtTs(p, 10, eng.tipHash(),
+            List.of(), PublicAddress.random(), eng.difficulty(), 10)));
+        assertTrue(eng.difficulty() > 5, "the fast window must have raised difficulty past the orphan");
+
+        // One bit above the RAISED tip difficulty stays excluded: the upper bound tracks the
+        // same moment-of-call value.
+        BlockImpl stillTooHard = mineAt(p, clk, 10, eng.blockAt(9).hash(), List.of(), 600,
+            PublicAddress.random(), eng.difficulty() + 1);
+        eng.registerOrphan(stillTooHard);
+
+        List<UncleRef> picked = eng.selectUncles();
+        assertEquals(List.of(tooHard.hash()), picked.stream().map(UncleRef::hash).toList(),
+            "only orphans within [minDifficulty, tip difficulty] at call time are offered");
+    }
+
     /**
      * Security regression: payUncleRewards scales each uncle/nephew reward to the uncle's proven
      * work (base >>> deficit, audit C1), so the pop MUST reverse the same scaled amount. Reverting

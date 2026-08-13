@@ -22,7 +22,6 @@ import rhizome.core.ledger.PublicAddress;
 import rhizome.core.mempool.ExecutionStatus;
 import rhizome.core.merkletree.MerkleTree;
 import rhizome.core.transaction.Transaction;
-import rhizome.core.transaction.TransactionImpl;
 
 import static rhizome.core.mempool.ExecutionStatus.*;
 
@@ -98,7 +97,10 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
     private final java.util.List<BlockStateProcessor> stateDomains;
     private final rhizome.core.state.StateAccumulator stateAccumulator;
     private LedgerSnapshot genesisSnapshot;
-    private final OrphanPool orphans = new OrphanPool(256);
+    /** The GHOST uncle machinery (orphan pool, orphan-PoW cache, admission/selection/validation
+     *  rules) — extracted so the engine owns only the lock; every call happens under it
+     *  (see {@link UncleRegistry}). */
+    private final UncleRegistry uncles;
     private final ReentrantLock lock = new ReentrantLock();
 
     /**
@@ -175,25 +177,6 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
         new java.util.concurrent.atomic.AtomicBoolean();
 
     /**
-     * Verify-once cache of orphan-header proof of work (audit: uncle re-hash). Every production
-     * round's {@link #selectUncles} scans the whole orphan pool under the engine lock, and each
-     * eligible orphan's memory-hard Pufferfish2 hash was re-run per candidate block — up to 256
-     * hashes per round. PoW validity is a pure function of the header: the hash commits every
-     * header field including the id (which selects the PoW cost via {@code powCostsAt}), so a
-     * cached positive verdict can never go stale — it does NOT depend on the tip, hence needs no
-     * invalidation on pop/reorg. Bounded LRU (access-order); only successes are cached, so an
-     * attacker cannot evict useful entries with junk headers. Engine-lock-guarded like every
-     * caller ({@link #registerOrphan}, {@link #uncleEligible}).
-     */
-    private final java.util.LinkedHashMap<SHA256Hash, Boolean> verifiedOrphanPow =
-        new java.util.LinkedHashMap<>(256, 0.75f, true) {
-            @Override
-            protected boolean removeEldestEntry(Map.Entry<SHA256Hash, Boolean> eldest) {
-                return size() > 1024;
-            }
-        };
-
-    /**
      * Recently popped canonical blocks (bounded), mapped block-hash → proven PoW nonce, so
      * {@link #restoreBlock} skips the memory-hard PoW re-verification ONLY for a block whose
      * header is identical to one this node popped — the hash commits every header field except
@@ -249,6 +232,7 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
         // Let the VM bound transfer_value by the contract's committed balance (audit T4).
         this.contractProcessor.useNativeBalance(a ->
             ledger.hasWallet(a) ? ledger.getWalletValue(a).amount() : 0L);
+        this.uncles = new UncleRegistry(params);
     }
 
     /**
@@ -557,7 +541,7 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
             }
             // Bound the block's serialized size (cheap, before any expensive work) so a
             // block laden with contract payloads cannot be a download/storage DoS.
-            if (serializedSize(block) > params.maxBlockSizeBytes()) {
+            if (block.serializedSize() > params.maxBlockSizeBytes()) {
                 return BLOCK_TOO_LARGE;
             }
             // Static checkpoint: at a pinned height, only the published hash passes.
@@ -622,12 +606,12 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
                 // minDifficulty <= ref.difficulty() <= block.difficulty(). A fabricated block passed
                 // to this trusted path can then never inflate uncle work/rewards beyond what a
                 // normal addBlock would accept.
-                uncleWork = uncleWorkFromRefs(b);
+                uncleWork = uncles.uncleWorkFromRefs(b);
                 if (uncleWork == null) {
                     return INVALID_UNCLES;
                 }
             } else {
-                uncleWork = validateUncles(b);
+                uncleWork = uncles.validateUncles(b, store);
                 if (uncleWork == null) {
                     return INVALID_UNCLES;
                 }
@@ -689,7 +673,7 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
                 // entry written on first acceptance is simply kept.
                 if (!trustedRestore) {
                     for (UncleRef ref : block.uncles()) {
-                        Block uncle = orphans.get(ref.hash());
+                        Block uncle = uncles.pooled(ref.hash());
                         if (uncle != null) {
                             store.putUncle(ref.hash(), uncle);
                         }
@@ -1684,56 +1668,15 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
         return tree.getRootHash();
     }
 
-    /** Serialized byte size of the block (header + variable-length transactions + uncles). */
-    private static long serializedSize(Block block) {
-        long size = Block.fixedOverheadBytes(block.uncles().size());
-        for (Transaction t : block.transactions()) {
-            size += t.sizeBytes(); // exact wire length without building the DTO (P7)
-        }
-        return size;
-    }
-
     /**
      * Remembers a valid off-chain block so a later block may reference it as an uncle.
-     * Only blocks with valid proof of work are retained (no free pool spam).
+     * Only blocks with valid proof of work are retained (no free pool spam). The admission
+     * rules live in {@link UncleRegistry}.
      */
     public void registerOrphan(Block block) {
         lock.lock();
         try {
-            Block b = block;
-            // Cheap, allocation-free pre-checks BEFORE the memory-hard verifyNonce (audit H3): the
-            // Pufferfish2 hash is expensive by design, so `/submit` must not let an attacker force one
-            // per throwaway block. A block can only ever become a valid uncle if it is a recent
-            // sibling — its height within the uncle-depth window of our tip, and its parent our known
-            // canonical block at height-1 (exactly what uncleEligible later requires). Garbage with a
-            // random parent or an out-of-window height is dropped here for a few comparisons instead
-            // of a hash. This also removes the double-hash: a would-be next block (id = tip+1) that
-            // failed addBlock's own verifyNonce has id > tip and is rejected below without re-hashing.
-            long tip = store.height();
-            int depth = params.uncleMaxDepth();
-            int uid = b.id();
-            if (b.difficulty() < params.minDifficulty()) {
-                return; // worthless as an uncle; also forgeable free "work"
-            }
-            // Same serialized-size bound addBlock enforces, checked BEFORE the PoW hash: the
-            // pool retains full bodies, so without it a spray of max-size orphans (each with a
-            // real but cheap minDifficulty PoW) could pin ~maxSize × maxBlockSizeBytes of heap
-            // (audit: orphan body retention).
-            if (serializedSize(block) > params.maxBlockSizeBytes()) {
-                return; // too large to ever be accepted or referenced
-            }
-            if (uid <= GenesisBlock.GENESIS_ID || uid > tip || uid < tip - depth + 1) {
-                return; // not a recent past sibling of a block we could still build on
-            }
-            if (!store.headerAt(uid - 1).hash().equals(b.lastBlockHash())) {
-                return; // must fork from our known main-chain parent at height uid-1
-            }
-            // Only now the memory-hard proof-of-work check, on a block that is at least a
-            // structurally-plausible recent sibling — verify-once: a sibling already proven (e.g.
-            // re-gossiped, or scanned by selectUncles on a previous round) is not re-hashed.
-            if (verifyOrphanPowOnce(block, uid)) {
-                orphans.put(block);
-            }
+            uncles.registerOrphan(block, store);
         } finally {
             lock.unlock();
         }
@@ -1748,230 +1691,35 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
     public Block orphanBlock(SHA256Hash hash) {
         lock.lock();
         try {
-            Block orphan = orphans.get(hash);
-            return orphan != null ? orphan : store.uncleAt(hash);
+            return uncles.orphanBlock(hash, store);
         } finally {
             lock.unlock();
         }
-    }
-
-    /**
-     * Full uncle validation (GHOST): bounded count and distinct; each uncle must be a
-     * known orphan with valid PoW, recent (its id strictly below this block and within
-     * {@code uncleMaxDepth}), forked from a main-chain block (its parent is on our
-     * chain), not itself the canonical block at its height, and not already referenced
-     * by a recent block. Returns the summed uncle work (2^difficulty over the
-     * referenced uncles) to fold into the chain weight, or {@code null} if any
-     * check fails.
-     */
-    /**
-     * The uncle work committed by {@code block}'s references, summed as {@code Σ 2^difficulty} — the
-     * same total {@link #validateUncles} returns, but read straight from the (already-validated)
-     * references without consulting the orphan pool. Used only by {@link #restoreBlock}.
-     *
-     * <p>Even on the trusted path the pool-free structural bounds are enforced from the refs alone
-     * (audit F2): at most {@code maxUnclesPerBlock} references, distinct hashes, and
-     * {@code minDifficulty <= ref.difficulty() <= block.difficulty()} — the SAME range
-     * {@link #uncleEligible} and {@code HeaderChain.uncleWork} enforce (nephewDifficulty = the
-     * including block's own difficulty), so every path agrees on the bound. Returns {@code null}
-     * when a bound fails, exactly like {@link #validateUncles}.
-     */
-    private BigInteger uncleWorkFromRefs(Block block) {
-        assert lock.isHeldByCurrentThread() : LOCK_REQUIRED;
-
-        return UncleWeight.structuralWork(block.uncles(), block.difficulty(), params);
-    }
-
-    private BigInteger validateUncles(Block block) {
-        assert lock.isHeldByCurrentThread() : LOCK_REQUIRED;
-
-        List<UncleRef> uncles = block.uncles();
-        if (uncles.isEmpty()) {
-            return BigInteger.ZERO;
-        }
-        if (uncles.size() > params.maxUnclesPerBlock()) {
-            return null;
-        }
-        int h = block.id();
-        int depth = params.uncleMaxDepth();
-        long tipHeight = store.height();
-        UncleContext ctx = uncleContext(h, depth, tipHeight);
-
-        BigInteger uncleWork = BigInteger.ZERO;
-        java.util.Set<SHA256Hash> seen = new java.util.HashSet<>();
-        for (UncleRef ref : uncles) {
-            SHA256Hash u = ref.hash();
-            if (!seen.add(u)) {
-                return null; // distinct
-            }
-            Block uncle = orphans.get(u);
-            if (uncle == null) {
-                // The sync paths' uncle-resolve skips a fetch when the body is already known, and
-                // "known" includes the PERSISTED uncle bodies (addBlock persists referenced uncles
-                // so fresh nodes can fetch them later). A node that applied the referencing block
-                // before a restart therefore holds the body in the store but NOT in the in-memory
-                // pool: the retry after the resolve would fail right here — INVALID_UNCLES every
-                // round, a PEER_INVALID ban of an honest peer (campaign 2, S7: a wedged cluster
-                // that froze at the first block referencing a persisted uncle). The persisted body
-                // was fully validated when first applied and its eligibility is re-checked below
-                // against the live context, so falling back to it is exact.
-                uncle = store.uncleAt(u);
-            }
-            if (uncle == null) {
-                return null; // unknown orphan
-            }
-            if (uncle.difficulty() != ref.difficulty()) {
-                return null; // committed difficulty must match the real orphan (no work inflation)
-            }
-            PublicAddress uncleMiner = blockMiner(uncle);
-            if (uncleMiner == null || !uncleMiner.equals(ref.miner())) {
-                return null; // committed miner must match the real orphan (no reward redirection)
-            }
-            // The nephew's difficulty caps how much work any uncle it references can claim,
-            // and minDifficulty floors it — see uncleEligible. block.difficulty() is the
-            // including block's own difficulty.
-            if (!uncleEligible(uncle, h, depth, tipHeight, ctx, block.difficulty())) {
-                return null;
-            }
-            uncleWork = uncleWork.add(BlockWork.of(ref.difficulty()));
-        }
-        return uncleWork;
     }
 
     /**
      * The uncle references a block at height {@code height} would include when
      * produced now: eligible orphans from the pool, up to {@code maxUnclesPerBlock},
      * each committing the orphan's real difficulty. Empty when nothing qualifies.
+     * The eligibility cap is the tip's difficulty at the moment of the call —
+     * {@code currentDifficulty} passes to {@link UncleRegistry#selectUncles} explicitly.
      */
     public List<UncleRef> selectUncles() {
         lock.lock();
         try {
-            // Block ids are int on the wire (BlockDto/HeaderCodec), so the chain is protocol-capped
-            // at 2^31-1 blocks (~340 years at 5 s) — an accepted protocol limit, frozen by the format.
-            int h = (int) (store.height() + 1);
-            int depth = params.uncleMaxDepth();
-            long tipHeight = store.height();
-            UncleContext ctx = uncleContext(h, depth, tipHeight);
-            List<UncleRef> out = new ArrayList<>();
-            for (Block orphan : orphans.snapshot()) {
-                if (out.size() >= params.maxUnclesPerBlock()) {
-                    break;
-                }
-                PublicAddress orphanMiner = blockMiner(orphan);
-                // The block being produced at height h will carry the current difficulty;
-                // only reference orphans whose difficulty fits [minDifficulty, currentDifficulty]
-                // so the produced block passes its own validateUncles check.
-                if (orphanMiner != null
-                        && uncleEligible(orphan, h, depth, tipHeight, ctx, currentDifficulty)) {
-                    out.add(new UncleRef(orphan.hash(), orphan.difficulty(), orphanMiner));
-                }
-            }
-            return out;
+            return uncles.selectUncles(store, currentDifficulty);
         } finally {
             lock.unlock();
         }
-    }
-
-    /** The coinbase recipient (miner) of a block, or {@code null} if it has no coinbase. */
-    private static PublicAddress blockMiner(Block block) {
-        for (Transaction tx : block.transactions()) {
-            if (tx.isTransactionFee()) {
-                return tx.to();
-            }
-        }
-        return null;
-    }
-
-    /** Recent main-chain hashes an uncle may fork from, and uncle hashes already referenced. */
-    private UncleContext uncleContext(int h, int depth, long tipHeight) {
-        assert lock.isHeldByCurrentThread() : LOCK_REQUIRED;
-
-        java.util.Set<SHA256Hash> recentChain = new java.util.HashSet<>();
-        java.util.Set<SHA256Hash> alreadyReferenced = new java.util.HashSet<>();
-        for (long ancestor = Math.max(GenesisBlock.GENESIS_ID, h - depth - 1L); ancestor <= tipHeight; ancestor++) {
-            BlockHeader onChain = store.headerAt(ancestor);
-            recentChain.add(onChain.hash());
-            if (ancestor >= h - depth) {
-                for (UncleRef ref : onChain.uncles()) {
-                    alreadyReferenced.add(ref.hash());
-                }
-            }
-        }
-        return new UncleContext(recentChain, alreadyReferenced);
-    }
-
-    /**
-     * Whether {@code uncle} is a valid uncle for a block at height {@code h} whose own
-     * difficulty is {@code nephewDifficulty}. The uncle's difficulty must lie in
-     * {@code [minDifficulty, nephewDifficulty]}: no zero-/sub-minimum-work uncle earns a
-     * reward, and none can be credited more work than the contemporaneous chain difficulty.
-     * The same bound is enforced in HeaderChain.uncleWork so mining, block validation and
-     * headers-first sync all agree.
-     */
-    private boolean uncleEligible(Block uncle, int h, int depth, long tipHeight, UncleContext ctx,
-                                  int nephewDifficulty) {
-        assert lock.isHeldByCurrentThread() : LOCK_REQUIRED;
-
-        // Cheapest-first, PoW last — the same DoS-ordering doctrine as addBlock: the memory-hard
-        // verifyNonce runs only for orphans every cheap check already accepts, so a pool full of
-        // already-referenced or out-of-range orphans costs map lookups, not Pufferfish2 hashes,
-        // on every production round (selectUncles scans the whole orphan pool under the engine
-        // lock). Pure checks only, so the verdict is unchanged by the reordering.
-        int ud = uncle.difficulty();
-        if (ud < params.minDifficulty() || ud > nephewDifficulty) {
-            return false; // work must be real and not inflated beyond the nephew's difficulty
-        }
-        int uid = uncle.id();
-        if (uid >= h || uid < h - depth) {
-            return false; // recent and strictly before this block
-        }
-        if (!ctx.recentChain().contains(uncle.lastBlockHash())) {
-            return false; // must fork from a recent main-chain block
-        }
-        if (ctx.alreadyReferenced().contains(uncle.hash())) {
-            return false; // not already credited
-        }
-        if (uid <= tipHeight && store.headerAt(uid).hash().equals(uncle.hash())) {
-            return false; // that is the canonical block, not an orphan
-        }
-        // Real PoW, last — verify-once: the memory-hard hash is deterministic per header, so an
-        // orphan already proven (registration, an earlier production round's scan, or a previous
-        // block's uncle validation) is a cache hit instead of a fresh Pufferfish2 run. selectUncles
-        // scans the whole pool under the engine lock on EVERY production round; without the cache
-        // that is up to 256 Pufferfish2 hashes per candidate block.
-        return verifyOrphanPowOnce(uncle, uid);
-    }
-
-    /**
-     * {@code verifyNonce} with a bounded verify-once cache keyed by the header hash (see
-     * {@link #verifiedOrphanPow}). Only successful verifications are cached; failures re-run
-     * (they follow the same deterministic verdict, so caching them would only let junk evict
-     * useful entries). Callers hold the engine lock.
-     */
-    private boolean verifyOrphanPowOnce(Block block, int id) {
-        assert lock.isHeldByCurrentThread() : LOCK_REQUIRED;
-
-        SHA256Hash key = block.hash();
-        if (verifiedOrphanPow.containsKey(key)) {
-            return true;
-        }
-        if (!block.verifyNonce(params.powAlgorithm(), params.powCostsAt(id))) {
-            return false;
-        }
-        verifiedOrphanPow.put(key, Boolean.TRUE);
-        return true;
     }
 
     /** Test hook: current size of the orphan-PoW verify-once cache (bounded-LRU assertions). */
     int verifiedOrphanPowCacheSizeForTest() {
         lock.lock();
         try {
-            return verifiedOrphanPow.size();
+            return uncles.verifiedOrphanPowCacheSizeForTest();
         } finally {
             lock.unlock();
         }
     }
-
-    private record UncleContext(java.util.Set<SHA256Hash> recentChain,
-                                java.util.Set<SHA256Hash> alreadyReferenced) {}
 }
