@@ -59,6 +59,21 @@ public sealed interface Block permits BlockImpl {
                 .build();
     }
 
+    /**
+     * Fixed wire overhead of a serialized block, excluding transactions: the header buffer, the
+     * uncle-count int, and one 61-byte record (hash 32 + difficulty 4 + miner address 25) per
+     * committed uncle. {@code ChainEngine.serializedSize} (the consensus size-cap check) and
+     * {@link rhizome.core.blockchain.BlockAssembler} (which packs a candidate under that same
+     * cap) both build on this ONE base rather than each spelling it out — they used to, and
+     * already drifted once: the assembler's copy omitted the uncle bytes, so it could pack a
+     * block the network then rejected as {@code BLOCK_TOO_LARGE} after the PoW was already spent
+     * (audit: uncle size accounting).
+     */
+    public static long fixedOverheadBytes(int uncleCount) {
+        return BlockDto.BUFFER_SIZE + Integer.BYTES
+            + (long) uncleCount * (SHA256Hash.SIZE + Integer.BYTES + rhizome.core.ledger.PublicAddress.SIZE);
+    }
+
     public BlockDto serialize();
     default BlockDto serialize(Block block) {
         return serializer().serialize(block);

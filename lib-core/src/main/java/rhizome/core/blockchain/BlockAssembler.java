@@ -74,13 +74,10 @@ public final class BlockAssembler {
         // the network would reject as too large.
         // Size the block from sizeBytes() rather than serialize().getSize() (audit P7): the latter
         // allocates a full DTO (copying signature/key/data) per transaction just to read a length.
-        // The base MUST carry the same constant the consensus serializedSize charges: the wire
-        // uncle-count int (4 B) plus 61 B per committed uncle record (hash 32 + difficulty 4 +
-        // miner address 25) — omitting them let the assembler pack a block that addBlock then
-        // rejects as BLOCK_TOO_LARGE after the PoW was already spent (audit: uncle size accounting).
-        long size = rhizome.core.block.dto.BlockDto.BUFFER_SIZE + Integer.BYTES + coinbase.sizeBytes()
-            + (long) view.uncles().size()
-                * (SHA256Hash.SIZE + Integer.BYTES + PublicAddress.SIZE);
+        // The base comes from Block.fixedOverheadBytes, the SAME formula ChainEngine's consensus
+        // serializedSize charges (see its javadoc) — the two used to be spelled out separately and
+        // already drifted once (audit: uncle size accounting).
+        long size = Block.fixedOverheadBytes(view.uncles().size()) + coinbase.sizeBytes();
         for (Transaction t : selected) {
             long next = size + t.sizeBytes();
             if (next > params.maxBlockSizeBytes()) {

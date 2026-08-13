@@ -1644,12 +1644,10 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
 
     /** Serialized byte size of the block (header + variable-length transactions + uncles). */
     private static long serializedSize(Block block) {
-        long size = rhizome.core.block.dto.BlockDto.BUFFER_SIZE + Integer.BYTES;
+        long size = Block.fixedOverheadBytes(block.uncles().size());
         for (Transaction t : block.transactions()) {
             size += t.sizeBytes(); // exact wire length without building the DTO (P7)
         }
-        size += (long) block.uncles().size()
-            * (SHA256Hash.SIZE + Integer.BYTES + rhizome.core.ledger.PublicAddress.SIZE);
         return size;
     }
 

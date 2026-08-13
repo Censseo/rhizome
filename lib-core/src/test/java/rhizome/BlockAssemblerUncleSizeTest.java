@@ -29,14 +29,14 @@ import rhizome.core.transaction.TransactionImpl;
 import rhizome.crypto.PowAlgorithm;
 import rhizome.crypto.PrivateKey;
 import rhizome.crypto.PublicKey;
-import rhizome.crypto.SHA256Hash;
 
 /**
  * The block assembler's size accounting must charge the SAME bytes the consensus
  * {@code serializedSize} charges: the wire uncle-count int (4 B) and 61 B per uncle record
  * (hash 32 + difficulty 4 + miner 25). Before the fix the counter omitted them, so the
  * assembler could pack a block the network rejects as BLOCK_TOO_LARGE — after the PoW was
- * already spent.
+ * already spent. Both now build on {@link Block#fixedOverheadBytes}, one formula instead of
+ * two hand-copies that could drift again.
  */
 class BlockAssemblerUncleSizeTest {
 
@@ -49,14 +49,12 @@ class BlockAssemblerUncleSizeTest {
     private PublicAddress sender;
     private PublicAddress miner;
 
-    /** Consensus-side serialized size, mirroring ChainEngine.serializedSize exactly. */
+    /** Consensus-side serialized size: the same {@link Block#fixedOverheadBytes} ChainEngine uses. */
     private static long consensusSize(Block block) {
-        long size = rhizome.core.block.dto.BlockDto.BUFFER_SIZE + Integer.BYTES;
+        long size = Block.fixedOverheadBytes(block.uncles().size());
         for (Transaction t : block.transactions()) {
             size += ((TransactionImpl) t).sizeBytes();
         }
-        size += (long) block.uncles().size()
-            * (SHA256Hash.SIZE + Integer.BYTES + PublicAddress.SIZE);
         return size;
     }
 
@@ -97,9 +95,7 @@ class BlockAssemblerUncleSizeTest {
         // same sizeBytes): exactly room for the header, the uncle-count int, one uncle record
         // (61 B), the coinbase and ONE transfer — not two.
         int transferSize = ((TransactionImpl) TransactionImpl.builder().build()).sizeBytes();
-        int cap = rhizome.core.block.dto.BlockDto.BUFFER_SIZE + Integer.BYTES
-            + (SHA256Hash.SIZE + Integer.BYTES + PublicAddress.SIZE)
-            + 2 * transferSize;
+        int cap = (int) Block.fixedOverheadBytes(1) + 2 * transferSize;
         params = NetworkParameters.testnet().toBuilder()
             .powAlgorithm(PowAlgorithm.SHA256).genesisDifficulty(3).minDifficulty(3)
             .maxBlockSizeBytes(cap).build();
