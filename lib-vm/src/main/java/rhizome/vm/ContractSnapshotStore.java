@@ -22,11 +22,11 @@ public interface ContractSnapshotStore {
     }
 
     /**
-     * Best-effort durability barrier for unsynced bulk writes. Snapshot import seeds code/storage
-     * slots through the straight-through path, which a durable store deliberately writes WITHOUT
-     * per-entry fsyncs (one fsync per slot made snap-sync unusable); calling this at the end of
-     * the import fsyncs the tail so a power loss cannot drop seeded slots the node has already
-     * reported as imported. No-op for stores whose writes are always synced or non-durable.
+     * Durability barrier after bulk seeding. Kept for API compatibility with stores that
+     * predate durable straight-through writes: every current write path commits with fsync
+     * (audit: durability in the type), so a durable store has nothing left to flush here —
+     * the call is a safe no-op. Stores that ever wrote without fsync must still implement
+     * this as the barrier their callers rely on.
      */
     default void syncToDisk() { }
 

@@ -106,17 +106,17 @@ public final class RocksDbContractStore extends RocksDbStore implements Contract
         return raw(codeCf, contract.toBytes());
     }
 
-    // Code/storage slot writes go through the bulk path: they are the snapshot-import seeding
-    // (and in-session folds, always followed by the block's synced applyBlock), never the
-    // journal/receipt writes, which keep the synced put/delete below (audit F3).
+    // Code/storage slot writes are DURABLE straight-through puts: every write path this type
+    // exposes commits durably (audit: durability in the type), so a caller can never believe a
+    // block-applied write survived when it did not.
     @Override
     public void putCode(PublicAddress contract, byte[] code) {
-        putBulk(codeCf, contract.toBytes(), code);
+        put(codeCf, contract.toBytes(), code);
     }
 
     @Override
     public void deleteCode(PublicAddress contract) {
-        deleteBulk(codeCf, contract.toBytes());
+        delete(codeCf, contract.toBytes());
     }
 
     @Override
@@ -147,12 +147,12 @@ public final class RocksDbContractStore extends RocksDbStore implements Contract
 
     @Override
     public void putStorage(PublicAddress contract, byte[] key, byte[] value) {
-        putBulk(storageCf, slot(contract, key), value);
+        put(storageCf, slot(contract, key), value);
     }
 
     @Override
     public void deleteStorage(PublicAddress contract, byte[] key) {
-        deleteBulk(storageCf, slot(contract, key));
+        delete(storageCf, slot(contract, key));
     }
 
     @Override

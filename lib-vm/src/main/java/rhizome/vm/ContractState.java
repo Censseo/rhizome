@@ -50,12 +50,10 @@ public interface ContractState {
     }
 
     /**
-     * Sets a storage slot. Straight-through calls are for session buffers and snapshot
-     * seeding ONLY: a durable store writes this path deliberately UNSYNCED (bulk-import
-     * throughput), so committing block state through it could silently lose the write on
-     * power loss. Block commits must go through {@code ContractStore.applyBlock}/{@code
-     * revertBlock} (synced, atomic with the journal); bulk seeding must end with
-     * {@link ContractSnapshotStore#syncToDisk()}.
+     * Sets a storage slot. Durable: a durable store commits this write with fsync, so the value
+     * is on disk before the call returns — no caller has to guess whether a straight-through
+     * write survived a crash (audit: durability in the type). Block commits additionally ride
+     * {@code ContractStore.applyBlock}/{@code revertBlock} for atomicity with the journal.
      */
     void putStorage(PublicAddress contract, byte[] key, byte[] value);
 

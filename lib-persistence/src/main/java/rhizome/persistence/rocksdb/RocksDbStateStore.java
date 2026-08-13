@@ -101,7 +101,10 @@ public final class RocksDbStateStore extends RocksDbStore implements SmtNodeStor
         if (protectedWrites != null) {
             protectedWrites.add(new ByteKey(hash));
         }
-        putBulk(nodesCf, hash, node); // unsynced, see bulkWriteOptions
+        // Durable: every write path this type exposes commits with fsync (audit: durability in
+        // the type). Batch writes are covered by flushBatch's single synced batch; a
+        // straight-through put (proofs, snapshot-import rebuild) is synced on its own.
+        put(nodesCf, hash, node);
     }
 
     @Override

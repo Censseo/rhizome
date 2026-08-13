@@ -633,14 +633,14 @@ public final class RocksDbNodeStore extends RocksDbStore implements rhizome.core
         private void setValue(PublicAddress wallet, long amount) {
             // Inside a block commit, buffer the write so it flushes atomically with the height in
             // append/pop; otherwise (genesis/snapshot seeding) write straight through (audit S3) —
-            // unsynced, see bulkWriteOptions: the seeding path is one write per wallet and the next
-            // synced batch in this database covers the tail.
+            // durably: every write path this type exposes commits with fsync (audit: durability in
+            // the type).
             var pending = pendingLedger;
             if (pending != null) {
                 pending.put(wallet, amount);
                 return;
             }
-            putBulk(ledgerCf, wallet.toBytes(), ByteBuffer.allocate(8).putLong(amount).array());
+            put(ledgerCf, wallet.toBytes(), ByteBuffer.allocate(8).putLong(amount).array());
         }
 
         @Override
@@ -675,18 +675,18 @@ public final class RocksDbNodeStore extends RocksDbStore implements rhizome.core
         @Override
         public void set(PublicAddress sender, long next) {
             // Inside a block commit, buffer the write so it flushes atomically with the height in
-            // append/pop (audit perf: per-sender fsync); otherwise write straight through — unsynced
-            // (bulk seeding / boot re-sync, see bulkWriteOptions); the markSyncedThrough watermark
-            // that concludes a re-sync stays synced and covers the tail.
+            // append/pop (audit perf: per-sender fsync); otherwise write straight through — durably
+            // (bulk seeding / boot re-sync: every write path this type exposes commits with fsync,
+            // audit: durability in the type).
             var pending = pendingNonces;
             if (pending != null) {
                 pending.put(sender, next);
                 return;
             }
             if (next <= 0) {
-                deleteBulk(noncesCf, sender.toBytes());
+                delete(noncesCf, sender.toBytes());
             } else {
-                putBulk(noncesCf, sender.toBytes(), longToBytes(next));
+                put(noncesCf, sender.toBytes(), longToBytes(next));
             }
         }
 
