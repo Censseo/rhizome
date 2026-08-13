@@ -79,6 +79,9 @@ public final class NodeService {
         this.mempool = mempool;
         this.snapshots = sources.snapshots() != null
             ? sources.snapshots() : SnapshotService.none(engine);
+        // Built here, not as a field initializer: the accessors capture `engine`, which the
+        // compiler cannot prove initialized before the constructor body assigns it.
+        this.statsWindows = new StatsWindowService(engine::height, this::block);
     }
 
     /**
@@ -354,52 +357,16 @@ public final class NodeService {
         return engine.height();
     }
 
-    /** Aggregate over the last stats window: total tx count and the first/last block timestamps. */
-    public record StatsWindow(long windowStart, long height, long txCount, long firstTs, long lastTs) {}
-
-    private volatile StatsWindow statsWindowCache;
-    /** Serializes stats-window recomputes: without it, N concurrent callers on a stale cache
-     *  all re-decode the same window under the read path (duplicate lock-guarded work). */
-    private final Object statsWindowLock = new Object();
+    /** Aggregate over the last stats window, cached by tip height; see {@link StatsWindowService}. */
+    private final StatsWindowService statsWindows;
 
     /**
-     * Cached aggregate over the last {@code window} blocks for {@code GET /stats}. The dashboard polls
-     * stats on a timer, but this window only changes when the tip advances, so it is recomputed (and
-     * the {@code window} blocks re-decoded under the read path) only when {@code blockCount()} moved
-     * since the last call (audit optimization). Live scalars (mempool, peers, difficulty) are cheap and
-     * stay uncached in the handler.
+     * Cached aggregate over the last {@code window} blocks for {@code GET /stats} — the window
+     * only changes when the tip advances, so it is recomputed (and the {@code window} blocks
+     * re-decoded under the read path) only when {@code blockCount()} moved since the last call.
      */
-    public StatsWindow statsWindow(int window) {
-        long height = blockCount();
-        StatsWindow cached = statsWindowCache;
-        if (cached != null && cached.height() == height) {
-            return cached;
-        }
-        synchronized (statsWindowLock) {
-            // Re-check inside the lock: a concurrent caller may already have recomputed this
-            // height — only one thread re-decodes the window per tip movement.
-            cached = statsWindowCache;
-            if (cached != null && cached.height() == height) {
-                return cached;
-            }
-            long windowStart = Math.max(1, height - window + 1);
-            long txCount = 0;
-            long firstTs = 0;
-            long lastTs = 0;
-            for (long h = windowStart; h <= height; h++) {
-                var b = (rhizome.core.block.BlockImpl) block(h);
-                txCount += b.transactions().size();
-                if (h == windowStart) {
-                    firstTs = b.timestamp();
-                }
-                if (h == height) {
-                    lastTs = b.timestamp();
-                }
-            }
-            StatsWindow w = new StatsWindow(windowStart, height, txCount, firstTs, lastTs);
-            statsWindowCache = w;
-            return w;
-        }
+    public StatsWindowService.StatsWindow statsWindow(int window) {
+        return statsWindows.statsWindow(window);
     }
 
     /** Exclusive upper bound of pruned block bodies (0 = archive node). */
