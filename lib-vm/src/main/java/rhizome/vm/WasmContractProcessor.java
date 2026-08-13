@@ -8,6 +8,7 @@ import rhizome.core.blockchain.ContractProcessor.ContractLog;
 import rhizome.core.blockchain.Contracts;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.state.HeightRetainedIndex;
+import rhizome.core.state.PruneCadence;
 import rhizome.core.transaction.TransactionKind;
 
 /**
@@ -77,16 +78,11 @@ public final class WasmContractProcessor implements ContractProcessor {
     static final long MAX_RETAINED_CHANGE_BYTES = 64L * 1024 * 1024;
 
     /**
-     * Cadence of the amortized durable interval prune ({@code pruneThrough} range tombstones).
-     * Per-height point deletes still run on every appended block, keeping the RAM maps and their
-     * durable rows at exactly {@code retainDepth}; the interval deleteRange is only the backstop
-     * for rows committed before a restart (the RAM maps are empty then). Running it every block
-     * paid ~2 synced range-tombstone fsyncs per block for rows that rarely exist (audit perf).
-     * The reorg window is unaffected: per-height deletes cover it exactly, and the interval
-     * prune only ever lags it — never leads it.
+     * Amortized cadence of the durable interval prune ({@code pruneThrough} range tombstones) —
+     * see {@link PruneCadence}: the per-height deletes run on every appended block, the interval
+     * deleteRange is only the backstop for rows committed before a restart.
      */
-    static final long PRUNE_INTERVAL = 32;
-    private long lastIntervalPruneCutoff;
+    private final PruneCadence durablePrune = new PruneCadence();
 
     /** Uses a default retention depth; fine when reorgs are shallow. */
     public WasmContractProcessor(WasmVm vm, ContractStore baseStore) {
@@ -663,16 +659,12 @@ public final class WasmContractProcessor implements ContractProcessor {
         receiptsByHeight.pruneThrough(chainTip, baseStore::deleteReceipts); // receipts prune on the journal schedule (F3)
         changesByHeight.pruneThrough(chainTip, null);
         logsByHeight.pruneThrough(chainTip, null);
-        // Interval prune of the durable rows, AMORTIZED to every PRUNE_INTERVAL commits: the
-        // per-height deletes above only reach heights still present in the RAM maps, which are
-        // EMPTY after a restart — without an interval prune, every journal/receipt written
-        // before it would stay on disk forever. The deleteRange fsync is not worth paying per
-        // block for that rare backlog (audit perf); the reorg window is covered exactly by the
-        // per-height deletes, and this prune only ever lags it.
-        long cutoff = chainTip - retainDepth;
-        if (cutoff > 0 && cutoff - lastIntervalPruneCutoff >= PRUNE_INTERVAL) {
-            baseStore.pruneThrough(cutoff);
-            lastIntervalPruneCutoff = cutoff;
+        // Interval prune of the durable rows, AMORTIZED via PruneCadence: the per-height deletes
+        // above only reach heights still present in the RAM maps, which are EMPTY after a restart
+        // — without an interval prune, every journal/receipt written before it would stay on
+        // disk forever.
+        if (durablePrune.due(chainTip - retainDepth)) {
+            baseStore.pruneThrough(chainTip - retainDepth);
         }
     }
 }

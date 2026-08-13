@@ -7,6 +7,7 @@ import java.util.Map;
 
 import rhizome.core.blockchain.NetworkParameters;
 import rhizome.core.state.HeightRetainedIndex;
+import rhizome.core.state.PruneCadence;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.transaction.TransactionKind;
 
@@ -44,9 +45,8 @@ public final class DefaultTokenProcessor implements TokenProcessor {
     /** Fixed part of a serialized {@link TokenMeta}: id, minter, decimals, supply, height, 2 lengths. */
     private static final long TOKEN_META_FIXED_BYTES = 32L + PublicAddress.SIZE + 1 + 8 + 8 + 1 + 1;
 
-    /** Blocks between amortized durable interval prunes ({@code pruneJournals}); see pruneToChainTip. */
-    static final long PRUNE_INTERVAL = 32;
-    private long lastIntervalPruneCutoff;
+    /** Amortized cadence of the durable interval prune ({@code pruneJournals}); see pruneToChainTip. */
+    private final PruneCadence journalPrune = new PruneCadence();
 
     public DefaultTokenProcessor(TokenStore store, NetworkParameters params) {
         this(store, params, params.maxReorgDepth());
@@ -221,10 +221,8 @@ public final class DefaultTokenProcessor implements TokenProcessor {
         // Amortized durable interval prune: the deleteRange fsync is the backstop for rows
         // committed before a restart, not worth paying every block (audit perf). It only ever lags
         // the exact per-height schedule, so the reorg depth stays fully covered.
-        long cutoff = chainTip - retainDepth;
-        if (cutoff > 0 && cutoff - lastIntervalPruneCutoff >= PRUNE_INTERVAL) {
-            store.pruneJournals(cutoff);
-            lastIntervalPruneCutoff = cutoff;
+        if (journalPrune.due(chainTip - retainDepth)) {
+            store.pruneJournals(chainTip - retainDepth);
         }
     }
 

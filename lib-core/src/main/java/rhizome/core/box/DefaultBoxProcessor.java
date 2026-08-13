@@ -5,6 +5,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import rhizome.core.state.HeightRetainedIndex;
+import rhizome.core.state.PruneCadence;
 
 import rhizome.core.blockchain.NetworkParameters;
 import rhizome.core.ledger.PublicAddress;
@@ -414,24 +415,22 @@ public final class DefaultBoxProcessor implements BoxProcessor {
     }
 
     /**
-     * Cadence of the amortized durable interval prune ({@code pruneJournals} range tombstones).
-     * Per-height receipt deletes still run on every appended block; the interval deleteRange is
-     * only the backstop for rows committed before a restart (the RAM maps are empty then), so it
-     * is paid every PRUNE_INTERVAL blocks instead of ~2 synced tombstone fsyncs per block (audit
-     * perf). It only ever lags the exact per-height schedule — the reorg window stays covered.
+     * Amortized cadence of the durable interval prune ({@code pruneJournals} range tombstones) —
+     * see {@link rhizome.core.state.PruneCadence}: per-height receipt deletes still run on every
+     * appended block; the interval deleteRange is only the backstop for rows committed before a
+     * restart (the RAM maps are empty then), so it is paid every PRUNE_INTERVAL blocks instead of
+     * ~2 synced tombstone fsyncs per block (audit perf). It only ever lags the exact per-height
+     * schedule — the reorg window stays covered.
      */
-    static final long PRUNE_INTERVAL = 32;
-    private long lastIntervalPruneCutoff;
+    private final PruneCadence journalPrune = new PruneCadence();
 
     @Override
     public void pruneToChainTip(long chainTip) {
         receiptsByHeight.pruneThrough(chainTip, store::deleteReceipts); // receipts prune on the journal schedule (audit F7)
         eventsByHeight.pruneThrough(chainTip, null);
         changesByHeight.pruneThrough(chainTip, null);
-        long cutoff = chainTip - retainDepth;
-        if (cutoff > 0 && cutoff - lastIntervalPruneCutoff >= PRUNE_INTERVAL) {
-            store.pruneJournals(cutoff);
-            lastIntervalPruneCutoff = cutoff;
+        if (journalPrune.due(chainTip - retainDepth)) {
+            store.pruneJournals(chainTip - retainDepth);
         }
     }
 
