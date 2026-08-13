@@ -109,6 +109,24 @@ class RocksDbStateStoreTest {
     }
 
     @Test
+    void rootsAndPruneSurviveReopen(@TempDir Path dir) throws Exception {
+        try (var store = new RocksDbStateStore(dir.toString())) {
+            for (long h = 1; h <= 10; h++) {
+                store.putRoot(h, key32((int) h));
+            }
+            store.deleteRoot(10);
+            store.pruneBelow(5);
+        }
+        // The root store is on disk, not in memory: the deleted and pruned rows stay gone.
+        try (var store = new RocksDbStateStore(dir.toString())) {
+            assertNull(store.getRoot(10), "the deleted root must not resurrect");
+            assertNull(store.getRoot(3), "the pruned root must not resurrect");
+            assertArrayEquals(key32(5), store.getRoot(5));
+            assertArrayEquals(key32(9), store.getRoot(9));
+        }
+    }
+
+    @Test
     void beginBatchRefusesASecondOpenBatch(@TempDir Path dir) throws Exception {
         try (var store = new RocksDbStateStore(dir.toString())) {
             store.beginBatch();

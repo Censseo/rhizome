@@ -109,6 +109,27 @@ class RocksDbNodeStoreTest implements ChainStoreContract, NonceStoreContract, Le
     }
 
     @Test
+    void straightThroughLedgerNoncesAndWatermarkSurviveReopen() throws IOException {
+        // The straight-through write path (no open block commit — genesis/snapshot seeding) must
+        // be durable across a reopen, exactly like the staged commit path: a ledger balance, a
+        // nonce, and the nonce sync watermark are the three things boot recovery re-reads.
+        String path = tempDir.resolve("db").toString();
+        PublicAddress wallet = PublicAddress.random();
+        try (RocksDbNodeStore store = new RocksDbNodeStore(path)) {
+            Ledger ledger = store.ledger();
+            ledger.createWallet(wallet);
+            ledger.deposit(wallet, new TransactionAmount(100));
+            store.nonceStore().set(wallet, 3L);
+            store.nonceStore().markSyncedThrough(42L);
+        }
+        try (RocksDbNodeStore store = new RocksDbNodeStore(path)) {
+            assertEquals(100, store.ledger().getWalletValue(wallet).amount());
+            assertEquals(3L, store.nonceStore().next(wallet));
+            assertEquals(42L, store.nonceStore().syncedThroughHeight());
+        }
+    }
+
+    @Test
     void ledgerChecksArithmetic() throws IOException {
         try (RocksDbNodeStore store = new RocksDbNodeStore(tempDir.resolve("db").toString())) {
             Ledger ledger = store.ledger();

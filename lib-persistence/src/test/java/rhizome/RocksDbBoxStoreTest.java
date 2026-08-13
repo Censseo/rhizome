@@ -60,4 +60,38 @@ class RocksDbBoxStoreTest implements BoxStoreContract {
             assertEquals(a, store.get(a.id())); // survived on disk
         }
     }
+
+    @Test
+    void receiptsSurviveReopen() throws Exception {
+        byte[] encoded = {1, 2, 3, 4};
+        try (var store = new RocksDbBoxStore(dir.toString())) {
+            store.putReceipts(9, encoded);
+            org.junit.jupiter.api.Assertions.assertArrayEquals(encoded, store.getReceipts(9));
+        }
+        try (var store = new RocksDbBoxStore(dir.toString())) {
+            org.junit.jupiter.api.Assertions.assertArrayEquals(encoded, store.getReceipts(9),
+                "receipts are on disk, not in memory");
+            store.deleteReceipts(9);
+            assertNull(store.getReceipts(9));
+        }
+        // The deletion is durable too.
+        try (var store = new RocksDbBoxStore(dir.toString())) {
+            assertNull(store.getReceipts(9));
+        }
+    }
+
+    @Test
+    void pruneJournalsSurvivesReopen() throws Exception {
+        PublicAddress owner = PublicAddress.random();
+        Box a = box(owner, 0, 1000, 5);
+        try (var store = new RocksDbBoxStore(dir.toString())) {
+            store.applyBlock(2, List.of(BoxStore.BoxMutation.write(a)));
+            store.pruneJournals(3);
+        }
+        // Reopening must not resurrect the pruned journal: reverting block 2 is a no-op.
+        try (var store = new RocksDbBoxStore(dir.toString())) {
+            store.revertBlock(2);
+            assertEquals(a, store.get(a.id()));
+        }
+    }
 }

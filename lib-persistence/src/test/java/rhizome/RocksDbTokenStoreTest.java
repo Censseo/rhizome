@@ -63,4 +63,19 @@ class RocksDbTokenStoreTest implements TokenStoreContract {
             assertEquals(1_000, store.getBalance(m.id(), holder.toBytes()));
         }
     }
+
+    @Test
+    void pruneJournalsSurvivesReopen() throws Exception {
+        PublicAddress minter = PublicAddress.random();
+        TokenMeta m = meta(minter, 0, 1_000);
+        try (var store = new RocksDbTokenStore(dir.toString())) {
+            store.applyBlock(2, List.of(new TokenStore.TokenOp.MetaSet(m)));
+            store.pruneJournals(3);
+        }
+        // Reopening must not resurrect the pruned journal: reverting block 2 is a no-op.
+        try (var store = new RocksDbTokenStore(dir.toString())) {
+            store.revertBlock(2);
+            assertEquals(m, store.getMeta(m.id()));
+        }
+    }
 }
