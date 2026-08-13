@@ -160,7 +160,13 @@ final class SnapshotBootstrap {
             return false;
         }
 
-        if (info.chunkCount() < 0 || info.chunkCount() > MAX_SNAPSHOT_CHUNKS) {
+        // <= 0, not < 0: a snapshot at a real (buried, non-genesis) pivot always has at least one
+        // chunk of state, so zero is as absurd a count as negative — HttpPeerSource's own
+        // /state/snapshot/info parsing already refuses chunks <= 0 for exactly this reason (audit
+        // F6). This check used to be more permissive than that one; a zero-chunk snapshot from a
+        // non-HTTP PeerSource still ended up refused (root verification cannot pass against zero
+        // chunks), just later, after a temp spool file was created for nothing.
+        if (info.chunkCount() <= 0 || info.chunkCount() > MAX_SNAPSHOT_CHUNKS) {
             log.warn("Snapshot advertises an out-of-range chunk count ({}); refusing", info.chunkCount());
             return false;
         }

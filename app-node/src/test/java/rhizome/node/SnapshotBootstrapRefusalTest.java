@@ -6,10 +6,13 @@ import org.junit.jupiter.api.io.TempDir;
 
 import rhizome.core.block.Block;
 import rhizome.core.block.BlockHeader;
+import rhizome.core.block.BlockImpl;
 import rhizome.core.blockchain.BootstrapTarget;
 import rhizome.core.blockchain.ChainStore;
+import rhizome.core.blockchain.GenesisBlock;
 import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.InMemoryNonceStore;
+import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
 import rhizome.core.blockchain.NonceStore;
 import rhizome.core.blockchain.PeerSource;
@@ -25,6 +28,7 @@ import rhizome.core.state.SmtNodeStore;
 import rhizome.core.token.InMemoryTokenStore;
 import rhizome.core.token.TokenStore;
 import rhizome.crypto.PowAlgorithm;
+import rhizome.crypto.SHA256Hash;
 import rhizome.vm.InMemoryContractStore;
 
 import java.nio.file.Path;
@@ -69,6 +73,33 @@ class SnapshotBootstrapRefusalTest {
     private boolean bootstrap(PeerSource peer) {
         return SnapshotBootstrap.bootstrap(PARAMS, genesisSnapshot, target,
             new InMemoryContractStore(), peer, NOW, tempDir);
+    }
+
+    /** Mines a standalone, PoW-valid header (no retarget crossed in these short test chains). */
+    private BlockHeader mineHeader(long id, SHA256Hash parent, long timestamp, SHA256Hash stateRoot) {
+        var b = (BlockImpl) BlockImpl.builder().id((int) id).timestamp(timestamp)
+            .difficulty(PARAMS.genesisDifficulty()).lastBlockHash(parent)
+            .merkleRoot(SHA256Hash.random()).stateRoot(stateRoot).build();
+        b.nonce(Miner.mineNonce(b.hash(), b.difficulty(), PARAMS.powAlgorithm()));
+        return BlockHeader.of(b);
+    }
+
+    /**
+     * A real, PoW-validated header chain from height 2 through {@code pivot + maxReorgDepth} —
+     * exactly the window {@code SnapshotBootstrap} fetches and validates before it ever looks at
+     * the advertised chunk count — with {@code pivotRoot} on the pivot header and everywhere else
+     * empty (only the pivot's state root is checked against the snapshot advertisement).
+     */
+    private List<BlockHeader> buriedPivotHeaders(long pivot, SHA256Hash pivotRoot) {
+        SHA256Hash parent = BlockHeader.of(GenesisBlock.build(PARAMS, genesisSnapshot)).hash();
+        List<BlockHeader> chain = new ArrayList<>();
+        long validateTo = pivot + PARAMS.maxReorgDepth();
+        for (long h = 2; h <= validateTo; h++) {
+            BlockHeader header = mineHeader(h, parent, h * 1000L, h == pivot ? pivotRoot : SHA256Hash.empty());
+            chain.add(header);
+            parent = header.hash();
+        }
+        return chain;
     }
 
     @Test
@@ -122,8 +153,32 @@ class SnapshotBootstrapRefusalTest {
 
     @Test
     void anOutOfRangeChunkCountIsRefusedBeforeAnyFetch() {
-        assertFalse(bootstrap(new FakePeer(100, info(20, new byte[32], -1))));
-        assertFalse(bootstrap(new FakePeer(100, info(20, new byte[32], Integer.MAX_VALUE))));
+        // A real, PoW-validated chain buries the pivot and its advertised root matches the
+        // validated header, so these cases are refused BY THE CHUNK COUNT specifically — not,
+        // as a peer serving no headers at all would be, by the earlier proof-of-burial checks.
+        long pivot = 2;
+        SHA256Hash pivotRoot = SHA256Hash.random();
+        List<BlockHeader> chain = buriedPivotHeaders(pivot, pivotRoot);
+        assertFalse(bootstrap(new FakePeer(100, info(pivot, pivotRoot.toBytes(), -1), chain)));
+        assertFalse(bootstrap(new FakePeer(100, info(pivot, pivotRoot.toBytes(), Integer.MAX_VALUE), chain)));
+        assertEquals(0, target.chainStore().height());
+    }
+
+    @Test
+    void aZeroChunkCountIsRefused() {
+        // A snapshot at a real (non-genesis, buried) pivot must carry at least one chunk of
+        // state; zero is as absurd as a negative count, not a legitimate empty snapshot.
+        // HttpPeerSource's own /state/snapshot/info parsing already refuses chunks <= 0 (audit
+        // F6) — this pins the outcome for SnapshotBootstrap's own check, which used to only
+        // refuse a negative count: before that fix a zero-chunk snapshot still never got
+        // adopted (root verification cannot pass against zero chunks), but only after spooling
+        // a temp file and running a verification pass doomed to fail. The pivot here is
+        // genuinely buried and its advertised root genuinely matches the validated header, so
+        // this is not refused for either of those unrelated reasons.
+        long pivot = 2;
+        SHA256Hash pivotRoot = SHA256Hash.random();
+        List<BlockHeader> chain = buriedPivotHeaders(pivot, pivotRoot);
+        assertFalse(bootstrap(new FakePeer(100, info(pivot, pivotRoot.toBytes(), 0), chain)));
         assertEquals(0, target.chainStore().height());
     }
 
@@ -131,8 +186,14 @@ class SnapshotBootstrapRefusalTest {
         return new PeerSource.SnapshotInfo(pivot, root, chunks);
     }
 
-    /** A peer that advertises a snapshot and serves nothing else. */
-    private record FakePeer(long height, PeerSource.SnapshotInfo snapshot) implements PeerSource {
+    /** A peer that advertises a snapshot, optionally serves a real header chain, and nothing else. */
+    private record FakePeer(long height, PeerSource.SnapshotInfo snapshot, List<BlockHeader> servedHeaders)
+            implements PeerSource {
+
+        FakePeer(long height, PeerSource.SnapshotInfo snapshot) {
+            this(height, snapshot, List.of());
+        }
+
         @Override public PeerSource.SnapshotInfo snapshotInfo() {
             return snapshot;
         }
@@ -142,7 +203,7 @@ class SnapshotBootstrapRefusalTest {
         }
 
         @Override public List<BlockHeader> headers(long start, long end) {
-            return List.of();
+            return servedHeaders.stream().filter(h -> h.id() >= start && h.id() <= end).toList();
         }
 
         @Override public byte[] snapshotChunk(int index) {
