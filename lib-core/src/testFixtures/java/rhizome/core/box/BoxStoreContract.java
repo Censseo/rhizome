@@ -2,6 +2,7 @@ package rhizome.core.box;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
@@ -12,6 +13,11 @@ import rhizome.core.ledger.PublicAddress;
 
 /**
  * The behaviour every {@link BoxStore} owes its callers, run against each implementation.
+ *
+ * <p>Includes the double-apply refusal (audit F10): {@link InMemoryBoxStore} used to overwrite
+ * the journal silently where RocksDB threw, so most of the test suite — which runs against the
+ * in-memory store — could not have caught the bug the durable one is guarded for. Both now
+ * refuse alike.
  *
  * <p>An interface with {@code default} {@code @Test} methods rather than an abstract base class:
  * the repo has no abstract class, and a test class implementing this keeps its single
@@ -112,6 +118,34 @@ public interface BoxStoreContract {
         store.pruneJournals(3); // drop journals below height 3, including height 2
         // With the journal gone, reverting block 2 is a no-op (state unchanged).
         store.revertBlock(2);
+        assertEquals(a, store.get(a.id()));
+    }
+
+    @Test
+    default void applyBlockRefusesADoubleApply() throws Exception {
+        BoxStore store = newBoxStore();
+        PublicAddress owner = PublicAddress.random();
+        Box a = box(owner, 0, 1000, 5);
+        store.applyBlock(2, List.of(BoxStore.BoxMutation.write(a)));
+        // A second apply at the same height would journal the already-mutated state as the
+        // "prior", corrupting any later revert — it must be refused (audit F10).
+        List<BoxStore.BoxMutation> repeat = List.of(BoxStore.BoxMutation.write(a));
+        assertThrows(IllegalStateException.class, () -> store.applyBlock(2, repeat));
+        assertEquals(a, store.get(a.id())); // the first commit is untouched
+    }
+
+    @Test
+    default void aMutationLessApplyRecordsNoJournalAndStaysReAppliable() throws Exception {
+        // A block that touches no box has nothing to undo, so it must not persist an (empty)
+        // journal — otherwise a legitimately mutation-less block would falsely trip the
+        // double-apply guard the moment it, or a later empty apply at the same height, ran again.
+        BoxStore store = newBoxStore();
+        store.applyBlock(5, List.of());
+        store.applyBlock(5, List.of()); // must not throw
+        PublicAddress owner = PublicAddress.random();
+        Box a = box(owner, 0, 1000, 5);
+        // A later real apply at that same height is still accepted — no phantom journal blocks it.
+        store.applyBlock(5, List.of(BoxStore.BoxMutation.write(a)));
         assertEquals(a, store.get(a.id()));
     }
 }

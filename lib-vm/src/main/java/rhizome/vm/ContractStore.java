@@ -44,15 +44,19 @@ public interface ContractStore extends ContractState, ContractSnapshotStore, Con
      *       exactly as {@link #putJournal} would (a durable store keeps it so a reorg after a
      *       restart can still reverse the block); may be null to commit changes without a
      *       journal (e.g. a block that touched no contract state).</li>
-     *   <li>Implementations may refuse a height that already has a journal (double-apply would
-     *       capture already-mutated state as the "prior") by throwing
-     *       {@link IllegalStateException}.</li>
+     *   <li>A height that already has a journal MUST be refused with {@link IllegalStateException}:
+     *       a double-apply would capture the already-mutated state as the journal's "prior", so a
+     *       later revert would restore the wrong values (audit F10).</li>
      * </ul>
      *
-     * <p>The default implementation loops the per-operation methods and then
-     * {@link #putJournal} — correct, just not atomic — so existing stores keep working.
+     * <p>The default implementation checks the guard, then loops the per-operation methods and
+     * calls {@link #putJournal} — correct, just not atomic — so a store that does not override
+     * this gets the guard for free rather than opting out of it by omission.
      */
     default void applyBlock(long height, java.util.List<StorageChange> changes, byte[] journal) {
+        if (getJournal(height) != null) {
+            throw new IllegalStateException("contract store already has a journal at height " + height);
+        }
         for (StorageChange change : changes) {
             change.applyTo(this);
         }

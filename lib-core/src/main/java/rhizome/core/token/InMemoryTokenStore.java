@@ -36,6 +36,15 @@ public final class InMemoryTokenStore implements TokenStore {
 
     @Override
     public void applyBlock(long height, List<TokenOp> ops) {
+        // Refuse a double-apply: re-applying a block would journal its own already-mutated state
+        // as the "prior", so a later revert would restore the wrong values (audit F10). Checked
+        // against whether a NON-EMPTY journal already exists at this height — mirroring the
+        // durable store, which persists no journal (and so triggers no refusal next time) for a
+        // mutation-less apply; see the guard below.
+        List<Undo> existing = journals.get(height);
+        if (existing != null && !existing.isEmpty()) {
+            throw new IllegalStateException("token store already has a journal at height " + height);
+        }
         List<Undo> journal = new ArrayList<>(ops.size());
         for (TokenOp op : ops) {
             if (op instanceof TokenOp.MetaSet m) {
@@ -52,7 +61,11 @@ public final class InMemoryTokenStore implements TokenStore {
                 }
             }
         }
-        journals.put(height, journal);
+        // A mutation-less apply persists no journal: revertBlock maps a missing journal to
+        // "nothing to undo", matching the durable store (audit: empty journals).
+        if (!journal.isEmpty()) {
+            journals.put(height, journal);
+        }
     }
 
     @Override

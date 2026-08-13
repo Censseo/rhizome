@@ -3,6 +3,7 @@ package rhizome.core.token;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
@@ -13,6 +14,10 @@ import rhizome.core.ledger.PublicAddress;
 
 /**
  * The behaviour every {@link TokenStore} owes its callers, run against each implementation.
+ *
+ * <p>Includes the double-apply refusal (audit F10): {@link InMemoryTokenStore} used to overwrite
+ * the journal silently where RocksDB threw — see {@link rhizome.core.box.BoxStoreContract} for
+ * the same fix on the box side. Both now refuse alike.
  */
 public interface TokenStoreContract {
 
@@ -79,5 +84,34 @@ public interface TokenStoreContract {
         store.pruneJournals(3);
         store.revertBlock(2); // journal gone -> no-op
         assertNotNull(store.getMeta(m.id()));
+    }
+
+    @Test
+    default void applyBlockRefusesADoubleApply() throws Exception {
+        TokenStore store = newTokenStore();
+        PublicAddress minter = PublicAddress.random();
+        TokenMeta m = meta(minter, 0, 1_000);
+        store.applyBlock(2, List.of(new TokenStore.TokenOp.MetaSet(m)));
+        // A second apply at the same height would journal the already-mutated state as the
+        // "prior", corrupting any later revert — it must be refused (audit F10).
+        List<TokenStore.TokenOp> repeat = List.of(new TokenStore.TokenOp.MetaSet(m));
+        assertThrows(IllegalStateException.class, () -> store.applyBlock(2, repeat));
+        // ...and the first commit is untouched.
+        assertEquals(m, store.getMeta(m.id()));
+    }
+
+    @Test
+    default void aMutationLessApplyRecordsNoJournalAndStaysReAppliable() throws Exception {
+        // A block that touches no token has nothing to undo, so it must not persist an (empty)
+        // journal — otherwise a legitimately mutation-less block would falsely trip the
+        // double-apply guard the moment it, or a later empty apply at the same height, ran again.
+        TokenStore store = newTokenStore();
+        store.applyBlock(5, List.of());
+        store.applyBlock(5, List.of()); // must not throw
+        PublicAddress minter = PublicAddress.random();
+        TokenMeta m = meta(minter, 0, 1_000);
+        // A later real apply at that same height is still accepted — no phantom journal blocks it.
+        store.applyBlock(5, List.of(new TokenStore.TokenOp.MetaSet(m)));
+        assertEquals(m, store.getMeta(m.id()));
     }
 }

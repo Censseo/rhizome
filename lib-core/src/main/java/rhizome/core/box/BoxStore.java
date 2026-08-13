@@ -22,6 +22,12 @@ public interface BoxStore {
      * Applies one block's box mutations atomically and records an undo journal keyed
      * by {@code height}. Each mutation either writes a box ({@link BoxMutation#box()}
      * non-null) or deletes the box at {@link BoxMutation#id()} (box null).
+     *
+     * <p>A height that already carries a NON-EMPTY journal MUST be refused with
+     * {@link IllegalStateException}: a double-apply would journal the already-mutated state as
+     * the "prior", so a later {@link #revertBlock} would restore the wrong values (audit F10).
+     * An apply whose {@code mutations} is empty persists no journal (there is nothing to undo),
+     * so it does not itself trigger this refusal on a later call at the same height.
      */
     void applyBlock(long height, List<BoxMutation> mutations);
 

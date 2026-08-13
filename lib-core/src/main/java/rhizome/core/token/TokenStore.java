@@ -15,7 +15,15 @@ public interface TokenStore {
     /** Balance of {@code tokenId} held by {@code address} (0 if none). */
     long getBalance(byte[] tokenId, byte[] address);
 
-    /** Applies one block's token changes atomically and records an undo journal for {@code height}. */
+    /**
+     * Applies one block's token changes atomically and records an undo journal for {@code height}.
+     *
+     * <p>A height that already carries a NON-EMPTY journal MUST be refused with
+     * {@link IllegalStateException}: a double-apply would journal the already-mutated state as
+     * the "prior", so a later {@link #revertBlock} would restore the wrong values (audit F10).
+     * An apply whose {@code ops} is empty persists no journal (there is nothing to undo), so it
+     * does not itself trigger this refusal on a later call at the same height.
+     */
     void applyBlock(long height, List<TokenOp> ops);
 
     /** Reverts the token changes committed for {@code height} using the persisted journal. */
