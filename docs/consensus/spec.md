@@ -71,9 +71,30 @@ Cheapest and structural first, proof of work last. This ordering is **DoS armor,
 
 ### C-3 — Single-writer locking *(implemented)*
 
-All public `ChainEngine` methods serialise on one lock: one writer at a time, reads see consistent
-state. Pandanite's unlocked getters produced torn reads of its `BigInt` cumulative work, and its
-opposed mempool↔blockchain lock orders deadlocked under load (§4.9).
+`ChainEngine` serialises on one lock — but the blanket claim "all public methods serialise on one
+lock" is false, and a blanket claim that is false in places is worse than an accurate one, because
+it stops anyone from asking which places. There are three tiers, mirroring the class javadoc:
+
+1. **Serialised on the engine lock.** Every mutator (`addBlock`, `popBlock`, `stampStateRoot`,
+   `runExclusive`, `withConsistentView`) and every getter that reads the ledger, the store or a
+   derived cache (`height`, `tipHash`, `blockAt`, `headerAt`, `difficulty`, `totalWork`,
+   `nextNonce`, `confirmedBalance`, `box`, `tokenBalance`, `voteableParams`, `stateRoot`, …). One
+   writer at a time; reads see a consistent snapshot. The GHOST uncle machinery (`UncleRegistry`)
+   is a lock-free collaborator called only from these already-locked paths, so the single-writer
+   doctrine holds without it re-entering the lock.
+2. **Deliberately lock-free, seqlock-guarded.** `scanBoxes`, `boxEvents` and `tokenEvents` read
+   the box/token stores without the lock and fall back to it only if a `stampStateRoot` dry-run
+   overlapped the read. This is the one intentional exception, and it exists because these are
+   the scan-shaped reads that would otherwise hold the consensus lock for a whole window of
+   entries.
+3. **Lock-free by construction.** `isReorgInProgress`, `degradedState`, `isDegraded`,
+   `boxesEnabled`, `tokensEnabled`, `params`, `nowMillis` and `setOnBlockApplied` touch only
+   atomics, volatiles or final fields. They need no lock and must not take one — `isDegraded` and
+   `isReorgInProgress` are polled from paths that must never block behind a block application.
+
+The rule C-3 protects is unchanged: Pandanite's unlocked getters produced torn reads of its
+`BigInt` cumulative work, and its opposed mempool↔blockchain lock orders deadlocked under load
+(§4.9).
 
 Reorg is atomic: the bounded small-reorg path runs the whole pop→apply→restore sequence under one
 `withConsistentView` hold (branch prefetched, so no network I/O under the lock). The header-first
