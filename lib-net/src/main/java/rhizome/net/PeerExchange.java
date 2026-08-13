@@ -2,7 +2,9 @@ package rhizome.net;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.URI;
 import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
 import java.time.Duration;
 
 /**
@@ -60,5 +62,29 @@ public final class PeerExchange {
             throw new IOException(what + " exceeds " + maxBytes + " bytes");
         }
         return data;
+    }
+
+    /**
+     * Builds a request for {@code baseUrl + path}, applying the two invariants every outbound
+     * peer exchange shares:
+     * <ul>
+     *   <li>{@code baseUrl}'s host is pinned to its validated IP before the dial
+     *       ({@link PeerHosts#pin}, anti-rebinding/SSRF; {@code blockPrivateHosts} refuses
+     *       non-routable targets);</li>
+     *   <li>the shared peer token rides only where {@code tokenPolicy} allows it, judged against
+     *       {@code tokenTarget} — the ORIGINAL, unpinned URL, since pinning rewrites the host to
+     *       an IP literal that never matches a hostname-configured trusted peer.</li>
+     * </ul>
+     *
+     * <p>The whole-exchange deadline stays with the caller: each exchange has its own budget
+     * and retry/backoff policy, which is why this returns the builder instead of sending.
+     * Pinning per request is cheap — resolution is cached ({@code PeerHosts.resolveAll}).
+     */
+    public static HttpRequest.Builder pinnedRequest(String baseUrl, String path,
+                                                    boolean blockPrivateHosts,
+                                                    PeerTokenPolicy tokenPolicy, String tokenTarget) {
+        String pinned = PeerHosts.pin(baseUrl, blockPrivateHosts);
+        return PeerAuth.withToken(HttpRequest.newBuilder(URI.create(pinned + path)),
+            tokenPolicy.tokenFor(tokenTarget));
     }
 }

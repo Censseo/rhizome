@@ -1,7 +1,6 @@
 package rhizome.net;
 
 import java.io.InputStream;
-import java.net.URI;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
@@ -157,11 +156,8 @@ public final class PeerDiscovery {
     /** PEX fetch + self-announce against one peer, with failure bookkeeping. */
     private void contactPeer(String peer) {
         try {
-            // Pin once and reuse for both the /peers fetch and the /add_peer announce, instead of
-            // resolving the host twice per peer per round.
-            String pinned = PeerHosts.pin(peer, blockPrivateHosts);
-            registry.addAll(fetchPeersPinned(pinned, peer));
-            announceToPinned(pinned, peer);
+            registry.addAll(fetchPeers(peer));
+            announceTo(peer);
             failures.remove(peer);
         } catch (InterruptedException e) {
             // Cut by the round deadline (invokeAll cancelled the task) — not the peer's fault, so it is
@@ -197,12 +193,15 @@ public final class PeerDiscovery {
 
     // Package-private (not private) so a regression test can assert the body cap directly.
     List<String> fetchPeers(String peer) throws Exception {
-        // Pin the peer to its resolved IP (and refuse non-routable hosts on mainnet) so a DNS
-        // rebind cannot point this fetch at an internal service (SSRF).
-        return fetchPeersPinned(PeerHosts.pin(peer, blockPrivateHosts), peer);
+        return fetchPeersPinned(peer);
     }
 
-    private List<String> fetchPeersPinned(String pinned, String originalPeer) throws Exception {
+    private List<String> fetchPeersPinned(String peer) throws Exception {
+        // Pin the peer to its resolved IP (and refuse non-routable hosts on mainnet) so a DNS
+        // rebind cannot point this fetch at an internal service (SSRF) — PeerExchange
+        // .pinnedRequest applies the same pin+token sequence every peer exchange uses, and the
+        // resolution is cached, so the fetch and the announce below cost one resolver round-trip
+        // per minute, not two per contact.
         // Stream + bound the body: never buffer an unbounded response into memory (audit V2). The
         // MAX_PEX_PER_PEER limit below only caps how many entries we KEEP — it cannot stop an
         // attacker's giant body, which ofString() would have fully materialised before we ever parse.
@@ -212,8 +211,7 @@ public final class PeerDiscovery {
         AtomicReference<AutoCloseable> openBody = new AtomicReference<>();
         String body = BodyReadDeadline.call(fetchDeadline, openBody, () -> {
             HttpResponse<InputStream> resp = exchange.client().send(
-                PeerAuth.withToken(HttpRequest.newBuilder(URI.create(pinned + "/peers")),
-                        tokenPolicy.tokenFor(originalPeer))
+                PeerExchange.pinnedRequest(peer, "/peers", blockPrivateHosts, tokenPolicy, peer)
                     .timeout(fetchDeadline).GET().build(),
                 HttpResponse.BodyHandlers.ofInputStream());
             if (resp.statusCode() != 200) {
@@ -235,7 +233,7 @@ public final class PeerDiscovery {
         return arr.toList().stream().map(Object::toString).limit(MAX_PEX_PER_PEER).toList();
     }
 
-    private void announceToPinned(String pinned, String originalPeer) throws Exception {
+    private void announceTo(String peer) throws Exception {
         if (selfUrl == null || selfUrl.isEmpty()) {
             return;
         }
@@ -248,8 +246,7 @@ public final class PeerDiscovery {
         AtomicReference<AutoCloseable> openBody = new AtomicReference<>();
         BodyReadDeadline.call(fetchDeadline, openBody, () -> {
             HttpResponse<InputStream> resp = exchange.client().send(
-                PeerAuth.withToken(HttpRequest.newBuilder(URI.create(pinned + "/add_peer")),
-                        tokenPolicy.tokenFor(originalPeer))
+                PeerExchange.pinnedRequest(peer, "/add_peer", blockPrivateHosts, tokenPolicy, peer)
                     .timeout(fetchDeadline)
                     .header("Content-Type", "application/json")
                     .POST(HttpRequest.BodyPublishers.ofString(body)).build(),

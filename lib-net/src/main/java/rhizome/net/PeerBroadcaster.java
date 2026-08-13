@@ -1,7 +1,6 @@
 package rhizome.net;
 
 import java.io.InputStream;
-import java.net.URI;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
@@ -213,23 +212,21 @@ public final class PeerBroadcaster implements AutoCloseable {
     }
 
     private void sendQuietly(String peer, String path, byte[] body) {
-        // Pin the peer to a freshly-resolved, validated IP before every send, exactly as the
-        // sync/PEX paths do (PeerHosts.pin). Without this, gossip re-resolved the hostname at
+        // Pin the peer to a freshly-resolved, validated IP before every send (PeerExchange
+        // .pinnedRequest → PeerHosts.pin). Without this, gossip re-resolved the hostname at
         // send time, so a peer admitted with a public IP could flip DNS to 127.0.0.1 /
         // 169.254.169.254 / an RFC1918 host and receive our POSTs — a blind SSRF (audit M1).
-        String url;
+        HttpRequest request;
         try {
-            url = PeerHosts.pin(peer, blockPrivateHosts) + path;
+            request = PeerExchange.pinnedRequest(peer, path, blockPrivateHosts, tokenPolicy, peer)
+                .timeout(SEND_DEADLINE)
+                .header("Content-Type", "application/octet-stream")
+                .POST(HttpRequest.BodyPublishers.ofByteArray(body))
+                .build();
         } catch (SecurityException e) {
             log.debug("broadcast to {} refused (non-routable / rebind): {}", peer, e.toString());
             return;
         }
-        HttpRequest request = PeerAuth.withToken(HttpRequest.newBuilder(URI.create(url)),
-                tokenPolicy.tokenFor(peer))
-            .timeout(SEND_DEADLINE)
-            .header("Content-Type", "application/octet-stream")
-            .POST(HttpRequest.BodyPublishers.ofByteArray(body))
-            .build();
         try {
             // Whole-exchange deadline (BodyReadDeadline, audit F1/F2): with discarding() the
             // reply body is still read AFTER the request timeout stops applying, so a slow-drip
@@ -248,7 +245,7 @@ public final class PeerBroadcaster implements AutoCloseable {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         } catch (Exception e) {
-            log.debug("broadcast to {} failed: {}", url, e.toString());
+            log.debug("broadcast to {} failed: {}", peer, e.toString());
         }
     }
 

@@ -4,7 +4,6 @@ import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.math.BigInteger;
-import java.net.URI;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
@@ -86,11 +85,11 @@ public final class HttpPeerSource implements PeerSource {
      */
     private static final long MAX_THROTTLE_WAIT_MILLIS = 1000L;
 
-    private final String baseUrl;
-    /** The ORIGINAL (pre-DNS-pin) base URL, used for the {@link PeerTokenPolicy} trust check:
-     *  pinning rewrites the host to an IP literal, which would never match a hostname-configured
-     *  trusted peer. */
+    /** The ORIGINAL (trimmed) base URL. Pinning happens per request via
+     *  {@link PeerExchange#pinnedRequest} (resolution is cached); keeping the original also feeds
+     *  the {@link PeerTokenPolicy} trust check, which would never match a pinned IP literal. */
     private final String originalUrl;
+    private final boolean blockPrivateHosts;
     private final PeerExchange exchange;
     private final Duration requestDeadline;
     /** Decides whether the RHIZOME_PEER_TOKEN secret may be presented to this peer (configured
@@ -114,8 +113,9 @@ public final class HttpPeerSource implements PeerSource {
      * As above, but sharing a caller-provided {@link PeerExchange}. The sync loop creates one source per
      * peer per round; each JDK {@code HttpClient} spawns a selector-manager thread and its own
      * connection pool that is never closed, so building one per round churned threads/sockets and reused
-     * no keep-alive connection (audit net #1). The DNS pin is still recomputed per source, so sharing the
-     * exchange does not weaken the anti-rebinding guarantee — it only shares the transport.
+     * no keep-alive connection (audit net #1). The DNS pin runs per request
+     * ({@link PeerExchange#pinnedRequest}), so sharing the exchange does not weaken the
+     * anti-rebinding guarantee — it only shares the transport.
      */
     public HttpPeerSource(String baseUrl, boolean blockPrivateHosts, PeerExchange exchange) {
         this(baseUrl, blockPrivateHosts, exchange, REQUEST_DEADLINE);
@@ -135,9 +135,8 @@ public final class HttpPeerSource implements PeerSource {
     /** As above, with an explicit whole-exchange deadline and a token policy. */
     HttpPeerSource(String baseUrl, boolean blockPrivateHosts, PeerExchange exchange, Duration requestDeadline,
                    PeerTokenPolicy tokenPolicy) {
-        String trimmed = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
-        this.originalUrl = trimmed;
-        this.baseUrl = PeerHosts.pin(trimmed, blockPrivateHosts);
+        this.originalUrl = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
+        this.blockPrivateHosts = blockPrivateHosts;
         this.exchange = exchange;
         this.requestDeadline = requestDeadline;
         this.tokenPolicy = tokenPolicy;
@@ -182,8 +181,8 @@ public final class HttpPeerSource implements PeerSource {
         // Stream-decode block-by-block so peak memory is ~one block, not the whole ~800 MiB
         // window a hostile peer could otherwise force us to buffer (audit M5).
         String path = "/sync?start=" + start + "&end=" + end;
-        HttpRequest request = PeerAuth.withToken(HttpRequest.newBuilder(URI.create(baseUrl + path)),
-                tokenPolicy.tokenFor(originalUrl))
+        HttpRequest request = PeerExchange.pinnedRequest(originalUrl, path, blockPrivateHosts,
+                tokenPolicy, originalUrl)
             .timeout(requestDeadline).GET().build();
         // Retry OUTSIDE the deadline wrapper (see backoffBeforeRetry): each attempt gets its own
         // whole-exchange budget, and the wait never eats into the previous one.
@@ -317,8 +316,8 @@ public final class HttpPeerSource implements PeerSource {
 
     /** Fetches {@code path}, applying the {@link NotFound} mode on a 404; throws on other errors. */
     private byte[] fetch(String path, long maxBytes, NotFound notFound) {
-        HttpRequest request = PeerAuth.withToken(HttpRequest.newBuilder(URI.create(baseUrl + path)),
-                tokenPolicy.tokenFor(originalUrl))
+        HttpRequest request = PeerExchange.pinnedRequest(originalUrl, path, blockPrivateHosts,
+                tokenPolicy, originalUrl)
             .timeout(requestDeadline)
             .GET()
             .build();
