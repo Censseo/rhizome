@@ -18,7 +18,6 @@ import rhizome.crypto.PublicKey;
 import rhizome.crypto.SHA256Hash;
 import rhizome.crypto.SignatureScheme;
 import rhizome.core.ledger.PublicAddress;
-import rhizome.core.serialization.BinarySerializable;
 import rhizome.core.transaction.Transaction;
 import rhizome.core.transaction.TransactionAmount;
 import rhizome.core.transaction.dto.TransactionDto;
@@ -65,7 +64,7 @@ class BinaryCodecTest {
         // A transfer is the fixed prefix plus the one-byte kind tag.
         assertEquals(TransactionDto.FIXED_SIZE + 1, bytes.length);
 
-        TransactionDto restored = BinarySerializable.fromBuffer(bytes, TransactionDto.class);
+        TransactionDto restored = TransactionDto.fromBuffer(bytes);
         assertArrayEquals(bytes, restored.toBuffer());
         assertEquals(3, restored.chainId());
         assertEquals(11, restored.nonce());
@@ -75,9 +74,8 @@ class BinaryCodecTest {
     @Test
     void strictSingleObjectDecodeRejectsTrailingBytes() {
         // The single-object entry (used by POST /add_transaction) must consume the whole buffer, so a
-        // wire tx has a unique form — closing the last non-strict single-object path (audit codec P7
-        // parity). The offset overload stays lenient: PeerInterface streams consecutive objects through
-        // it, where the "remaining" bytes are the next object, not junk.
+        // wire tx has a unique form (audit codec P7 parity). Multi-object buffers are decoded through
+        // the codecs' readFrom(ByteBuffer), never through this entry point.
         var pair = generateKeyPair();
         var key = PublicKey.of(pair.getPublic());
         Transaction t = Transaction.of(PublicAddress.of(key), PublicAddress.random(),
@@ -86,11 +84,9 @@ class BinaryCodecTest {
         byte[] bytes = t.serialize().toBuffer();
         byte[] withTrailer = java.util.Arrays.copyOf(bytes, bytes.length + 1);
 
-        assertDoesNotThrow(() -> BinarySerializable.fromBuffer(bytes, TransactionDto.class));
+        assertDoesNotThrow(() -> TransactionDto.fromBuffer(bytes));
         assertThrows(IllegalArgumentException.class,
-            () -> BinarySerializable.fromBuffer(withTrailer, TransactionDto.class));
-        // Offset overload remains lenient (multi-object streaming relies on it).
-        assertDoesNotThrow(() -> BinarySerializable.fromBuffer(withTrailer, 0, TransactionDto.class));
+            () -> TransactionDto.fromBuffer(withTrailer));
     }
 
     @Test
@@ -113,7 +109,7 @@ class BinaryCodecTest {
         // Wire round-trip: variable length, self-delimiting, byte-exact.
         byte[] bytes = t.serialize().toBuffer();
         assertEquals(TransactionDto.FIXED_SIZE + 1 + 8 + 8 + 4 + code.length, bytes.length);
-        var restoredDto = BinarySerializable.fromBuffer(bytes, TransactionDto.class);
+        var restoredDto = TransactionDto.fromBuffer(bytes);
         var restored = (rhizome.core.transaction.TransactionImpl) Transaction.of(restoredDto);
         assertEquals(rhizome.core.transaction.TransactionKind.DEPLOY, restored.kind());
         assertArrayEquals(code, restored.data());
@@ -135,7 +131,7 @@ class BinaryCodecTest {
         byte[] bytes = dto.toBuffer();
         assertEquals(TransactionDto.FIXED_SIZE + 1, bytes.length);
 
-        TransactionDto restored = BinarySerializable.fromBuffer(bytes, TransactionDto.class);
+        TransactionDto restored = TransactionDto.fromBuffer(bytes);
         assertEquals(true, restored.isTransactionFee());
         assertArrayEquals(bytes, restored.toBuffer());
     }
@@ -154,7 +150,7 @@ class BinaryCodecTest {
         byte[] bytes = dto.toBuffer();
         assertEquals(BlockDto.BUFFER_SIZE, bytes.length);
 
-        BlockDto restored = BinarySerializable.fromBuffer(bytes, BlockDto.class);
+        BlockDto restored = BlockDto.fromBuffer(bytes);
         assertEquals(4242, restored.id());
         assertEquals(1234567890L, restored.timestamp());
         assertEquals(22, restored.difficulty());

@@ -19,7 +19,6 @@ import org.slf4j.LoggerFactory;
 import rhizome.core.block.Block;
 import rhizome.core.block.BlockCodec;
 import rhizome.core.common.Constants;
-import rhizome.core.serialization.BinarySerializable;
 import rhizome.core.serialization.JsonSink;
 import rhizome.core.serialization.JsonSink.Key;
 import rhizome.core.transaction.Transaction;
@@ -346,7 +345,7 @@ public final class NodeApi {
                 return statusResponse(node.submitTransaction(t, clientKey(req, trustXff)));
             })))
             .with(POST, "/add_transaction", req -> req.loadBody(TX_BODY).then(body -> offload(blocking, () -> {
-                Transaction t = Transaction.of(BinarySerializable.fromBuffer(body.getArray(), TransactionDto.class));
+                Transaction t = Transaction.of(TransactionDto.fromBuffer(body.getArray()));
                 return statusResponse(node.submitTransaction(t, clientKey(req, trustXff)));
             })))
             .with(POST, "/submit", req -> req.loadBody(maxBlockBody).then(body -> offload(blocking, () -> {

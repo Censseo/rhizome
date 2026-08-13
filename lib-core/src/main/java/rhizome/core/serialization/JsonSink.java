@@ -5,10 +5,11 @@ import java.util.Arrays;
 /**
  * Hand-written, allocation-light JSON writer: a growable {@code byte[]} buffer that response
  * serialization writes directly into, instead of building an {@code org.json} tree, rendering it
- * to a {@code String}, then re-encoding that {@code String} to UTF-8. Like
- * {@link BinarySerializable}, this is written by hand rather than delegated to a
- * reflective/codegen encoder: no reflection, no runtime bytecode generation — a GraalVM
- * native-image prerequisite — and it is the fast path measured for the node's hot JSON
+ * to a {@code String}, then re-encoding that {@code String} to UTF-8. Like the hand-written
+ * binary DTO codecs ({@link rhizome.core.block.dto.BlockDto},
+ * {@link rhizome.core.transaction.dto.TransactionDto}), this is written by hand rather than
+ * delegated to a reflective/codegen encoder: no reflection, no runtime bytecode generation — a
+ * GraalVM native-image prerequisite — and it is the fast path measured for the node's hot JSON
  * endpoints.
  *
  * <p><b>Comma bookkeeping.</b> A single {@code needComma} flag (no stack of open scopes) is

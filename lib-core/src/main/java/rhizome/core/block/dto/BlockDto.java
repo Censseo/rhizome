@@ -2,13 +2,10 @@ package rhizome.core.block.dto;
 
 import java.nio.ByteBuffer;
 
-import org.jetbrains.annotations.NotNull;
-
 import lombok.Getter;
 import rhizome.crypto.SHA256Hash;
 import rhizome.core.block.HeaderWire;
 import rhizome.core.serialization.BinaryIO;
-import rhizome.core.serialization.BinarySerializable;
 
 /**
  * Wire/storage form of a block header. Fixed big-endian layout
@@ -19,7 +16,7 @@ import rhizome.core.serialization.BinarySerializable;
  * producer runs without the accumulator), so the header format is fixed once.
  */
 @Getter
-public class BlockDto implements BinarySerializable {
+public class BlockDto {
     public final int id;
     public final long timestamp;
     public final int difficulty;
@@ -67,7 +64,6 @@ public class BlockDto implements BinarySerializable {
         this.vote = vote;
     }
 
-    @Override
     public void writeTo(ByteBuffer buffer) {
         HeaderWire.writePrefix(buffer, new HeaderWire.Prefix(id, timestamp, difficulty,
             numTransactions, lastBlockHash, merkleRoot, nonce, stateRoot, vote));
@@ -79,8 +75,31 @@ public class BlockDto implements BinarySerializable {
             p.lastBlockHash(), p.merkleRoot(), p.nonce(), p.stateRoot(), p.vote());
     }
 
-    @Override
-    public @NotNull int getSize() {
+    public int getSize() {
         return BUFFER_SIZE;
+    }
+
+    /** The fixed-layout wire form of one header. */
+    public byte[] toBuffer() {
+        ByteBuffer buffer = ByteBuffer.allocate(getSize());
+        writeTo(buffer);
+        return buffer.array();
+    }
+
+    /**
+     * Strict single-object decode: the whole {@code buffer} must be exactly one header. Trailing
+     * bytes are rejected so a wire object has a unique encoding, matching the strictness of
+     * {@code BlockCodec.decode} (identity is content-hash, so this is wire-hygiene, not a
+     * correctness fix). The packed block codec reads headers from a multi-object buffer via
+     * {@link #readFrom(ByteBuffer)} instead.
+     */
+    public static BlockDto fromBuffer(byte[] buffer) {
+        ByteBuffer bb = ByteBuffer.wrap(buffer);
+        BlockDto result = readFrom(bb);
+        if (bb.hasRemaining()) {
+            throw new IllegalArgumentException(
+                "trailing bytes after BlockDto (" + bb.remaining() + " left)");
+        }
+        return result;
     }
 }

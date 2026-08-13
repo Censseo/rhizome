@@ -2,15 +2,12 @@ package rhizome.core.transaction.dto;
 
 import java.nio.ByteBuffer;
 
-import org.jetbrains.annotations.NotNull;
-
 import lombok.Getter;
 import lombok.experimental.Accessors;
 import rhizome.crypto.PublicKey;
 import rhizome.crypto.SignatureScheme;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.serialization.BinaryIO;
-import rhizome.core.serialization.BinarySerializable;
 import rhizome.core.transaction.TransactionSignature;
 
 /**
@@ -34,7 +31,7 @@ import rhizome.core.transaction.TransactionSignature;
  * post-quantum-committed one is 33 bytes longer.
  */
 @Accessors(fluent = true) @Getter
-public class TransactionDto implements BinarySerializable {
+public class TransactionDto {
     public final SignatureScheme scheme;
     public final TransactionSignature signature;
     public final PublicKey signingKey;
@@ -125,7 +122,6 @@ public class TransactionDto implements BinarySerializable {
         this.data = data == null ? new byte[0] : data;
     }
 
-    @Override
     public void writeTo(ByteBuffer buffer) {
         buffer.put(scheme.code());
         BinaryIO.putFixed(buffer, signature.toBytes(), scheme.signatureBytes());
@@ -195,12 +191,36 @@ public class TransactionDto implements BinarySerializable {
             isTransactionFee, chainId, nonce, kind, gasLimit, gasPrice, data);
     }
 
-    @Override
-    public @NotNull int getSize() {
+    public int getSize() {
         int size = fixedSize(scheme) + 1;
         if (kind != KIND_TRANSFER) {
             size += Long.BYTES + Long.BYTES + Integer.BYTES + data.length;
         }
         return size;
+    }
+
+    /** The self-delimiting wire form of one transaction. */
+    public byte[] toBuffer() {
+        ByteBuffer buffer = ByteBuffer.allocate(getSize());
+        writeTo(buffer);
+        return buffer.array();
+    }
+
+    /**
+     * Strict single-object decode: the whole {@code buffer} must be exactly one transaction.
+     * Trailing bytes are rejected so a wire object has a unique encoding, matching the P7
+     * strictness of {@code BlockCodec}/{@code HeaderCodec} (identity is content-hash, so this is
+     * wire-hygiene, not a correctness fix — but it closes the last non-strict single-object path,
+     * {@code /add_transaction}). The packed block codec reads transactions from a multi-object
+     * buffer via {@link #readFrom(ByteBuffer)} instead.
+     */
+    public static TransactionDto fromBuffer(byte[] buffer) {
+        ByteBuffer bb = ByteBuffer.wrap(buffer);
+        TransactionDto result = readFrom(bb);
+        if (bb.hasRemaining()) {
+            throw new IllegalArgumentException(
+                "trailing bytes after TransactionDto (" + bb.remaining() + " left)");
+        }
+        return result;
     }
 }

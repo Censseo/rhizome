@@ -4,7 +4,6 @@ import org.junit.jupiter.api.Test;
 
 import rhizome.core.block.Block;
 import rhizome.core.block.dto.BlockDto;
-import rhizome.core.serialization.BinarySerializable;
 import rhizome.core.user.User;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -58,7 +57,7 @@ class BlockTest {
         }
         var blockADto = blockA.serialize();
         var blockABuf = blockADto.toBuffer();
-        var blockBDto = BinarySerializable.fromBuffer(blockABuf, BlockDto.class);
+        var blockBDto = BlockDto.fromBuffer(blockABuf);
         var blockB = Block.of(blockBDto, blockA.transactions());
         assertEquals(blockB, blockA);
     }

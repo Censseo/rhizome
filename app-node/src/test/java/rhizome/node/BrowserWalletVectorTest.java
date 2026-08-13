@@ -13,7 +13,6 @@ import rhizome.core.box.BoxPayload;
 import rhizome.core.box.BoxRegister;
 import rhizome.core.common.Utils;
 import rhizome.core.ledger.PublicAddress;
-import rhizome.core.serialization.BinarySerializable;
 import rhizome.core.token.TokenMeta;
 import rhizome.core.token.TokenPayload;
 import rhizome.core.transaction.Transaction;
@@ -66,7 +65,7 @@ class BrowserWalletVectorTest {
 
     private static Transaction decode(String wireHex) {
         return Transaction.of(
-            BinarySerializable.fromBuffer(Utils.hexStringToByteArray(wireHex), TransactionDto.class));
+            TransactionDto.fromBuffer(Utils.hexStringToByteArray(wireHex)));
     }
 
     @Test

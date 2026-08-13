@@ -12,7 +12,6 @@ import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters;
 import org.junit.jupiter.api.Test;
 
 import rhizome.core.ledger.PublicAddress;
-import rhizome.core.serialization.BinarySerializable;
 import rhizome.core.transaction.Transaction;
 import rhizome.core.transaction.TransactionAmount;
 import rhizome.core.transaction.TransactionImpl;
@@ -63,7 +62,7 @@ class TransactionSchemeAgilityTest {
         assertEquals(TransactionDto.fixedSize(SignatureScheme.ED25519_PQC) + 1, bytes.length);
 
         TransactionImpl restored = (TransactionImpl) Transaction.of(
-            BinarySerializable.fromBuffer(bytes, TransactionDto.class));
+            TransactionDto.fromBuffer(bytes));
         assertEquals(SignatureScheme.ED25519_PQC, restored.scheme());
         assertArrayEquals(COMMITMENT, restored.pqCommitment());
         assertEquals(tx.from(), restored.from());
@@ -146,7 +145,7 @@ class TransactionSchemeAgilityTest {
             byte[] tampered = bytes.clone();
             tampered[0] = (byte) code;
             assertThrows(IllegalArgumentException.class,
-                () -> BinarySerializable.fromBuffer(tampered, TransactionDto.class),
+                () -> TransactionDto.fromBuffer(tampered),
                 "scheme 0x" + Integer.toHexString(code) + " must be rejected, not defaulted");
         }
     }
@@ -166,7 +165,7 @@ class TransactionSchemeAgilityTest {
         bytes[feeFlagOffset] = 1;
 
         IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
-            () -> BinarySerializable.fromBuffer(bytes, TransactionDto.class));
+            () -> TransactionDto.fromBuffer(bytes));
         assertTrue(e.getMessage().contains("self-authorized"), e.getMessage());
     }
 
