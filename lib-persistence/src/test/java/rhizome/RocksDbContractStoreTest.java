@@ -1,24 +1,47 @@
 package rhizome;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
-import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.nio.file.Path;
-import java.util.List;
 
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import rhizome.core.ledger.PublicAddress;
 import rhizome.persistence.rocksdb.RocksDbContractStore;
-import rhizome.vm.StorageChange;
+import rhizome.vm.ContractStore;
+import rhizome.vm.ContractStoreContract;
 
-class RocksDbContractStoreTest {
+/**
+ * RocksDB-specific behaviour beyond {@link ContractStoreContract}: persistence across a reopen,
+ * which an in-memory store has no equivalent of — see {@code InMemoryContractStoreTest} and
+ * {@code ContractStoreContract} for the properties (including the double-apply refusal) both
+ * backends share.
+ */
+class RocksDbContractStoreTest implements ContractStoreContract {
+
+    @TempDir
+    Path dir;
+
+    private RocksDbContractStore opened;
+
+    @Override
+    public ContractStore newContractStore() throws Exception {
+        opened = new RocksDbContractStore(dir.toString());
+        return opened;
+    }
+
+    @AfterEach
+    void tearDown() {
+        if (opened != null) {
+            opened.close();
+        }
+    }
 
     @Test
-    void persistsCodeAndStorageAcrossReopen(@TempDir Path dir) throws Exception {
+    void persistsCodeAndStorageAcrossReopen() throws Exception {
         PublicAddress contract = PublicAddress.random();
         byte[] code = {0x00, 0x61, 0x73, 0x6d, 1, 2, 3};
         byte[] key = {0};
@@ -29,8 +52,6 @@ class RocksDbContractStoreTest {
             store.putStorage(contract, key, value);
             assertArrayEquals(code, store.getCode(contract));
             assertArrayEquals(value, store.getStorage(contract, key));
-            assertNull(store.getStorage(contract, new byte[] {1}));
-            assertNull(store.getCode(PublicAddress.random()));
         }
 
         // Reopen: state survived (it is on disk, not in memory).
@@ -41,28 +62,7 @@ class RocksDbContractStoreTest {
     }
 
     @Test
-    void storageIsIsolatedPerContract(@TempDir Path dir) throws Exception {
-        try (var store = new RocksDbContractStore(dir.toString())) {
-            PublicAddress a = PublicAddress.random();
-            PublicAddress b = PublicAddress.random();
-            byte[] key = {0};
-            store.putStorage(a, key, new byte[] {1});
-            store.putStorage(b, key, new byte[] {2});
-            assertArrayEquals(new byte[] {1}, store.getStorage(a, key));
-            assertArrayEquals(new byte[] {2}, store.getStorage(b, key));
-        }
-    }
-
-    @Test
-    void unusedKeysAreNull(@TempDir Path dir) throws Exception {
-        try (var store = new RocksDbContractStore(dir.toString())) {
-            assertNull(store.getStorage(PublicAddress.random(), new byte[] {42}));
-            assertEquals(null, store.getCode(PublicAddress.random()));
-        }
-    }
-
-    @Test
-    void undoJournalSurvivesReopen(@TempDir Path dir) throws Exception {
+    void undoJournalSurvivesReopen() throws Exception {
         byte[] journal = {1, 2, 3, 4, 5};
         try (var store = new RocksDbContractStore(dir.toString())) {
             assertNull(store.getJournal(7), "no journal yet");
@@ -78,118 +78,19 @@ class RocksDbContractStoreTest {
     }
 
     @Test
-    void applyBlockCommitsChangesAndJournalAtomicallyAndRefusesDoubleApply(@TempDir Path dir) throws Exception {
-        PublicAddress contract = PublicAddress.random();
-        byte[] key = {0};
-        byte[] fresh = {7};
-        byte[] journal = {9, 9, 9};
-        try (var store = new RocksDbContractStore(dir.toString())) {
-            store.putStorage(contract, key, new byte[] {1});
-            // One call commits every slot mutation AND the journal in a single WriteBatch (audit F1).
-            store.applyBlock(10, List.of(
-                StorageChange.putStorage(contract, key, new byte[] {2}),
-                StorageChange.putStorage(contract, fresh, new byte[] {3}),
-                StorageChange.putCode(contract, new byte[] {0x00, 0x61, 0x73, 0x6d})), journal);
-            assertArrayEquals(new byte[] {2}, store.getStorage(contract, key));
-            assertArrayEquals(new byte[] {3}, store.getStorage(contract, fresh));
-            assertArrayEquals(new byte[] {0x00, 0x61, 0x73, 0x6d}, store.getCode(contract));
-            assertArrayEquals(journal, store.getJournal(10));
-            // Re-applying the same height would journal the already-mutated state as "prior" (audit F10).
-            assertThrows(IllegalStateException.class,
-                () -> store.applyBlock(10, List.of(StorageChange.putStorage(contract, key, new byte[] {4})), journal));
-        }
-        // The commit survived the reopen — mutations and journal together.
-        try (var store = new RocksDbContractStore(dir.toString())) {
-            assertArrayEquals(new byte[] {2}, store.getStorage(contract, key));
-            assertArrayEquals(journal, store.getJournal(10));
-        }
-    }
-
-    @Test
-    void pruneThroughDropsJournalsAndReceiptsByInterval(@TempDir Path dir) throws Exception {
-        // The processor's per-height deletes only reach heights still in its RAM maps (empty
-        // after a restart); pruneThrough is the interval drop that keeps pre-restart rows from
-        // accumulating forever.
+    void pruneThroughDropsJournalsAndReceiptsAcrossReopen() throws Exception {
         try (var store = new RocksDbContractStore(dir.toString())) {
             for (long h = 1; h <= 6; h++) {
                 store.putJournal(h, new byte[] {(byte) h});
                 store.putReceipts(h, new byte[] {(byte) (h + 10)});
             }
             store.pruneThrough(4);
-            for (long h = 1; h <= 4; h++) {
-                assertNull(store.getJournal(h), "journal at/below the cutoff is gone");
-                assertNull(store.getReceipts(h), "receipts at/below the cutoff are gone");
-            }
-            assertArrayEquals(new byte[] {5}, store.getJournal(5));
-            assertArrayEquals(new byte[] {15}, store.getReceipts(5));
-            assertArrayEquals(new byte[] {6}, store.getJournal(6));
-            assertArrayEquals(new byte[] {16}, store.getReceipts(6));
         }
         // The interval drop is durable across a reopen.
         try (var store = new RocksDbContractStore(dir.toString())) {
             assertNull(store.getJournal(4));
             assertNull(store.getReceipts(4));
             assertArrayEquals(new byte[] {5}, store.getJournal(5));
-        }
-    }
-
-    @Test
-    void revertBlockRestoresPriorsAndDropsJournalAtomically(@TempDir Path dir) throws Exception {
-        PublicAddress contract = PublicAddress.random();
-        byte[] key = {0};
-        byte[] fresh = {7};
-        try (var store = new RocksDbContractStore(dir.toString())) {
-            store.putStorage(contract, key, new byte[] {1});
-            store.applyBlock(10, List.of(
-                StorageChange.putStorage(contract, key, new byte[] {2}),
-                StorageChange.putStorage(contract, fresh, new byte[] {3})), new byte[] {9});
-            // Restores are the undo journal in final application order; null value = delete (audit F1).
-            store.revertBlock(10, List.of(
-                StorageChange.putStorage(contract, key, new byte[] {1}),
-                StorageChange.deleteStorage(contract, fresh)));
-            assertArrayEquals(new byte[] {1}, store.getStorage(contract, key));
-            assertNull(store.getStorage(contract, fresh));
-            assertNull(store.getJournal(10));
-        }
-    }
-
-    @Test
-    void revertBlockDropsReceiptsInTheSameAtomicUnit(@TempDir Path dir) throws Exception {
-        // The receipts must ride the revert's WriteBatch (audit: revert-path tear): deleted
-        // separately and first, a crash between the two writes stranded the journal without the
-        // receipts, and the executor's rollback guard then wedged every reorg retry over the
-        // height. Plant the full triple (state + journal + receipts), revert, and re-open:
-        // restores, journal drop AND receipts drop must all be durable together.
-        PublicAddress contract = PublicAddress.random();
-        byte[] key = {0};
-        try (var store = new RocksDbContractStore(dir.toString())) {
-            store.putStorage(contract, key, new byte[] {1});
-            store.applyBlock(10, List.of(StorageChange.putStorage(contract, key, new byte[] {2})),
-                new byte[] {9});
-            store.putReceipts(10, new byte[] {7, 7, 7});
-            store.revertBlock(10, List.of(StorageChange.putStorage(contract, key, new byte[] {1})));
-            assertArrayEquals(new byte[] {1}, store.getStorage(contract, key));
-            assertNull(store.getJournal(10));
-            assertNull(store.getReceipts(10), "receipts drop with the revert, not separately");
-        }
-        try (var store = new RocksDbContractStore(dir.toString())) {
-            assertArrayEquals(new byte[] {1}, store.getStorage(contract, key));
-            assertNull(store.getJournal(10));
-            assertNull(store.getReceipts(10));
-        }
-    }
-
-    @Test
-    void revertBlockWithReceiptsAndNoJournalStillDropsThem(@TempDir Path dir) throws Exception {
-        // A receipts-only height (a reverting CALL that touched no storage commits receipts but
-        // no journal): the store-level revert must accept an empty restore list and still drop
-        // the receipts — the processor's "receipts without journal" branch depends on it
-        // (audit 17th pass).
-        try (var store = new RocksDbContractStore(dir.toString())) {
-            store.putReceipts(11, new byte[] {1, 2, 3});
-            store.revertBlock(11, List.of());
-            assertNull(store.getReceipts(11));
-            assertNull(store.getJournal(11));
         }
     }
 }
