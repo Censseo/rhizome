@@ -3,8 +3,12 @@ package rhizome.node;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
 
 /**
  * The embedded dashboard SPA: static files bundled in the node jar under
@@ -12,37 +16,29 @@ import java.util.Map;
  * (they are small, and this avoids blocking the HTTP event loop on classpath IO
  * per request).
  *
- * <p>The file list is explicit rather than discovered — classpath directory
+ * <p>The base file list is explicit rather than discovered — classpath directory
  * listing is unreliable inside jars, and an explicit list means a missing
  * resource fails loudly at startup instead of 404ing in production.
+ *
+ * <p>Contract templates are the one exception: their {@code .rs}/{@code .wasm} pair is not
+ * listed here but read from {@code templates/manifest.json} (staged from lib-vm — its single
+ * source — by the {@code stageContractTemplates} build task), the same way {@link DocsAssets}
+ * reads its file list from the generated docs manifest rather than repeating it. A manifest
+ * naming a file the jar does not carry fails loudly here instead of 404ing in production.
  */
 final class DashboardAssets {
 
-    /** Every file the SPA is made of, relative to the {@code dashboard/} resource root. */
-    private static final String[] FILES = {
+    /** Resource prefix every dashboard file is staged under. */
+    private static final String ROOT = "/dashboard/";
+
+    /** The fixed SPA shell, relative to the {@code dashboard/} resource root — never derived. */
+    private static final String[] BASE_FILES = {
         "index.html",
         "app.css",
         "app.js",
         "crypto.js",
         "tx.js",
         "md.js",
-        "templates/manifest.json",
-        "templates/counter.wasm",
-        "templates/token.wasm",
-        "templates/amm.wasm",
-        "templates/pair.wasm",
-        "templates/router.wasm",
-        "templates/launchpad.wasm",
-        "templates/emitter.wasm",
-        "templates/agent_wallet.wasm",
-        "templates/counter.rs",
-        "templates/token.rs",
-        "templates/amm.rs",
-        "templates/pair.rs",
-        "templates/router.rs",
-        "templates/launchpad.rs",
-        "templates/emitter.rs",
-        "templates/agent_wallet.rs",
     };
 
     /** One served file: its bytes and the Content-Type they are served with. */
@@ -54,11 +50,30 @@ final class DashboardAssets {
         this.byPath = byPath;
     }
 
-    /** Loads every bundled file from the classpath; throws if any is missing. */
+    /**
+     * Loads every bundled file from the classpath — the SPA shell, then the contract templates
+     * named by {@code templates/manifest.json} — and throws if any is missing.
+     */
     static DashboardAssets load() {
         Map<String, Asset> assets = new HashMap<>();
-        for (String file : FILES) {
-            assets.put(file, new Asset(read("/dashboard/" + file), contentType(file)));
+        for (String file : BASE_FILES) {
+            assets.put(file, new Asset(read(file), contentType(file)));
+        }
+
+        String manifestPath = "templates/manifest.json";
+        byte[] manifestBytes = read(manifestPath);
+        assets.put(manifestPath, new Asset(manifestBytes, contentType(manifestPath)));
+        JSONArray templates = new JSONObject(new String(manifestBytes, StandardCharsets.UTF_8))
+            .getJSONArray("templates");
+        if (templates.isEmpty()) {
+            throw new IllegalStateException("dashboard templates manifest lists no templates");
+        }
+        for (int i = 0; i < templates.length(); i++) {
+            JSONObject t = templates.getJSONObject(i);
+            for (String key : new String[] {"wasm", "source"}) {
+                String file = "templates/" + t.getString(key);
+                assets.put(file, new Asset(read(file), contentType(file)));
+            }
         }
         return new DashboardAssets(assets);
     }
@@ -72,7 +87,9 @@ final class DashboardAssets {
         return byPath.get("index.html");
     }
 
-    private static byte[] read(String resource) {
+    /** Reads {@code path} (relative to {@link #ROOT}, e.g. {@code "app.js"}) from the classpath. */
+    private static byte[] read(String path) {
+        String resource = ROOT + path;
         try (InputStream in = DashboardAssets.class.getResourceAsStream(resource)) {
             if (in == null) {
                 throw new IllegalStateException("missing dashboard resource: " + resource);

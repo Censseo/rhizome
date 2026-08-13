@@ -89,10 +89,12 @@ The decoupling is interface-driven, defined in `lib-core` and implemented outwar
 ## Smart contracts
 
 Contract sources are `#![no_std]` Rust in `lib-vm/contracts/*.rs`, compiled to the `.wasm`
-fixtures in `lib-vm/src/test/resources/`. The dashboard bundles the same templates
-(`app-node/src/main/resources/dashboard/templates/`). Contracts import a small host ABI
-(module `"env"`: `storage_read`/`storage_write`/`set_output`, …) and export `call`. If you edit
-a `.rs` template, the corresponding checked-in `.wasm` must be rebuilt to match.
+fixtures in `lib-vm/src/test/resources/`. Both are the single source — the dashboard does not
+carry its own copy; `app-node`'s `stageContractTemplates` Gradle task stages them into
+`dashboard/templates/` at build time, checked against `dashboard/templates/manifest.json`, the one
+editorial list of which contracts are templates. Contracts import a small host ABI (module
+`"env"`: `storage_read`/`storage_write`/`set_output`, …) and export `call`. If you edit a `.rs`
+template, the corresponding checked-in `.wasm` must be rebuilt to match.
 
 ## Dependency pins (deliberate — see comments in build.gradle)
 

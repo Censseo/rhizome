@@ -103,6 +103,82 @@ def stageDocs = tasks.register('stageDocs') {
 sourceSets.main.resources.srcDir(stagedDocsRoot)
 tasks.named('processResources') { dependsOn stageDocs }
 
+// ---- contract templates served by the dashboard ----
+// lib-vm/contracts/*.rs is the single source of a template's Rust source; lib-vm/src/test/
+// resources/*.wasm the single source of its compiled binary — the same resource lib-vm's own
+// tests build and audit against. The dashboard used to carry hand-maintained duplicates of
+// both, and they drifted: five of eight .rs copies fell behind their audited originals while
+// the .wasm shipped right beside them was already post-audit, so the dashboard's "Source"
+// button showed code that did not describe the binary a "Deploy" click would install (see
+// app-node/src/test/java/rhizome/node/DashboardTemplatesTest.java).
+//
+// dashboard/templates/manifest.json stays checked in — it is not a copy of anything, it is the
+// one editorial list (name/description/method ABI) the dashboard UI reads. This task uses it as
+// the list of which lib-vm contracts are templates, so the id/wasm/source triple is declared
+// exactly once.
+def contractsDir = rootProject.file('lib-vm/contracts')
+def contractFixturesDir = rootProject.file('lib-vm/src/test/resources')
+def templatesManifest = file('src/main/resources/dashboard/templates/manifest.json')
+// lib-vm/contracts/*.rs that are test fixtures, not dashboard templates (LogOrderingTest's
+// logtree.rs) — an explicit exclusion, so leaving a real contract out of the manifest by
+// accident still fails the build below.
+def nonTemplateContracts = ['logtree'] as Set
+
+def stagedTemplatesRoot = layout.buildDirectory.dir('generated/contract-templates-resources')
+
+def stageContractTemplates = tasks.register('stageContractTemplates') {
+    group = 'build'
+    description = 'Stages contract template sources and binaries from lib-vm, their single source, into the node resources.'
+
+    inputs.file(templatesManifest)
+    inputs.dir(contractsDir)
+    inputs.dir(contractFixturesDir)
+    inputs.property('nonTemplateContracts', nonTemplateContracts.sort())
+    outputs.dir(stagedTemplatesRoot)
+
+    doLast {
+        def manifest = new groovy.json.JsonSlurper().parse(templatesManifest)
+        def templates = manifest.templates
+        if (!templates) {
+            throw new GradleException("${rootProject.relativePath(templatesManifest)} lists no templates")
+        }
+
+        // Every .rs in lib-vm/contracts must be a declared template or an explicit exclusion —
+        // an omission must be deliberate, not merely forgotten (audit T1/T2 drifted exactly
+        // this way when the dashboard's copy was hand-maintained instead of staged).
+        def declaredIds = templates.collect { it.id } as Set
+        def allContractIds = contractsDir.listFiles({ f -> f.name.endsWith('.rs') } as FileFilter)
+                .collect { it.name[0..-4] } as Set
+        def unaccounted = allContractIds - declaredIds - nonTemplateContracts
+        if (unaccounted) {
+            throw new GradleException('lib-vm/contracts has .rs file(s) neither listed in ' +
+                    "${rootProject.relativePath(templatesManifest)} nor excluded as test-only via " +
+                    'nonTemplateContracts in app-node/build.gradle: ' + unaccounted.sort().join(', '))
+        }
+
+        def dir = stagedTemplatesRoot.get().dir('dashboard/templates').asFile
+        dir.deleteDir()
+        dir.mkdirs()
+
+        templates.each { t ->
+            def rs = new File(contractsDir, t.source as String)
+            def wasm = new File(contractFixturesDir, t.wasm as String)
+            if (!rs.exists()) {
+                throw new GradleException("template '${t.id}': ${rootProject.relativePath(rs)} does not exist")
+            }
+            if (!wasm.exists()) {
+                throw new GradleException("template '${t.id}': ${rootProject.relativePath(wasm)} does not exist " +
+                        '(is it built and checked in under lib-vm/src/test/resources?)')
+            }
+            new File(dir, t.source as String).bytes = rs.bytes
+            new File(dir, t.wasm as String).bytes = wasm.bytes
+        }
+    }
+}
+
+sourceSets.main.resources.srcDir(stagedTemplatesRoot)
+tasks.named('processResources') { dependsOn stageContractTemplates }
+
 tasks.named('test') {
     // Use JUnit Platform for unit tests.
     useJUnitPlatform()

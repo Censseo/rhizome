@@ -527,55 +527,13 @@
       "glob": "dashboard/md.js"
     },
     {
-      "glob": "dashboard/templates/agent_wallet.rs"
-    },
-    {
-      "glob": "dashboard/templates/agent_wallet.wasm"
-    },
-    {
-      "glob": "dashboard/templates/amm.rs"
-    },
-    {
-      "glob": "dashboard/templates/amm.wasm"
-    },
-    {
-      "glob": "dashboard/templates/counter.rs"
-    },
-    {
-      "glob": "dashboard/templates/counter.wasm"
-    },
-    {
-      "glob": "dashboard/templates/emitter.rs"
-    },
-    {
-      "glob": "dashboard/templates/emitter.wasm"
-    },
-    {
-      "glob": "dashboard/templates/launchpad.rs"
-    },
-    {
-      "glob": "dashboard/templates/launchpad.wasm"
-    },
-    {
       "glob": "dashboard/templates/manifest.json"
     },
     {
-      "glob": "dashboard/templates/pair.rs"
+      "glob": "dashboard/templates/*.rs"
     },
     {
-      "glob": "dashboard/templates/pair.wasm"
-    },
-    {
-      "glob": "dashboard/templates/router.rs"
-    },
-    {
-      "glob": "dashboard/templates/router.wasm"
-    },
-    {
-      "glob": "dashboard/templates/token.rs"
-    },
-    {
-      "glob": "dashboard/templates/token.wasm"
+      "glob": "dashboard/templates/*.wasm"
     },
     {
       "glob": "dashboard/tx.js"

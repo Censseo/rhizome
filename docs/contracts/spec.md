@@ -137,9 +137,11 @@ resumes exactly via the `fromHeight` cursor — **push for liveness, cursor for 
 ### V-7 — Reference contracts *(implemented)*
 
 `#![no_std]` Rust in [lib-vm/contracts/](../../lib-vm/contracts/), compiled to `.wasm` fixtures in
-`lib-vm/src/test/resources/`, and bundled for the dashboard in
-[dashboard/templates/](../../app-node/src/main/resources/dashboard/templates/). All are driven
-through consensus in the tests.
+`lib-vm/src/test/resources/`. Both are the single source: the `stageContractTemplates` Gradle task
+(app-node/build.gradle) stages them into
+[dashboard/templates/](../../app-node/src/main/resources/dashboard/templates/) at build time,
+validated against the editorial list in `dashboard/templates/manifest.json` — no hand-maintained
+copy exists to drift. All are driven through consensus in the tests.
 
 | Contract | What it proves |
 |---|---|
@@ -151,7 +153,10 @@ through consensus in the tests.
 | `agent_wallet.rs` | account abstraction for agents — owner-driven `exec`, plus revocable **session keys** capped per-token and decremented per spend |
 | `counter.rs`, `emitter.rs` | minimal ABI fixtures |
 
-> If you edit a `.rs` template, the corresponding checked-in `.wasm` **must** be rebuilt to match.
+> If you edit a `.rs` template, the corresponding checked-in `.wasm` in `lib-vm/src/test/resources/`
+> **must** be rebuilt to match — this is not yet enforced by the build (no Rust toolchain is
+> wired into Gradle), only by `DashboardTemplatesTest` pinning the served binary's `is_deployer`
+> import and by review.
 
 ### V-8 — Agent wallet / account abstraction *(implemented)*
 
