@@ -108,7 +108,7 @@ final class BlockStateChanges {
      * {@code contract ‖ storageKey}. Neither ever deletes on the forward path: a storage write of
      * empty bytes is a value, not an erasure.
      */
-    static void contract(ContractProcessor contracts, long height, List<StateChange> out) {
+    static void contract(ContractStateSource contracts, long height, List<StateChange> out) {
         for (var ch : contracts.changes(height)) {
             if (ch.code()) {
                 out.add(StateChange.set(StateKeys.CONTRACT_CODE, ch.contract().toBytes(), ch.value()));

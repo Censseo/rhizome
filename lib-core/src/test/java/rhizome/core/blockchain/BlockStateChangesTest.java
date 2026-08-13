@@ -72,7 +72,7 @@ class BlockStateChangesTest {
     void aContractStorageKeyIsContractThenSlot() {
         PublicAddress contract = PublicAddress.random();
         List<StateChange> out = new ArrayList<>();
-        BlockStateChanges.contract(contractsEmitting(new ContractProcessor.ContractChange(
+        BlockStateChanges.contract(contractsEmitting(new ContractStateSource.ContractChange(
             false, contract, STORAGE_KEY, new byte[] {1})), 5, out);
 
         assertEquals(1, out.size());
@@ -85,7 +85,7 @@ class BlockStateChangesTest {
     void contractCodeUsesItsOwnDomainAndTheBareAddress() {
         PublicAddress contract = PublicAddress.random();
         List<StateChange> out = new ArrayList<>();
-        BlockStateChanges.contract(contractsEmitting(new ContractProcessor.ContractChange(
+        BlockStateChanges.contract(contractsEmitting(new ContractStateSource.ContractChange(
             true, contract, null, new byte[] {9, 9})), 5, out);
 
         assertEquals(1, out.size());
@@ -139,9 +139,9 @@ class BlockStateChangesTest {
         return new Stub();
     }
 
-    private static ContractProcessor contractsEmitting(ContractProcessor.ContractChange... changes) {
+    private static ContractProcessor contractsEmitting(ContractStateSource.ContractChange... changes) {
         final class Stub extends AbsentContractProcessorDouble {
-            @Override public List<ContractProcessor.ContractChange> changes(long height) {
+            @Override public List<ContractStateSource.ContractChange> changes(long height) {
                 return List.of(changes);
             }
         }

@@ -200,7 +200,7 @@ class ContractConsensusTest {
         long callHeight = engine.height() + 1;
         assertEquals(ExecutionStatus.SUCCESS, mineBlock(List.of(callTx(1, contract, new byte[0], TransactionKind.CALL))));
 
-        List<rhizome.core.blockchain.ContractProcessor.ContractLog> logs = processor.logs(callHeight);
+        List<rhizome.core.blockchain.ContractApi.ContractLog> logs = processor.logs(callHeight);
         assertEquals(1, logs.size());
         assertEquals(contract, logs.get(0).contract());
         assertArrayEquals("count".getBytes(), logs.get(0).topic());

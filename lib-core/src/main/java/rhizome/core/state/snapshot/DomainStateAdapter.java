@@ -37,6 +37,17 @@ public final class DomainStateAdapter implements StateSource, StateSink {
     private final List<BoxStore.BoxMutation> pendingBoxes = new ArrayList<>();
     private final List<TokenStore.TokenOp> pendingTokens = new ArrayList<>();
 
+    /**
+     * Export-only: the two contract domains (code and storage, whose store lives outside
+     * lib-core) are provided by {@code contractSource} during snapshot materialisation. No
+     * import sink is wired, so this adapter cannot be the target of a snapshot import — the
+     * snap-sync bootstrap builds the full source/sink form.
+     */
+    public DomainStateAdapter(Ledger ledger, NonceStore nonces, BoxStore boxes, TokenStore tokens,
+                              StateSource contractSource) {
+        this(ledger, nonces, boxes, tokens, contractSource, null);
+    }
+
     public DomainStateAdapter(Ledger ledger, NonceStore nonces, BoxStore boxes, TokenStore tokens,
                               StateSource contractSource, StateSink contractSink) {
         this.ledger = ledger;

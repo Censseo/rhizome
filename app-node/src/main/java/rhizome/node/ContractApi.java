@@ -5,7 +5,7 @@ import io.activej.http.HttpResponse;
 import io.activej.http.HttpRequest;
 import org.json.JSONObject;
 
-import rhizome.core.blockchain.ContractProcessor.ContractLog;
+import rhizome.core.blockchain.ContractApi.ContractLog;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.serialization.JsonSink;
 import rhizome.core.serialization.JsonSink.Key;

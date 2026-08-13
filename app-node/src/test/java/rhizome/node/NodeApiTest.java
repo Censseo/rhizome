@@ -381,7 +381,7 @@ class NodeApiTest {
     @Test
     void logsEndpointReturnsContractLogsByHeightAndCursor() throws Exception {
         var contract = PublicAddress.random();
-        var log = new rhizome.core.blockchain.ContractProcessor.ContractLog(
+        var log = new rhizome.core.blockchain.ContractApi.ContractLog(
             contract, "count".getBytes(), new byte[] {1, 0, 0, 0, 0, 0, 0, 0});
         var node = new NodeService(engine, mempool, NodeSources.builder()
             .logSource(h -> h == 1 ? List.of(log) : List.of()).build());

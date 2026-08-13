@@ -110,16 +110,16 @@ final class SessionContractStore implements ContractState {
      * state-root format, which models sets only; none can arise from contract execution today,
      * so one here fails loud rather than silently dropping a deletion from the state root.
      */
-    List<rhizome.core.blockchain.ContractProcessor.ContractChange> forwardChanges() {
-        List<rhizome.core.blockchain.ContractProcessor.ContractChange> out = new ArrayList<>();
+    List<rhizome.core.blockchain.ContractStateSource.ContractChange> forwardChanges() {
+        List<rhizome.core.blockchain.ContractStateSource.ContractChange> out = new ArrayList<>();
         codeWrites.forEach((contract, v) ->
-            out.add(new rhizome.core.blockchain.ContractProcessor.ContractChange(true, contract, null, v)));
+            out.add(new rhizome.core.blockchain.ContractStateSource.ContractChange(true, contract, null, v)));
         storageWrites.forEach((slot, v) -> {
             if (v == null) {
                 throw new IllegalStateException(
                     "storage deletions cannot be expressed as forward state-root changes");
             }
-            out.add(new rhizome.core.blockchain.ContractProcessor.ContractChange(
+            out.add(new rhizome.core.blockchain.ContractStateSource.ContractChange(
                 false, slot.contract(), slot.key(), v));
         });
         return out;

@@ -16,7 +16,9 @@ import java.util.Set;
 
 import org.junit.jupiter.api.Test;
 
+import rhizome.core.blockchain.ContractApi;
 import rhizome.core.blockchain.ContractProcessor;
+import rhizome.core.blockchain.ContractStateSource;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.transaction.TransactionKind;
 
@@ -352,9 +354,9 @@ class WasmContractProcessorPersistenceTest {
         // A log-spamming block must not retain unbounded entries: logs are a best-effort query
         // service, not consensus, so the excess is truncated to MAX_LOGS_PER_HEIGHT.
         WasmContractProcessor processor = new WasmContractProcessor(new WasmVm(), new DurableTestStore());
-        List<ContractProcessor.ContractLog> spam = new java.util.ArrayList<>();
+        List<ContractApi.ContractLog> spam = new java.util.ArrayList<>();
         for (int i = 0; i < WasmContractProcessor.MAX_LOGS_PER_HEIGHT + 1_000; i++) {
-            spam.add(new ContractProcessor.ContractLog(PublicAddress.random(),
+            spam.add(new ContractApi.ContractLog(PublicAddress.random(),
                 new byte[] {1}, new byte[] {2}));
         }
         processor.retainLogs(1, spam);
@@ -372,7 +374,7 @@ class WasmContractProcessorPersistenceTest {
         int expectedKept = (int) (WasmContractProcessor.MAX_RETAINED_LOG_BYTES / perHeight);
         long heights = expectedKept + 3;
         for (long h = 1; h <= heights; h++) {
-            processor.retainLogs(h, List.of(new ContractProcessor.ContractLog(
+            processor.retainLogs(h, List.of(new ContractApi.ContractLog(
                 PublicAddress.random(), new byte[] {1}, payload)));
         }
         int retained = 0;
@@ -395,7 +397,7 @@ class WasmContractProcessorPersistenceTest {
         // the root would diverge between nodes that evicted and nodes that did not. The retained
         // height the state root is about to read must always survive its own retention.
         WasmContractProcessor processor = new WasmContractProcessor(new WasmVm(), new DurableTestStore());
-        List<ContractProcessor.ContractChange> huge = List.of(new ContractProcessor.ContractChange(
+        List<ContractStateSource.ContractChange> huge = List.of(new ContractStateSource.ContractChange(
             false, PublicAddress.random(), new byte[] {1},
             new byte[(int) (WasmContractProcessor.MAX_RETAINED_CHANGE_BYTES + 1)]));
         processor.retainChanges(1, huge);

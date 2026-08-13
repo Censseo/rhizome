@@ -3,8 +3,8 @@ package rhizome.vm;
 import java.util.List;
 
 import rhizome.core.blockchain.ContractProcessor;
-import rhizome.core.blockchain.ContractProcessor.ContractChange;
-import rhizome.core.blockchain.ContractProcessor.ContractLog;
+import rhizome.core.blockchain.ContractStateSource.ContractChange;
+import rhizome.core.blockchain.ContractApi.ContractLog;
 import rhizome.core.blockchain.Contracts;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.state.HeightRetainedIndex;
@@ -379,6 +379,7 @@ public final class WasmContractProcessor implements ContractProcessor {
     }
 
     /** Deployed code at {@code contract} in the committed state, or {@code null}. */
+    @Override
     public byte[] codeAt(PublicAddress contract) {
         return baseStore.getCode(contract);
     }

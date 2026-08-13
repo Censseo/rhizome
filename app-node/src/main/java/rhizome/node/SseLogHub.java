@@ -10,7 +10,7 @@ import io.activej.csp.queue.ChannelBuffer;
 import io.activej.csp.supplier.ChannelSupplier;
 import io.activej.eventloop.Eventloop;
 
-import rhizome.core.blockchain.ContractProcessor.ContractLog;
+import rhizome.core.blockchain.ContractApi.ContractLog;
 
 /**
  * Push streaming of contract event logs over Server-Sent Events: the live

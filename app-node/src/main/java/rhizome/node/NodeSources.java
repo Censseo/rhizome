@@ -4,16 +4,17 @@ import java.util.List;
 import java.util.function.Function;
 import java.util.function.LongFunction;
 
-import rhizome.core.blockchain.ContractProcessor;
+import rhizome.core.blockchain.ContractApi;
 import rhizome.core.box.BoxProcessor;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.token.TokenProcessor;
 import rhizome.net.PeerRegistry;
-import rhizome.core.blockchain.ContractProcessor.ContractLog;
+import rhizome.core.blockchain.ContractApi.ContractLog;
 
 /**
  * The read-side collaborators a {@link NodeService} serves from: the peer set, the per-height
- * event and log sources, the contract processor behind dry-runs, and the snapshot service.
+ * event and log sources, the contract domain's dashboard audience (dry-runs), and the snapshot
+ * service.
  *
  * <p>These were seven {@code volatile} fields with seven setters, which said something untrue
  * about them: that they change while the node runs. They do not — every one is written once,
@@ -35,7 +36,7 @@ public record NodeSources(
     Function<PublicAddress, byte[]> codeSource,
     LongFunction<List<BoxProcessor.BoxEvent>> boxEventSource,
     LongFunction<List<TokenProcessor.TokenEvent>> tokenEventSource,
-    ContractProcessor contracts,
+    ContractApi contracts,
     SnapshotService snapshots) {
 
     /** No sources at all: the shape a test that only exercises the chain endpoints needs. */

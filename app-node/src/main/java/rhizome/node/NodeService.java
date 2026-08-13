@@ -7,7 +7,7 @@ import java.util.List;
 
 import rhizome.core.block.Block;
 import rhizome.core.blockchain.ChainEngine;
-import rhizome.core.blockchain.ContractProcessor.ContractLog;
+import rhizome.core.blockchain.ContractApi.ContractLog;
 import rhizome.core.blockchain.NetworkParameters;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.mempool.ExecutionStatus;

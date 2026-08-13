@@ -17,8 +17,14 @@ import rhizome.core.transaction.TransactionKind;
  * BlockStateProcessor#commit(long)} (block accepted) or {@link BlockStateProcessor#discard()}
  * (block rejected), so contract state moves atomically with the block. The session lifecycle
  * is declared once, on {@link BlockStateProcessor}.
+ *
+ * <p>The contract domain has two other audiences, declared apart so consumers depend on
+ * exactly what they use: the state-root translation reads committed writes through
+ * {@link ContractStateSource}, and the node's dashboard surface (code lookup, event logs,
+ * dry runs) reads through {@link ContractApi}. This interface composes both — a concrete
+ * processor serves all three audiences, but nothing that only queries has to see execution.
  */
-public interface ContractProcessor extends BlockStateProcessor {
+public interface ContractProcessor extends BlockStateProcessor, ContractStateSource, ContractApi {
 
     /**
      * The contract domain on a node with no VM wired. Replaces a null field, so the engine and the
@@ -44,39 +50,6 @@ public interface ContractProcessor extends BlockStateProcessor {
      * transfer on a reorg. Empty for a height with no contract transactions.
      */
     List<ContractReceipt> receipts(long blockHeight);
-
-    /**
-     * Event logs emitted by {@code blockHeight}'s contract transactions, in block
-     * order — the channel autonomous agents watch to react to on-chain state. Empty
-     * for a height with no contract logs. Dropped when the block is reverted.
-     */
-    default List<ContractLog> logs(long blockHeight) {
-        return List.of();
-    }
-
-    /**
-     * Executes a read-only CALL against committed state and discards all writes — a
-     * dry run for querying contract state off-chain. Never mutates the store or the
-     * block session, so it is safe to call concurrently with block processing. Returns
-     * the would-be output, gas and logs; not wired to the ledger (no value actually
-     * moves). Default: unsupported.
-     */
-    default ContractResult dryRun(PublicAddress from, PublicAddress to, byte[] input,
-                                  long value, long gasLimit) {
-        throw new UnsupportedOperationException("dry-run not supported");
-    }
-
-    /** Contract code/storage writes committed by {@code blockHeight}, for the authenticated state root. */
-    default List<ContractChange> changes(long blockHeight) {
-        return List.of();
-    }
-
-    /**
-     * One committed contract write with its final value. {@code code} distinguishes a code
-     * write (deploy — {@code key} null) from a storage write. Contracts never delete forward
-     * (a storage write of empty bytes is a value, not a deletion), so {@code value} is non-null.
-     */
-    record ContractChange(boolean code, PublicAddress contract, byte[] key, byte[] value) {}
 
     /**
      * A native-coin (PDN) transfer a contract made out of its own balance via the {@code
@@ -105,9 +78,6 @@ public interface ContractProcessor extends BlockStateProcessor {
             this(gasUsed, success, List.of());
         }
     }
-
-    /** One event a contract emitted: the emitting contract, an indexable topic, and data. */
-    record ContractLog(PublicAddress contract, byte[] topic, byte[] data) {}
 
     /**
      * Outcome of one contract execution. {@code gasUsed} is charged regardless of

@@ -281,7 +281,7 @@ public final class RhizomeNode implements AutoCloseable {
                 snapshots = opened(opened, SnapshotService.open(engine,
                     new rhizome.core.state.snapshot.DomainStateAdapter(
                         store.ledger(), store.nonceStore(), boxStore, tokenStore,
-                        new rhizome.vm.ContractStateAdapter(contractStore), null),
+                        new rhizome.vm.ContractStateAdapter(contractStore)),
                     Path.of(config.dataDir(), "snapshots")));
             } catch (java.io.IOException e) {
                 throw new IllegalStateException(
