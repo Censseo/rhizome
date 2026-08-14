@@ -12,7 +12,7 @@ import rhizome.core.ledger.PublicAddress;
 import rhizome.core.transaction.Transaction;
 import rhizome.core.transaction.TransactionAmount;
 
-import static rhizome.crypto.Crypto.generateKeyPair;
+import static rhizome.crypto.Crypto.generateKeyPairTyped;
 
 /**
  * Not a correctness test — a rough throughput probe for the validation hot path.
@@ -27,9 +27,9 @@ class ValidationBenchmark {
         if (!"on".equals(System.getProperty("bench"))) {
             return;
         }
-        var pair = generateKeyPair();
-        var key = PublicKey.of(pair.getPublic());
-        var priv = new PrivateKey((Ed25519PrivateKeyParameters) pair.getPrivate());
+        var pair = generateKeyPairTyped();
+        var key = pair.publicKey();
+        var priv = pair.privateKey();
         var from = PublicAddress.of(key);
 
         List<Transaction> txs = new ArrayList<>(TX);

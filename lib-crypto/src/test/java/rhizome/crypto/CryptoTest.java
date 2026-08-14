@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import static rhizome.crypto.Crypto.generateKeyPairTyped;
 import java.nio.charset.StandardCharsets;
 
 import org.junit.jupiter.api.Test;
@@ -13,9 +14,9 @@ class CryptoTest {
 
     @Test
     void signMessageRoundTripsThroughVerifyMessage() {
-        var pair = Crypto.generateKeyPair();
-        PrivateKey privateKey = PrivateKey.of(pair.getPrivate());
-        PublicKey publicKey = PublicKey.of(pair.getPublic());
+        var pair = generateKeyPairTyped();
+        PrivateKey privateKey = pair.privateKey();
+        PublicKey publicKey = pair.publicKey();
 
         byte[] signature = Crypto.signMessage(privateKey, "hello rhizome".getBytes(StandardCharsets.UTF_8));
         assertTrue(Crypto.verifyMessage(publicKey, "hello rhizome".getBytes(StandardCharsets.UTF_8), signature));
@@ -26,9 +27,9 @@ class CryptoTest {
     void messageSignatureDoesNotVerifyAgainstTheRawMessage() {
         // The domain prefix keeps the two signing domains apart: a signMessage output must not
         // double as a raw (transaction-domain) signature over the same bytes.
-        var pair = Crypto.generateKeyPair();
-        PrivateKey privateKey = PrivateKey.of(pair.getPrivate());
-        PublicKey publicKey = PublicKey.of(pair.getPublic());
+        var pair = generateKeyPairTyped();
+        PrivateKey privateKey = pair.privateKey();
+        PublicKey publicKey = pair.publicKey();
 
         byte[] message = "transfer everything".getBytes(StandardCharsets.UTF_8);
         byte[] signature = Crypto.signMessage(privateKey, message);
@@ -37,8 +38,8 @@ class CryptoTest {
 
     @Test
     void stringSigningIsUtf8RegardlessOfPlatformCharset() {
-        var pair = Crypto.generateKeyPair();
-        PrivateKey privateKey = PrivateKey.of(pair.getPrivate());
+        var pair = generateKeyPairTyped();
+        PrivateKey privateKey = pair.privateKey();
 
         byte[] fromString = Crypto.signWithPrivateKey("héllo — ☃", privateKey);
         byte[] fromUtf8Bytes = Crypto.signWithPrivateKey("héllo — ☃".getBytes(StandardCharsets.UTF_8), privateKey);
@@ -50,9 +51,9 @@ class CryptoTest {
         // sign(String) and checkSignature(String) must agree on the SAME pinned charset (UTF-8):
         // with the platform default on the verify side, a non-ASCII message signed under UTF-8
         // would fail to verify on any host whose default charset differs (e.g. windows-1252).
-        var pair = Crypto.generateKeyPair();
-        PrivateKey privateKey = PrivateKey.of(pair.getPrivate());
-        PublicKey publicKey = PublicKey.of(pair.getPublic());
+        var pair = generateKeyPairTyped();
+        PrivateKey privateKey = pair.privateKey();
+        PublicKey publicKey = pair.publicKey();
 
         String message = "héllo — ☃ 中文";
         byte[] signature = Crypto.signWithPrivateKey(message, privateKey);

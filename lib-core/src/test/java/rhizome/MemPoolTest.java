@@ -3,7 +3,7 @@ package rhizome;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static rhizome.crypto.Crypto.generateKeyPair;
+import static rhizome.crypto.Crypto.generateKeyPairTyped;
 
 import java.util.HashMap;
 import java.util.List;
@@ -53,9 +53,9 @@ class MemPoolTest {
         accounts = new MutableAccounts();
         mempool = new MemPool(params, verifier, accounts, 100);
 
-        var pair = generateKeyPair();
-        key = PublicKey.of(pair.getPublic());
-        priv = new PrivateKey((Ed25519PrivateKeyParameters) pair.getPrivate());
+        var pair = generateKeyPairTyped();
+        key = pair.publicKey();
+        priv = pair.privateKey();
         sender = PublicAddress.of(key);
         accounts.balances.put(sender, 1_000_000L);
     }
@@ -235,9 +235,9 @@ class MemPoolTest {
         // Regression: a free signed no-op (amount 0, fee 0) from a fresh unfunded keypair used to
         // be admitted and selected into every candidate block, get the block rejected at execution
         // (SENDER_DOES_NOT_EXIST), never be purged, and halt production network-wide.
-        var freshPair = generateKeyPair();
-        var freshKey = PublicKey.of(freshPair.getPublic());
-        var freshPriv = new PrivateKey((Ed25519PrivateKeyParameters) freshPair.getPrivate());
+        var freshPair = generateKeyPairTyped();
+        var freshKey = freshPair.publicKey();
+        var freshPriv = freshPair.privateKey();
         var freshAddr = PublicAddress.of(freshKey);
         Transaction poison = Transaction.of(freshAddr, PublicAddress.random(), new TransactionAmount(0),
             freshKey, new TransactionAmount(0), 1000L, params.chainId(), 0);
@@ -265,9 +265,9 @@ class MemPoolTest {
         }
         assertEquals(ExecutionStatus.QUEUE_FULL, pool.addTransaction(send(1, 0, 3)));
 
-        var otherPair = generateKeyPair();
-        var otherKey = PublicKey.of(otherPair.getPublic());
-        var otherPriv = new PrivateKey((Ed25519PrivateKeyParameters) otherPair.getPrivate());
+        var otherPair = generateKeyPairTyped();
+        var otherKey = otherPair.publicKey();
+        var otherPriv = otherPair.privateKey();
         var other = PublicAddress.of(otherKey);
         accounts.balances.put(other, 1_000_000L);
         Transaction fromOther = Transaction.of(other, PublicAddress.random(), new TransactionAmount(1),
@@ -278,9 +278,9 @@ class MemPoolTest {
 
     /** A funded, independent sender for the parking-eviction tests. */
     private Transaction fromFreshSender(PublicAddress[] out, long fee, long nonce) {
-        var pair = generateKeyPair();
-        var k = PublicKey.of(pair.getPublic());
-        var p = new PrivateKey((Ed25519PrivateKeyParameters) pair.getPrivate());
+        var pair = generateKeyPairTyped();
+        var k = pair.publicKey();
+        var p = pair.privateKey();
         var addr = PublicAddress.of(k);
         accounts.balances.put(addr, 1_000_000L);
         out[0] = addr;
@@ -399,15 +399,15 @@ class MemPoolTest {
      * cheap gates) but whose signature was made by a DIFFERENT key, so it fails verification.
      */
     private Transaction readyButInvalidSig(PublicAddress[] out, long fee) {
-        var pair = generateKeyPair();
-        var k = PublicKey.of(pair.getPublic());
+        var pair = generateKeyPairTyped();
+        var k = pair.publicKey();
         var addr = PublicAddress.of(k);
         accounts.balances.put(addr, 1_000_000L);
         out[0] = addr;
         Transaction t = Transaction.of(addr, PublicAddress.random(), new TransactionAmount(1),
             k, new TransactionAmount(fee), 1000L, params.chainId(), 0); // nonce 0 == confirmed next -> ready
-        var wrong = generateKeyPair();
-        t.sign(new PrivateKey((Ed25519PrivateKeyParameters) wrong.getPrivate())); // wrong key -> bad sig
+        var wrong = generateKeyPairTyped();
+        t.sign(wrong.privateKey()); // wrong key -> bad sig
         return t;
     }
 

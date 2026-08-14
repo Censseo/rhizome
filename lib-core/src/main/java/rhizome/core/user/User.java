@@ -11,15 +11,15 @@ import rhizome.core.transaction.Transaction;
 import rhizome.core.transaction.TransactionAmount;
 
 import static rhizome.core.common.Helpers.PDN;
-import static rhizome.crypto.Crypto.generateKeyPair;
+import static rhizome.crypto.Crypto.generateKeyPairTyped;
 
 public interface User {
 
     public static User create() {
-        var kp = generateKeyPair();
+        var kp = generateKeyPairTyped();
         return UserImpl.builder()
-                .publicKey(PublicKey.of((Ed25519PublicKeyParameters) kp.getPublic()))
-                .privateKey(new PrivateKey((Ed25519PrivateKeyParameters) kp.getPrivate()))
+                .publicKey(kp.publicKey())
+                .privateKey(kp.privateKey())
                 .build();
     }
 

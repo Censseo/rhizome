@@ -5,7 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static rhizome.crypto.Crypto.generateKeyPair;
+import static rhizome.crypto.Crypto.generateKeyPairTyped;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -171,9 +171,9 @@ class RocksDbNodeStoreTest implements ChainStoreContract, NonceStoreContract, Le
             AtomicLong clock = new AtomicLong(0);
 
             LedgerSnapshot snapshot = new LedgerSnapshot("test", 0, params.chainId());
-            var pair = generateKeyPair();
-            PublicKey key = PublicKey.of(pair.getPublic());
-            PrivateKey priv = new PrivateKey((Ed25519PrivateKeyParameters) pair.getPrivate());
+            var pair = generateKeyPairTyped();
+            PublicKey key = pair.publicKey();
+            PrivateKey priv = pair.privateKey();
             PublicAddress sender = PublicAddress.of(key);
             snapshot.put(sender, new TransactionAmount(1_000_000L));
 
@@ -237,9 +237,9 @@ class RocksDbNodeStoreTest implements ChainStoreContract, NonceStoreContract, Le
         String path = tempDir.resolve("db").toString();
         AtomicLong clock = new AtomicLong(0);
 
-        var pair = generateKeyPair();
-        PublicKey key = PublicKey.of(pair.getPublic());
-        PrivateKey priv = new PrivateKey((Ed25519PrivateKeyParameters) pair.getPrivate());
+        var pair = generateKeyPairTyped();
+        PublicKey key = pair.publicKey();
+        PrivateKey priv = pair.privateKey();
         PublicAddress sender = PublicAddress.of(key);
         PublicAddress miner = PublicAddress.random();
 
@@ -485,9 +485,9 @@ class RocksDbNodeStoreTest implements ChainStoreContract, NonceStoreContract, Le
         String path = tempDir.resolve("db").toString();
         AtomicLong clock = new AtomicLong(0);
 
-        var pair = generateKeyPair();
-        PublicKey key = PublicKey.of(pair.getPublic());
-        PrivateKey priv = new PrivateKey((Ed25519PrivateKeyParameters) pair.getPrivate());
+        var pair = generateKeyPairTyped();
+        PublicKey key = pair.publicKey();
+        PrivateKey priv = pair.privateKey();
         PublicAddress sender = PublicAddress.of(key);
         PublicAddress miner = PublicAddress.random();
 

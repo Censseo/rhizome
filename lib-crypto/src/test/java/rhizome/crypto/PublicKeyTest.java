@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import static rhizome.crypto.Crypto.generateKeyPairTyped;
 import org.junit.jupiter.api.Test;
 
 /** Strict Ed25519 public-key encoding validation: canonical y, on-curve, no small order (audit F1). */
@@ -56,17 +57,17 @@ class PublicKeyTest {
 
     @Test
     void generatedKeysStillValidateAndVerify() {
-        var pair = Crypto.generateKeyPair();
-        PublicKey publicKey = PublicKey.of(pair.getPublic());
+        var pair = generateKeyPairTyped();
+        PublicKey publicKey = pair.publicKey();
         assertTrue(publicKey.get() != null, "freshly generated key must be accepted");
-        byte[] signature = Crypto.signWithPrivateKey("hello", PrivateKey.of(pair.getPrivate()));
+        byte[] signature = Crypto.signWithPrivateKey("hello", pair.privateKey());
         assertTrue(Crypto.checkSignature("hello", signature, publicKey));
     }
 
     @Test
     void identicalEncodingsCompareEqual() {
         // Ed25519PublicKeyParameters has no equals/hashCode; equality must be by encoding.
-        byte[] encoded = PublicKey.of(Crypto.generateKeyPair().getPublic()).toBytes();
+        byte[] encoded = Crypto.generateKeyPairTyped().publicKey().toBytes();
         PublicKey a = PublicKey.of(encoded);
         PublicKey b = PublicKey.of(encoded.clone());
         PublicKey c = PublicKey.of(a.toHexString());

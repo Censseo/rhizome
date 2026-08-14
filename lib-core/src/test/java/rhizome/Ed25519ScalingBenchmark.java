@@ -19,7 +19,7 @@ import rhizome.crypto.PrivateKey;
 import rhizome.crypto.PublicKey;
 import rhizome.crypto.SHA256Hash;
 
-import static rhizome.crypto.Crypto.generateKeyPair;
+import static rhizome.crypto.Crypto.generateKeyPairTyped;
 
 /**
  * Not a correctness test — isolates WHERE the parallel signature path loses scaling.
@@ -144,9 +144,9 @@ class Ed25519ScalingBenchmark {
     }
 
     private static List<Transaction> mint(int n) {
-        var pair = generateKeyPair();
-        var key = PublicKey.of(pair.getPublic());
-        var priv = new PrivateKey((Ed25519PrivateKeyParameters) pair.getPrivate());
+        var pair = generateKeyPairTyped();
+        var key = pair.publicKey();
+        var priv = pair.privateKey();
         var from = PublicAddress.of(key);
         List<Transaction> txs = new ArrayList<>(n);
         for (int i = 0; i < n; i++) {

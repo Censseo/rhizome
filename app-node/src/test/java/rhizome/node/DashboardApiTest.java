@@ -4,7 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static rhizome.crypto.Crypto.generateKeyPair;
+import static rhizome.crypto.Crypto.generateKeyPairTyped;
 
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
@@ -72,9 +72,9 @@ class DashboardApiTest {
         eventloop = Eventloop.create();
         clock = new AtomicLong(0);
 
-        var pair = generateKeyPair();
-        key = PublicKey.of(pair.getPublic());
-        priv = new PrivateKey((Ed25519PrivateKeyParameters) pair.getPrivate());
+        var pair = generateKeyPairTyped();
+        key = pair.publicKey();
+        priv = pair.privateKey();
         sender = PublicAddress.of(key);
         miner = PublicAddress.random();
 

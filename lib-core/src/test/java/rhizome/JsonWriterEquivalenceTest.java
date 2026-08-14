@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static rhizome.crypto.Crypto.generateKeyPair;
 
+import static rhizome.crypto.Crypto.generateKeyPairTyped;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -145,8 +146,8 @@ class JsonWriterEquivalenceTest {
     private static TransactionImpl buildSigned(SignatureScheme scheme, byte[] pq, TransactionKind kind,
             byte[] data, long gasLimit, long gasPrice, long amount, long fee, long nonce,
             long timestamp, PublicAddress to) {
-        AsymmetricCipherKeyPair pair = generateKeyPair();
-        PublicKey key = PublicKey.of(pair.getPublic());
+        var pair = generateKeyPairTyped();
+        PublicKey key = pair.publicKey();
         TransactionImpl tx = TransactionImpl.builder()
             .from(PublicAddress.of(key, scheme, pq))
             .to(to)
@@ -163,7 +164,7 @@ class JsonWriterEquivalenceTest {
             .gasLimit(gasLimit)
             .gasPrice(gasPrice)
             .build();
-        tx.sign(new PrivateKey((Ed25519PrivateKeyParameters) pair.getPrivate()));
+        tx.sign(pair.privateKey());
         return tx;
     }
 

@@ -4,7 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static rhizome.crypto.Crypto.generateKeyPair;
+import static rhizome.crypto.Crypto.generateKeyPairTyped;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -58,9 +58,9 @@ class ConsensusV2GateTest {
     @BeforeEach
     void setUp() {
         ledger = new InMemoryLedger();
-        var pair = generateKeyPair();
-        senderKey = PublicKey.of(pair.getPublic());
-        senderPrivate = new PrivateKey((Ed25519PrivateKeyParameters) pair.getPrivate());
+        var pair = generateKeyPairTyped();
+        senderKey = pair.publicKey();
+        senderPrivate = pair.privateKey();
         sender = PublicAddress.of(senderKey);
         recipient = PublicAddress.random();
         miner = PublicAddress.random();

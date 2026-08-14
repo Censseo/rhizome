@@ -6,7 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static rhizome.crypto.Crypto.generateKeyPair;
+import static rhizome.crypto.Crypto.generateKeyPairTyped;
 
 import org.junit.jupiter.api.Test;
 
@@ -21,7 +21,7 @@ import rhizome.crypto.SignatureScheme;
 class PublicAddressSchemeTest {
 
     private static PublicKey key() {
-        return PublicKey.of(generateKeyPair().getPublic());
+        return generateKeyPairTyped().publicKey();
     }
 
     private static byte[] commitment(byte fill) {

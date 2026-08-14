@@ -2,7 +2,7 @@ package rhizome.vm;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static rhizome.crypto.Crypto.generateKeyPair;
+import static rhizome.crypto.Crypto.generateKeyPairTyped;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -81,9 +81,9 @@ class TokenContractTest {
         contracts = new InMemoryContractStore();
         clock = new AtomicLong(1_000_000L);
 
-        var pair = generateKeyPair();
-        key = PublicKey.of(pair.getPublic());
-        priv = new PrivateKey((Ed25519PrivateKeyParameters) pair.getPrivate());
+        var pair = generateKeyPairTyped();
+        key = pair.publicKey();
+        priv = pair.privateKey();
         sender = PublicAddress.of(key);
         miner = PublicAddress.random();
 
@@ -136,9 +136,9 @@ class TokenContractTest {
         // the whole supply to themselves. Under the deployer-bound init it is a no-op: nothing is
         // minted, the init flag stays unset, and the real deployer can still init afterwards.
         PublicAddress token = Contracts.deriveAddress(sender, 0);
-        var apair = generateKeyPair();
-        PublicKey aKey = PublicKey.of(apair.getPublic());
-        PrivateKey aPriv = new PrivateKey((Ed25519PrivateKeyParameters) apair.getPrivate());
+        var apair = generateKeyPairTyped();
+        PublicKey aKey = apair.publicKey();
+        PrivateKey aPriv = apair.privateKey();
         PublicAddress attacker = PublicAddress.of(aKey);
 
         // Deploy the token and fund the attacker so it can pay gas for its init attempt.

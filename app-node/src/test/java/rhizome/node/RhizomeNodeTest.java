@@ -1,5 +1,6 @@
 package rhizome.node;
 
+import static rhizome.crypto.Crypto.generateKeyPairTyped;
 import rhizome.net.HttpPeerSource;
 import rhizome.net.PeerId;
 
@@ -265,10 +266,9 @@ class RhizomeNodeTest {
 
     @Test
     void miningNodeIncludesSubmittedContractTransactions() throws Exception {
-        var pair = rhizome.crypto.Crypto.generateKeyPair();
-        var key = rhizome.crypto.PublicKey.of(pair.getPublic());
-        var priv = new rhizome.crypto.PrivateKey(
-            (org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters) pair.getPrivate());
+        var pair = rhizome.crypto.Crypto.generateKeyPairTyped();
+        var key = pair.publicKey();
+        var priv = pair.privateKey();
         var sender = PublicAddress.of(key);
 
         int port = freePort();

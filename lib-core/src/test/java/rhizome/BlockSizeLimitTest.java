@@ -1,7 +1,7 @@
 package rhizome;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static rhizome.crypto.Crypto.generateKeyPair;
+import static rhizome.crypto.Crypto.generateKeyPairTyped;
 
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
@@ -46,9 +46,9 @@ class BlockSizeLimitTest {
             .powAlgorithm(PowAlgorithm.SHA256).genesisDifficulty(3).minDifficulty(3)
             .maxBlockSizeBytes(500).build();
         clock = new AtomicLong(1_000_000L);
-        var pair = generateKeyPair();
-        key = PublicKey.of(pair.getPublic());
-        priv = new PrivateKey((Ed25519PrivateKeyParameters) pair.getPrivate());
+        var pair = generateKeyPairTyped();
+        key = pair.publicKey();
+        priv = pair.privateKey();
         sender = PublicAddress.of(key);
         miner = PublicAddress.random();
         LedgerSnapshot snapshot = new LedgerSnapshot("t", 0, params.chainId());

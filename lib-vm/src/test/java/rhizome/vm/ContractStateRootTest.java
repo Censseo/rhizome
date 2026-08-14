@@ -4,7 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static rhizome.crypto.Crypto.generateKeyPair;
+import static rhizome.crypto.Crypto.generateKeyPairTyped;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -90,9 +90,9 @@ class ContractStateRootTest {
         accumulator = new StateAccumulator(new InMemorySmtNodeStore(), new InMemoryRootStore(), params.maxReorgDepth());
         clock = new AtomicLong(1_000_000L);
 
-        var pair = generateKeyPair();
-        key = PublicKey.of(pair.getPublic());
-        priv = new PrivateKey((Ed25519PrivateKeyParameters) pair.getPrivate());
+        var pair = generateKeyPairTyped();
+        key = pair.publicKey();
+        priv = pair.privateKey();
         sender = PublicAddress.of(key);
         miner = PublicAddress.random();
 

@@ -4,7 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static rhizome.crypto.Crypto.generateKeyPair;
+import static rhizome.crypto.Crypto.generateKeyPairTyped;
 
 import java.util.List;
 
@@ -65,8 +65,8 @@ public interface ChainStoreContract {
     @Test
     default void popRemovesTipAndDeindexesTransactions() throws Exception {
         ChainStore store = newChainStore();
-        var pair = generateKeyPair();
-        PublicKey key = PublicKey.of(pair.getPublic());
+        var pair = generateKeyPairTyped();
+        PublicKey key = pair.publicKey();
         PublicAddress sender = PublicAddress.of(key);
         Transaction tx = Transaction.of(sender, PublicAddress.random(), new TransactionAmount(1), key);
 

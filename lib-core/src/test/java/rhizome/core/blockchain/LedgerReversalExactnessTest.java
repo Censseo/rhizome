@@ -35,7 +35,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static rhizome.crypto.Crypto.generateKeyPair;
+import static rhizome.crypto.Crypto.generateKeyPairTyped;
 
 /**
  * {@code rollbackBlock} must restore the ledger to exactly the state {@code executeBlock} found.
@@ -80,9 +80,9 @@ class LedgerReversalExactnessTest {
         boxes = new DefaultBoxProcessor(new InMemoryBoxStore(), params);
         tokens = new DefaultTokenProcessor(new InMemoryTokenStore(), params);
 
-        var pair = generateKeyPair();
-        key = PublicKey.of(pair.getPublic());
-        priv = new PrivateKey((Ed25519PrivateKeyParameters) pair.getPrivate());
+        var pair = generateKeyPairTyped();
+        key = pair.publicKey();
+        priv = pair.privateKey();
         sender = PublicAddress.of(key);
         bob = PublicAddress.random();
         miner = PublicAddress.random();
@@ -201,9 +201,9 @@ class LedgerReversalExactnessTest {
         // wallet that does not exist — mid-rollback, leaving the ledger partially reverted while
         // the stores, nonces, processors and state root stayed applied. A funded sender cannot
         // reach it: its wallet exists, so subtracting zero is a harmless no-op.
-        var pair = generateKeyPair();
-        PublicKey strangerKey = PublicKey.of(pair.getPublic());
-        var strangerPriv = new PrivateKey((Ed25519PrivateKeyParameters) pair.getPrivate());
+        var pair = generateKeyPairTyped();
+        PublicKey strangerKey = pair.publicKey();
+        var strangerPriv = pair.privateKey();
         PublicAddress stranger = PublicAddress.of(strangerKey);
         assertEquals(false, ledger.hasWallet(stranger), "the sender must be unknown to the ledger");
 

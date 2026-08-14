@@ -1,5 +1,6 @@
 package rhizome;
 
+import static rhizome.crypto.Crypto.generateKeyPairTyped;
 import org.junit.jupiter.api.Test;
 
 import rhizome.crypto.PrivateKey;
@@ -33,8 +34,8 @@ class CryptoTests {
 
     @Test
     void testKeyStringConversion() {
-        var keys = generateKeyPair();
-        var publicKey = PublicKey.of(keys.getPublic());
+        var keys = generateKeyPairTyped();
+        var publicKey = keys.publicKey();
         var publicKeyData = publicKey.toBytes();
 
         var publicKeyString = publicKey.toHexString();
@@ -46,8 +47,8 @@ class CryptoTests {
 
     @Test
     void testSignatureStringConversion() {
-        var keys = generateKeyPair();
-        var privateKey = new PrivateKey((Ed25519PrivateKeyParameters) keys.getPrivate());
+        var keys = generateKeyPairTyped();
+        var privateKey = keys.privateKey();
         var message = "FOOBAR";
         var signature = signWithPrivateKey(message.getBytes(StandardCharsets.UTF_8), privateKey);
 
@@ -59,9 +60,9 @@ class CryptoTests {
 
     @Test
     void testSignatureVerifications() {
-        var keys = generateKeyPair();
-        var privateKey = new PrivateKey((Ed25519PrivateKeyParameters) keys.getPrivate());
-        var publicKey = PublicKey.of(keys.getPublic());
+        var keys = generateKeyPairTyped();
+        var privateKey = keys.privateKey();
+        var publicKey = keys.publicKey();
 
         var message = "FOOBAR";
         var signature = signWithPrivateKey(message.getBytes(StandardCharsets.UTF_8), privateKey);
@@ -69,8 +70,8 @@ class CryptoTests {
         assertTrue(status);
 
         // check with wrong public key
-        var wrongKeys = generateKeyPair();
-        var wrongPrivateKey = new PrivateKey((Ed25519PrivateKeyParameters) wrongKeys.getPrivate());
+        var wrongKeys = generateKeyPairTyped();
+        var wrongPrivateKey = wrongKeys.privateKey();
         var wrongSignature = signWithPrivateKey(message.getBytes(StandardCharsets.UTF_8), wrongPrivateKey);
         status = checkSignature(message.getBytes(StandardCharsets.UTF_8), wrongSignature, publicKey);
         assertFalse(status);

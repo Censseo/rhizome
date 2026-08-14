@@ -3,7 +3,7 @@ package rhizome;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static rhizome.crypto.Crypto.generateKeyPair;
+import static rhizome.crypto.Crypto.generateKeyPairTyped;
 
 import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters;
 import org.junit.jupiter.api.Test;
@@ -97,14 +97,14 @@ class ConsensusModelTest {
 
     @Test
     void signatureCoversChainIdAndNonce() {
-        var pair = generateKeyPair();
-        var signingKey = PublicKey.of(pair.getPublic());
+        var pair = generateKeyPairTyped();
+        var signingKey = pair.publicKey();
         var from = PublicAddress.of(signingKey);
         var to = PublicAddress.random();
 
         Transaction t = Transaction.of(from, to, new TransactionAmount(100), signingKey,
             new TransactionAmount(1), 123456789L, 1, 7);
-        t.sign(new PrivateKey((Ed25519PrivateKeyParameters) pair.getPrivate()));
+        t.sign(pair.privateKey());
         assertTrue(t.signatureValid());
 
         // Tampering with the nonce after signing must invalidate the signature.
@@ -114,13 +114,13 @@ class ConsensusModelTest {
 
     @Test
     void dtoRoundTripPreservesChainIdAndNonce() {
-        var pair = generateKeyPair();
-        var signingKey = PublicKey.of(pair.getPublic());
+        var pair = generateKeyPairTyped();
+        var signingKey = pair.publicKey();
         var from = PublicAddress.of(signingKey);
 
         Transaction t = Transaction.of(from, PublicAddress.random(), new TransactionAmount(100),
             signingKey, new TransactionAmount(1), 123456789L, 1, 42);
-        t.sign(new PrivateKey((Ed25519PrivateKeyParameters) pair.getPrivate()));
+        t.sign(pair.privateKey());
 
         Transaction restored = Transaction.of(t.serialize());
         assertEquals(1, ((TransactionImpl) restored).chainId());
@@ -130,13 +130,13 @@ class ConsensusModelTest {
 
     @Test
     void jsonRoundTripPreservesChainIdAndNonce() {
-        var pair = generateKeyPair();
-        var signingKey = PublicKey.of(pair.getPublic());
+        var pair = generateKeyPairTyped();
+        var signingKey = pair.publicKey();
         var from = PublicAddress.of(signingKey);
 
         Transaction t = Transaction.of(from, PublicAddress.random(), new TransactionAmount(100),
             signingKey, new TransactionAmount(1), 123456789L, 1, 42);
-        t.sign(new PrivateKey((Ed25519PrivateKeyParameters) pair.getPrivate()));
+        t.sign(pair.privateKey());
 
         Transaction restored = Transaction.of(t.toJson());
         assertEquals(t.hashContents(), restored.hashContents());

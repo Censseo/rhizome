@@ -2,7 +2,7 @@ package rhizome;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
-import static rhizome.crypto.Crypto.generateKeyPair;
+import static rhizome.crypto.Crypto.generateKeyPairTyped;
 
 import java.util.Set;
 
@@ -50,9 +50,9 @@ class TokenOpTest {
         ledger = new InMemoryLedger();
         tokenStore = new InMemoryTokenStore();
         tokens = new DefaultTokenProcessor(tokenStore, params);
-        var pair = generateKeyPair();
-        senderKey = PublicKey.of(pair.getPublic());
-        senderPrivate = new PrivateKey((Ed25519PrivateKeyParameters) pair.getPrivate());
+        var pair = generateKeyPairTyped();
+        senderKey = pair.publicKey();
+        senderPrivate = pair.privateKey();
         sender = PublicAddress.of(senderKey);
         bob = PublicAddress.random();
         miner = PublicAddress.random();

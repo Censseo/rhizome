@@ -7,7 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static rhizome.crypto.Crypto.generateKeyPair;
+import static rhizome.crypto.Crypto.generateKeyPairTyped;
 
 import java.net.ServerSocket;
 import java.nio.file.Path;
@@ -97,9 +97,9 @@ class SnapSyncIntegrationTest {
         var accumulator = new StateAccumulator(new InMemorySmtNodeStore(), new InMemoryRootStore(),
             PARAMS.maxReorgDepth());
 
-        var pair = generateKeyPair();
-        key = PublicKey.of(pair.getPublic());
-        priv = new PrivateKey((Ed25519PrivateKeyParameters) pair.getPrivate());
+        var pair = generateKeyPairTyped();
+        key = pair.publicKey();
+        priv = pair.privateKey();
         sender = PublicAddress.of(key);
         genesisSnapshot = new LedgerSnapshot("t", 0, PARAMS.chainId());
         genesisSnapshot.put(sender, new TransactionAmount(50_000_000L));

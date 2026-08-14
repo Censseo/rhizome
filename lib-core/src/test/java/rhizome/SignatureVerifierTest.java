@@ -3,7 +3,7 @@ package rhizome;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static rhizome.crypto.Crypto.generateKeyPair;
+import static rhizome.crypto.Crypto.generateKeyPairTyped;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -22,11 +22,11 @@ import rhizome.core.transaction.TransactionImpl;
 class SignatureVerifierTest {
 
     private Transaction signed(long nonce) {
-        var pair = generateKeyPair();
-        var key = PublicKey.of(pair.getPublic());
+        var pair = generateKeyPairTyped();
+        var key = pair.publicKey();
         Transaction t = Transaction.of(PublicAddress.of(key), PublicAddress.random(),
             new TransactionAmount(100), key, new TransactionAmount(1), 1000L, 1, nonce);
-        t.sign(new PrivateKey((Ed25519PrivateKeyParameters) pair.getPrivate()));
+        t.sign(pair.privateKey());
         return t;
     }
 
@@ -124,8 +124,8 @@ class SignatureVerifierTest {
         verifier.verify(t);
         assertTrue(verifier.isCached(t));
 
-        var otherPair = generateKeyPair();
-        var otherKey = PublicKey.of(otherPair.getPublic());
+        var otherPair = generateKeyPairTyped();
+        var otherKey = otherPair.publicKey();
         Transaction sameSignature = Transaction.of(t);
         ((TransactionImpl) sameSignature).signingKey(otherKey);
         ((TransactionImpl) sameSignature).signature(((TransactionImpl) t).signature());

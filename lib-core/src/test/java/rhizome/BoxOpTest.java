@@ -3,7 +3,7 @@ package rhizome;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
-import static rhizome.crypto.Crypto.generateKeyPair;
+import static rhizome.crypto.Crypto.generateKeyPairTyped;
 
 import java.util.List;
 import java.util.Set;
@@ -52,9 +52,9 @@ class BoxOpTest {
         ledger = new InMemoryLedger();
         boxStore = new InMemoryBoxStore();
         boxes = new DefaultBoxProcessor(boxStore, params);
-        var pair = generateKeyPair();
-        senderKey = PublicKey.of(pair.getPublic());
-        senderPrivate = new PrivateKey((Ed25519PrivateKeyParameters) pair.getPrivate());
+        var pair = generateKeyPairTyped();
+        senderKey = pair.publicKey();
+        senderPrivate = pair.privateKey();
         sender = PublicAddress.of(senderKey);
         miner = PublicAddress.random();
         ledger.createWallet(sender);
@@ -195,9 +195,9 @@ class BoxOpTest {
         assertEquals(ExecutionStatus.SUCCESS, execute(block(2, coinbase(2), create(5000, 0))));
         byte[] id = Box.deriveId(sender, 0);
         // A different signer tries to update the box.
-        var otherPair = generateKeyPair();
-        PublicKey otherKey = PublicKey.of(otherPair.getPublic());
-        PrivateKey otherPriv = new PrivateKey((Ed25519PrivateKeyParameters) otherPair.getPrivate());
+        var otherPair = generateKeyPairTyped();
+        PublicKey otherKey = otherPair.publicKey();
+        PrivateKey otherPriv = otherPair.privateKey();
         PublicAddress other = PublicAddress.of(otherKey);
         ledger.createWallet(other);
         ledger.deposit(other, new TransactionAmount(10_000));
@@ -234,9 +234,9 @@ class BoxOpTest {
         assertEquals(ExecutionStatus.SUCCESS, execute(block(2, coinbase(2), create(5000, 0))));
         byte[] id = Box.deriveId(sender, 0);
 
-        var otherPair = generateKeyPair();
-        PublicKey otherKey = PublicKey.of(otherPair.getPublic());
-        PrivateKey otherPriv = new PrivateKey((Ed25519PrivateKeyParameters) otherPair.getPrivate());
+        var otherPair = generateKeyPairTyped();
+        PublicKey otherKey = otherPair.publicKey();
+        PrivateKey otherPriv = otherPair.privateKey();
         PublicAddress other = PublicAddress.of(otherKey);
         ledger.createWallet(other);
         ledger.deposit(other, new TransactionAmount(10_000));

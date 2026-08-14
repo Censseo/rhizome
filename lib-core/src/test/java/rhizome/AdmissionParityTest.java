@@ -1,7 +1,7 @@
 package rhizome;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static rhizome.crypto.Crypto.generateKeyPair;
+import static rhizome.crypto.Crypto.generateKeyPairTyped;
 
 import java.util.HashMap;
 import java.util.List;
@@ -62,9 +62,9 @@ class AdmissionParityTest {
         final PrivateKey priv;
         final PublicAddress address;
         KeyHolder() {
-            var pair = generateKeyPair();
-            key = PublicKey.of(pair.getPublic());
-            priv = new PrivateKey((Ed25519PrivateKeyParameters) pair.getPrivate());
+            var pair = generateKeyPairTyped();
+            key = pair.publicKey();
+            priv = pair.privateKey();
             address = PublicAddress.of(key);
         }
     }

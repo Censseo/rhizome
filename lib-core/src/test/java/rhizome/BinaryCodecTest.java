@@ -5,7 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static rhizome.crypto.Crypto.generateKeyPair;
+import static rhizome.crypto.Crypto.generateKeyPairTyped;
 
 import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters;
 import org.junit.jupiter.api.Test;
@@ -53,11 +53,11 @@ class BinaryCodecTest {
 
     @Test
     void signedTransactionRoundTripByteExact() {
-        var pair = generateKeyPair();
-        var key = PublicKey.of(pair.getPublic());
+        var pair = generateKeyPairTyped();
+        var key = pair.publicKey();
         Transaction t = Transaction.of(PublicAddress.of(key), PublicAddress.random(),
             new TransactionAmount(1234), key, new TransactionAmount(7), 999L, 3, 11);
-        t.sign(new PrivateKey((Ed25519PrivateKeyParameters) pair.getPrivate()));
+        t.sign(pair.privateKey());
 
         TransactionDto dto = t.serialize();
         byte[] bytes = dto.toBuffer();
@@ -76,11 +76,11 @@ class BinaryCodecTest {
         // The single-object entry (used by POST /add_transaction) must consume the whole buffer, so a
         // wire tx has a unique form (audit codec P7 parity). Multi-object buffers are decoded through
         // the codecs' readFrom(ByteBuffer), never through this entry point.
-        var pair = generateKeyPair();
-        var key = PublicKey.of(pair.getPublic());
+        var pair = generateKeyPairTyped();
+        var key = pair.publicKey();
         Transaction t = Transaction.of(PublicAddress.of(key), PublicAddress.random(),
             new TransactionAmount(1234), key, new TransactionAmount(7), 999L, 3, 11);
-        t.sign(new PrivateKey((Ed25519PrivateKeyParameters) pair.getPrivate()));
+        t.sign(pair.privateKey());
         byte[] bytes = t.serialize().toBuffer();
         byte[] withTrailer = java.util.Arrays.copyOf(bytes, bytes.length + 1);
 
@@ -91,8 +91,8 @@ class BinaryCodecTest {
 
     @Test
     void contractTransactionRoundTripPreservesKindDataAndGas() {
-        var pair = generateKeyPair();
-        var key = PublicKey.of(pair.getPublic());
+        var pair = generateKeyPairTyped();
+        var key = pair.publicKey();
         byte[] code = new byte[] {0x00, 0x61, 0x73, 0x6d, 1, 2, 3, 4, 5};
         Transaction t = rhizome.core.transaction.TransactionImpl.builder()
             .from(PublicAddress.of(key)).to(PublicAddress.random())
@@ -101,7 +101,7 @@ class BinaryCodecTest {
             .kind(rhizome.core.transaction.TransactionKind.DEPLOY)
             .data(code).gasLimit(500_000).gasPrice(2)
             .build();
-        t.sign(new PrivateKey((Ed25519PrivateKeyParameters) pair.getPrivate()));
+        t.sign(pair.privateKey());
 
         // Signature covers the contract fields (they are in the preimage).
         assertEquals(true, t.signatureValid());

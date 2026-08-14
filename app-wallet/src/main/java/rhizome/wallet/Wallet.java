@@ -1,5 +1,6 @@
 package rhizome.wallet;
 
+import static rhizome.crypto.Crypto.generateKeyPairTyped;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -36,9 +37,8 @@ public final class Wallet {
     }
 
     public static Wallet create() {
-        var pair = Crypto.generateKeyPair();
-        return fromPrivate(new PrivateKey(
-            (org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters) pair.getPrivate()));
+        var pair = Crypto.generateKeyPairTyped();
+        return new Wallet(pair.privateKey(), pair.publicKey(), null);
     }
 
     private static Wallet fromPrivate(PrivateKey privateKey) {

@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import static rhizome.crypto.Crypto.generateKeyPairTyped;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
@@ -79,9 +80,9 @@ class BoxApiTest {
         eventloop = Eventloop.create();
         clock = new AtomicLong(0);
 
-        var pair = generateKeyPair();
-        key = PublicKey.of(pair.getPublic());
-        priv = new PrivateKey((Ed25519PrivateKeyParameters) pair.getPrivate());
+        var pair = rhizome.crypto.Crypto.generateKeyPairTyped();
+        key = pair.publicKey();
+        priv = pair.privateKey();
         sender = PublicAddress.of(key);
         miner = PublicAddress.random();
 
@@ -116,8 +117,8 @@ class BoxApiTest {
         eventloopThread.join(2000);
     }
 
-    private static org.bouncycastle.crypto.AsymmetricCipherKeyPair generateKeyPair() {
-        return rhizome.crypto.Crypto.generateKeyPair();
+    private static rhizome.crypto.Crypto.KeyPair generateKeyPairTyped() {
+        return rhizome.crypto.Crypto.generateKeyPairTyped();
     }
 
     private HttpResponse call(HttpRequest request) throws Exception {

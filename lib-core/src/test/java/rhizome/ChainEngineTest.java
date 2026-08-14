@@ -3,7 +3,7 @@ package rhizome;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static rhizome.crypto.Crypto.generateKeyPair;
+import static rhizome.crypto.Crypto.generateKeyPairTyped;
 
 import java.math.BigInteger;
 import java.util.List;
@@ -60,9 +60,9 @@ class ChainEngineTest {
         store = new InMemoryChainStore();
         clock = new AtomicLong(START);
 
-        var pair = generateKeyPair();
-        senderKey = PublicKey.of(pair.getPublic());
-        senderPrivate = new PrivateKey((Ed25519PrivateKeyParameters) pair.getPrivate());
+        var pair = generateKeyPairTyped();
+        senderKey = pair.publicKey();
+        senderPrivate = pair.privateKey();
         sender = PublicAddress.of(senderKey);
         recipient = PublicAddress.random();
         miner = PublicAddress.random();

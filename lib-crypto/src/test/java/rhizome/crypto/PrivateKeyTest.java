@@ -10,7 +10,7 @@ class PrivateKeyTest {
 
     @Test
     void hexRoundTripPreservesTheKey() {
-        PrivateKey privateKey = PrivateKey.of(Crypto.generateKeyPair().getPrivate());
+        PrivateKey privateKey = Crypto.generateKeyPairTyped().privateKey();
         PrivateKey decoded = PrivateKey.of(privateKey.toHexString());
         assertEquals(privateKey.toHexString(), decoded.toHexString());
         byte[] signature = Crypto.signWithPrivateKey("hello", decoded);

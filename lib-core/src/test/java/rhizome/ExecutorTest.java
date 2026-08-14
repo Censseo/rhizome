@@ -2,7 +2,7 @@ package rhizome;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static rhizome.crypto.Crypto.generateKeyPair;
+import static rhizome.crypto.Crypto.generateKeyPairTyped;
 
 import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters;
 import org.junit.jupiter.api.BeforeEach;
@@ -38,9 +38,9 @@ class ExecutorTest {
     @BeforeEach
     void setUp() {
         ledger = new InMemoryLedger();
-        var pair = generateKeyPair();
-        senderKey = PublicKey.of(pair.getPublic());
-        senderPrivate = new PrivateKey((Ed25519PrivateKeyParameters) pair.getPrivate());
+        var pair = generateKeyPairTyped();
+        senderKey = pair.publicKey();
+        senderPrivate = pair.privateKey();
         sender = PublicAddress.of(senderKey);
         recipient = PublicAddress.random();
         miner = PublicAddress.random();
@@ -261,11 +261,11 @@ class ExecutorTest {
 
     @Test
     void unknownSenderRejected() {
-        var pair = generateKeyPair();
-        var ghostKey = PublicKey.of(pair.getPublic());
+        var pair = generateKeyPairTyped();
+        var ghostKey = pair.publicKey();
         Transaction t = Transaction.of(PublicAddress.of(ghostKey), recipient, new TransactionAmount(100),
             ghostKey, new TransactionAmount(0), 1234L, params.chainId(), 0);
-        t.sign(new PrivateKey((Ed25519PrivateKeyParameters) pair.getPrivate()));
+        t.sign(pair.privateKey());
         // A funded (>0) spend from a sender with no confirmed balance is still rejected — now via
         // BALANCE_TOO_LOW (absent wallet == balance 0) rather than SENDER_DOES_NOT_EXIST. The
         // accept/reject decision is unchanged; only key-presence no longer drives it (consensus
@@ -281,9 +281,9 @@ class ExecutorTest {
         // state root treats a 0 balance as absent. If validity keyed off hasWallet, the SAME canonical
         // block would be SUCCESS on a node that had reverted the sender into existence and rejected on
         // a node that synced the winning chain directly → permanent partition. Both cases must agree.
-        var pair = generateKeyPair();
-        var wKey = PublicKey.of(pair.getPublic());
-        var wPriv = new PrivateKey((Ed25519PrivateKeyParameters) pair.getPrivate());
+        var pair = generateKeyPairTyped();
+        var wKey = pair.publicKey();
+        var wPriv = pair.privateKey();
         var w = PublicAddress.of(wKey);
 
         // Case A — "clean" node: W was never created.
@@ -316,9 +316,9 @@ class ExecutorTest {
         // wallet → LedgerException thrown mid-rollback. popBlock/reorg has no restore path, so a
         // planted block of this shape corrupted the ledger on the next reorg that popped it. Apply then
         // rollback must be an exact, throw-free inverse.
-        var pair = generateKeyPair();
-        var wKey = PublicKey.of(pair.getPublic());
-        var wPriv = new PrivateKey((Ed25519PrivateKeyParameters) pair.getPrivate());
+        var pair = generateKeyPairTyped();
+        var wKey = pair.publicKey();
+        var wPriv = pair.privateKey();
         var w = PublicAddress.of(wKey);
 
         InMemoryLedger clean = new InMemoryLedger();

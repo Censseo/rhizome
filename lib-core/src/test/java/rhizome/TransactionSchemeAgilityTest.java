@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static rhizome.crypto.Crypto.generateKeyPair;
 
+import static rhizome.crypto.Crypto.generateKeyPairTyped;
 import org.bouncycastle.crypto.AsymmetricCipherKeyPair;
 import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters;
 import org.junit.jupiter.api.Test;
@@ -16,6 +17,7 @@ import rhizome.core.transaction.Transaction;
 import rhizome.core.transaction.TransactionAmount;
 import rhizome.core.transaction.TransactionImpl;
 import rhizome.core.transaction.dto.TransactionDto;
+import rhizome.crypto.Crypto;
 import rhizome.crypto.PrivateKey;
 import rhizome.crypto.PublicKey;
 import rhizome.crypto.SignatureScheme;
@@ -35,8 +37,8 @@ class TransactionSchemeAgilityTest {
         return c;
     }
 
-    private static TransactionImpl signed(AsymmetricCipherKeyPair pair, SignatureScheme scheme, byte[] pq) {
-        PublicKey key = PublicKey.of(pair.getPublic());
+    private static TransactionImpl signed(Crypto.KeyPair pair, SignatureScheme scheme, byte[] pq) {
+        PublicKey key = pair.publicKey();
         TransactionImpl tx = TransactionImpl.builder()
             .from(PublicAddress.of(key, scheme, pq))
             .to(PublicAddress.random())
@@ -49,13 +51,13 @@ class TransactionSchemeAgilityTest {
             .scheme(scheme)
             .pqCommitment(pq)
             .build();
-        tx.sign(new PrivateKey((Ed25519PrivateKeyParameters) pair.getPrivate()));
+        tx.sign(pair.privateKey());
         return tx;
     }
 
     @Test
     void postQuantumCommittedTransactionRoundTripsOnTheWire() {
-        TransactionImpl tx = signed(generateKeyPair(), SignatureScheme.ED25519_PQC, COMMITMENT);
+        TransactionImpl tx = signed(generateKeyPairTyped(), SignatureScheme.ED25519_PQC, COMMITMENT);
         byte[] bytes = tx.serialize().toBuffer();
 
         assertEquals(SignatureScheme.ED25519_PQC.code(), bytes[0]);
@@ -73,7 +75,7 @@ class TransactionSchemeAgilityTest {
 
     @Test
     void postQuantumCommittedTransactionRoundTripsThroughJson() {
-        TransactionImpl tx = signed(generateKeyPair(), SignatureScheme.ED25519_PQC, COMMITMENT);
+        TransactionImpl tx = signed(generateKeyPairTyped(), SignatureScheme.ED25519_PQC, COMMITMENT);
         TransactionImpl restored = (TransactionImpl) Transaction.of(tx.toJson());
 
         assertEquals(SignatureScheme.ED25519_PQC, restored.scheme());
@@ -92,7 +94,7 @@ class TransactionSchemeAgilityTest {
      */
     @Test
     void schemeDowngradeKeepsTheSignatureButBreaksTheSenderBinding() {
-        AsymmetricCipherKeyPair pair = generateKeyPair();
+        var pair = generateKeyPairTyped();
         TransactionImpl original = signed(pair, SignatureScheme.ED25519_PQC, COMMITMENT);
         assertTrue(original.senderBindingValid());
 
@@ -118,7 +120,7 @@ class TransactionSchemeAgilityTest {
     /** The mirror case: claiming a commitment that was never signed for also breaks the binding. */
     @Test
     void forgingACommitmentBreaksTheSenderBinding() {
-        AsymmetricCipherKeyPair pair = generateKeyPair();
+        var pair = generateKeyPairTyped();
         TransactionImpl original = signed(pair, SignatureScheme.ED25519, null);
         TransactionImpl upgraded = TransactionImpl.builder()
             .from(original.from())
@@ -140,7 +142,7 @@ class TransactionSchemeAgilityTest {
 
     @Test
     void unknownSchemeByteIsRejectedOnDecode() {
-        byte[] bytes = signed(generateKeyPair(), SignatureScheme.ED25519, null).serialize().toBuffer();
+        byte[] bytes = signed(generateKeyPairTyped(), SignatureScheme.ED25519, null).serialize().toBuffer();
         for (int code : new int[] {0x02, 0x0F, 0x80, 0xFF}) {
             byte[] tampered = bytes.clone();
             tampered[0] = (byte) code;
@@ -156,7 +158,7 @@ class TransactionSchemeAgilityTest {
      */
     @Test
     void selfAuthorizedTransactionMustUseTheDefaultScheme() {
-        byte[] bytes = signed(generateKeyPair(), SignatureScheme.ED25519_PQC, COMMITMENT)
+        byte[] bytes = signed(generateKeyPairTyped(), SignatureScheme.ED25519_PQC, COMMITMENT)
             .serialize().toBuffer();
         // Flip isTransactionFee, whose offset follows the scheme-dependent authorisation fields.
         int feeFlagOffset = SignatureScheme.ED25519_PQC.wireAuthBytes()
@@ -173,7 +175,7 @@ class TransactionSchemeAgilityTest {
     void sizeBytesMatchesTheSerializedLengthForEveryScheme() {
         for (SignatureScheme scheme : SignatureScheme.values()) {
             byte[] pq = scheme.commitsToPostQuantumKey() ? COMMITMENT : null;
-            TransactionImpl tx = signed(generateKeyPair(), scheme, pq);
+            TransactionImpl tx = signed(generateKeyPairTyped(), scheme, pq);
             assertEquals(tx.serialize().getSize(), tx.sizeBytes(), scheme + " size mismatch");
             assertEquals(tx.serialize().toBuffer().length, tx.sizeBytes(), scheme + " size mismatch");
         }
@@ -185,14 +187,14 @@ class TransactionSchemeAgilityTest {
      */
     @Test
     void classicalTransactionJsonCarriesNoSchemeFields() {
-        var json = signed(generateKeyPair(), SignatureScheme.ED25519, null).toJson();
+        var json = signed(generateKeyPairTyped(), SignatureScheme.ED25519, null).toJson();
         assertFalse(json.has("sigScheme"));
         assertFalse(json.has("pqCommitment"));
     }
 
     @Test
     void jsonRejectsUnknownSchemeAndMismatchedCommitmentWidth() {
-        TransactionImpl tx = signed(generateKeyPair(), SignatureScheme.ED25519_PQC, COMMITMENT);
+        TransactionImpl tx = signed(generateKeyPairTyped(), SignatureScheme.ED25519_PQC, COMMITMENT);
 
         var unknown = tx.toJson();
         unknown.put("sigScheme", "ML_DSA_44");
@@ -202,7 +204,7 @@ class TransactionSchemeAgilityTest {
         shortCommitment.put("pqCommitment", "5a5a5a5a");
         assertThrows(IllegalArgumentException.class, () -> Transaction.of(shortCommitment));
 
-        var strayCommitment = signed(generateKeyPair(), SignatureScheme.ED25519, null).toJson();
+        var strayCommitment = signed(generateKeyPairTyped(), SignatureScheme.ED25519, null).toJson();
         strayCommitment.put("pqCommitment", rhizome.core.common.Utils.bytesToHex(COMMITMENT));
         assertThrows(IllegalArgumentException.class, () -> Transaction.of(strayCommitment));
     }
@@ -214,7 +216,7 @@ class TransactionSchemeAgilityTest {
      */
     @Test
     void inconsistentSchemeAndCommitmentFailClosedInsteadOfThrowing() {
-        PublicKey key = PublicKey.of(generateKeyPair().getPublic());
+        PublicKey key = generateKeyPairTyped().publicKey();
         TransactionImpl tx = TransactionImpl.builder()
             .from(PublicAddress.of(key))
             .to(PublicAddress.random())

@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static rhizome.crypto.Crypto.generateKeyPair;
 
+import static rhizome.crypto.Crypto.generateKeyPairTyped;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.math.BigInteger;
@@ -112,9 +113,9 @@ class TokenPairTest {
         contracts = new InMemoryContractStore();
         clock = new AtomicLong(1_000_000L);
 
-        var pairKeys = generateKeyPair();
-        key = PublicKey.of(pairKeys.getPublic());
-        priv = new PrivateKey((Ed25519PrivateKeyParameters) pairKeys.getPrivate());
+        var pairKeys = generateKeyPairTyped();
+        key = pairKeys.publicKey();
+        priv = pairKeys.privateKey();
         sender = PublicAddress.of(key);
         miner = PublicAddress.random();
 

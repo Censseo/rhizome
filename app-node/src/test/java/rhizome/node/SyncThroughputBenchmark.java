@@ -31,7 +31,7 @@ import rhizome.core.transaction.TransactionAmount;
 import rhizome.crypto.PrivateKey;
 import rhizome.crypto.PublicKey;
 
-import static rhizome.crypto.Crypto.generateKeyPair;
+import static rhizome.crypto.Crypto.generateKeyPairTyped;
 
 /**
  * Not a correctness test — it measures how one sync round splits between network I/O and
@@ -74,9 +74,9 @@ class SyncThroughputBenchmark {
             return;
         }
 
-        var pair = generateKeyPair();
-        PublicKey key = PublicKey.of(pair.getPublic());
-        PrivateKey priv = new PrivateKey((Ed25519PrivateKeyParameters) pair.getPrivate());
+        var pair = generateKeyPairTyped();
+        PublicKey key = pair.publicKey();
+        PrivateKey priv = pair.privateKey();
         PublicAddress sender = PublicAddress.of(key);
         PublicAddress miner = PublicAddress.random();
 

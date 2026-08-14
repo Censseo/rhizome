@@ -1,7 +1,7 @@
 package rhizome;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static rhizome.crypto.Crypto.generateKeyPair;
+import static rhizome.crypto.Crypto.generateKeyPairTyped;
 
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
@@ -42,9 +42,9 @@ class NonceMonotonicCounterTest {
             .powAlgorithm(PowAlgorithm.SHA256).genesisDifficulty(4).minDifficulty(4)
             .minBlockTimeSec(0).build();
 
-        var pair = generateKeyPair();
-        PublicKey key = PublicKey.of(pair.getPublic());
-        PrivateKey priv = new PrivateKey((Ed25519PrivateKeyParameters) pair.getPrivate());
+        var pair = generateKeyPairTyped();
+        PublicKey key = pair.publicKey();
+        PrivateKey priv = pair.privateKey();
         PublicAddress sender = PublicAddress.of(key);
         PublicAddress miner = PublicAddress.random();
 

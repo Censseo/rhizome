@@ -92,6 +92,19 @@ public class Crypto {
     }
 
     /**
+     * A typed key pair: the private and public keys as Rhizome's own types, so callers never
+     * cast the raw BouncyCastle {@code AsymmetricCipherKeyPair} halves (the L28 key factory).
+     */
+    public record KeyPair(PrivateKey privateKey, PublicKey publicKey) {}
+
+    /** Generates an Ed25519 key pair in the typed form callers actually use. */
+    public static KeyPair generateKeyPairTyped() {
+        AsymmetricCipherKeyPair pair = generateKeyPair();
+        return new KeyPair(PrivateKey.of(pair.getPrivate()),
+            PublicKey.of(pair.getPublic()));
+    }
+
+    /**
      * Domain separator for general-purpose message signing. Transaction signatures deliberately
      * stay raw (consensus), so off-chain message signing frames the message with this prefix to
      * keep the two domains apart: a message signature can never be replayed as a transaction

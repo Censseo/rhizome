@@ -7,7 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static rhizome.crypto.Crypto.generateKeyPair;
+import static rhizome.crypto.Crypto.generateKeyPairTyped;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -74,9 +74,9 @@ class SnapshotServiceTest {
             PARAMS.maxReorgDepth());
         AtomicLong clock = new AtomicLong(1_000_000L);
 
-        var pair = generateKeyPair();
-        PublicKey key = PublicKey.of(pair.getPublic());
-        PrivateKey priv = new PrivateKey((Ed25519PrivateKeyParameters) pair.getPrivate());
+        var pair = generateKeyPairTyped();
+        PublicKey key = pair.publicKey();
+        PrivateKey priv = pair.privateKey();
         PublicAddress sender = PublicAddress.of(key);
         LedgerSnapshot genesis = new LedgerSnapshot("t", 0, PARAMS.chainId());
         genesis.put(sender, new TransactionAmount(5_000_000L));

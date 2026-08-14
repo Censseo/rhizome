@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static rhizome.crypto.Crypto.generateKeyPair;
 
+import static rhizome.crypto.Crypto.generateKeyPairTyped;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.util.List;
@@ -104,13 +105,13 @@ class AgentWalletTest {
         contracts = new InMemoryContractStore();
         clock = new AtomicLong(1_000_000L);
 
-        var ownerPair = generateKeyPair();
-        ownerKey = PublicKey.of(ownerPair.getPublic());
-        ownerPriv = new PrivateKey((Ed25519PrivateKeyParameters) ownerPair.getPrivate());
+        var ownerPair = generateKeyPairTyped();
+        ownerKey = ownerPair.publicKey();
+        ownerPriv = ownerPair.privateKey();
         owner = PublicAddress.of(ownerKey);
-        var agentPair = generateKeyPair();
-        agentKey = PublicKey.of(agentPair.getPublic());
-        agentPriv = new PrivateKey((Ed25519PrivateKeyParameters) agentPair.getPrivate());
+        var agentPair = generateKeyPairTyped();
+        agentKey = agentPair.publicKey();
+        agentPriv = agentPair.privateKey();
         agent = PublicAddress.of(agentKey);
         miner = PublicAddress.random();
 
