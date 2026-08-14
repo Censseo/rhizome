@@ -29,8 +29,31 @@ public final class SparseMerkleTree {
     /** The root of an empty tree: 32 zero bytes. */
     public static final byte[] EMPTY_ROOT = new byte[32];
 
-    private static final byte LEAF = 0x00;
-    private static final byte INNER = 0x01;
+    /** A node's serialized width: type(1) + 32 + 32. */
+    public static final int NODE_BYTES = 65;
+
+    /** Node type tag: a LEAF node's two words are key and valueHash. */
+    public static final byte LEAF = 0x00;
+
+    /** Node type tag: an INNER node's two words are its left and right child hashes. */
+    public static final byte INNER = 0x01;
+
+    /** Whether {@code node} is a LEAF node (its words are key and valueHash, not children). */
+    public static boolean isLeafNode(byte[] node) {
+        return node != null && node.length == NODE_BYTES && node[0] == LEAF;
+    }
+
+    /** The left and right child hashes of an INNER node (bytes 1..33 and 33..65). */
+    public static byte[][] innerChildren(byte[] node) {
+        if (node == null || node.length != NODE_BYTES || node[0] != INNER) {
+            throw new IllegalArgumentException("not an inner SMT node");
+        }
+        return new byte[][] {
+            Arrays.copyOfRange(node, 1, 33),
+            Arrays.copyOfRange(node, 33, NODE_BYTES),
+        };
+    }
+
     private static final int KEY_BITS = 256;
 
     private final SmtNodeStore store;

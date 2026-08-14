@@ -69,7 +69,8 @@ class RocksDbStateStoreGcTest {
             // phase — without the protection-set filter the delete would erase the fresh copy.
             RocksDbStateStore.gcAfterMarkHook = () -> seedOrphanLeaf(store);
             try {
-                store.pruneBelow(1024); // watermark 0 -> one full interval -> async sweep triggered
+                store.pruneBelow(1024); // roots only — the GC trigger is explicit
+            store.gcNodesIfDue(1024); // watermark 0 -> one full interval -> async sweep triggered
                 awaitSweep(store);
             } finally {
                 RocksDbStateStore.gcAfterMarkHook = null;

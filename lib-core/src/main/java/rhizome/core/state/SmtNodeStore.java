@@ -36,4 +36,15 @@ public interface SmtNodeStore {
     default void discardBatch() {
         // no-op; see beginBatch
     }
+
+    /**
+     * Explicit garbage-collection trigger: a durable store may delete nodes unreachable from
+     * any retained root, at its own cadence; an in-memory store has nothing to collect. Called
+     * alongside the root prune (never as a hidden side effect of it — constat 41), so the
+     * caller names the maintenance it wants. {@code chainTip} is the pruning floor: nodes only
+     * reachable past it are garbage.
+     */
+    default void gcNodesIfDue(long chainTip) {
+        // no-op for stores that keep every node (in-memory, or a store without collection)
+    }
 }

@@ -156,7 +156,8 @@ class RocksDbStateStoreTest {
             }
             assertNotNull(store.get(orphanRoot), "orphan nodes are on disk before the sweep");
 
-            store.pruneBelow(1024); // watermark 0 -> one full interval -> async sweep triggered
+            store.pruneBelow(1024); // roots only — the GC trigger is explicit
+            store.gcNodesIfDue(1024); // watermark 0 -> one full interval -> async sweep triggered
 
             // The sweep runs OFF the calling thread (consensus lock must never wait for it),
             // so poll for the garbage to disappear instead of asserting synchronously.

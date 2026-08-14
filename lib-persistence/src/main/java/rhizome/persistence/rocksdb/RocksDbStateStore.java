@@ -18,6 +18,7 @@ import org.slf4j.LoggerFactory;
 
 import rhizome.core.state.RootStore;
 import rhizome.core.state.SmtNodeStore;
+import rhizome.core.state.SparseMerkleTree;
 
 import static rhizome.core.common.Utils.longToBytes;
 
@@ -183,7 +184,20 @@ public final class RocksDbStateStore extends RocksDbStore implements SmtNodeStor
         } catch (RocksDBException e) {
             throw new IllegalStateException("state root prune failed", e);
         }
-        sweepNodesIfDue(minHeight);
+    }
+
+    /**
+     * Explicit SMT-node GC trigger: sweeps unreachable nodes once the amortized interval
+     * has elapsed since the last sweep. Deliberately NOT a side effect of {@link
+     * #pruneBelow} (constat 41): root pruning is a {@link RootStore} contract, node
+     * collection a maintenance duty of this node store — the caller names what it wants.
+     * Called by {@code StateAccumulator} alongside the root prune, so the sweep keeps the
+     * same cadence and still runs at trigger time, under the consensus lock, after the
+     * block's flushBatch and putRoot (see the GC javadoc).
+     */
+    @Override
+    public void gcNodesIfDue(long chainTip) {
+        sweepNodesIfDue0(chainTip);
     }
 
     // ---- smt_nodes garbage collection ----
@@ -241,9 +255,6 @@ public final class RocksDbStateStore extends RocksDbStore implements SmtNodeStor
     private static final byte[] GC_SWEPT_THROUGH_KEY = "nodesGcSweptThrough".getBytes();
     private static final long GC_SWEEP_INTERVAL = 1024;
     private static final int GC_DELETE_CHUNK = 4096;
-    /** SparseMerkleTree node encoding: type(1) ‖ word(32) ‖ word(32); LEAF = 0x00 (words are key/valueHash). */
-    private static final int SMT_NODE_BYTES = 65;
-    private static final byte SMT_LEAF = 0x00;
 
     /** Single daemon thread: sweeps are serialized by {@link #gcRunning} and never block callers. */
     private final ExecutorService gcExecutor = Executors.newSingleThreadExecutor(r -> {
@@ -275,7 +286,7 @@ public final class RocksDbStateStore extends RocksDbStore implements SmtNodeStor
         return gcSweptThrough;
     }
 
-    private void sweepNodesIfDue(long minHeight) {
+    private void sweepNodesIfDue0(long minHeight) {
         if (minHeight - gcSweptThrough < GC_SWEEP_INTERVAL) {
             return;
         }
@@ -448,7 +459,9 @@ public final class RocksDbStateStore extends RocksDbStore implements SmtNodeStor
     /**
      * Adds every node hash reachable from {@code root} to {@code live} (iterative, subtree-deduped).
      * Reads go through the sweep's snapshot: the GC must not consult the live CF (or an open
-     * block-commit overlay), only the consistent trigger-time view it deletes from.
+     * block-commit overlay), only the consistent trigger-time view it deletes from. The node
+     * format is read through {@link SparseMerkleTree}'s own accessors — the tree owns the
+     * encoding, this adapter must not replay it (constat 41).
      */
     private void collectReachable(byte[] root, java.util.Set<ByteKey> live, ReadOptions readOptions)
             throws RocksDBException {
@@ -463,19 +476,18 @@ public final class RocksDbStateStore extends RocksDbStore implements SmtNodeStor
                 continue; // subtree already collected: consecutive roots share nearly all their nodes
             }
             byte[] node = db.get(nodesCf, readOptions, hash);
-            if (node == null || node.length != SMT_NODE_BYTES) {
+            if (node == null || node.length != SparseMerkleTree.NODE_BYTES) {
                 continue; // missing/corrupt node: a GC must not fail the prune; nothing to recurse into
             }
-            if (node[0] == SMT_LEAF) {
+            if (SparseMerkleTree.isLeafNode(node)) {
                 continue; // a leaf's words are key/valueHash, not child node hashes
             }
-            byte[] left = java.util.Arrays.copyOfRange(node, 1, 33);
-            byte[] right = java.util.Arrays.copyOfRange(node, 33, SMT_NODE_BYTES);
-            if (!isAllZero(left)) {
-                stack.push(left);
+            byte[][] children = SparseMerkleTree.innerChildren(node);
+            if (!isAllZero(children[0])) {
+                stack.push(children[0]);
             }
-            if (!isAllZero(right)) {
-                stack.push(right);
+            if (!isAllZero(children[1])) {
+                stack.push(children[1]);
             }
         }
     }

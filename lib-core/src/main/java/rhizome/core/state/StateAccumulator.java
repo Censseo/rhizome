@@ -25,8 +25,9 @@ public final class StateAccumulator {
      * {@link PruneCadence}: pruning every block paid a synced range tombstone per block;
      * pruning every PRUNE_INTERVAL blocks keeps up to {@code retainDepth + PRUNE_INTERVAL}
      * roots instead — the safe direction, since the retained window must cover the max reorg
-     * depth (audit perf). The SMT node GC watermark rides the same calls, so its sweep cadence
-     * is unaffected (it has its own interval).
+     * depth (audit perf). The SMT node GC rides the same calls, triggered EXPLICITLY
+     * (constat 41): {@code pruneBelow} only prunes roots, {@code gcNodesIfDue} is the
+     * named maintenance call, so a caller cannot collect nodes by accident.
      */
     private final PruneCadence rootPrune = new PruneCadence();
 
@@ -94,6 +95,7 @@ public final class StateAccumulator {
         // PRUNE_INTERVAL extra heights; the reorg window (retainDepth) always stays covered.
         if (cutoff > 1 && rootPrune.due(cutoff)) {
             roots.pruneBelow(cutoff); // keep genesis (height 1) and the reorg window
+            nodes.gcNodesIfDue(cutoff); // explicit node GC at the same cadence (constat 41)
         }
         return root;
     }
