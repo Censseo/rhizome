@@ -71,7 +71,12 @@ public final class InMemoryLedger implements Ledger {
         if (journals.containsKey(height)) {
             throw new IllegalStateException("ledger already has a journal at height " + height);
         }
-        journals.put(height, List.copyOf(ops));
+        // A mutation-less apply persists no journal: revertBlock maps a missing journal to
+        // "nothing to undo" — the same empty-journal rule as the durable store and the
+        // box/token/contract stores, so an op-less block stays re-appliable.
+        if (!ops.isEmpty()) {
+            journals.put(height, List.copyOf(ops));
+        }
     }
 
     @Override

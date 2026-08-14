@@ -682,15 +682,23 @@ public final class RocksDbNodeStore extends RocksDbStore implements rhizome.core
 
         @Override
         public void applyBlock(long height, java.util.List<rhizome.core.ledger.LedgerOp> ops) {
+            // Refuse a double-apply: re-applying a block would journal its own already-mutated
+            // state as the "prior", so a later revert would restore the wrong values (audit F10)
+            // — the same guard the box/token/contract stores enforce, checked against both the
+            // durable copy and the journal staged for the open block commit.
+            var pending = pendingLedgerJournal;
+            if (raw(ledgerJournalCf, longToBytes(height)) != null
+                    || (pending != null && pending.containsKey(height))) {
+                throw new IllegalStateException("ledger already has a journal at height " + height);
+            }
             if (ops.isEmpty()) {
                 return; // no journal to keep — same empty-journal rule as the box/token/contract stores
             }
             byte[] encoded = LedgerJournalCodec.encode(ops);
-            var pending = pendingLedger;
             if (pending != null) {
                 // Inside a block commit: stage so the journal flushes atomically with the block,
                 // the height and the ledger writes themselves (audit: one undo protocol).
-                pendingLedgerJournal.put(height, encoded);
+                pending.put(height, encoded);
                 return;
             }
             put(ledgerJournalCf, longToBytes(height), encoded);

@@ -54,6 +54,12 @@ public interface Ledger {
      * applied, in application order. The default keeps nothing (the reorg path re-derives
      * the inverses arithmetically); a durable ledger persists the journal so a reorg after
      * a restart can still reverse the block exactly.
+     *
+     * <p>Journal-keeping implementations speak the same protocol as the box/token/contract
+     * stores: a mutation-less apply persists no journal (an op-less block therefore stays
+     * re-appliable), and a height that already has a journal MUST be refused with
+     * {@link IllegalStateException} — a double-apply would journal the already-mutated state
+     * as the "prior", so a later revert would restore the wrong values (audit F10).
      */
     default void applyBlock(long height, List<LedgerOp> ops) {
         // no journal kept — see the class javadoc
