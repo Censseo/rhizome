@@ -8,10 +8,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.math.BigInteger;
 
 import org.bouncycastle.crypto.AsymmetricCipherKeyPair;
-import org.bouncycastle.crypto.Signer;
 import org.bouncycastle.crypto.generators.Ed25519KeyPairGenerator;
 import org.bouncycastle.crypto.params.Ed25519KeyGenerationParameters;
-import org.bouncycastle.crypto.signers.Ed25519Signer;
 
 
 public class Crypto {
@@ -48,14 +46,12 @@ public class Crypto {
     /**
      * Signs a raw digest. RESERVED for transaction hashes (consensus); see the note on
      * {@link #signWithPrivateKey(String, PrivateKey)}. Use {@link #signMessage} for general
-     * message signing.
+     * message signing. Signed through the scheme's algorithm table, not a hard-coded signer
+     * (constat 43b): the scheme names which primitive produces its signatures.
      */
     public static byte[] signWithPrivateKey(byte[] message, PrivateKey privateKey) {
         try {
-            Signer signer = new Ed25519Signer();
-            signer.init(true, privateKey.key());
-            signer.update(message, 0, message.length);
-            return signer.generateSignature();
+            return SignatureScheme.ED25519.algorithm().sign(message, privateKey.toBytes());
         } catch (Exception e) {
             // Never return an empty/garbage signature on failure: that used to let a
             // signing fault surface only much later as a rejected transaction, masking
@@ -76,13 +72,12 @@ public class Crypto {
         // has no Ed25519 parameters: signer.init(false, null) would NPE inside BouncyCastle. A
         // missing key is definitionally an invalid signature, so return false rather than throw —
         // the security primitive must fail closed on attacker-controlled input (audit M4).
-        if (publicKey == null || publicKey.get() == null || signature == null) {
+        if (publicKey == null || publicKey.isEmpty() || signature == null) {
             return false;
         }
-        Ed25519Signer signer = new Ed25519Signer();
-        signer.init(false, publicKey.get());
-        signer.update(bytes, 0, bytes.length);
-        return signer.verifySignature(signature);
+        // Verified through the scheme's algorithm table, not a hard-coded signer: the scheme
+        // names which primitive verifies its signatures (constat 43b; SignatureAlgorithm).
+        return SignatureScheme.ED25519.algorithm().verify(bytes, signature, publicKey.toBytes());
     }
 
     public static AsymmetricCipherKeyPair generateKeyPair() {

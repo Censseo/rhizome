@@ -47,7 +47,7 @@ public enum SignatureScheme {
      * Ed25519. Address body is {@code RIPEMD160(SHA256(publicKey))} — the classical scheme, and the
      * default for every transaction that does not opt in to anything else.
      */
-    ED25519((byte) 0x00, 64, 32, 0),
+    ED25519((byte) 0x00, 64, 32, 0, Ed25519Algorithm.INSTANCE),
 
     /**
      * Ed25519 whose address additionally commits to the hash of a future post-quantum public key:
@@ -65,7 +65,7 @@ public enum SignatureScheme {
      * 32-byte digest. Fixing the post-quantum key format now would defeat the purpose of committing
      * before the format is chosen.
      */
-    ED25519_PQC((byte) 0x01, 64, 32, 32);
+    ED25519_PQC((byte) 0x01, 64, 32, 32, Ed25519Algorithm.INSTANCE);
 
     /** 32-byte commitment: one SHA-256 digest. Fixed so the wire width is scheme-derived. */
     public static final int COMMITMENT_SIZE = 32;
@@ -74,12 +74,21 @@ public enum SignatureScheme {
     private final int signatureBytes;
     private final int publicKeyBytes;
     private final int commitmentBytes;
+    /** The signing primitive this scheme authorises — named explicitly in the table above. */
+    private final SignatureAlgorithm algorithm;
 
-    SignatureScheme(byte code, int signatureBytes, int publicKeyBytes, int commitmentBytes) {
+    SignatureScheme(byte code, int signatureBytes, int publicKeyBytes, int commitmentBytes,
+                    SignatureAlgorithm algorithm) {
         this.code = code;
         this.signatureBytes = signatureBytes;
         this.publicKeyBytes = publicKeyBytes;
         this.commitmentBytes = commitmentBytes;
+        this.algorithm = algorithm;
+    }
+
+    /** The algorithm that verifies this scheme's signatures (see {@link SignatureAlgorithm}). */
+    public SignatureAlgorithm algorithm() {
+        return algorithm;
     }
 
     /** Consensus-visible discriminant: address version byte and transaction wire prefix. */
