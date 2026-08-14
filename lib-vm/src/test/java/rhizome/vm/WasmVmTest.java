@@ -150,9 +150,15 @@ class WasmVmTest {
             new java.util.concurrent.atomic.AtomicBoolean();
         java.util.concurrent.atomic.AtomicBoolean callerRaised =
             new java.util.concurrent.atomic.AtomicBoolean();
+        // Latched, not slept: onWorker submits to an executor and blocks on future.get(), so an
+        // interrupt landing before the task is DEQUEUED cancels it while still queued — it never
+        // runs, and nothing is there to interrupt. A fixed sleep only bets that the executor won
+        // that race; under load it loses and the test fails for a reason it does not test.
+        java.util.concurrent.CountDownLatch workerRunning = new java.util.concurrent.CountDownLatch(1);
         Thread caller = new Thread(() -> {
             try {
                 WasmVm.onBoundedStack(() -> {
+                    workerRunning.countDown();
                     while (!Thread.currentThread().isInterrupted()) {
                         Thread.onSpinWait();
                     }
@@ -164,7 +170,8 @@ class WasmVmTest {
             }
         });
         caller.start();
-        Thread.sleep(100); // let the worker start spinning
+        assertTrue(workerRunning.await(10, java.util.concurrent.TimeUnit.SECONDS),
+            "the worker must actually be running before the interrupt — otherwise this asserts nothing");
         caller.interrupt();
         caller.join(5_000);
         assertTrue(callerRaised.get(), "the caller must surface the interruption");
