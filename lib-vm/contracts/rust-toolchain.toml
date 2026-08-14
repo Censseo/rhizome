@@ -1,0 +1,14 @@
+# The contract toolchain, pinned.
+#
+# Every .wasm in lib-vm/src/test/resources was produced by this exact compiler: its version is
+# recorded inside each binary's `producers` section, so the pin is verifiable against the
+# artefacts rather than trusted. Eight of the nine binaries were built with 1.94.1; logtree.wasm
+# had already drifted to 1.96.0 before this file existed, which is the drift this pin closes.
+#
+# rustup reads this file from the working directory, so `rustc` invoked from lib-vm/contracts
+# resolves to the pinned compiler with no further ceremony — including for a human compiling one
+# contract by hand. The Gradle task does the same thing (see :lib-vm:compileContracts).
+[toolchain]
+channel = "1.94.1"
+targets = ["wasm32-unknown-unknown"]
+profile = "minimal"
