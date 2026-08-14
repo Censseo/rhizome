@@ -71,7 +71,7 @@ public record PublicAddress(byte[] address) {
      *                     absent (null/empty) for a scheme that commits to nothing
      */
     public static PublicAddress of(PublicKey publicKey, SignatureScheme scheme, byte[] pqCommitment) {
-        if (!publicKey.key().isPresent()) {
+        if (publicKey.isEmpty()) {
             // Fail closed exactly as before: an absent key has no address, and callers compare the
             // result against a transaction's `from` — empty() matches nothing key-derived.
             return PublicAddress.empty();

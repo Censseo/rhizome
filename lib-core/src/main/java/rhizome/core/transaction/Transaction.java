@@ -335,7 +335,7 @@ public sealed interface Transaction permits TransactionImpl {
                 // BOX_COLLECT minted by BlockAssembler) rather than hex of the zero-filled
                 // encoding toBytes() falls back to — the two disagree in that one case, so
                 // toBytes() cannot be fed to hexUpper() unconditionally here.
-                if (transactionImpl.signingKey().key().isPresent()) {
+                if (transactionImpl.signingKey().isPresent()) {
                     sink.hexUpper(K_SIGNING_KEY, transactionImpl.signingKey().toBytes());
                 } else {
                     sink.field(K_SIGNING_KEY, "");

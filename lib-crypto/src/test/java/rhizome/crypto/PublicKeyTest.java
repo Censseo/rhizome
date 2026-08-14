@@ -30,7 +30,7 @@ class PublicKeyTest {
     void smallOrderEncodingsAllMapToEmpty() {
         for (String hex : SMALL_ORDER_HEX) {
             assertEquals(PublicKey.empty(), PublicKey.of(hex), "small-order key accepted: " + hex);
-            assertNull(PublicKey.of(hex).get());
+            assertTrue(PublicKey.of(hex).isEmpty());
         }
     }
 
@@ -59,7 +59,7 @@ class PublicKeyTest {
     void generatedKeysStillValidateAndVerify() {
         var pair = generateKeyPairTyped();
         PublicKey publicKey = pair.publicKey();
-        assertTrue(publicKey.get() != null, "freshly generated key must be accepted");
+        assertTrue(publicKey.isPresent(), "freshly generated key must be accepted");
         byte[] signature = Crypto.signWithPrivateKey("hello", pair.privateKey());
         assertTrue(Crypto.checkSignature("hello", signature, publicKey));
     }

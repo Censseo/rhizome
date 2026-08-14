@@ -12,8 +12,9 @@ import java.util.Optional;
 
 // A final class rather than a record: records cannot hold per-instance memo state, and the
 // canonical 32-byte encoding is memoised here (see encoded()) so equals/hashCode stop paying
-// an Ed25519PublicKeyParameters.getEncoded() clone per comparison (audit). The public surface
-// — constructor, key() accessor, factories — is unchanged from the record.
+// an Ed25519PublicKeyParameters.getEncoded() clone per comparison (audit). The BouncyCastle
+// parameter is an implementation detail: the public surface is bytes and hex, so no caller
+// — and no module — reaches a BC type through this class (constat 43c).
 public final class PublicKey {
 
     public static final int SIZE = 32;
@@ -25,7 +26,7 @@ public final class PublicKey {
     // clone (see toBytes()).
     private volatile byte[] encoded;
 
-    public PublicKey(Optional<Ed25519PublicKeyParameters> key) {
+    private PublicKey(Optional<Ed25519PublicKeyParameters> key) {
         this.key = key;
     }
 
@@ -91,12 +92,14 @@ public final class PublicKey {
         return encoded().clone();
     }
 
-    public Optional<Ed25519PublicKeyParameters> key() {
-        return key;
+    /** Whether this key is the empty (absent) value, e.g. a decoded all-zero signing key. */
+    public boolean isEmpty() {
+        return key.isEmpty();
     }
 
-    public Ed25519PublicKeyParameters get() {
-        return key.orElse(null);
+    /** Whether this key carries a real Ed25519 point. */
+    public boolean isPresent() {
+        return key.isPresent();
     }
 
     // Ed25519PublicKeyParameters implements neither equals nor hashCode, so compare the
