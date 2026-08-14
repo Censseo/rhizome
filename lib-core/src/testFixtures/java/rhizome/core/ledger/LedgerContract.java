@@ -16,9 +16,10 @@ import rhizome.core.transaction.TransactionAmount;
  *
  * <p>Includes the per-block undo-journal protocol ({@link Ledger#applyBlock}/{@link
  * Ledger#revertBlock}/{@link Ledger#pruneJournals}): both journal-keeping backends must speak
- * it identically — the double-apply refusal (audit F10) and the op-less apply that persists no
- * journal — because a reorg after a restart runs against the durable copy, not the in-memory
- * one the suite exercises most.
+ * it identically — the double-apply refusal (audit F10), the op-less apply that persists no
+ * journal, and a revert that replays the journal through the store's checked inverses rather
+ * than a second arithmetic — because a reorg after a restart runs against the durable copy,
+ * not the in-memory one the suite exercises most.
  */
 public interface LedgerContract {
 
@@ -205,6 +206,34 @@ public interface LedgerContract {
         // Both journals were consumed by their revert: a second attempt finds nothing.
         assertFalse(ledger.revertBlock(3));
         assertFalse(ledger.revertBlock(2));
+    }
+
+    @Test
+    default void revertOfAJournalNamingAnAbsentWalletFailsInsteadOfInventingABalance() throws Exception {
+        // Every legitimately journaled op touched an existing wallet on the way in, so a journal
+        // naming an absent wallet means store corruption. Reading the absent wallet as zero and
+        // writing the inverse onto it (the old RocksDB replay) silently MINTED a balance the
+        // consensus path then read as real; both backends must throw instead.
+        Ledger ledger = newLedger();
+        PublicAddress ghost = PublicAddress.random();
+        ledger.applyBlock(2, List.of(new LedgerOp(LedgerOp.Op.WITHDRAW, ghost, 50)));
+        assertThrows(LedgerException.class, () -> ledger.revertBlock(2));
+        assertFalse(ledger.hasWallet(ghost), "a refused revert must not materialise the wallet");
+    }
+
+    @Test
+    default void revertOfADepositBelowZeroFailsInsteadOfWritingANegativeBalance() throws Exception {
+        // The underflow twin: reverting a deposit larger than the wallet's balance means the
+        // journal disagrees with the committed state (corruption). The old RocksDB replay wrote
+        // the negative result, readable as a real balance; both backends must refuse, like any
+        // other underflow.
+        Ledger ledger = newLedger();
+        PublicAddress wallet = PublicAddress.random();
+        ledger.createWallet(wallet);
+        ledger.deposit(wallet, new TransactionAmount(30));
+        ledger.applyBlock(2, List.of(new LedgerOp(LedgerOp.Op.DEPOSIT, wallet, 50)));
+        assertThrows(LedgerException.class, () -> ledger.revertBlock(2));
+        assertEquals(30L, ledger.getWalletValue(wallet).amount(), "a refused revert must not partially apply");
     }
 
     /** The ledger's entire content as a deterministic, order-independent byte string. */

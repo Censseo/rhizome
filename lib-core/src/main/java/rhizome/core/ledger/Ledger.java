@@ -66,8 +66,12 @@ public interface Ledger {
     }
 
     /**
-     * Reverts the ledger changes of the block at {@code height} from its undo journal. The
-     * default does nothing — callers must fall back to their arithmetic mirrors.
+     * Reverts the ledger changes of the block at {@code height} from its undo journal, by
+     * replaying each entry's exact inverse through the store's own checked arithmetic
+     * ({@link LedgerOp#revert}). A journal that disagrees with the committed state — it names
+     * an absent wallet, or its inverse over/underflows — is corrupt and must throw, never be
+     * written back as a balance the consensus path then reads. The default does nothing —
+     * callers must fall back to their arithmetic mirrors.
      *
      * @return true if a journal was found and applied
      */

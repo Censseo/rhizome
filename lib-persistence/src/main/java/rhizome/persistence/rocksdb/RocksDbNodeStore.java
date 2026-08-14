@@ -712,13 +712,11 @@ public final class RocksDbNodeStore extends RocksDbStore implements rhizome.core
             }
             java.util.List<rhizome.core.ledger.LedgerOp> journal = LedgerJournalCodec.decode(encoded);
             for (int i = journal.size() - 1; i >= 0; i--) {
-                rhizome.core.ledger.LedgerOp op = journal.get(i);
-                long prior = op.amount();
-                long current = balanceOrZero(op.wallet());
-                long next = op.op() == rhizome.core.ledger.LedgerOp.Op.WITHDRAW
-                    ? current + prior  // the reverse of a withdraw is a credit
-                    : current - prior; // the reverse of a deposit is a debit
-                setValue(op.wallet(), next);
+                // Replay through the store's own checked inverses — the exact undo the in-memory
+                // ledger runs, not a second arithmetic to keep in sync. A journal naming an
+                // absent wallet or one that over/underflows is corrupt and must throw here,
+                // never be written back as a balance the consensus path then reads.
+                journal.get(i).revert(this);
             }
             delete(ledgerJournalCf, longToBytes(height));
             return true;
