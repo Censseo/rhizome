@@ -1,7 +1,5 @@
 package rhizome.core.user;
 
-import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters;
-import org.bouncycastle.crypto.params.Ed25519PublicKeyParameters;
 import org.json.JSONObject;
 
 import rhizome.crypto.PrivateKey;
@@ -74,8 +72,10 @@ public interface User {
             // The private key is REQUIRED here: the default toJson omits it, so accepting the
             // public form would silently build a user whose privateKey() is null and NPE later
             // in signTransaction/equals (audit review). Any JSON meant to be parsed back into a
-            // usable User must come from toJsonWithPrivateKey; a missing key now fails loudly
-            // with a JSONException instead of a deferred NullPointerException.
+            // usable User must carry the private key explicitly (a JSON with the key built by
+            // the caller, as UserTests does — the private-key SERIALIZER is deliberately not
+            // shipped); a missing key now fails loudly with a JSONException instead of a
+            // deferred NullPointerException.
             return UserImpl.builder()
                     .publicKey(PublicKey.of(json.getString(PUBLIC_KEY)))
                     .privateKey(PrivateKey.of(json.getString(PRIVATE_KEY)))
@@ -83,20 +83,16 @@ public interface User {
         }
         /**
          * Public-key-only form — the safe default for {@link User#toJson()}: a serialized user
-         * must never leak its secret into logs/JSON dumps unless the caller explicitly asks for
-         * {@link #toJsonWithPrivateKey(User)} (audit: private key serialized in plaintext).
+         * must never leak its secret into logs/JSON dumps. There is deliberately NO private-key
+         * serializer in this jar: a caller that needs the key in JSON builds the
+         * {@code privateKey} field itself from {@link PrivateKey#toHexString()} (tests, encrypted
+         * keystores) — shipping one would put a plaintext-secret writer one import away from
+         * production code (audit: private key serialized in plaintext).
          */
         public JSONObject toJson(User user) {
             var userImpl = (UserImpl) user;
             JSONObject result = new JSONObject();
             result.put(PUBLIC_KEY, userImpl.publicKey().toHexString());
-            return result;
-        }
-        /** Explicit opt-in form that includes the private key (tests, encrypted keystores). */
-        public JSONObject toJsonWithPrivateKey(User user) {
-            var userImpl = (UserImpl) user;
-            JSONObject result = toJson(user);
-            result.put(PRIVATE_KEY, userImpl.privateKey().toHexString());
             return result;
         }
     }

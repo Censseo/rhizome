@@ -36,6 +36,16 @@ import java.util.Arrays;
  * the same JSON object, so {@link #hexUpper(byte[])} and {@link #hexLower(byte[])} are separate,
  * explicitly named methods rather than one method with an implied default — a default would be a
  * silent wrong-case regression waiting to happen at some call site.
+ *
+ * <p><b>The writer/reader pair is deliberate.</b> This writer is one half of a two-halves JSON
+ * strategy: the node WRITES with {@code JsonSink} (allocation-light, measured fastest on the hot
+ * endpoint paths) and READS with {@code org.json} (the JSONObject tree that {@code Block.of},
+ * {@code Transaction.of} and {@code User.of} parse, including lib-net's peer-JSON fallback).
+ * They are NOT two implementations of the same thing to be merged — merging would either give
+ * up the writer's performance for a tree it never builds, or re-implement a JSON parser by
+ * hand for no gain. The equivalence tests (JsonWriterEquivalenceTest, BoxTokenJsonEquivalenceTest,
+ * ExplorerJsonEquivalenceTest) pin the two halves' agreement on the wire form; that is the
+ * intended contract, and {@code org.json} stays an {@code api} dependency of lib-core.
  */
 public final class JsonSink {
 

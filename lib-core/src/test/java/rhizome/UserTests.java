@@ -41,9 +41,13 @@ class UserTests {
 
         assertTrue(t2.signatureValid());
 
-        // Recreate miner from JSON (explicit private-key form — the default toJson is public-only)
-        String serialized = User.serializer().toJsonWithPrivateKey(miner).toString();
-        JSONObject parsed = new JSONObject(serialized);
+        // Recreate miner from JSON, including the private key (the default toJson is
+        // public-only; the private-key form is built explicitly here because the
+        // private-key serializer no longer ships in the production jar).
+        JSONObject serialized = new JSONObject()
+            .put("publicKey", miner.publicKey().toHexString())
+            .put("privateKey", miner.privateKey().toHexString());
+        JSONObject parsed = new JSONObject(serialized.toString());
 
         User minerCopy = User.of(parsed);
         // Test the signature still works
