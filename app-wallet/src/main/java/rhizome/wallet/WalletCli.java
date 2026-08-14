@@ -9,6 +9,8 @@ import rhizome.core.blockchain.Contracts;
 import rhizome.core.common.Constants;
 import rhizome.core.common.Helpers;
 import rhizome.core.common.Utils;
+import rhizome.core.blockchain.NetworkParameters;
+import rhizome.core.token.TokenId;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.transaction.Transaction;
 import rhizome.core.transaction.TransactionAmount;
@@ -82,6 +84,24 @@ public final class WalletCli {
     private interface Handler {
         int run(String[] args) throws Exception;
     }
+
+    /**
+     * The consensus parameters the CLI's pre-flight bounds are read from, so a rule the node
+     * enforces has ONE definition rather than a copy here kept in step by a comment.
+     *
+     * <p>Any network instance serves, because every bound taken from it is network-invariant:
+     * {@code maxTxGas} and the three mint-metadata limits are identical across mainnet, testnet
+     * and devnet. That has to be true for a single instance to be sound, so it is not assumed —
+     * {@code WalletCliProtocolBoundsTest} asserts it over all three, and fails the build if a
+     * future network diverges. At that point these bounds stop being constants and the CLI has to
+     * learn which network it is talking to; the test is what forces that conversation instead of
+     * letting the wallet quietly refuse transactions the node would have accepted.
+     *
+     * <p>The bounds are checked BEFORE any network call by design (a checksum typo should not
+     * cost a passphrase prompt and a scrypt round), which is why they cannot simply be fetched
+     * from the node being addressed.
+     */
+    private static final NetworkParameters PROTOCOL = NetworkParameters.cleanMainnet();
 
     /**
      * The one place a command name is bound to its handler — a table, not a switch, so the
@@ -182,9 +202,10 @@ public final class WalletCli {
 
     private static final long DEFAULT_GAS_LIMIT = 10_000_000L;
     private static final long DEFAULT_GAS_PRICE = 1L;
-    /** Protocol ceiling on one transaction's gas (NetworkParameters.maxTxGas): the node rejects
-     *  anything above it, so the CLI fails fast instead of signing a doomed transaction. */
-    private static final long MAX_GAS_LIMIT = 50_000_000L;
+    /** Protocol ceiling on one transaction's gas: the node rejects anything above it, so the CLI
+     *  fails fast instead of signing a doomed transaction. Read from the parameters, not copied
+     *  (see {@link #PROTOCOL}). */
+    private static final long MAX_GAS_LIMIT = PROTOCOL.maxTxGas();
     /** Sanity ceiling on the gas price in base units: bounded so {@code gasLimit × gasPrice}
      *  can never overflow the long arithmetic the fee check uses. */
     private static final long MAX_GAS_PRICE = 100_000_000_000L;
@@ -585,12 +606,11 @@ public final class WalletCli {
     }
 
     /** Byte length of a box id / token id: both are SHA-256 derived (Box.deriveId, TokenMeta.deriveId). */
-    private static final int ID_BYTES = 32;
-    /** Protocol bounds on mint metadata (NetworkParameters.maxTokenSymbolBytes/NameBytes/Decimals):
-     *  mirrored here so the CLI refuses what the node would reject, before signing. */
-    private static final int MAX_TOKEN_SYMBOL_BYTES = 16;
-    private static final int MAX_TOKEN_NAME_BYTES = 64;
-    private static final int MAX_TOKEN_DECIMALS = 18;
+    private static final int ID_BYTES = TokenId.SIZE;
+    /** Protocol bounds on mint metadata, read from the parameters rather than copied. */
+    private static final int MAX_TOKEN_SYMBOL_BYTES = PROTOCOL.maxTokenSymbolBytes();
+    private static final int MAX_TOKEN_NAME_BYTES = PROTOCOL.maxTokenNameBytes();
+    private static final int MAX_TOKEN_DECIMALS = PROTOCOL.maxTokenDecimals();
 
     /**
      * Validates a 32-byte box/token id given as hex and returns it unchanged. Unvalidated ids used
