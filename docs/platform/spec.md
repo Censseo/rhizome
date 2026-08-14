@@ -138,8 +138,15 @@ what it uses:
 `undeclared-dependency` is in `excludedRules`; the rest of the rule set is active. This is a quality
 gate, not advice — `./gradlew build` fails on violation. It is the mechanical half of the
 interface-driven decoupling described in [CLAUDE.md](../../CLAUDE.md): `lib-core` defines
-`ContractProcessor`, `PeerSource`, `ChainStore`/`NonceStore`/`ContractStore`/`BoxStore`, and the
-outward modules implement them, so consensus never compiles against a transport or a WASM runtime.
+`ContractProcessor`, `PeerSource`, `ChainStore`/`NonceStore`/`BoxStore`, and the outward modules
+implement them, so consensus never compiles against a transport or a WASM runtime.
+
+`ContractStore` is deliberately **not** in that list: it lives in `lib-vm`, next to the contract
+logic that drives it, under the same ownership rule the rest of the tree follows — a port belongs
+with the domain logic that uses it, not with whoever happens to hold a reference. `lib-core` reaches
+contract state through `ContractProcessor` and never names a store type. It is also no longer one
+interface: `19ff5b9` split it into `ContractState`, `ContractSnapshotStore` and
+`ContractJournalStore` for the three audiences that were sharing it.
 
 ### P-7 — Benchmark harness *(implemented)*
 
