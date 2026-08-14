@@ -13,6 +13,8 @@ import java.util.Map;
 
 import org.junit.jupiter.api.Test;
 
+import rhizome.core.blockchain.ContractProcessor.ContractResult;
+
 /**
  * Drives a real Rust-compiled WASM contract (contracts/counter.rs -> counter.wasm)
  * through the VM: it reads a counter from storage, increments it, writes it back,
@@ -50,13 +52,13 @@ class WasmVmTest {
         byte[] caller = "agent".getBytes(StandardCharsets.UTF_8);
 
         ExecResult first = vm.execute(COUNTER, new MapHostState(storage, caller, new byte[0], 0), new GasMeter(10_000_000));
-        assertEquals(ExecResult.Status.OK, first.status());
+        assertEquals(ContractResult.Status.OK, first.status());
         assertArrayEquals(le64(1), first.output());
         assertTrue(first.gasUsed() > 0, "execution should cost gas");
 
         // Same storage map -> the counter persists and advances.
         ExecResult second = vm.execute(COUNTER, new MapHostState(storage, caller, new byte[0], 0), new GasMeter(10_000_000));
-        assertEquals(ExecResult.Status.OK, second.status());
+        assertEquals(ContractResult.Status.OK, second.status());
         assertArrayEquals(le64(2), second.output());
     }
 
@@ -66,7 +68,7 @@ class WasmVmTest {
         byte[] caller = "agent".getBytes(StandardCharsets.UTF_8);
 
         ExecResult r = vm.execute(EMITTER, new MapHostState(storage, caller, new byte[0], 0), new GasMeter(10_000_000));
-        assertEquals(ExecResult.Status.OK, r.status());
+        assertEquals(ContractResult.Status.OK, r.status());
         assertEquals(1, r.logs().size());
         LogEntry log = r.logs().get(0);
         assertArrayEquals("count".getBytes(StandardCharsets.UTF_8), log.topic());
@@ -115,7 +117,7 @@ class WasmVmTest {
         // A budget far too small to finish: the per-instruction meter must abort
         // deterministically instead of running (or hanging) to completion.
         ExecResult r = vm.execute(COUNTER, new MapHostState(new byte[0], new byte[0], 0), new GasMeter(50));
-        assertEquals(ExecResult.Status.OUT_OF_GAS, r.status());
+        assertEquals(ContractResult.Status.OUT_OF_GAS, r.status());
         assertEquals(50, r.gasUsed());
     }
 
@@ -128,12 +130,12 @@ class WasmVmTest {
         // honest block a warm producer built. The charge must be identical warm vs cold.
         WasmVm.clearModuleCacheForTest();
         ExecResult cold = vm.execute(COUNTER, new MapHostState(new byte[0], new byte[0], 0), new GasMeter(10_000_000));
-        assertEquals(ExecResult.Status.OK, cold.status(), "cold run should succeed");
+        assertEquals(ContractResult.Status.OK, cold.status(), "cold run should succeed");
 
         // Second run: same code, same (empty) state -> identical execution, but the module is now
         // cached. Only the cache warmth differs between the two calls.
         ExecResult warm = vm.execute(COUNTER, new MapHostState(new byte[0], new byte[0], 0), new GasMeter(10_000_000));
-        assertEquals(ExecResult.Status.OK, warm.status(), "warm run should succeed");
+        assertEquals(ContractResult.Status.OK, warm.status(), "warm run should succeed");
 
         assertEquals(cold.gasUsed(), warm.gasUsed(),
             "gasUsed must not depend on module-cache warmth (consensus determinism)");

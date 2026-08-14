@@ -8,6 +8,8 @@ import java.io.ByteArrayOutputStream;
 
 import org.junit.jupiter.api.Test;
 
+import rhizome.core.blockchain.ContractProcessor.ContractResult;
+
 /**
  * Adversarial hostile-module tests for the VM's load-bearing determinism / resource controls, each of
  * which previously had no negative test (audit coverage gaps + findings S2/S5):
@@ -262,8 +264,8 @@ class WasmAdversarialTest {
         ExecResult big = vm.execute(bigMod,
             new MapHostState(new byte[0], new byte[0], 0), new GasMeter(10_000_000));
 
-        assertEquals(ExecResult.Status.OK, small.status(), "small-length call should complete");
-        assertEquals(ExecResult.Status.OK, big.status(), "big-length call should complete");
+        assertEquals(ContractResult.Status.OK, small.status(), "small-length call should complete");
+        assertEquals(ContractResult.Status.OK, big.status(), "big-length call should complete");
         // Both modules are byte-identical except the i32.const operand (same 1-gas instruction), so the
         // whole gasUsed delta is the transfer_value per-byte charge.
         assertEquals((long) (bigLen - smallLen) * GasSchedule.PER_BYTE, big.gasUsed() - small.gasUsed(),
@@ -311,8 +313,8 @@ class WasmAdversarialTest {
         ExecResult big = vm.execute(bigMod,
             new MapHostState(new byte[0], new byte[0], 0), new GasMeter(10_000_000));
 
-        assertEquals(ExecResult.Status.OK, small.status(), "small grow should complete");
-        assertEquals(ExecResult.Status.OK, big.status(), "big grow should complete");
+        assertEquals(ContractResult.Status.OK, small.status(), "small grow should complete");
+        assertEquals(ContractResult.Status.OK, big.status(), "big grow should complete");
         assertEquals((long) (bigPages - smallPages) * GasSchedule.MEMORY_PER_PAGE,
             big.gasUsed() - small.gasUsed(),
             "memory.grow must charge MEMORY_PER_PAGE per requested page (audit S-4)");
@@ -377,8 +379,8 @@ class WasmAdversarialTest {
         ExecResult big = vm.execute(bigMod,
             new MapHostState(new byte[0], new byte[0], 0), new GasMeter(10_000_000));
 
-        assertEquals(ExecResult.Status.OK, small.status(), "small-length call should complete");
-        assertEquals(ExecResult.Status.OK, big.status(), "big-length call should complete");
+        assertEquals(ContractResult.Status.OK, small.status(), "small-length call should complete");
+        assertEquals(ContractResult.Status.OK, big.status(), "big-length call should complete");
         assertEquals((long) (bigLen - smallLen) * GasSchedule.PER_BYTE, big.gasUsed() - small.gasUsed(),
             "call_contract must charge PER_BYTE of the callee-address length too (audit F1)");
     }
@@ -537,7 +539,7 @@ class WasmAdversarialTest {
         WasmVm.clearModuleCacheForTest();
         ExecResult r = vm.execute(mod,
             new MapHostState(new byte[0], new byte[0], 0), new GasMeter(10_000_000));
-        assertEquals(ExecResult.Status.OK, r.status(),
+        assertEquals(ContractResult.Status.OK, r.status(),
             "a grow that fails at the instance cap must not consume the tree-page budget");
     }
 
@@ -674,7 +676,7 @@ class WasmAdversarialTest {
         WasmVm.clearModuleCacheForTest();
         ExecResult r = vm.execute(transferValueModule(WasmVm.HOST_BUFFER_CAP, 17),
             new MapHostState(new byte[0], new byte[0], 0), new GasMeter(10_000_000));
-        assertEquals(ExecResult.Status.OK, r.status(),
+        assertEquals(ContractResult.Status.OK, r.status(),
             "a host buffer at exactly HOST_BUFFER_CAP must be allowed");
     }
 
@@ -687,7 +689,7 @@ class WasmAdversarialTest {
         WasmVm.clearModuleCacheForTest();
         ExecResult r = vm.execute(transferValueModule(WasmVm.HOST_BUFFER_CAP + 1, 17),
             new MapHostState(new byte[0], new byte[0], 0), new GasMeter(limit));
-        assertEquals(ExecResult.Status.OUT_OF_GAS, r.status(),
+        assertEquals(ContractResult.Status.OUT_OF_GAS, r.status(),
             "a host buffer above HOST_BUFFER_CAP must be rejected before allocation");
         assertEquals(limit, r.gasUsed(),
             "the cap rejection consumes the full budget, never a heap-dependent amount");
@@ -769,14 +771,14 @@ class WasmAdversarialTest {
         WasmVm.clearModuleCacheForTest();
         ExecResult present = vm.execute(mod, hostWithBox(box), new GasMeter(10_000_000));
         ExecResult missing = vm.execute(mod, hostWithBox(null), new GasMeter(10_000_000));
-        assertEquals(ExecResult.Status.OK, present.status(), "box_read with a box should complete");
-        assertEquals(ExecResult.Status.OK, missing.status(), "box_read without a box should complete");
+        assertEquals(ContractResult.Status.OK, present.status(), "box_read with a box should complete");
+        assertEquals(ContractResult.Status.OK, missing.status(), "box_read without a box should complete");
         assertEquals((long) box.serializedSize() * GasSchedule.PER_BYTE,
             present.gasUsed() - missing.gasUsed(),
             "the full serialized size is charged up front, not after serialize()");
 
         ExecResult shortGas = vm.execute(mod, hostWithBox(box), new GasMeter(present.gasUsed() - 1));
-        assertEquals(ExecResult.Status.OUT_OF_GAS, shortGas.status(),
+        assertEquals(ContractResult.Status.OUT_OF_GAS, shortGas.status(),
             "one gas short must fail before serialize()/the output copy, not after");
         assertEquals(present.gasUsed() - 1, shortGas.gasUsed());
     }

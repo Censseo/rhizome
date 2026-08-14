@@ -6,6 +6,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
 
+import rhizome.core.blockchain.ContractProcessor.ContractResult;
+
 /**
  * Regression tests for the deterministic contract-VM hardening (audit C2 / H4):
  * unbounded WASM recursion must trap at a fixed depth on every node instead of overflowing the
@@ -33,7 +35,7 @@ class WasmDepthLimitTest {
         // JVM StackOverflowError. Generous gas so the cap — not gas — is what stops it.
         ExecResult r = WasmVm.onBoundedStack(() ->
             vm.execute(RECURSIVE, new MapHostState(new byte[0], new byte[0], 0), new GasMeter(50_000_000)));
-        assertEquals(ExecResult.Status.REVERTED, r.status());
+        assertEquals(ContractResult.Status.REVERTED, r.status());
         assertTrue(r.message() != null && r.message().contains("depth"),
             "expected a call-depth revert, got: " + r.message());
     }

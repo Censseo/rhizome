@@ -8,6 +8,8 @@ import java.io.ByteArrayOutputStream;
 
 import org.junit.jupiter.api.Test;
 
+import rhizome.core.blockchain.ContractProcessor.ContractResult;
+
 /**
  * Regression tests for the WASM function-locals guards (audit V1 &amp; V3).
  *
@@ -136,7 +138,7 @@ class WasmLocalsGuardTest {
         ExecResult r = WasmVm.onBoundedStack(() ->
             vm.execute(RECURSIVE_WITH_LOCALS, new MapHostState(new byte[0], new byte[0], 0),
                 new GasMeter(500_000_000)));
-        assertEquals(ExecResult.Status.REVERTED, r.status());
+        assertEquals(ContractResult.Status.REVERTED, r.status());
         assertTrue(r.message() != null && r.message().contains("locals"),
             "expected a locals-budget revert, got: " + r.message());
     }
@@ -216,7 +218,7 @@ class WasmLocalsGuardTest {
         ExecResult r = WasmVm.onBoundedStack(() ->
             vm.execute(mod, new MapHostState(new byte[0], new byte[0], 0),
                 new GasMeter(500_000_000)));
-        assertEquals(ExecResult.Status.REVERTED, r.status());
+        assertEquals(ContractResult.Status.REVERTED, r.status());
         assertTrue(r.message() != null && r.message().contains("locals"),
             "expected a locals-budget revert (params must count), got: " + r.message());
     }

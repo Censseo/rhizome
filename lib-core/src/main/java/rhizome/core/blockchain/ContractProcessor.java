@@ -83,28 +83,49 @@ public interface ContractProcessor extends BlockStateProcessor, ContractStateSou
      * Outcome of one contract execution. {@code gasUsed} is charged regardless of
      * success; {@code contractAddress} is the new address for a DEPLOY (null for CALL);
      * {@code logs} are the events it emitted (empty unless it succeeded).
+     *
+     * <p>The outcome keeps the VM failure's three states instead of flattening them to a
+     * boolean plus an error string: a call that exhausted its budget
+     * ({@link Status#OUT_OF_GAS}) is not the same event as a contract choosing to revert
+     * ({@link Status#REVERTED}), and the distinction must survive to the boundary without
+     * parsing the message. {@code error} remains the human-readable message; the JSON
+     * projection of the failure (the dashboard's {@code success}/{@code error} pair) is
+     * derived from it and is frozen by {@code DryRunJsonFormTest}.
      */
-    record ContractResult(boolean success, long gasUsed, byte[] output,
+    record ContractResult(Status status, long gasUsed, byte[] output,
                           PublicAddress contractAddress, String error, List<ContractLog> logs,
                           List<NativeTransfer> transfers) {
 
+        /** The three states of a contract execution outcome, in VM order. */
+        public enum Status { OK, REVERTED, OUT_OF_GAS }
+
         public static ContractResult ok(long gasUsed, byte[] output, PublicAddress contractAddress) {
-            return new ContractResult(true, gasUsed, output, contractAddress, null, List.of(), List.of());
+            return new ContractResult(Status.OK, gasUsed, output, contractAddress, null, List.of(), List.of());
         }
 
         public static ContractResult ok(long gasUsed, byte[] output, PublicAddress contractAddress,
                                         List<ContractLog> logs) {
-            return new ContractResult(true, gasUsed, output, contractAddress, null, List.copyOf(logs), List.of());
+            return new ContractResult(Status.OK, gasUsed, output, contractAddress, null,
+                List.copyOf(logs), List.of());
         }
 
         public static ContractResult ok(long gasUsed, byte[] output, PublicAddress contractAddress,
                                         List<ContractLog> logs, List<NativeTransfer> transfers) {
-            return new ContractResult(true, gasUsed, output, contractAddress, null,
+            return new ContractResult(Status.OK, gasUsed, output, contractAddress, null,
                 List.copyOf(logs), List.copyOf(transfers));
         }
 
         public static ContractResult reverted(long gasUsed, String error) {
-            return new ContractResult(false, gasUsed, new byte[0], null, error, List.of(), List.of());
+            return new ContractResult(Status.REVERTED, gasUsed, new byte[0], null, error, List.of(), List.of());
+        }
+
+        public static ContractResult outOfGas(long gasUsed, String error) {
+            return new ContractResult(Status.OUT_OF_GAS, gasUsed, new byte[0], null, error, List.of(), List.of());
+        }
+
+        /** Whether the call completed: the JSON surface's {@code success} projects this. */
+        public boolean success() {
+            return status == Status.OK;
         }
     }
 }

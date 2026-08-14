@@ -138,8 +138,7 @@ public final class WasmContractProcessor implements ContractProcessor {
             case DEPLOY -> deploy(from, data, nonce, gasLimit);
             case CALL -> call(from, to, data, value, gasLimit);
             default -> ContractResult.reverted(0, "not a contract transaction");
-        };
-        currentReceipts.add(new ContractReceipt(result.gasUsed(), result.success(), result.transfers()));
+        };        currentReceipts.add(new ContractReceipt(result.gasUsed(), result.success(), result.transfers()));
         currentLogs.addAll(result.logs());
         return result;
     }
@@ -148,7 +147,7 @@ public final class WasmContractProcessor implements ContractProcessor {
         PublicAddress address = Contracts.deriveAddress(deployer, nonce);
         long gasUsed = GasSchedule.DEPLOY_BASE + (long) code.length * GasSchedule.DEPLOY_PER_CODE_BYTE;
         if (gasUsed > gasLimit) {
-            return ContractResult.reverted(gasLimit, "out of gas for deploy");
+            return ContractResult.outOfGas(gasLimit, "out of gas for deploy");
         }
         // Reject oversized, malformed, or non-deterministic (float/SIMD) code at deploy so it
         // never enters on-chain state, rather than only discovering it on every later call.
@@ -205,7 +204,7 @@ public final class WasmContractProcessor implements ContractProcessor {
         try {
             meter.charge(GasSchedule.CALL_BASE);
         } catch (OutOfGasException e) {
-            return ContractResult.reverted(meter.used(), "out of gas for call");
+            return ContractResult.outOfGas(meter.used(), "out of gas for call");
         }
         // Native transfers a contract makes (transfer_value) accumulate here across the call tree;
         // a reverted frame truncates its own entries (see runCall), so only surviving transfers
@@ -216,10 +215,13 @@ public final class WasmContractProcessor implements ContractProcessor {
         // network constant, not the host JVM's -Xss (see WasmVm.onBoundedStack).
         CallOutcome outcome = WasmVm.onBoundedStack(() -> runCall(caller.toBytes(), contract, input,
             value, meter, session, new java.util.ArrayDeque<>(), transfers, reservedByContract));
-        if (outcome.success()) {
+        if (outcome.succeeded()) {
             return ContractResult.ok(meter.used(), outcome.output(), null, outcome.logs(), transfers);
         }
-        return ContractResult.reverted(meter.used(), outcome.error());
+        // The frame's own status rides through: a call that exhausted the budget stays
+        // OUT_OF_GAS, not a revert — the distinction the boundary type now carries.
+        return new ContractResult(outcome.status(), meter.used(), new byte[0], null,
+            outcome.error(), List.of(), List.of());
     }
 
     @Override
@@ -234,7 +236,7 @@ public final class WasmContractProcessor implements ContractProcessor {
         try {
             meter.charge(GasSchedule.CALL_BASE);
         } catch (OutOfGasException e) {
-            return ContractResult.reverted(meter.used(), "out of gas for call");
+            return ContractResult.outOfGas(meter.used(), "out of gas for call");
         }
         SessionContractStore scratch = new SessionContractStore(baseStore);
         // dryRun is read-only: transfers are collected for bounds-checking but never applied.
@@ -242,16 +244,27 @@ public final class WasmContractProcessor implements ContractProcessor {
         java.util.Map<PublicAddress, Long> reservedByContract = new java.util.HashMap<>();
         CallOutcome outcome = WasmVm.onBoundedStackDryRun(() -> runCall(from.toBytes(), to, input, value,
             meter, scratch, new java.util.ArrayDeque<>(), transfers, reservedByContract));
-        if (outcome.success()) {
+        if (outcome.succeeded()) {
             return ContractResult.ok(meter.used(), outcome.output(), null, outcome.logs());
         }
-        return ContractResult.reverted(meter.used(), outcome.error());
+        return new ContractResult(outcome.status(), meter.used(), new byte[0], null,
+            outcome.error(), List.of(), List.of());
     }
 
-    /** Result of one call frame: callee output and the logs that survived (both empty on failure). */
-    private record CallOutcome(boolean success, byte[] output, List<ContractLog> logs, String error) {
-        static CallOutcome fail(String error) {
-            return new CallOutcome(false, new byte[0], List.of(), error);
+    /** Result of one call frame: the VM status, the callee output and the logs that survived
+     *  (both empty on failure), and the error message (null on success). */
+    private record CallOutcome(ContractResult.Status status, byte[] output,
+                               List<ContractLog> logs, String error) {
+        static CallOutcome ok(byte[] output, List<ContractLog> logs) {
+            return new CallOutcome(ContractResult.Status.OK, output, logs, null);
+        }
+
+        static CallOutcome fail(ContractResult.Status status, String error) {
+            return new CallOutcome(status, new byte[0], List.of(), error);
+        }
+
+        boolean succeeded() {
+            return status == ContractResult.Status.OK;
         }
     }
 
@@ -271,10 +284,10 @@ public final class WasmContractProcessor implements ContractProcessor {
                                 List<ContractProcessor.NativeTransfer> transfers,
                                 java.util.Map<PublicAddress, Long> reservedByContract) {
         if (stack.size() >= MAX_CALL_DEPTH) {
-            return CallOutcome.fail("call depth limit");
+            return CallOutcome.fail(ContractResult.Status.REVERTED, "call depth limit");
         }
         if (stack.contains(contract)) {
-            return CallOutcome.fail("reentrant call");
+            return CallOutcome.fail(ContractResult.Status.REVERTED, "reentrant call");
         }
         byte[] code;
         try {
@@ -286,7 +299,7 @@ public final class WasmContractProcessor implements ContractProcessor {
             throw HostFault.wrap("contract code read failed", t);
         }
         if (code == null) {
-            return CallOutcome.fail("no contract at address");
+            return CallOutcome.fail(ContractResult.Status.REVERTED, "no contract at address");
         }
 
         SessionContractStore frame = new SessionContractStore(parent);
@@ -342,7 +355,7 @@ public final class WasmContractProcessor implements ContractProcessor {
                 }
                 CallOutcome sub = runCall(contract.toBytes(), PublicAddress.of(calleeAddr),
                     calleeInput, 0, meter, frame, stack, transfers, reservedByContract);
-                if (!sub.success()) {
+                if (!sub.succeeded()) {
                     return null;
                 }
                 collected.addAll(sub.logs());
@@ -369,13 +382,15 @@ public final class WasmContractProcessor implements ContractProcessor {
                 }
             }
             discarded.clear();
-            return CallOutcome.fail(result.message()); // frame discarded: no writes, no logs
+            // Frame discarded: no writes, no logs. The VM's own status rides through — a
+            // sub-frame that exhausted the shared meter stays OUT_OF_GAS, not a revert.
+            return CallOutcome.fail(result.status(), result.message());
         }
         host.commit();                 // this call's own writes into its frame...
         frame.flushWithJournal();      // ...and the frame (incl. sub-calls) into the parent
         // No end-of-call log splice: this frame's logs already reached `collected` via the live
         // sink, in emission order (audit: inter-contract log ordering).
-        return new CallOutcome(true, result.output(), collected, null);
+        return CallOutcome.ok(result.output(), collected);
     }
 
     /** Deployed code at {@code contract} in the committed state, or {@code null}. */
