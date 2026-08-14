@@ -60,12 +60,6 @@ public final class HttpPeerSource implements PeerSource {
      */
     private static final Duration REQUEST_DEADLINE = Duration.ofSeconds(30);
     /**
-     * Hard cap on the snapshot chunk count a peer may advertise, mirroring app-node's
-     * {@code MAX_SNAPSHOT_CHUNKS}: {@code SnapshotBootstrap} loops and pre-sizes on this
-     * peer-controlled value, so an unbounded count is a CPU/memory DoS (audit F6).
-     */
-    private static final int MAX_SNAPSHOT_CHUNKS = 1_000_000;
-    /**
      * Hard cap on one /orphan body: a full block, with the same headroom the node's own
      * /submit body cap allows. Bounds a hostile peer's reply before the codec parses it.
      */
@@ -248,7 +242,7 @@ public final class HttpPeerSource implements PeerSource {
             int chunks = info.getInt("chunks");
             // The chunk count is peer-controlled and SnapshotBootstrap loops/pre-sizes on it;
             // reject absurd values here so the peer is penalised instead of indulged (audit F6).
-            if (chunks <= 0 || chunks > MAX_SNAPSHOT_CHUNKS) {
+            if (chunks <= 0 || chunks > Constants.MAX_SNAPSHOT_CHUNKS) {
                 throw new PeerProtocolException(
                     "peer advertised out-of-range snapshot chunk count: " + chunks);
             }

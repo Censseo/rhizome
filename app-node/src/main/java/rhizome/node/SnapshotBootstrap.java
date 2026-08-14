@@ -47,20 +47,10 @@ final class SnapshotBootstrap {
     private static final Logger log = LoggerFactory.getLogger(SnapshotBootstrap.class);
 
     /**
-     * Hard cap on the number of snapshot chunks a peer may advertise. {@code chunkCount} arrives
-     * verbatim from an untrusted peer's {@code /info} JSON; pre-sizing {@code new ArrayList<>(n)}
-     * with {@code Integer.MAX_VALUE} allocates a multi-gigabyte backing array and OOMs a
-     * bootstrapping node before a single chunk is fetched or the root is verified. This bound (each
-     * chunk carries many bindings, so even a full-chain snapshot is far under it) makes the pre-size
-     * safe, matching the length bounds the block/tx codecs already apply before allocating.
-     */
-    private static final int MAX_SNAPSHOT_CHUNKS = 1_000_000;
-
-    /**
      * Hard cap on the total snapshot bytes spooled during bootstrap. Every fetched chunk is
      * streamed to a temporary file until the root verifies (see the import comment below), and
      * a hostile bootstrap peer may serve each chunk at the full 16 MiB its own endpoint permits
-     * — {@code MAX_SNAPSHOT_CHUNKS} such chunks would exhaust any heap (audit F7) and, without
+     * — {@code Constants.MAX_SNAPSHOT_CHUNKS} such chunks would exhaust any heap (audit F7) and, without
      * the cap, any disk. 4 GiB is far above any plausible mainnet snapshot while keeping the
      * spool bounded. The heap peak is now ONE chunk (~16 MiB): chunks are decoded lazily from
      * the spool during verification and replay.
@@ -166,7 +156,7 @@ final class SnapshotBootstrap {
         // F6). This check used to be more permissive than that one; a zero-chunk snapshot from a
         // non-HTTP PeerSource still ended up refused (root verification cannot pass against zero
         // chunks), just later, after a temp spool file was created for nothing.
-        if (info.chunkCount() <= 0 || info.chunkCount() > MAX_SNAPSHOT_CHUNKS) {
+        if (info.chunkCount() <= 0 || info.chunkCount() > Constants.MAX_SNAPSHOT_CHUNKS) {
             log.warn("Snapshot advertises an out-of-range chunk count ({}); refusing", info.chunkCount());
             return false;
         }
