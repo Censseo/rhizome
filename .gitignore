@@ -33,3 +33,6 @@ specs/
 # le lancement doit rester non interactif). Sans valeur — devnet jetable — mais une clé
 # privée n'a rien à faire dans l'historique du dépôt.
 scripts/local-testnet/keys/
+
+# Environnement local de shell — peut contenir des secrets ; jamais dans le dépôt.
+.env
