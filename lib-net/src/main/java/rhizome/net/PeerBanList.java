@@ -153,12 +153,13 @@ public final class PeerBanList {
      * one node's ban never eclipses sibling ports on the same address; the address-wide
      * counterpart is {@link #addressKey}.
      */
-    static String endpointKey(String peerUrl) {
-        if (peerUrl == null) {
+    static String endpointKey(PeerId peer) {
+        if (!peer.isValid()) {
             return "";
         }
+        String canonical = peer.canonical();
         try {
-            URI uri = URI.create(peerUrl.trim());
+            URI uri = URI.create(canonical);
             String host = uri.getHost();
             if (host != null && !host.isEmpty()) {
                 int port = portOf(uri);
@@ -169,9 +170,9 @@ public final class PeerBanList {
                 }
             }
         } catch (IllegalArgumentException ignored) {
-            // not a URI: fall through to the trimmed raw form
+            // not a URI: fall through to the canonical form
         }
-        return peerUrl.trim().toLowerCase(Locale.ROOT);
+        return canonical.toLowerCase(Locale.ROOT);
     }
 
     /**
@@ -197,12 +198,12 @@ public final class PeerBanList {
      * escalated address-wide ban while single-port offences stay endpoint-isolated. Falls
      * back to the hostname (no port) when resolution is unavailable.
      */
-    static String addressKey(String peerUrl) {
-        if (peerUrl == null) {
+    static String addressKey(PeerId peer) {
+        if (!peer.isValid()) {
             return "addr:";
         }
         try {
-            String host = URI.create(peerUrl.trim()).getHost();
+            String host = URI.create(peer.canonical()).getHost();
             if (host != null && !host.isEmpty()) {
                 try {
                     return "addr:" + PeerHosts.resolveFirst(host).getHostAddress();
@@ -211,9 +212,9 @@ public final class PeerBanList {
                 }
             }
         } catch (IllegalArgumentException ignored) {
-            // not a URI: fall through to the trimmed raw form
+            // not a URI: fall through to the canonical form
         }
-        return "addr:" + peerUrl.trim().toLowerCase(Locale.ROOT);
+        return "addr:" + peer.canonical().toLowerCase(Locale.ROOT);
     }
 
     /**
@@ -225,12 +226,12 @@ public final class PeerBanList {
      * up, so the escalation simply does not apply there; endpoint bans still do, and on those
      * networks they are the correct granularity anyway.
      */
-    private static boolean escalationApplies(String peerUrl) {
-        if (peerUrl == null) {
+    private static boolean escalationApplies(PeerId peer) {
+        if (!peer.isValid()) {
             return false;
         }
         try {
-            String host = URI.create(peerUrl.trim()).getHost();
+            String host = URI.create(peer.canonical()).getHost();
             return host != null && !host.isEmpty() && PeerHosts.isPubliclyRoutable(host);
         } catch (IllegalArgumentException notAUri) {
             return false;
@@ -246,20 +247,20 @@ public final class PeerBanList {
      * (all peers on {@code localhost}, different ports) a bare hostname mirror would recreate
      * the very eclipse the endpoint-scoped keying removes (testnet campaign S5).
      */
-    static String nameKey(String peerUrl) {
-        if (peerUrl == null) {
+    static String nameKey(PeerId peer) {
+        if (!peer.isValid()) {
             return "name:";
         }
         try {
-            URI uri = URI.create(peerUrl.trim());
+            URI uri = URI.create(peer.canonical());
             String host = uri.getHost();
             if (host != null && !host.isEmpty()) {
                 return "name:" + host.toLowerCase(Locale.ROOT) + ":" + portOf(uri);
             }
         } catch (IllegalArgumentException ignored) {
-            // not a URI: fall through to the trimmed raw form
+            // not a URI: fall through to the canonical form
         }
-        return "name:" + peerUrl.trim().toLowerCase(Locale.ROOT);
+        return "name:" + peer.canonical().toLowerCase(Locale.ROOT);
     }
 
     /**
@@ -268,16 +269,16 @@ public final class PeerBanList {
      * was already within an active ban window — or its ADDRESS crossed the escalated
      * address-wide threshold).
      */
-    public boolean misbehave(String peerUrl, int points) {
+    public boolean misbehave(PeerId peer, int points) {
         long now = nowMillis.getAsLong();
-        boolean endpointBanned = scoreEndpoint(peerUrl, points, now);
-        boolean addressBanned = escalateAddress(peerUrl, points, now);
+        boolean endpointBanned = scoreEndpoint(peer, points, now);
+        boolean addressBanned = escalateAddress(peer, points, now);
         return endpointBanned || addressBanned;
     }
 
     /** Credits the peer's endpoint entry; bans it (plus the name mirror) at the threshold. */
-    private boolean scoreEndpoint(String peerUrl, int points, long now) {
-        String key = endpointKey(peerUrl);
+    private boolean scoreEndpoint(PeerId peer, int points, long now) {
+        String key = endpointKey(peer);
         maybeSweepEntries(now);
         Entry entry = entries.get(key);
         if (entry == null) {
@@ -311,7 +312,7 @@ public final class PeerBanList {
             if (entry.score >= banThreshold) {
                 entry.bannedUntil = now + banMillis;
                 entry.score = 0; // start clean once the ban lifts
-                mirrorToName(peerUrl, entry.bannedUntil, now);
+                mirrorToName(peer, entry.bannedUntil, now);
                 return true;
             }
             return false;
@@ -331,12 +332,12 @@ public final class PeerBanList {
      * offending after its own ban lands (its score stops accumulating, the address's does not)
      * would reach the address threshold single-handed and ban every sibling port with it.
      */
-    private boolean escalateAddress(String peerUrl, int points, long now) {
-        if (!escalationApplies(peerUrl)) {
+    private boolean escalateAddress(PeerId peer, int points, long now) {
+        if (!escalationApplies(peer)) {
             return false;
         }
-        String key = addressKey(peerUrl);
-        String endpoint = endpointKey(peerUrl);
+        String key = addressKey(peer);
+        String endpoint = endpointKey(peer);
         maybeSweepAddresses(now);
         Entry entry = addresses.get(key);
         if (entry == null) {
@@ -386,8 +387,8 @@ public final class PeerBanList {
      * Written to the separate {@link #mirrors} table: with the offence table full mid-spray the
      * mirror used to be skipped, abandoning the anti-dodge protection exactly under attack.
      */
-    private void mirrorToName(String peerUrl, long bannedUntil, long now) {
-        String key = nameKey(peerUrl);
+    private void mirrorToName(PeerId peer, long bannedUntil, long now) {
+        String key = nameKey(peer);
         maybeSweepMirrors(now);
         Entry entry = mirrors.get(key);
         if (entry == null) {
@@ -412,15 +413,15 @@ public final class PeerBanList {
     }
 
     /** Bans a peer outright, regardless of its current score. */
-    public void ban(String peerUrl) {
-        misbehave(peerUrl, banThreshold);
+    public void ban(PeerId peer) {
+        misbehave(peer, banThreshold);
     }
 
-    public boolean isBanned(String peerUrl) {
+    public boolean isBanned(PeerId peer) {
         long now = nowMillis.getAsLong();
-        Entry byEndpoint = entries.get(endpointKey(peerUrl));
-        Entry byName = mirrors.get(nameKey(peerUrl));
-        Entry byAddress = addresses.get(addressKey(peerUrl));
+        Entry byEndpoint = entries.get(endpointKey(peer));
+        Entry byName = mirrors.get(nameKey(peer));
+        Entry byAddress = addresses.get(addressKey(peer));
         // An untracked endpoint is NEVER banned: the shared overflow bucket only counts the
         // spray, it must not condemn an endpoint that committed no offence of its own (eclipse
         // lever). Likewise an address is only ever banned by its own escalation entry.

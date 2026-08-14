@@ -1,6 +1,7 @@
 package rhizome.node;
 
 import rhizome.net.HttpPeerSource;
+import rhizome.net.PeerId;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -76,7 +77,7 @@ class RhizomeNodeTest {
 
                 assertFalse(node.knownPeers().contains(victimUrl),
                     "a host serving junk must be dropped from the registry");
-                assertFalse(node.banList().isBanned(victimUrl),
+                assertFalse(node.banList().isBanned(PeerId.of(victimUrl)),
                     "…but never banned: it never proved it was a Rhizome node at all");
             }
         } finally {
@@ -149,7 +150,7 @@ class RhizomeNodeTest {
                 Thread.sleep(20);
             }
             assertTrue(node.knownPeers().contains(peerUrl), "peer admitted");
-            node.banList().ban(peerUrl);
+            node.banList().ban(PeerId.of(peerUrl));
 
             node.syncRound();
 
@@ -238,7 +239,7 @@ class RhizomeNodeTest {
                     "nothing adopted from a branch past finality");
                 assertTrue(nodeB.engine().height() >= heightB,
                     "B keeps its own branch; it never rolls back for a peer past finality");
-                assertFalse(nodeB.banList().isBanned("http://localhost:" + portA),
+                assertFalse(nodeB.banList().isBanned(PeerId.of("http://localhost:" + portA)),
                     "a deep-forked peer is not misbehaving: it must never be banned");
                 assertTrue(nodeB.knownPeers().contains("http://localhost:" + portA),
                     "the deep-forked peer stays in the registry");

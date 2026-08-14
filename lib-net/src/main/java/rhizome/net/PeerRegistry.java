@@ -14,6 +14,11 @@ import java.util.function.LongSupplier;
  * The node's live set of known peer base URLs. Thread-safe and bounded; never
  * contains this node's own advertised URL. Feeds sync, gossip and discovery.
  *
+ * <p>Every table here keys on the peer's typed IDENTITY ({@link PeerId}), never on the
+ * received string: admission canonicalizes once and stores the canonical form, so
+ * case/trailing-dot/default-port/trailing-slash spellings of one URL can never occupy
+ * two table slots (audit: /add_peer coalescing &amp; self-pairing bypass).
+ *
  * <p>Hardened against eclipse and SSRF:
  * <ul>
  *   <li><b>Seed peers</b> (from config) are trusted, never subject to the SSRF/subnet
@@ -37,7 +42,7 @@ public final class PeerRegistry {
     /** How long a discovered peer removed as failed/evicted is refused re-admission. */
     private static final long REMOVAL_COOLDOWN_MILLIS = 5 * 60_000L;
 
-    private final String self;
+    private final PeerId self;
     private final int maxPeers;
     private final PeerBanList banList;
     private final boolean blockPrivateHosts;
@@ -54,16 +59,16 @@ public final class PeerRegistry {
     /** Placeholder entry for seed peers (never subnet-counted, never publicly advertised). */
     private static final Entry SEED_ENTRY = new Entry("", true);
 
-    private final Map<String, Entry> peers = new ConcurrentHashMap<>();
+    private final Map<PeerId, Entry> peers = new ConcurrentHashMap<>();
     /** Config/seed peers: exempt from SSRF + subnet caps and never evicted by capacity. */
-    private final Set<String> seeds = ConcurrentHashMap.newKeySet();
+    private final Set<PeerId> seeds = ConcurrentHashMap.newKeySet();
     /**
      * Peers that have answered at least one well-formed protocol exchange, i.e. that are
      * demonstrably Rhizome nodes rather than whatever host an unauthenticated {@code /add_peer}
      * pointed us at. Bounded by the peer table (cleared in {@link #remove}). See
      * {@link #markConfirmed} for why the distinction carries a ban decision.
      */
-    private final Set<String> confirmed = ConcurrentHashMap.newKeySet();
+    private final Set<PeerId> confirmed = ConcurrentHashMap.newKeySet();
     /** Live count of discovered (non-seed) peers per subnet bucket. */
     private final Map<String, Integer> subnetCounts = new ConcurrentHashMap<>();
     /**
@@ -99,20 +104,11 @@ public final class PeerRegistry {
     /** As above, with an injectable clock for the removal cooldown (package-private for tests). */
     PeerRegistry(String selfUrl, int maxPeers, PeerBanList banList, boolean blockPrivateHosts,
                  LongSupplier nowMillis) {
-        this.self = normalize(selfUrl);
+        this.self = PeerId.of(selfUrl);
         this.maxPeers = maxPeers;
         this.banList = banList;
         this.blockPrivateHosts = blockPrivateHosts;
         this.nowMillis = nowMillis;
-    }
-
-    /**
-     * Canonical form used for dedup and the self-pairing refusal: case/trailing-dot/default-port/
-     * trailing-slash variants of one URL coalesce into a single entry (see
-     * {@link PeerUrls#canonicalize}; audit: /add_peer coalescing & self-pairing).
-     */
-    static String normalize(String url) {
-        return PeerUrls.canonicalize(url);
     }
 
     /**
@@ -122,16 +118,16 @@ public final class PeerRegistry {
      */
     public void addSeeds(Iterable<String> urls) {
         for (String url : urls) {
-            String u = normalize(url);
-            if (u == null || u.isEmpty() || !isHttpUrl(u) || u.equals(self)) {
+            PeerId id = PeerId.of(url);
+            if (!id.isValid() || id.equals(self)) {
                 continue;
             }
-            if (banList != null && banList.isBanned(u)) {
+            if (banList != null && banList.isBanned(id)) {
                 continue;
             }
             synchronized (lock) {
-                if (peers.putIfAbsent(u, SEED_ENTRY) == null) {
-                    seeds.add(u);
+                if (peers.putIfAbsent(id, SEED_ENTRY) == null) {
+                    seeds.add(id);
                 }
             }
         }
@@ -144,31 +140,31 @@ public final class PeerRegistry {
      * a banned or internal-pointing peer cannot be introduced via any path.
      */
     public boolean add(String url) {
-        String u = normalize(url);
-        if (u == null || u.isEmpty() || !isHttpUrl(u) || u.equals(self)) {
+        PeerId id = PeerId.of(url);
+        if (!id.isValid() || id.equals(self)) {
             return false;
         }
-        if (banList != null && banList.isBanned(u)) {
+        if (banList != null && banList.isBanned(id)) {
             return false;
         }
-        String host = hostOf(u);
+        String host = id.host();
         // A peer recently removed as failed/evicted is refused re-admission for a short window,
         // so it cannot flap straight back into its bucket slot (audit F5). Keyed by ENDPOINT
         // (host + port): a full-URL key was dodgeable by rotating the port or path, and a
         // bare-host key let one peer's failure lock out sibling ports on a shared host
         // (audit follow-up; testnet campaign S5 — same port-scoping as PeerBanList).
-        Long cooldownUntil = removalCooldowns.get(endpointOf(u));
+        Long cooldownUntil = removalCooldowns.get(id.endpoint());
         if (cooldownUntil != null) {
             if (nowMillis.getAsLong() < cooldownUntil) {
                 return false;
             }
-            removalCooldowns.remove(endpointOf(u)); // window expired: eligible again
+            removalCooldowns.remove(id.endpoint()); // window expired: eligible again
         }
         // Cheap rejections BEFORE the blocking DNS resolution below: an exact duplicate or a
         // full table is decided on the live map directly (both are re-checked authoritatively
         // under the lock at insertion). A flood of duplicate/full-table adds must not each pay
         // a resolver round-trip (audit: admission ordering).
-        if (peers.containsKey(u) || peers.size() >= maxPeers) {
+        if (peers.containsKey(id) || peers.size() >= maxPeers) {
             return false;
         }
         // The routability verdict is computed ONCE here, at admission; publicSnapshot serves this
@@ -179,7 +175,7 @@ public final class PeerRegistry {
         }
         String bucket = subnetKey(host);
         synchronized (lock) {
-            if (peers.containsKey(u)) {
+            if (peers.containsKey(id)) {
                 return false;
             }
             if (peers.size() >= maxPeers) {
@@ -188,7 +184,7 @@ public final class PeerRegistry {
             if (subnetCounts.getOrDefault(bucket, 0) >= MAX_PER_SUBNET) {
                 return false; // eclipse: one subnet cannot monopolise the table
             }
-            if (peers.putIfAbsent(u, new Entry(bucket, routable)) == null) {
+            if (peers.putIfAbsent(id, new Entry(bucket, routable)) == null) {
                 subnetCounts.merge(bucket, 1, Integer::sum);
                 return true;
             }
@@ -207,27 +203,28 @@ public final class PeerRegistry {
      * that would also refuse the victim's honest node later.
      */
     public void markConfirmed(String url) {
-        String u = normalize(url);
-        if (u != null && peers.containsKey(u)) {
-            confirmed.add(u);
+        PeerId id = PeerId.of(url);
+        if (id.isValid() && peers.containsKey(id)) {
+            confirmed.add(id);
         }
     }
 
     /** True if {@code url} has answered a valid protocol exchange, or is a configured seed
      *  (the operator vouched for it). See {@link #markConfirmed}. */
     public boolean isConfirmed(String url) {
-        String u = normalize(url);
-        return u != null && (confirmed.contains(u) || seeds.contains(u));
+        PeerId id = PeerId.of(url);
+        return id.isValid() && (confirmed.contains(id) || seeds.contains(id));
     }
 
     /** Records misbehaviour; if it tips the peer over the ban threshold, evicts it. Seed peers
      *  are trusted anchors and are never auto-banned or evicted (audit M4 collateral bans).
      *  Callers must not penalize a peer that {@link #isConfirmed} rejects — see there. */
     public boolean penalize(String url, int points) {
-        if (banList == null || seeds.contains(normalize(url))) {
+        PeerId id = PeerId.of(url);
+        if (banList == null || !id.isValid() || seeds.contains(id)) {
             return false;
         }
-        boolean banned = banList.misbehave(url, points);
+        boolean banned = banList.misbehave(id, points);
         if (banned) {
             remove(url);
         }
@@ -235,12 +232,12 @@ public final class PeerRegistry {
     }
 
     public boolean isBanned(String url) {
-        return banList != null && banList.isBanned(url);
+        return banList != null && banList.isBanned(PeerId.of(url));
     }
 
     /** True if {@code url} names a configured seed peer (trusted anchor, never PEX-evicted). */
     public boolean isSeed(String url) {
-        return seeds.contains(normalize(url));
+        return seeds.contains(PeerId.of(url));
     }
 
     public void addAll(Iterable<String> urls) {
@@ -250,19 +247,19 @@ public final class PeerRegistry {
     }
 
     public void remove(String url) {
-        String u = normalize(url);
+        PeerId id = PeerId.of(url);
         synchronized (lock) {
-            Entry entry = peers.remove(u);
-            confirmed.remove(u); // bounded by the peer table: never outlives its entry
+            Entry entry = peers.remove(id);
+            confirmed.remove(id); // bounded by the peer table: never outlives its entry
             if (entry == null) {
                 return;
             }
-            if (!seeds.remove(u)) {
+            if (!seeds.remove(id)) {
                 // Decrement the bucket recorded at ADMISSION — never re-resolve DNS at removal,
                 // so a DNS flip between add and remove cannot corrupt the accounting (audit F5).
                 subnetCounts.computeIfPresent(entry.subnetBucket(), (k, v) -> v <= 1 ? null : v - 1);
-                String endpoint = endpointOf(u);
-                if (endpoint != null) {
+                String endpoint = id.endpoint();
+                if (!endpoint.isEmpty()) {
                     removalCooldowns.put(endpoint, nowMillis.getAsLong() + REMOVAL_COOLDOWN_MILLIS);
                 }
             }
@@ -270,7 +267,11 @@ public final class PeerRegistry {
     }
 
     public List<String> snapshot() {
-        return List.copyOf(peers.keySet());
+        List<String> out = new ArrayList<>(peers.size());
+        for (PeerId id : peers.keySet()) {
+            out.add(id.canonical());
+        }
+        return out;
     }
 
     /** The configured table capacity (used by PeerDiscovery to bound its round queue). */
@@ -288,7 +289,7 @@ public final class PeerRegistry {
      */
     public List<String> publicSnapshot() {
         List<String> out = new ArrayList<>();
-        for (Map.Entry<String, Entry> e : peers.entrySet()) {
+        for (Map.Entry<PeerId, Entry> e : peers.entrySet()) {
             if (seeds.contains(e.getKey())) {
                 continue;
             }
@@ -298,7 +299,7 @@ public final class PeerRegistry {
             if (blockPrivateHosts && !e.getValue().publiclyRoutable()) {
                 continue;
             }
-            out.add(e.getKey());
+            out.add(e.getKey().canonical());
         }
         return out;
     }
@@ -308,52 +309,10 @@ public final class PeerRegistry {
     }
 
     public String self() {
-        return self;
+        return self.canonical();
     }
 
-    // ---- URL / host classification ----
-
-    /** Strict http(s) URL with a host — rejects junk like {@code httpfoo://} that a prefix check let in. */
-    static boolean isHttpUrl(String u) {
-        try {
-            URI uri = URI.create(u);
-            String scheme = uri.getScheme();
-            return (("http".equals(scheme) || "https".equals(scheme)) && uri.getHost() != null);
-        } catch (IllegalArgumentException e) {
-            return false;
-        }
-    }
-
-    /** Host-only extraction (no port): feeds the SSRF routability check and subnet bucketing. */
-    private static String hostOf(String url) {
-        try {
-            return URI.create(url).getHost();
-        } catch (IllegalArgumentException e) {
-            return null;
-        }
-    }
-
-    /** Endpoint key for the removal-cooldown table: host + port, so one peer's failure cannot
-     *  lock out its sibling ports on a shared host (same port-scoping as PeerBanList). The
-     *  scheme's default port folds to the absent form, exactly as PeerUrls.canonicalize emits
-     *  it, so {@code http://h:80} and {@code http://h} can never key two cooldown entries. */
-    private static String endpointOf(String url) {
-        try {
-            URI uri = URI.create(url);
-            String host = uri.getHost();
-            if (host == null) {
-                return null;
-            }
-            int port = uri.getPort();
-            String scheme = uri.getScheme() == null ? "" : uri.getScheme().toLowerCase(java.util.Locale.ROOT);
-            if (("http".equals(scheme) && port == 80) || ("https".equals(scheme) && port == 443)) {
-                port = -1;
-            }
-            return host.toLowerCase(java.util.Locale.ROOT) + ":" + port;
-        } catch (IllegalArgumentException e) {
-            return null;
-        }
-    }
+    // ---- host classification ----
 
     /** Delegates to {@link PeerHosts#isPubliclyRoutable} (kept here as the admission-time entry point). */
     static boolean isPubliclyRoutable(String host) {
