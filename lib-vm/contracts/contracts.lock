@@ -1,0 +1,18 @@
+# Contract source/binary pairs, by sha256. Generated — do not hand-edit.
+#
+# verifyContractFixtures compares these on every build, so an edited .rs whose .wasm was not
+# rebuilt fails loudly instead of shipping a source that does not describe its binary. The check
+# needs no Rust toolchain; regenerating this file does.
+#
+#   ./gradlew :lib-vm:compileContracts -Pcontracts=rebuild
+#
+# name                sha256(.rs)                                                       sha256(.wasm)
+agent_wallet  19d6668db50e5ebfc0fbcf0105c090052fe80b8973ed43aaa9cdbb115cfea874  6f0083e446f665cd94c39374506f74f5369b6861bb9a871bfcc7f13c07940776
+amm           7489ce208e2523162253de7c413d7af64103b07bca45b2b3d249b3efd5c386c4  c4c5710b42fcb7e5d5c7b10b21fb1e44bfc7761de147232347a00defee3bad77
+counter       b17dd2da9acd8d2bc2fe44ea5860e7e6db655b826e0d2cd06d25688bd3ec9c61  73977f7234490f52055c8e8bef70b583b531a4b7bbce09ed2ea4fbe75d663e3e
+emitter       5351712b31c6c0cd9973981ee52cf45762937d1869d310be2a6043a182c68741  b6e4ef550f93f8605f52cb624c6788986f1a599154ede2dc5e1196efae093c80
+launchpad     e5fed4fc0b4ac4c99c265789bbfd6e6ccdd2362be6b2d747273ab462afbad110  7be7225994156c0c404eadb8231ace7d0d8d868d19a5da840b75303de5aecf92
+logtree       afb3daa2e34da878c58e37d0ae135de04bc1875d34a757ee7aac36b557bb3bff  cb26318e3c90f350e5edb0bde20f2de6dd76ff663c2cd2e9c7eca47a45763826
+pair          477f4fcf614bd6201fe6449ac78ebbca9f2fb9fb69990d9ab4438b164535e428  1c1d51d01493f2474947fd50f7b7ecec3389a92e07a120dab50e57e822cfb617
+router        a8c30fd8e7ee82d8a59285580df3028d72d32234bf53a7d0c10efc9bcaf1ad6b  63f579424a3784b58eeff14eccc5b27be5fefb27dc494f2bb8d16d61297b78e3
+token         76b54c142de7dbc3bd5a4af5752b6808db07f07e116ff73b0504bf8422febfdb  559cf860a8dcb2336f49ec205bfac45b2b52a0c3aae35db99e1fecb428f833a1

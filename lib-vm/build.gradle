@@ -45,11 +45,12 @@ dependencies {
 // what makes them driftable — token.rs shipped three times with a stale token.wasm beside it,
 // once dropping the audit-T1 deployer guard from the source the dashboard served.
 //
-// This commit gives them a reproducible way back: compileContracts regenerates every binary from
-// its source, opt-in so an ordinary build never needs rustc. The guard that REFUSES a stale pair
-// is the next commit.
+// So the pair is governed two ways. compileContracts (opt-in, needs Rust) regenerates the
+// binaries; verifyContractFixtures (always on, needs nothing) fails the build when a .rs moves
+// without its .wasm. The second is the one that catches the omission, and it costs two hashes.
 def contractsDir = file('contracts')
 def contractFixturesDir = file('src/test/resources')
+def contractsLock = file('contracts/contracts.lock')
 
 // The exact invocation that reproduces every checked-in binary byte for byte, recovered from the
 // artefacts themselves (see contracts/README.md for how, and for the two that had drifted):
@@ -67,7 +68,12 @@ def contractNames = { ->
             .collect { it.name[0..-4] }.sort()
 }
 
-tasks.register('compileContracts') {
+def sha256 = { File f ->
+    java.security.MessageDigest.getInstance('SHA-256').digest(f.bytes)
+            .encodeHex().toString()
+}
+
+def compileContracts = tasks.register('compileContracts') {
     group = 'build'
     description = 'Recompiles every contract .rs to its checked-in .wasm. Opt-in: -Pcontracts=rebuild.'
 
@@ -97,8 +103,86 @@ tasks.register('compileContracts') {
                 rebuilt << name
             }
         }
+        writeContractsLock(contractsLock, contractNames(), contractsDir, contractFixturesDir, sha256)
         logger.lifecycle(rebuilt.isEmpty()
                 ? 'compileContracts: every .wasm was already byte-identical to its source'
                 : "compileContracts: rebuilt ${rebuilt.join(', ')} — review the binary diff before committing")
     }
+}
+
+def verifyContractFixtures = tasks.register('verifyContractFixtures') {
+    group = 'verification'
+    description = 'Fails when a contract .rs changed without its .wasm being rebuilt.'
+
+    inputs.dir(contractsDir)
+    inputs.dir(contractFixturesDir)
+    outputs.upToDateWhen { true }
+
+    doLast {
+        if (!contractsLock.exists()) {
+            throw new GradleException("${rootProject.relativePath(contractsLock)} is missing — " +
+                    'regenerate it with ./gradlew :lib-vm:compileContracts -Pcontracts=rebuild')
+        }
+        def locked = [:]
+        contractsLock.eachLine { line ->
+            def t = line.trim()
+            if (t && !t.startsWith('#')) {
+                def parts = t.split(/\s+/)
+                locked[parts[0]] = [rs: parts[1], wasm: parts[2]]
+            }
+        }
+        def names = contractNames()
+        def unlocked = names - locked.keySet()
+        if (unlocked) {
+            throw new GradleException('contract(s) with no entry in ' +
+                    "${rootProject.relativePath(contractsLock)}: ${unlocked.join(', ')} — " +
+                    'run ./gradlew :lib-vm:compileContracts -Pcontracts=rebuild')
+        }
+        def orphaned = locked.keySet() - names
+        if (orphaned) {
+            throw new GradleException("${rootProject.relativePath(contractsLock)} still lists deleted " +
+                    "contract(s): ${orphaned.join(', ')}")
+        }
+        def stale = []
+        names.each { name ->
+            def rs = new File(contractsDir, "${name}.rs")
+            def wasm = new File(contractFixturesDir, "${name}.wasm")
+            if (!wasm.exists()) {
+                throw new GradleException("contracts/${name}.rs has no compiled ${name}.wasm")
+            }
+            if (sha256(rs) != locked[name].rs || sha256(wasm) != locked[name].wasm) {
+                stale << name
+            }
+        }
+        if (stale) {
+            // The whole point: an edited .rs whose .wasm was not rebuilt is now a build failure
+            // demanding a deliberate gesture, instead of a dashboard quietly serving a source
+            // that does not describe the binary beside it (audit T1).
+            throw new GradleException('contract source/binary pair(s) out of sync: ' +
+                    "${stale.join(', ')}\n" +
+                    'Rebuild them with:  ./gradlew :lib-vm:compileContracts -Pcontracts=rebuild\n' +
+                    '(needs the toolchain pinned in lib-vm/contracts/rust-toolchain.toml)')
+        }
+    }
+}
+
+tasks.named('check') { dependsOn verifyContractFixtures }
+tasks.named('processTestResources') { mustRunAfter compileContracts }
+
+static void writeContractsLock(File lock, List names, File srcDir, File wasmDir, Closure sha256) {
+    def rows = names.collect { name ->
+        [name, sha256(new File(srcDir, "${name}.rs")), sha256(new File(wasmDir, "${name}.wasm"))]
+    }
+    def width = rows.collect { it[0].length() }.max()
+    lock.text = '''\
+# Contract source/binary pairs, by sha256. Generated — do not hand-edit.
+#
+# verifyContractFixtures compares these on every build, so an edited .rs whose .wasm was not
+# rebuilt fails loudly instead of shipping a source that does not describe its binary. The check
+# needs no Rust toolchain; regenerating this file does.
+#
+#   ./gradlew :lib-vm:compileContracts -Pcontracts=rebuild
+#
+# name                sha256(.rs)                                                       sha256(.wasm)
+''' + rows.collect { r -> "${r[0].padRight(width)}  ${r[1]}  ${r[2]}" }.join('\n') + '\n'
 }
