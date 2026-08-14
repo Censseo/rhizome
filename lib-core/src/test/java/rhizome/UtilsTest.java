@@ -40,7 +40,11 @@ class UtilsTest {
     void checkSignWithPrivateKey() {
         var messageToSign = TEST_MESSAGE;
         var signtureExpected = LEGACY_SIGNATURE;
-        var privateKey = new PrivateKey(new Ed25519PrivateKeyParameters(hexStringToByteArray(TEST_PRIVATE_KEY), 0));
+        // TEST_PRIVATE_KEY is a 64-byte libsodium-style secret key (seed || public key); only
+        // the leading 32 bytes are the Ed25519 seed. The old record constructor took them
+        // silently — say so instead, since PrivateKey.of(String) rightly refuses the long form.
+        var privateKey = PrivateKey.of(
+            java.util.Arrays.copyOf(hexStringToByteArray(TEST_PRIVATE_KEY), PrivateKey.SIZE));
         var signature = signWithPrivateKey(messageToSign.getBytes(UTF_8), privateKey);
         assertEquals(signtureExpected,bytesToHex(signature));
     }

@@ -35,7 +35,7 @@ class SignatureVectorTest {
 
     /** Derives the public key from a private key the way callers do (the seed's public half). */
     private static byte[] publicKeyBytes(PrivateKey privateKey) {
-        return PublicKey.of(privateKey.key().generatePublicKey()).toBytes();
+        return privateKey.publicKey().toBytes();
     }
 
     @Test

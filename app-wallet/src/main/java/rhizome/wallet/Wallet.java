@@ -6,7 +6,6 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
-import org.bouncycastle.crypto.params.Ed25519PublicKeyParameters;
 import org.json.JSONObject;
 
 import rhizome.crypto.Crypto;
@@ -46,8 +45,7 @@ public final class Wallet {
     }
 
     private static Wallet fromPrivate(PrivateKey privateKey, TofuPin chainIdPin) {
-        Ed25519PublicKeyParameters pub = privateKey.key().generatePublicKey();
-        return new Wallet(privateKey, PublicKey.of(pub), chainIdPin);
+        return new Wallet(privateKey, privateKey.publicKey(), chainIdPin);
     }
 
     /**

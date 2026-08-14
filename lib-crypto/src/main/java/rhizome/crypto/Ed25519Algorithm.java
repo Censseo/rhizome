@@ -34,4 +34,11 @@ public final class Ed25519Algorithm implements SignatureAlgorithm {
         signer.update(message, 0, message.length);
         return signer.verifySignature(signature);
     }
+
+    @Override
+    public byte[] derivePublicKey(byte[] privateKeySeed) {
+        // The scalar multiplication BouncyCastle performs here is exactly what callers used to
+        // reach through PrivateKey.key().generatePublicKey() to get; the bytes are identical.
+        return new Ed25519PrivateKeyParameters(privateKeySeed, 0).generatePublicKey().getEncoded();
+    }
 }

@@ -18,4 +18,14 @@ public interface SignatureAlgorithm {
 
     /** Verifies {@code signature} over {@code message} under {@code publicKey}. */
     boolean verify(byte[] message, byte[] signature, byte[] publicKey);
+
+    /**
+     * Derives the public key matching {@code privateKeySeed}.
+     *
+     * <p>Here rather than on the key type for the same reason as {@link #sign}: which curve a
+     * seed belongs to is the algorithm's knowledge, not the container's. It is also the last
+     * operation that forced callers to unwrap a key into its BouncyCastle parameter — every
+     * caller reaching into the private key wanted exactly this and nothing else.
+     */
+    byte[] derivePublicKey(byte[] privateKeySeed);
 }
