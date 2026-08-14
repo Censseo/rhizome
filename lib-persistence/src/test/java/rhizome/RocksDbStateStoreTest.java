@@ -171,4 +171,40 @@ class RocksDbStateStoreTest {
                 "the retained root's nodes survive the sweep");
         }
     }
+
+    @Test
+    void asyncSweepSkipsACorruptNodeInsteadOfFailingForever(@TempDir Path dir) throws Exception {
+        try (var store = new RocksDbStateStore(dir.toString())) {
+            SparseMerkleTree tree = new SparseMerkleTree(store);
+            byte[] liveRoot = SparseMerkleTree.EMPTY_ROOT;
+            for (int i = 1; i <= 10; i++) {
+                liveRoot = tree.update(liveRoot, key32(i), key32(i));
+            }
+            store.putRoot(2048, liveRoot);
+            // Corrupt the retained root's on-disk bytes: a valid-length node with a tag that is
+            // neither LEAF nor INNER (disk rot). The mark phase reaches it first.
+            byte[] corrupt = new byte[SparseMerkleTree.NODE_BYTES];
+            corrupt[0] = 0x7F;
+            store.put(liveRoot, corrupt);
+            // Garbage the sweep must still collect: reachable from no recorded root.
+            byte[] orphanRoot = SparseMerkleTree.EMPTY_ROOT;
+            for (int i = 101; i <= 110; i++) {
+                orphanRoot = tree.update(orphanRoot, key32(i), key32(i));
+            }
+            assertNotNull(store.get(orphanRoot), "orphan nodes are on disk before the sweep");
+
+            store.pruneBelow(1024);
+            store.gcNodesIfDue(1024);
+
+            // A sweep that THREW on the corrupt tag would die with its watermark frozen and retry
+            // the same node at every interval, forever — the orphan below would never be deleted.
+            // Skipping the corrupt node (nothing to recurse into) lets the sweep complete.
+            long deadline = System.currentTimeMillis() + 30_000;
+            while (store.get(orphanRoot) != null && System.currentTimeMillis() < deadline) {
+                Thread.sleep(50);
+            }
+            assertNull(store.get(orphanRoot),
+                "a corrupt reachable node must not stop the sweep from collecting unreachable ones");
+        }
+    }
 }

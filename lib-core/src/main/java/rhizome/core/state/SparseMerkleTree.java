@@ -43,6 +43,11 @@ public final class SparseMerkleTree {
         return node != null && node.length == NODE_BYTES && node[0] == LEAF;
     }
 
+    /** Whether {@code node} is an INNER node (its words are the left/right child hashes). */
+    public static boolean isInnerNode(byte[] node) {
+        return node != null && node.length == NODE_BYTES && node[0] == INNER;
+    }
+
     /** The left and right child hashes of an INNER node (bytes 1..33 and 33..65). */
     public static byte[][] innerChildren(byte[] node) {
         if (node == null || node.length != NODE_BYTES || node[0] != INNER) {

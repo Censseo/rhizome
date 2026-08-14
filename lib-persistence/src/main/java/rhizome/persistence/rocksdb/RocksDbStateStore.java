@@ -476,11 +476,12 @@ public final class RocksDbStateStore extends RocksDbStore implements SmtNodeStor
                 continue; // subtree already collected: consecutive roots share nearly all their nodes
             }
             byte[] node = db.get(nodesCf, readOptions, hash);
-            if (node == null || node.length != SparseMerkleTree.NODE_BYTES) {
-                continue; // missing/corrupt node: a GC must not fail the prune; nothing to recurse into
-            }
-            if (SparseMerkleTree.isLeafNode(node)) {
-                continue; // a leaf's words are key/valueHash, not child node hashes
+            if (!SparseMerkleTree.isInnerNode(node)) {
+                // A leaf's words are key/valueHash, not child hashes; a missing, short or
+                // unknown-tag node is corruption. Either way there is nothing to recurse into —
+                // and a GC must not fail the prune: throwing here froze the sweep watermark
+                // forever, retrying the same corrupt node at every interval.
+                continue;
             }
             byte[][] children = SparseMerkleTree.innerChildren(node);
             if (!isAllZero(children[0])) {
