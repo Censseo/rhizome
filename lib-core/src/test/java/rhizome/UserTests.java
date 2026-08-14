@@ -7,13 +7,14 @@ import org.json.JSONObject;
 import org.junit.jupiter.api.Test;
 
 import rhizome.core.block.Block;
+import rhizome.core.block.BlockImpl;
 import rhizome.core.transaction.Transaction;
 import rhizome.core.user.User;
 
 class UserTests {
         @Test
     void checkSignature() {
-        Block b = Block.empty();
+        BlockImpl b = Block.empty();
         
         User miner = User.create();
         User receiver = User.create();
@@ -28,7 +29,7 @@ class UserTests {
 
     @Test
     void checkUserSerialization() {
-        Block b = Block.empty();
+        BlockImpl b = Block.empty();
         
         User miner = User.create();
         User receiver = User.create();

@@ -14,9 +14,20 @@ import java.util.List;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
-public sealed interface Block permits BlockImpl {
+/**
+ * The read surface of a block: everything consensus, sync and the API read from it.
+ * Deliberately not sealed (there is one implementation, {@link BlockImpl}, and the
+ * seal promised nothing a final class does not already guarantee) and deliberately
+ * immutable here — mutation ({@code addTransaction}, the field setters) lives on the
+ * implementation, where the block is assembled before it reaches consensus. The wire
+ * writers ({@link #toJson()}, {@link #serialize()}, {@link #writeJsonBody(JsonSink)})
+ * were interface members of the sealed type; they remain for callers, with the JSON
+ * oracle (JsonWriterEquivalenceTest) pinning their form.
+ */
 
-    public static Block empty() {
+public interface Block {
+
+    public static BlockImpl empty() {
         return BlockImpl.builder().build();
     }
 
@@ -25,18 +36,17 @@ public sealed interface Block permits BlockImpl {
     }
 
     public static Block of(Block block) {
-        var blockImpl = (BlockImpl) block;
         return BlockImpl.builder()
-                .id(blockImpl.id())
-                .timestamp(blockImpl.timestamp())
-                .difficulty(blockImpl.difficulty())
-                .merkleRoot(blockImpl.merkleRoot())
-                .lastBlockHash(blockImpl.lastBlockHash())
-                .nonce(blockImpl.nonce())
-                .stateRoot(blockImpl.stateRoot())
-                .vote(blockImpl.vote())
-                .transactions(blockImpl.transactions())
-                .uncles(blockImpl.uncles())
+                .id(block.id())
+                .timestamp(block.timestamp())
+                .difficulty(block.difficulty())
+                .merkleRoot(block.merkleRoot())
+                .lastBlockHash(block.lastBlockHash())
+                .nonce(block.nonce())
+                .stateRoot(block.stateRoot())
+                .vote(block.vote())
+                .transactions(block.transactions())
+                .uncles(block.uncles())
                 .build();
     }
 
@@ -121,8 +131,6 @@ public sealed interface Block permits BlockImpl {
     }
 
     public int id();
-    public Block id(int id);
-    public void addTransaction(Transaction t);
     public List<Transaction> transactions();
     public List<UncleRef> uncles();
     public boolean verifyNonce(rhizome.crypto.PowAlgorithm powAlgorithm);
@@ -185,50 +193,48 @@ public sealed interface Block permits BlockImpl {
         static BlockSerializer instance = new BlockSerializer();
 
         public BlockDto serialize(Block block) {
-            var blockImpl = (BlockImpl) block;
             return new BlockDto(
-                blockImpl.id(),
-                blockImpl.timestamp(),
-                blockImpl.difficulty(),
-                blockImpl.transactions().size(),
-                blockImpl.lastBlockHash(),
-                blockImpl.merkleRoot(),
-                blockImpl.nonce(),
-                blockImpl.stateRoot(),
-                blockImpl.vote()
+                block.id(),
+                block.timestamp(),
+                block.difficulty(),
+                block.transactions().size(),
+                block.lastBlockHash(),
+                block.merkleRoot(),
+                block.nonce(),
+                block.stateRoot(),
+                block.vote()
             );
         }
     
         public JSONObject toJson(Block block) {
-            var blockImpl = (BlockImpl) block;
             JSONObject result = new JSONObject();
-            result.put(ID, blockImpl.id());
+            result.put(ID, block.id());
             try {
-                result.put(HASH, blockImpl.hash().toHexString());
+                result.put(HASH, block.hash().toHexString());
             } catch (JSONException e) {
                 e.printStackTrace();
             }
-            result.put(DIFFICULTY, blockImpl.difficulty());
-            result.put(NONCE, blockImpl.nonce().toHexString());
-            result.put(TIMESTAMP, Long.toString(blockImpl.timestamp()));
-            result.put(MERKLE_ROOT, blockImpl.merkleRoot().toHexString());
-            result.put(LAST_BLOCK_HASH, blockImpl.lastBlockHash().toHexString());
+            result.put(DIFFICULTY, block.difficulty());
+            result.put(NONCE, block.nonce().toHexString());
+            result.put(TIMESTAMP, Long.toString(block.timestamp()));
+            result.put(MERKLE_ROOT, block.merkleRoot().toHexString());
+            result.put(LAST_BLOCK_HASH, block.lastBlockHash().toHexString());
             // Committed only when set, mirroring the header hash, so a stateless block's
             // JSON (and the hash a peer recomputes from it) is unchanged.
-            if (!blockImpl.stateRoot().equals(SHA256Hash.empty())) {
-                result.put(STATE_ROOT, blockImpl.stateRoot().toHexString());
+            if (!block.stateRoot().equals(SHA256Hash.empty())) {
+                result.put(STATE_ROOT, block.stateRoot().toHexString());
             }
-            if (blockImpl.vote() != 0) {
-                result.put(VOTE, blockImpl.vote());
+            if (block.vote() != 0) {
+                result.put(VOTE, block.vote());
             }
             JSONArray transactionsArray = new JSONArray();
-            for (Transaction transaction : blockImpl.transactions()) {
+            for (Transaction transaction : block.transactions()) {
                 transactionsArray.put(transaction.toJson());
             }
             result.put(TRANSACTIONS, transactionsArray);
-            if (!blockImpl.uncles().isEmpty()) {
+            if (!block.uncles().isEmpty()) {
                 JSONArray unclesArray = new JSONArray();
-                for (UncleRef uncle : blockImpl.uncles()) {
+                for (UncleRef uncle : block.uncles()) {
                     unclesArray.put(new JSONObject()
                         .put("hash", uncle.hash().toHexString())
                         .put(DIFFICULTY, uncle.difficulty())
@@ -247,32 +253,31 @@ public sealed interface Block permits BlockImpl {
          * fork-point bisection.
          */
         public void writeJsonBody(JsonSink sink, Block block) {
-            var blockImpl = (BlockImpl) block;
-            sink.field(K_ID, blockImpl.id());
-            sink.hexUpper(K_HASH, blockImpl.hash().toBytes());
-            sink.field(K_DIFFICULTY, blockImpl.difficulty());
-            sink.hexUpper(K_NONCE, blockImpl.nonce().toBytes());
-            sink.fieldLongAsString(K_TIMESTAMP, blockImpl.timestamp());
-            sink.hexUpper(K_MERKLE_ROOT, blockImpl.merkleRoot().toBytes());
-            sink.hexUpper(K_LAST_BLOCK_HASH, blockImpl.lastBlockHash().toBytes());
+            sink.field(K_ID, block.id());
+            sink.hexUpper(K_HASH, block.hash().toBytes());
+            sink.field(K_DIFFICULTY, block.difficulty());
+            sink.hexUpper(K_NONCE, block.nonce().toBytes());
+            sink.fieldLongAsString(K_TIMESTAMP, block.timestamp());
+            sink.hexUpper(K_MERKLE_ROOT, block.merkleRoot().toBytes());
+            sink.hexUpper(K_LAST_BLOCK_HASH, block.lastBlockHash().toBytes());
             // Committed only when set, mirroring the header hash, so a stateless block's
             // JSON (and the hash a peer recomputes from it) is unchanged.
-            if (!blockImpl.stateRoot().equals(SHA256Hash.empty())) {
-                sink.hexUpper(K_STATE_ROOT, blockImpl.stateRoot().toBytes());
+            if (!block.stateRoot().equals(SHA256Hash.empty())) {
+                sink.hexUpper(K_STATE_ROOT, block.stateRoot().toBytes());
             }
-            if (blockImpl.vote() != 0) {
-                sink.field(K_VOTE, blockImpl.vote());
+            if (block.vote() != 0) {
+                sink.field(K_VOTE, block.vote());
             }
             sink.name(K_TRANSACTIONS);
             sink.beginArray();
-            for (Transaction transaction : blockImpl.transactions()) {
+            for (Transaction transaction : block.transactions()) {
                 transaction.writeJson(sink);
             }
             sink.endArray();
-            if (!blockImpl.uncles().isEmpty()) {
+            if (!block.uncles().isEmpty()) {
                 sink.name(K_UNCLES);
                 sink.beginArray();
-                for (UncleRef uncle : blockImpl.uncles()) {
+                for (UncleRef uncle : block.uncles()) {
                     sink.beginObject();
                     sink.hexUpper(K_HASH, uncle.hash().toBytes());
                     sink.field(K_DIFFICULTY, uncle.difficulty());
