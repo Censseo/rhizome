@@ -1197,7 +1197,7 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
     // ---- native tokens ----
 
     /** Committed metadata for {@code tokenId}, or {@code null} (none / tokens disabled). */
-    public rhizome.core.token.TokenMeta tokenMeta(byte[] tokenId) {
+    public rhizome.core.token.TokenMeta tokenMeta(rhizome.core.token.TokenId tokenId) {
         lock.lock();
         try {
             return tokenProcessor.meta(tokenId);
@@ -1206,18 +1206,19 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
         }
     }
 
-    /** Committed balance of {@code tokenId} held by {@code address}. */
-    public long tokenBalance(byte[] tokenId, byte[] address) {
+    /** Committed balance of {@code key.tokenId()} held by {@code key.address()}. */
+    public long tokenBalance(rhizome.core.token.TokenBalanceKey key) {
         lock.lock();
         try {
-            return tokenProcessor.balance(tokenId, address);
+            return tokenProcessor.balance(key);
         } finally {
             lock.unlock();
         }
     }
 
     /** Token ids minted by {@code minter}, paginated after {@code afterId} (null = start). */
-    public java.util.List<byte[]> tokenIdsByMinter(byte[] minter, byte[] afterId, int limit) {
+    public java.util.List<rhizome.core.token.TokenId> tokenIdsByMinter(byte[] minter,
+                                                                        rhizome.core.token.TokenId afterId, int limit) {
         lock.lock();
         try {
             return tokenProcessor.tokenIdsByMinter(minter, afterId, limit);
@@ -1227,7 +1228,8 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
     }
 
     /** Token ids {@code address} holds, paginated after {@code afterId} (null = start). */
-    public java.util.List<byte[]> tokenIdsByHolder(byte[] address, byte[] afterId, int limit) {
+    public java.util.List<rhizome.core.token.TokenId> tokenIdsByHolder(byte[] address,
+                                                                        rhizome.core.token.TokenId afterId, int limit) {
         lock.lock();
         try {
             return tokenProcessor.tokenIdsByHolder(address, afterId, limit);

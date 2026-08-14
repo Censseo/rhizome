@@ -9,6 +9,8 @@ import rhizome.core.common.Utils;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.state.StateChange;
 import rhizome.core.state.StateKeys;
+import rhizome.core.token.TokenBalanceKey;
+import rhizome.core.token.TokenId;
 import rhizome.core.token.TokenMeta;
 import rhizome.core.token.TokenProcessor;
 import rhizome.core.token.TokenStore;
@@ -31,13 +33,18 @@ import static org.junit.jupiter.api.Assertions.assertNull;
  */
 class BlockStateChangesTest {
 
-    private static final byte[] TOKEN_ID = new byte[32];
+    private static final TokenId TOKEN_ID = filledTokenId();
     private static final byte[] STORAGE_KEY = {7, 7, 7};
 
-    static {
-        for (int i = 0; i < TOKEN_ID.length; i++) {
-            TOKEN_ID[i] = (byte) (0xA0 + i);
+    /** A 32-byte id with a recognizable non-constant pattern (0xA0..0xBF), so a test that
+     *  accidentally uses the wrong half (or the wrong length) fails loudly instead of silently
+     *  passing on zeros. */
+    private static TokenId filledTokenId() {
+        byte[] bytes = new byte[TokenId.SIZE];
+        for (int i = 0; i < bytes.length; i++) {
+            bytes[i] = (byte) (0xA0 + i);
         }
+        return TokenId.of(bytes);
     }
 
     @Test
@@ -45,12 +52,12 @@ class BlockStateChangesTest {
         PublicAddress holder = PublicAddress.random();
         List<StateChange> out = new ArrayList<>();
         BlockStateChanges.token(tokensEmitting(
-            new TokenStore.TokenOp.BalanceSet(TOKEN_ID, holder.toBytes(), 42L)), 5, out);
+            new TokenStore.TokenOp.BalanceSet(TokenBalanceKey.of(TOKEN_ID, holder), 42L)), 5, out);
 
         assertEquals(1, out.size());
         StateChange change = out.get(0);
         assertEquals(StateKeys.TOKEN_BALANCE, change.domain());
-        assertArrayEquals(StateKeys.tokenBalanceKey(TOKEN_ID, holder.toBytes()), change.rawKey(),
+        assertArrayEquals(StateKeys.tokenBalanceKey(TOKEN_ID.toBytes(), holder.toBytes()), change.rawKey(),
             "the raw key is tokenId then address — the reverse is equally well-formed and wrong");
         assertArrayEquals(Utils.longToBytes(42L), change.value(),
             "balances commit as big-endian 8 bytes");
@@ -61,7 +68,7 @@ class BlockStateChangesTest {
         PublicAddress holder = PublicAddress.random();
         List<StateChange> out = new ArrayList<>();
         BlockStateChanges.token(tokensEmitting(
-            new TokenStore.TokenOp.BalanceSet(TOKEN_ID, holder.toBytes(), 0L)), 5, out);
+            new TokenStore.TokenOp.BalanceSet(TokenBalanceKey.of(TOKEN_ID, holder), 0L)), 5, out);
 
         assertEquals(1, out.size());
         assertNull(out.get(0).value(),
@@ -115,7 +122,7 @@ class BlockStateChangesTest {
 
         assertEquals(1, out.size());
         assertEquals(StateKeys.TOKEN_META, out.get(0).domain());
-        assertArrayEquals(TOKEN_ID, out.get(0).rawKey());
+        assertArrayEquals(TOKEN_ID.toBytes(), out.get(0).rawKey());
         assertArrayEquals(meta.serialize(), out.get(0).value());
     }
 
@@ -158,10 +165,10 @@ class BlockStateChangesTest {
                                          PublicAddress t, long n, byte[] d, long h) {
             throw new UnsupportedOperationException();
         }
-        @Override public TokenMeta meta(byte[] id) { return null; }
-        @Override public long balance(byte[] id, byte[] a) { return 0; }
-        @Override public List<byte[]> tokenIdsByMinter(byte[] m, byte[] a, int l) { return List.of(); }
-        @Override public List<byte[]> tokenIdsByHolder(byte[] a, byte[] b, int l) { return List.of(); }
+        @Override public TokenMeta meta(TokenId id) { return null; }
+        @Override public long balance(TokenBalanceKey key) { return 0; }
+        @Override public List<TokenId> tokenIdsByMinter(byte[] m, TokenId a, int l) { return List.of(); }
+        @Override public List<TokenId> tokenIdsByHolder(byte[] a, TokenId b, int l) { return List.of(); }
     }
 
     private abstract static class AbsentBoxProcessorDouble implements BoxProcessor {

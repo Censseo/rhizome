@@ -34,6 +34,8 @@ import rhizome.core.ledger.PublicAddress;
 import rhizome.core.mempool.MemPool;
 import rhizome.core.token.DefaultTokenProcessor;
 import rhizome.core.token.InMemoryTokenStore;
+import rhizome.core.token.TokenBalanceKey;
+import rhizome.core.token.TokenId;
 import rhizome.core.token.TokenMeta;
 import rhizome.core.token.TokenStore;
 
@@ -93,7 +95,7 @@ class BoxTokenJsonEquivalenceTest {
         List<TokenStore.TokenOp> ops = new ArrayList<>();
         ops.add(new TokenStore.TokenOp.MetaSet(meta));
         if (holder != null) {
-            ops.add(new TokenStore.TokenOp.BalanceSet(meta.id(), holder.toBytes(), balance));
+            ops.add(new TokenStore.TokenOp.BalanceSet(TokenBalanceKey.of(meta.id(), holder), balance));
         }
         tokenStore.applyBlock(++seedHeight, ops);
     }
@@ -243,7 +245,7 @@ class BoxTokenJsonEquivalenceTest {
 
     private static JSONObject legacyTokenJson(TokenMeta meta) {
         return new JSONObject()
-            .put("id", legacyHexLower(meta.id()))
+            .put("id", legacyHexLower(meta.id().toBytes()))
             .put("minter", meta.minter().toHexString())
             .put("symbol", meta.symbol())
             .put("name", meta.name())
@@ -459,12 +461,12 @@ class BoxTokenJsonEquivalenceTest {
         int fill = 0xE1;
         for (String symbol : stringEscapingCorpus()) {
             for (String name : stringEscapingCorpus()) {
-                TokenMeta meta = new TokenMeta(filledId(fill), filledAddress(0xE2), symbol, name,
+                TokenMeta meta = new TokenMeta(TokenId.of(filledId(fill)), filledAddress(0xE2), symbol, name,
                     8, 1_000_000L, 5L);
                 seedToken(meta, null, 0);
 
                 HttpResponse response = TokenApi.token(node, HttpRequest.get(
-                    "http://x/token?id=" + rhizome.core.common.Utils.bytesToHex(meta.id())).build());
+                    "http://x/token?id=" + rhizome.core.common.Utils.bytesToHex(meta.id().toBytes())).build());
                 assertEquals(200, response.getCode());
                 assertSameJson(legacyTokenJson(meta), response);
 
@@ -478,19 +480,19 @@ class BoxTokenJsonEquivalenceTest {
 
     @Test
     void tokenBalanceEndpointIsLowercaseHex() {
-        TokenMeta meta = new TokenMeta(filledId(0xE5), filledAddress(0xE6), "PNDA", "Panda Coin",
+        TokenMeta meta = new TokenMeta(TokenId.of(filledId(0xE5)), filledAddress(0xE6), "PNDA", "Panda Coin",
             8, 1_000_000L, 1L);
         PublicAddress holder = filledAddress(0xE7);
         seedToken(meta, holder, 12345L);
 
         HttpResponse response = TokenApi.tokenBalance(node, HttpRequest.get(
-            "http://x/token_balance?id=" + rhizome.core.common.Utils.bytesToHex(meta.id())
+            "http://x/token_balance?id=" + rhizome.core.common.Utils.bytesToHex(meta.id().toBytes())
                 + "&address=" + holder.toHexString()).build());
         assertEquals(200, response.getCode());
         JSONObject legacy = new JSONObject()
-            .put("token", legacyHexLower(meta.id()))
+            .put("token", legacyHexLower(meta.id().toBytes()))
             .put("address", legacyHexLower(holder.toBytes()))
-            .put("balance", node.tokenBalance(meta.id(), holder.toBytes()));
+            .put("balance", node.tokenBalance(TokenBalanceKey.of(meta.id(), holder)));
         assertSameJson(legacy, response);
 
         JSONObject actual = new JSONObject(body(response));
@@ -502,13 +504,13 @@ class BoxTokenJsonEquivalenceTest {
     void tokensEndpointByMinterHasNoBalanceFieldByHolderDoes() {
         PublicAddress minter = filledAddress(0xE8);
         PublicAddress holder = filledAddress(0xE9);
-        TokenMeta meta = new TokenMeta(filledId(0xEA), minter, "PNDA", "Panda Coin", 8, 500L, 1L);
+        TokenMeta meta = new TokenMeta(TokenId.of(filledId(0xEA)), minter, "PNDA", "Panda Coin", 8, 500L, 1L);
         seedToken(meta, holder, 250L);
 
         HttpResponse byMinter = TokenApi.tokens(node,
             HttpRequest.get("http://x/tokens?minter=" + minter.toHexString()).build());
         assertEquals(200, byMinter.getCode());
-        JSONObject legacyByMinter = legacyTokensResponse(node, List.of(meta.id()), null);
+        JSONObject legacyByMinter = legacyTokensResponse(node, List.of(meta.id().toBytes()), null);
         assertSameJson(legacyByMinter, byMinter);
         JSONObject actualByMinter = new JSONObject(body(byMinter));
         assertFalse(actualByMinter.getJSONArray("tokens").getJSONObject(0).has("balance"),
@@ -517,7 +519,7 @@ class BoxTokenJsonEquivalenceTest {
         HttpResponse byHolder = TokenApi.tokens(node,
             HttpRequest.get("http://x/tokens?holder=" + holder.toHexString()).build());
         assertEquals(200, byHolder.getCode());
-        JSONObject legacyByHolder = legacyTokensResponse(node, List.of(meta.id()), holder.toBytes());
+        JSONObject legacyByHolder = legacyTokensResponse(node, List.of(meta.id().toBytes()), holder.toBytes());
         assertSameJson(legacyByHolder, byHolder);
         JSONObject actualByHolder = new JSONObject(body(byHolder));
         assertTrue(actualByHolder.getJSONArray("tokens").getJSONObject(0).has("balance"),
@@ -528,11 +530,11 @@ class BoxTokenJsonEquivalenceTest {
     private static JSONObject legacyTokensResponse(NodeService node, List<byte[]> ids, byte[] holderKey) {
         JSONArray arr = new JSONArray();
         for (byte[] id : ids) {
-            TokenMeta meta = node.tokenMeta(id);
+            TokenMeta meta = node.tokenMeta(TokenId.of(id));
             if (meta != null) {
                 JSONObject entry = legacyTokenJson(meta);
                 if (holderKey != null) {
-                    entry.put("balance", node.tokenBalance(id, holderKey));
+                    entry.put("balance", node.tokenBalance(TokenBalanceKey.of(TokenId.of(id), PublicAddress.of(holderKey))));
                 }
                 arr.put(entry);
             }

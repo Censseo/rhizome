@@ -22,6 +22,8 @@ import rhizome.core.ledger.PublicAddress;
 import rhizome.core.mempool.ExecutionStatus;
 import rhizome.core.token.DefaultTokenProcessor;
 import rhizome.core.token.InMemoryTokenStore;
+import rhizome.core.token.TokenBalanceKey;
+import rhizome.core.token.TokenId;
 import rhizome.core.token.TokenMeta;
 import rhizome.core.token.TokenPayload;
 import rhizome.core.token.TokenProcessor;
@@ -73,11 +75,11 @@ class TokenOpTest {
             TokenPayload.encodeMint(amount, 2, "PNDA", "Panda"), 0, nonce);
     }
 
-    private Transaction transfer(byte[] tokenId, PublicAddress to, long amount, long nonce) {
+    private Transaction transfer(TokenId tokenId, PublicAddress to, long amount, long nonce) {
         return tokenTx(TransactionKind.TOKEN_TRANSFER, to, TokenPayload.encodeAmount(tokenId, amount), 0, nonce);
     }
 
-    private Transaction burn(byte[] tokenId, long amount, long nonce) {
+    private Transaction burn(TokenId tokenId, long amount, long nonce) {
         return tokenTx(TransactionKind.TOKEN_BURN, sender, TokenPayload.encodeAmount(tokenId, amount), 0, nonce);
     }
 
@@ -101,20 +103,20 @@ class TokenOpTest {
     @Test
     void mintCreatesSupplyAndCreditsMinter() {
         assertEquals(ExecutionStatus.SUCCESS, execute(block(2, coinbase(2), mint(1_000_000, 0))));
-        byte[] id = TokenMeta.deriveId(sender, 0);
+        TokenId id = TokenMeta.deriveId(sender, 0);
         TokenMeta meta = tokens.meta(id);
         assertEquals("PNDA", meta.symbol());
         assertEquals(1_000_000, meta.totalSupply());
-        assertEquals(1_000_000, tokens.balance(id, sender.toBytes()));
+        assertEquals(1_000_000, tokens.balance(TokenBalanceKey.of(id, sender)));
     }
 
     @Test
     void transferMovesBalance() {
         execute(block(2, coinbase(2), mint(1_000, 0)));
-        byte[] id = TokenMeta.deriveId(sender, 0);
+        TokenId id = TokenMeta.deriveId(sender, 0);
         assertEquals(ExecutionStatus.SUCCESS, execute(block(3, coinbase(3), transfer(id, bob, 400, 1))));
-        assertEquals(600, tokens.balance(id, sender.toBytes()));
-        assertEquals(400, tokens.balance(id, bob.toBytes()));
+        assertEquals(600, tokens.balance(TokenBalanceKey.of(id, sender)));
+        assertEquals(400, tokens.balance(TokenBalanceKey.of(id, bob)));
     }
 
     @Test
@@ -123,9 +125,9 @@ class TokenOpTest {
         // the pre-debit balance used to blind-overwrite the debit and DOUBLE the balance (token
         // counterfeiting). Sending the full balance to yourself must leave supply and balance intact.
         execute(block(2, coinbase(2), mint(1_000, 0)));
-        byte[] id = TokenMeta.deriveId(sender, 0);
+        TokenId id = TokenMeta.deriveId(sender, 0);
         assertEquals(ExecutionStatus.SUCCESS, execute(block(3, coinbase(3), transfer(id, sender, 1_000, 1))));
-        assertEquals(1_000, tokens.balance(id, sender.toBytes()));
+        assertEquals(1_000, tokens.balance(TokenBalanceKey.of(id, sender)));
         assertEquals(1_000, tokens.meta(id).totalSupply());
     }
 
@@ -136,11 +138,11 @@ class TokenOpTest {
         // spending more than it holds would otherwise abort every candidate block forever — a free
         // production halt (audit: mempool-poisoning halt). The overspend must simply not apply.
         execute(block(2, coinbase(2), mint(100, 0)));
-        byte[] id = TokenMeta.deriveId(sender, 0);
+        TokenId id = TokenMeta.deriveId(sender, 0);
         assertEquals(ExecutionStatus.SUCCESS,
             execute(block(3, coinbase(3), transfer(id, bob, 101, 1))));
-        assertEquals(100, tokens.balance(id, sender.toBytes()));
-        assertEquals(0, tokens.balance(id, bob.toBytes()));
+        assertEquals(100, tokens.balance(TokenBalanceKey.of(id, sender)));
+        assertEquals(0, tokens.balance(TokenBalanceKey.of(id, bob)));
     }
 
     @Test
@@ -148,16 +150,16 @@ class TokenOpTest {
         // Same anti-poisoning rule: transferring a token that does not exist does not invalidate
         // the block; it is a no-op that still consumes the sender's nonce so it clears the pool.
         assertEquals(ExecutionStatus.SUCCESS,
-            execute(block(2, coinbase(2), transfer(new byte[32], bob, 1, 0))));
-        assertEquals(0, tokens.balance(new byte[32], bob.toBytes()));
+            execute(block(2, coinbase(2), transfer(TokenId.of(new byte[32]), bob, 1, 0))));
+        assertEquals(0, tokens.balance(TokenBalanceKey.of(TokenId.of(new byte[32]), bob)));
     }
 
     @Test
     void burnReducesSupplyAndBalance() {
         execute(block(2, coinbase(2), mint(1_000, 0)));
-        byte[] id = TokenMeta.deriveId(sender, 0);
+        TokenId id = TokenMeta.deriveId(sender, 0);
         assertEquals(ExecutionStatus.SUCCESS, execute(block(3, coinbase(3), burn(id, 250, 1))));
-        assertEquals(750, tokens.balance(id, sender.toBytes()));
+        assertEquals(750, tokens.balance(TokenBalanceKey.of(id, sender)));
         assertEquals(750, tokens.meta(id).totalSupply());
     }
 
@@ -168,12 +170,12 @@ class TokenOpTest {
         // Reusing the same nonce derives the same id; the second mint is a soft revert (block valid)
         // that must NOT create a second token or add to supply/balance.
         assertEquals(ExecutionStatus.SUCCESS, execute(block(2, coinbase(2), mint(1_000_000, 0))));
-        byte[] id = TokenMeta.deriveId(sender, 0);
+        TokenId id = TokenMeta.deriveId(sender, 0);
         // Second mint reusing nonce 0 -> same id. (The engine's per-sender nonce rule blocks this
         // upstream; here we exercise the processor's own id-collision guard directly.)
         assertEquals(ExecutionStatus.SUCCESS, execute(block(3, coinbase(3), mint(5_000_000, 0))));
         assertEquals(1_000_000, tokens.meta(id).totalSupply(), "supply must not change on a re-mint");
-        assertEquals(1_000_000, tokens.balance(id, sender.toBytes()), "balance must not change on a re-mint");
+        assertEquals(1_000_000, tokens.balance(TokenBalanceKey.of(id, sender)), "balance must not change on a re-mint");
     }
 
     @Test
@@ -181,9 +183,9 @@ class TokenOpTest {
         // TOKEN_BURN's insufficient-balance guard (audit: only transfer's short-balance path was
         // tested). Burning more than held is a soft revert: supply and balance stay intact.
         execute(block(2, coinbase(2), mint(100, 0)));
-        byte[] id = TokenMeta.deriveId(sender, 0);
+        TokenId id = TokenMeta.deriveId(sender, 0);
         assertEquals(ExecutionStatus.SUCCESS, execute(block(3, coinbase(3), burn(id, 101, 1))));
-        assertEquals(100, tokens.balance(id, sender.toBytes()));
+        assertEquals(100, tokens.balance(TokenBalanceKey.of(id, sender)));
         assertEquals(100, tokens.meta(id).totalSupply());
     }
 
@@ -194,9 +196,9 @@ class TokenOpTest {
         var mintToBob = tokenTx(TransactionKind.TOKEN_MINT, bob,
             TokenPayload.encodeMint(777, 2, "PNDA", "Panda"), 0, 0);
         assertEquals(ExecutionStatus.SUCCESS, execute(block(2, coinbase(2), mintToBob)));
-        byte[] id = TokenMeta.deriveId(sender, 0);
-        assertEquals(777, tokens.balance(id, bob.toBytes()), "recipient holds the full mint");
-        assertEquals(0, tokens.balance(id, sender.toBytes()), "the minter holds none of it");
+        TokenId id = TokenMeta.deriveId(sender, 0);
+        assertEquals(777, tokens.balance(TokenBalanceKey.of(id, bob)), "recipient holds the full mint");
+        assertEquals(0, tokens.balance(TokenBalanceKey.of(id, sender)), "the minter holds none of it");
         assertEquals(sender, tokens.meta(id).minter());
     }
 
@@ -224,24 +226,24 @@ class TokenOpTest {
     @Test
     void supplyIsConservedAcrossTransfers() {
         execute(block(2, coinbase(2), mint(1_000, 0)));
-        byte[] id = TokenMeta.deriveId(sender, 0);
+        TokenId id = TokenMeta.deriveId(sender, 0);
         execute(block(3, coinbase(3), transfer(id, bob, 300, 1)));
-        long total = tokens.balance(id, sender.toBytes()) + tokens.balance(id, bob.toBytes());
+        long total = tokens.balance(TokenBalanceKey.of(id, sender)) + tokens.balance(TokenBalanceKey.of(id, bob));
         assertEquals(tokens.meta(id).totalSupply(), total);
     }
 
     @Test
     void rollbackRestoresTokenState() {
         execute(block(2, coinbase(2), mint(1_000, 0)));
-        byte[] id = TokenMeta.deriveId(sender, 0);
+        TokenId id = TokenMeta.deriveId(sender, 0);
         Block b = block(3, coinbase(3), transfer(id, bob, 400, 1));
         execute(b);
-        assertEquals(400, tokens.balance(id, bob.toBytes()));
+        assertEquals(400, tokens.balance(TokenBalanceKey.of(id, bob)));
 
         Executor.rollbackBlock(b, ledger, null, null, 3, params);
         tokens.revertBlock(3);
-        assertEquals(0, tokens.balance(id, bob.toBytes()));
-        assertEquals(1_000, tokens.balance(id, sender.toBytes()));
+        assertEquals(0, tokens.balance(TokenBalanceKey.of(id, bob)));
+        assertEquals(1_000, tokens.balance(TokenBalanceKey.of(id, sender)));
 
         // Reverting the mint block removes the token entirely.
         Executor.rollbackBlock(block(2, coinbase(2), mint(1_000, 0)), ledger, null, null, 2, params);

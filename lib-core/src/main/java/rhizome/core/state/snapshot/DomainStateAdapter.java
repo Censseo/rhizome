@@ -74,10 +74,10 @@ public final class DomainStateAdapter implements StateSource, StateSink {
                 }
             });
             case StateKeys.BOX -> boxes.forEachBox(box -> out.accept(box.id(), box.serialize()));
-            case StateKeys.TOKEN_META -> tokens.forEachMeta(meta -> out.accept(meta.id(), meta.serialize()));
-            case StateKeys.TOKEN_BALANCE -> tokens.forEachBalance((tokenId, addr, amount) -> {
+            case StateKeys.TOKEN_META -> tokens.forEachMeta(meta -> out.accept(meta.id().toBytes(), meta.serialize()));
+            case StateKeys.TOKEN_BALANCE -> tokens.forEachBalance((key, amount) -> {
                 if (amount != 0) {
-                    out.accept(StateKeys.tokenBalanceKey(tokenId, addr), Utils.longToBytes(amount));
+                    out.accept(key.toBytes(), Utils.longToBytes(amount));
                 }
             });
             case StateKeys.CONTRACT_CODE, StateKeys.CONTRACT_STORAGE -> {
@@ -100,8 +100,8 @@ public final class DomainStateAdapter implements StateSource, StateSink {
             case StateKeys.TOKEN_META ->
                 pendingTokens.add(new TokenStore.TokenOp.MetaSet(TokenMeta.deserialize(value)));
             case StateKeys.TOKEN_BALANCE -> {
-                byte[][] split = StateKeys.splitTokenBalanceKey(key);
-                pendingTokens.add(new TokenStore.TokenOp.BalanceSet(split[0], split[1], Utils.bytesToLong(value)));
+                rhizome.core.token.TokenBalanceKey balanceKey = rhizome.core.token.TokenBalanceKey.of(key);
+                pendingTokens.add(new TokenStore.TokenOp.BalanceSet(balanceKey, Utils.bytesToLong(value)));
             }
             case StateKeys.CONTRACT_CODE, StateKeys.CONTRACT_STORAGE -> {
                 if (contractSink == null) {

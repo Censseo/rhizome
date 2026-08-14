@@ -11,6 +11,8 @@ import org.rocksdb.RocksIterator;
 import org.rocksdb.WriteBatch;
 import org.rocksdb.WriteOptions;
 
+import rhizome.core.token.TokenBalanceKey;
+import rhizome.core.token.TokenId;
 import rhizome.core.token.TokenMeta;
 import rhizome.core.token.TokenStore;
 
@@ -25,6 +27,10 @@ import static rhizome.core.common.Utils.longToBytes;
  * ({@code tokenId ‖ address} -> amount), {@code token_minter} ({@code minter ‖ tokenId}),
  * {@code token_holder} ({@code address ‖ tokenId}, present iff balance &gt; 0),
  * {@code token_journal} (height -> undo journal).
+ *
+ * <p>Keys are the typed {@link TokenId}/{@link TokenBalanceKey} encoded by
+ * {@link TokenBalanceKey#toBytes()} — the same committed layout the state root uses, so
+ * the store can never transpose the halves relative to consensus.
  */
 public final class RocksDbTokenStore extends RocksDbStore implements TokenStore {
 
@@ -52,14 +58,14 @@ public final class RocksDbTokenStore extends RocksDbStore implements TokenStore 
     }
 
     @Override
-    public TokenMeta getMeta(byte[] tokenId) {
-        byte[] bytes = raw(metaCf, tokenId);
+    public TokenMeta getMeta(TokenId tokenId) {
+        byte[] bytes = raw(metaCf, tokenId.toBytes());
         return bytes == null ? null : TokenMeta.deserialize(bytes);
     }
 
     @Override
-    public long getBalance(byte[] tokenId, byte[] address) {
-        byte[] bytes = raw(balanceCf, concat(tokenId, address));
+    public long getBalance(TokenBalanceKey key) {
+        byte[] bytes = raw(balanceCf, key.toBytes());
         return bytes == null ? 0L : bytesToLong(bytes, 0);
     }
 
@@ -74,15 +80,15 @@ public final class RocksDbTokenStore extends RocksDbStore implements TokenStore 
             List<Undo> journal = new ArrayList<>(ops.size());
             for (TokenOp op : ops) {
                 if (op instanceof TokenOp.MetaSet m) {
-                    byte[] id = m.meta().id();
-                    journal.add(Undo.meta(id, raw(metaCf, id)));
-                    batch.put(metaCf, id, m.meta().serialize());
-                    batch.put(minterCf, concat(m.meta().minter().toBytes(), id), EMPTY);
+                    TokenId id = m.meta().id();
+                    journal.add(Undo.meta(id, raw(metaCf, id.toBytes())));
+                    batch.put(metaCf, id.toBytes(), m.meta().serialize());
+                    batch.put(minterCf, concat(m.meta().minter().toBytes(), id.toBytes()), EMPTY);
                 } else if (op instanceof TokenOp.BalanceSet b) {
-                    byte[] key = concat(b.tokenId(), b.address());
+                    byte[] key = b.key().toBytes();
                     byte[] prior = raw(balanceCf, key);
-                    journal.add(Undo.balance(b.tokenId(), b.address(), prior == null ? 0 : bytesToLong(prior, 0)));
-                    setBalance(batch, b.tokenId(), b.address(), b.amount());
+                    journal.add(Undo.balance(b.key(), prior == null ? 0 : bytesToLong(prior, 0)));
+                    setBalance(batch, b.key(), b.amount());
                 }
             }
             // A op-less apply persists no journal: revertBlock maps a missing journal to
@@ -109,16 +115,17 @@ public final class RocksDbTokenStore extends RocksDbStore implements TokenStore 
                 if (u.isMeta()) {
                     if (u.priorMeta() == null) {
                         // Was a fresh mint: drop the meta and its minter index (minter from current meta).
-                        byte[] cur = raw(metaCf, u.tokenId());
+                        byte[] cur = raw(metaCf, u.tokenId().toBytes());
                         if (cur != null) {
-                            batch.delete(minterCf, concat(TokenMeta.deserialize(cur).minter().toBytes(), u.tokenId()));
+                            batch.delete(minterCf,
+                                concat(TokenMeta.deserialize(cur).minter().toBytes(), u.tokenId().toBytes()));
                         }
-                        batch.delete(metaCf, u.tokenId());
+                        batch.delete(metaCf, u.tokenId().toBytes());
                     } else {
-                        batch.put(metaCf, u.tokenId(), u.priorMeta());
+                        batch.put(metaCf, u.tokenId().toBytes(), u.priorMeta());
                     }
                 } else {
-                    setBalance(batch, u.tokenId(), u.address(), u.priorAmount());
+                    setBalance(batch, u.key(), u.priorAmount());
                 }
             }
             batch.delete(journalCf, longToBytes(height));
@@ -129,7 +136,7 @@ public final class RocksDbTokenStore extends RocksDbStore implements TokenStore 
     }
 
     /** Sets a balance and keeps the holder index consistent (present iff amount &gt; 0). */
-    private void setBalance(WriteBatch batch, byte[] tokenId, byte[] address, long amount)
+    private void setBalance(WriteBatch batch, TokenBalanceKey key, long amount)
             throws RocksDBException {
         // The store is the last line of defence: a negative balance persisted here would read
         // back as a real (debt) balance on every later lookup. Every producer path validates
@@ -138,13 +145,13 @@ public final class RocksDbTokenStore extends RocksDbStore implements TokenStore 
         if (amount < 0) {
             throw new IllegalStateException("negative token balance refused: " + amount);
         }
-        byte[] key = concat(tokenId, address);
-        byte[] holderKey = concat(address, tokenId);
+        byte[] keyBytes = key.toBytes();
+        byte[] holderKey = concat(key.address().toBytes(), key.tokenId().toBytes());
         if (amount == 0) {
-            batch.delete(balanceCf, key);
+            batch.delete(balanceCf, keyBytes);
             batch.delete(holderCf, holderKey);
         } else {
-            batch.put(balanceCf, key, longToBytes(amount));
+            batch.put(balanceCf, keyBytes, longToBytes(amount));
             batch.put(holderCf, holderKey, EMPTY);
         }
     }
@@ -160,18 +167,18 @@ public final class RocksDbTokenStore extends RocksDbStore implements TokenStore 
     }
 
     @Override
-    public List<byte[]> tokenIdsByMinter(byte[] minter, byte[] afterId, int limit) {
+    public List<TokenId> tokenIdsByMinter(byte[] minter, TokenId afterId, int limit) {
         return indexScan(minterCf, minter, afterId, limit);
     }
 
     @Override
-    public List<byte[]> tokenIdsByHolder(byte[] address, byte[] afterId, int limit) {
+    public List<TokenId> tokenIdsByHolder(byte[] address, TokenId afterId, int limit) {
         return indexScan(holderCf, address, afterId, limit);
     }
 
     /** Scans an {@code owner ‖ tokenId} index for tokenIds under {@code prefix}, after {@code afterId}. */
-    private List<byte[]> indexScan(ColumnFamilyHandle cf, byte[] prefix, byte[] afterId, int limit) {
-        List<byte[]> out = new ArrayList<>();
+    private List<TokenId> indexScan(ColumnFamilyHandle cf, byte[] prefix, TokenId afterId, int limit) {
+        List<TokenId> out = new ArrayList<>();
         try (RocksIterator it = db.newIterator(cf)) {
             // Seek straight to the prefix ‖ afterId composite: keys sort lexicographically, so
             // every subsequent key under the prefix is strictly past the cursor. The old
@@ -180,7 +187,7 @@ public final class RocksDbTokenStore extends RocksDbStore implements TokenStore 
             if (afterId == null) {
                 it.seek(prefix);
             } else {
-                byte[] cursor = concat(prefix, afterId);
+                byte[] cursor = concat(prefix, afterId.toBytes());
                 it.seek(cursor);
                 if (it.isValid() && Arrays.equals(it.key(), cursor)) {
                     it.next(); // exclusive of the cursor
@@ -191,10 +198,10 @@ public final class RocksDbTokenStore extends RocksDbStore implements TokenStore 
                 if (key.length < prefix.length || !startsWith(key, prefix)) {
                     break; // past the prefix
                 }
-                if (key.length != prefix.length + 32) {
+                if (key.length != prefix.length + TokenId.SIZE) {
                     continue; // foreign record under the prefix: skip it, don't truncate the page
                 }
-                out.add(Arrays.copyOfRange(key, prefix.length, key.length));
+                out.add(TokenId.of(Arrays.copyOfRange(key, prefix.length, key.length)));
             }
         }
         return out;
@@ -202,13 +209,14 @@ public final class RocksDbTokenStore extends RocksDbStore implements TokenStore 
 
     // ---- journal codec ----
 
-    private record Undo(byte[] tokenId, byte[] priorMeta, byte[] address, long priorAmount, boolean isMeta) {
-        static Undo meta(byte[] tokenId, byte[] priorMeta) {
+    private record Undo(TokenId tokenId, byte[] priorMeta, TokenBalanceKey key, long priorAmount,
+                        boolean isMeta) {
+        static Undo meta(TokenId tokenId, byte[] priorMeta) {
             return new Undo(tokenId, priorMeta, null, 0, true);
         }
 
-        static Undo balance(byte[] tokenId, byte[] address, long priorAmount) {
-            return new Undo(tokenId, null, address, priorAmount, false);
+        static Undo balance(TokenBalanceKey key, long priorAmount) {
+            return new Undo(key.tokenId(), null, key, priorAmount, false);
         }
     }
 
@@ -229,7 +237,7 @@ public final class RocksDbTokenStore extends RocksDbStore implements TokenStore 
         buffer.putInt(journal.size());
         for (Undo u : journal) {
             buffer.put((byte) (u.isMeta() ? 0 : 1));
-            buffer.put(u.tokenId());
+            buffer.put(u.tokenId().toBytes());
             if (u.isMeta()) {
                 if (u.priorMeta() == null) {
                     buffer.put((byte) 0);
@@ -239,7 +247,7 @@ public final class RocksDbTokenStore extends RocksDbStore implements TokenStore 
                     buffer.put(u.priorMeta());
                 }
             } else {
-                buffer.put(u.address());
+                buffer.put(u.key().address().toBytes());
                 buffer.putLong(u.priorAmount());
             }
         }
@@ -260,8 +268,9 @@ public final class RocksDbTokenStore extends RocksDbStore implements TokenStore 
         List<Undo> journal = new ArrayList<>(count);
         for (int i = 0; i < count; i++) {
             boolean isMeta = buffer.get() == 0;
-            byte[] tokenId = new byte[32];
-            buffer.get(tokenId);
+            byte[] tokenIdBytes = new byte[TokenId.SIZE];
+            buffer.get(tokenIdBytes);
+            TokenId tokenId = TokenId.of(tokenIdBytes);
             if (isMeta) {
                 byte[] priorMeta = null;
                 if (buffer.get() == 1) {
@@ -277,7 +286,9 @@ public final class RocksDbTokenStore extends RocksDbStore implements TokenStore 
                 byte[] address = new byte[ADDR];
                 buffer.get(address);
                 long priorAmount = buffer.getLong();
-                journal.add(Undo.balance(tokenId, address, priorAmount));
+                journal.add(Undo.balance(
+                    TokenBalanceKey.of(tokenId, rhizome.core.ledger.PublicAddress.of(address)),
+                    priorAmount));
             }
         }
         return journal;
@@ -298,7 +309,9 @@ public final class RocksDbTokenStore extends RocksDbStore implements TokenStore 
         try (RocksIterator it = db.newIterator(balanceCf)) {
             for (it.seekToFirst(); it.isValid(); it.next()) {
                 byte[] key = it.key();
-                consumer.accept(Arrays.copyOfRange(key, 0, 32), Arrays.copyOfRange(key, 32, key.length),
+                consumer.accept(TokenBalanceKey.of(
+                    TokenId.of(Arrays.copyOfRange(key, 0, TokenId.SIZE)),
+                    rhizome.core.ledger.PublicAddress.of(Arrays.copyOfRange(key, TokenId.SIZE, key.length))),
                     bytesToLong(it.value(), 0));
             }
         }

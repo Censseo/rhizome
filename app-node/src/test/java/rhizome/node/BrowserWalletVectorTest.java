@@ -13,6 +13,7 @@ import rhizome.core.box.BoxPayload;
 import rhizome.core.box.BoxRegister;
 import rhizome.core.common.Utils;
 import rhizome.core.ledger.PublicAddress;
+import rhizome.core.token.TokenId;
 import rhizome.core.token.TokenMeta;
 import rhizome.core.token.TokenPayload;
 import rhizome.core.transaction.Transaction;
@@ -177,8 +178,8 @@ class BrowserWalletVectorTest {
 
     @Test
     void browserDerivedTokenIdMatchesJava() {
-        byte[] id = TokenMeta.deriveId(PublicAddress.of(JS_TOKEN_MINTER), JS_DERIVE_NONCE);
-        assertEquals(JS_TOKEN_ID, Utils.bytesToHex(id).toLowerCase(),
+        TokenId id = TokenMeta.deriveId(PublicAddress.of(JS_TOKEN_MINTER), JS_DERIVE_NONCE);
+        assertEquals(JS_TOKEN_ID, id.toHexString().toLowerCase(),
             "JS deriveTokenId must match TokenMeta.deriveId");
     }
 
@@ -226,7 +227,7 @@ class BrowserWalletVectorTest {
     void browserEncodedTokenTransferPayloadDecodesToTheExpectedAmount() {
         byte[] data = Utils.hexStringToByteArray(JS_TOKEN_TRANSFER_PAYLOAD);
         TokenPayload payload = TokenPayload.decode(TransactionKind.TOKEN_TRANSFER, data, 16, 64, 18);
-        assertEquals(JS_TOKEN_ID_FOR_AMOUNT, Utils.bytesToHex(payload.tokenId()));
+        assertEquals(JS_TOKEN_ID_FOR_AMOUNT, payload.tokenId().toHexString());
         assertEquals(500L, payload.amount());
     }
 }

@@ -51,22 +51,22 @@ final class AbsentTokenProcessor implements TokenProcessor {
     }
 
     @Override
-    public TokenMeta meta(byte[] tokenId) {
+    public TokenMeta meta(TokenId tokenId) {
         return null;
     }
 
     @Override
-    public long balance(byte[] tokenId, byte[] address) {
+    public long balance(TokenBalanceKey key) {
         return 0L;
     }
 
     @Override
-    public List<byte[]> tokenIdsByMinter(byte[] minter, byte[] afterId, int limit) {
+    public List<TokenId> tokenIdsByMinter(byte[] minter, TokenId afterId, int limit) {
         return List.of();
     }
 
     @Override
-    public List<byte[]> tokenIdsByHolder(byte[] address, byte[] afterId, int limit) {
+    public List<TokenId> tokenIdsByHolder(byte[] address, TokenId afterId, int limit) {
         return List.of();
     }
 }

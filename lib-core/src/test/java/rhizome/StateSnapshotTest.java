@@ -42,6 +42,8 @@ import rhizome.core.state.snapshot.StateSnapshotExporter;
 import rhizome.core.state.snapshot.StateSnapshotImporter;
 import rhizome.core.token.DefaultTokenProcessor;
 import rhizome.core.token.InMemoryTokenStore;
+import rhizome.core.token.TokenBalanceKey;
+import rhizome.core.token.TokenId;
 import rhizome.core.token.TokenMeta;
 import rhizome.core.token.TokenPayload;
 import rhizome.core.transaction.Transaction;
@@ -71,7 +73,7 @@ class StateSnapshotTest {
     private PublicAddress bob;
     private PublicAddress miner;
     private byte[] boxId;
-    private byte[] tokenId;
+    private TokenId tokenId;
 
     @BeforeEach
     void setUp() {
@@ -186,8 +188,8 @@ class StateSnapshotTest {
         assertNotNull(freshBoxes.get(boxId));
         assertArrayEquals(boxStore.get(boxId).serialize(), freshBoxes.get(boxId).serialize());
         assertArrayEquals(tokenStore.getMeta(tokenId).serialize(), freshTokens.getMeta(tokenId).serialize());
-        assertEquals(tokenStore.getBalance(tokenId, sender.toBytes()),
-            freshTokens.getBalance(tokenId, sender.toBytes()));
+        assertEquals(tokenStore.getBalance(TokenBalanceKey.of(tokenId, sender)),
+            freshTokens.getBalance(TokenBalanceKey.of(tokenId, sender)));
         // Secondary indexes are rebuilt from the verified values, not transferred.
         assertEquals(1, freshBoxes.boxIdsByOwner(sender.toBytes(), null, 10).size());
         assertEquals(1, freshTokens.tokenIdsByHolder(sender.toBytes(), null, 10).size());

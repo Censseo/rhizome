@@ -124,7 +124,7 @@ public final class NodeService {
         if (tokens != null) {
             for (var e : tokens.apply(height)) {
                 out.add(new ContractLog(e.actor(), e.type().getBytes(java.nio.charset.StandardCharsets.UTF_8),
-                    e.tokenId()));
+                    e.tokenId().toBytes()));
             }
         }
         return out;
@@ -132,22 +132,24 @@ public final class NodeService {
 
 
     /** Committed metadata for {@code tokenId}, or {@code null}. */
-    public rhizome.core.token.TokenMeta tokenMeta(byte[] tokenId) {
+    public rhizome.core.token.TokenMeta tokenMeta(rhizome.core.token.TokenId tokenId) {
         return engine.tokenMeta(tokenId);
     }
 
-    /** Committed balance of {@code tokenId} held by {@code address}. */
-    public long tokenBalance(byte[] tokenId, byte[] address) {
-        return engine.tokenBalance(tokenId, address);
+    /** Committed balance of {@code key.tokenId()} held by {@code key.address()}. */
+    public long tokenBalance(rhizome.core.token.TokenBalanceKey key) {
+        return engine.tokenBalance(key);
     }
 
     /** Token ids minted by {@code minter}, paginated after {@code afterId} (null = start). */
-    public List<byte[]> tokenIdsByMinter(byte[] minter, byte[] afterId, int limit) {
+    public List<rhizome.core.token.TokenId> tokenIdsByMinter(byte[] minter,
+                                                             rhizome.core.token.TokenId afterId, int limit) {
         return engine.tokenIdsByMinter(minter, afterId, limit);
     }
 
     /** Token ids {@code address} holds, paginated after {@code afterId} (null = start). */
-    public List<byte[]> tokenIdsByHolder(byte[] address, byte[] afterId, int limit) {
+    public List<rhizome.core.token.TokenId> tokenIdsByHolder(byte[] address,
+                                                             rhizome.core.token.TokenId afterId, int limit) {
         return engine.tokenIdsByHolder(address, afterId, limit);
     }
 

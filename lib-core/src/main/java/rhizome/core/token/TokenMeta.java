@@ -5,7 +5,6 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.util.Arrays;
 
 import rhizome.core.ledger.PublicAddress;
 
@@ -24,7 +23,7 @@ public final class TokenMeta {
 
     private static final byte[] ID_DOMAIN = {'r', 'z', 't', 'o', 'k', 'e', 'n'};
 
-    private final byte[] id;
+    private final TokenId id;
     private final PublicAddress minter;
     private final String symbol;
     private final String name;
@@ -32,12 +31,9 @@ public final class TokenMeta {
     private final long totalSupply;
     private final long createdHeight;
 
-    public TokenMeta(byte[] id, PublicAddress minter, String symbol, String name,
+    public TokenMeta(TokenId id, PublicAddress minter, String symbol, String name,
                      int decimals, long totalSupply, long createdHeight) {
-        if (id == null || id.length != 32) {
-            throw new IllegalArgumentException("token id must be 32 bytes");
-        }
-        this.id = id.clone();
+        this.id = id;
         this.minter = minter;
         this.symbol = symbol;
         this.name = name;
@@ -47,20 +43,20 @@ public final class TokenMeta {
     }
 
     /** Deterministic token id: {@code SHA-256(minter ‖ nonce ‖ "rztoken")}. */
-    public static byte[] deriveId(PublicAddress minter, long nonce) {
+    public static TokenId deriveId(PublicAddress minter, long nonce) {
         try {
             MessageDigest sha = MessageDigest.getInstance("SHA-256");
             sha.update(minter.toBytes());
             sha.update(ByteBuffer.allocate(Long.BYTES).putLong(nonce).array());
             sha.update(ID_DOMAIN);
-            return sha.digest();
+            return TokenId.of(sha.digest());
         } catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException("SHA-256 unavailable", e);
         }
     }
 
-    public byte[] id() {
-        return id.clone();
+    public TokenId id() {
+        return id;
     }
 
     public PublicAddress minter() {
@@ -97,7 +93,7 @@ public final class TokenMeta {
         byte[] nameBytes = name.getBytes(StandardCharsets.UTF_8);
         ByteBuffer buffer = ByteBuffer.allocate(32 + PublicAddress.SIZE + 1 + 8 + 8
             + 1 + symbolBytes.length + 1 + nameBytes.length);
-        buffer.put(id);
+        buffer.put(id.toBytes());
         buffer.put(minter.toBytes());
         buffer.put((byte) decimals);
         buffer.putLong(totalSupply);
@@ -112,7 +108,7 @@ public final class TokenMeta {
     public static TokenMeta deserialize(byte[] bytes) {
         ByteBuffer buffer = ByteBuffer.wrap(bytes);
         try {
-            byte[] id = new byte[32];
+            byte[] id = new byte[TokenId.SIZE];
             buffer.get(id);
             byte[] minter = new byte[PublicAddress.SIZE];
             buffer.get(minter);
@@ -121,7 +117,8 @@ public final class TokenMeta {
             long createdHeight = buffer.getLong();
             String symbol = readString(buffer);
             String name = readString(buffer);
-            return new TokenMeta(id, PublicAddress.of(minter), symbol, name, decimals, totalSupply, createdHeight);
+            return new TokenMeta(TokenId.of(id), PublicAddress.of(minter), symbol, name,
+                decimals, totalSupply, createdHeight);
         } catch (BufferUnderflowException e) {
             throw new IllegalArgumentException("truncated token meta", e);
         }
@@ -137,7 +134,7 @@ public final class TokenMeta {
     @Override
     public boolean equals(Object o) {
         return o instanceof TokenMeta other
-            && Arrays.equals(id, other.id)
+            && id.equals(other.id)
             && decimals == other.decimals
             && totalSupply == other.totalSupply
             && createdHeight == other.createdHeight
@@ -148,7 +145,7 @@ public final class TokenMeta {
 
     @Override
     public int hashCode() {
-        return Arrays.hashCode(id);
+        return id.hashCode();
     }
 
     @Override

@@ -49,7 +49,7 @@ final class TokenApi {
         if (id.length != 32) {
             return badRequest("id must be 32 bytes (64 hex chars)");
         }
-        rhizome.core.token.TokenMeta meta = node.tokenMeta(id);
+        rhizome.core.token.TokenMeta meta = node.tokenMeta(rhizome.core.token.TokenId.of(id));
         if (meta == null) {
             return notFound("token not found");
         }
@@ -69,7 +69,9 @@ final class TokenApi {
         sink.beginObject();
         sink.hexLower(K_TOKEN, id);
         sink.hexLower(K_ADDRESS, address);
-        sink.field(K_BALANCE, node.tokenBalance(id, address));
+        sink.field(K_BALANCE, node.tokenBalance(
+            rhizome.core.token.TokenBalanceKey.of(rhizome.core.token.TokenId.of(id),
+                PublicAddress.of(address))));
         sink.endObject();
         return json(sink);
     }
@@ -79,7 +81,7 @@ final class TokenApi {
         String minter = req.getQueryParameter("minter");
         String holder = req.getQueryParameter("holder");
         byte[] key;
-        java.util.List<byte[]> ids;
+        java.util.List<rhizome.core.token.TokenId> ids;
         if (minter != null) {
             key = rhizome.core.common.Utils.hexStringToByteArray(minter);
             // Validate the decoded length BEFORE any store call: a short/overlong hex key must be a
@@ -101,13 +103,14 @@ final class TokenApi {
         sink.beginObject();
         sink.name(K_TOKENS);
         sink.beginArray();
-        for (byte[] id : ids) {
+        for (rhizome.core.token.TokenId id : ids) {
             rhizome.core.token.TokenMeta meta = node.tokenMeta(id);
             if (meta != null) {
                 sink.beginObject();
                 writeTokenBody(sink, meta);
                 if (holder != null) {
-                    sink.field(K_BALANCE, node.tokenBalance(id, key));
+                    sink.field(K_BALANCE, node.tokenBalance(
+                        rhizome.core.token.TokenBalanceKey.of(id, PublicAddress.of(key))));
                 }
                 sink.endObject();
             }
@@ -129,7 +132,7 @@ final class TokenApi {
      *  holder-only {@code balance} field without a second object (mirrors lib-core's
      *  {@code writeJsonBody}/{@code writeJson} split). */
     private static void writeTokenBody(JsonSink sink, rhizome.core.token.TokenMeta meta) {
-        sink.hexLower(K_ID, meta.id());
+        sink.hexLower(K_ID, meta.id().toBytes());
         sink.hexUpper(K_MINTER, meta.minter().toBytes());
         sink.field(K_SYMBOL, meta.symbol());
         sink.field(K_NAME, meta.name());

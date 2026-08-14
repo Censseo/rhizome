@@ -8,6 +8,8 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import org.junit.jupiter.api.Test;
 
 import rhizome.core.ledger.PublicAddress;
+import rhizome.core.token.TokenBalanceKey;
+import rhizome.core.token.TokenId;
 import rhizome.core.token.TokenMeta;
 import rhizome.core.token.TokenPayload;
 import rhizome.core.transaction.TransactionKind;
@@ -21,7 +23,7 @@ class TokenModelTest {
         TokenMeta meta = new TokenMeta(TokenMeta.deriveId(minter, 3), minter, "PNDA", "Panda Coin", 8, 1_000_000, 12);
         TokenMeta back = TokenMeta.deserialize(meta.serialize());
         assertEquals(meta, back);
-        assertArrayEquals(meta.id(), back.id());
+        assertEquals(meta.id(), back.id());
         assertEquals("PNDA", back.symbol());
         assertEquals("Panda Coin", back.name());
         assertEquals(8, back.decimals());
@@ -30,8 +32,8 @@ class TokenModelTest {
 
     @Test
     void deriveIdIsDeterministicAndUnique() {
-        assertArrayEquals(TokenMeta.deriveId(minter, 3), TokenMeta.deriveId(minter, 3));
-        assertFalse(java.util.Arrays.equals(TokenMeta.deriveId(minter, 3), TokenMeta.deriveId(minter, 4)));
+        assertEquals(TokenMeta.deriveId(minter, 3), TokenMeta.deriveId(minter, 3));
+        assertFalse(TokenMeta.deriveId(minter, 3).equals(TokenMeta.deriveId(minter, 4)));
     }
 
     @Test
@@ -46,10 +48,10 @@ class TokenModelTest {
 
     @Test
     void amountPayloadRoundTrips() {
-        byte[] tokenId = TokenMeta.deriveId(minter, 1);
+        TokenId tokenId = TokenMeta.deriveId(minter, 1);
         byte[] data = TokenPayload.encodeAmount(tokenId, 42);
         TokenPayload p = TokenPayload.decode(TransactionKind.TOKEN_TRANSFER, data, 16, 64, 18);
-        assertArrayEquals(tokenId, p.tokenId());
+        assertEquals(tokenId, p.tokenId());
         assertEquals(42, p.amount());
     }
 
@@ -69,7 +71,7 @@ class TokenModelTest {
         assertThrows(IllegalArgumentException.class,
             () -> TokenPayload.decode(TransactionKind.TOKEN_MINT, bigDec, 16, 64, 18));
         // Trailing bytes.
-        byte[] amt = TokenPayload.encodeAmount(new byte[32], 5);
+        byte[] amt = TokenPayload.encodeAmount(TokenId.of(new byte[32]), 5);
         byte[] trailer = java.util.Arrays.copyOf(amt, amt.length + 1);
         assertThrows(IllegalArgumentException.class,
             () -> TokenPayload.decode(TransactionKind.TOKEN_TRANSFER, trailer, 16, 64, 18));

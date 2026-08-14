@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import rhizome.core.ledger.PublicAddress;
+import rhizome.core.token.TokenBalanceKey;
 import rhizome.core.token.TokenMeta;
 import rhizome.core.token.TokenStore;
 import rhizome.core.token.TokenStoreContract;
@@ -53,14 +54,14 @@ class RocksDbTokenStoreTest implements TokenStoreContract {
         try (var store = new RocksDbTokenStore(dir.toString())) {
             store.applyBlock(2, List.of(
                 new TokenStore.TokenOp.MetaSet(m),
-                new TokenStore.TokenOp.BalanceSet(m.id(), holder.toBytes(), 1_000)));
+                new TokenStore.TokenOp.BalanceSet(TokenBalanceKey.of(m.id(), holder), 1_000)));
             assertEquals(m, store.getMeta(m.id()));
-            assertEquals(1_000, store.getBalance(m.id(), holder.toBytes()));
-            assertEquals(0, store.getBalance(m.id(), PublicAddress.random().toBytes()));
+            assertEquals(1_000, store.getBalance(TokenBalanceKey.of(m.id(), holder)));
+            assertEquals(0, store.getBalance(TokenBalanceKey.of(m.id(), PublicAddress.random())));
         }
         try (var store = new RocksDbTokenStore(dir.toString())) {
             assertEquals(m, store.getMeta(m.id())); // survived on disk
-            assertEquals(1_000, store.getBalance(m.id(), holder.toBytes()));
+            assertEquals(1_000, store.getBalance(TokenBalanceKey.of(m.id(), holder)));
         }
     }
 

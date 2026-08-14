@@ -44,6 +44,8 @@ import rhizome.core.state.StateKeys;
 import rhizome.core.state.StateProof;
 import rhizome.core.token.DefaultTokenProcessor;
 import rhizome.core.token.InMemoryTokenStore;
+import rhizome.core.token.TokenBalanceKey;
+import rhizome.core.token.TokenId;
 import rhizome.core.token.TokenMeta;
 import rhizome.core.token.TokenPayload;
 import rhizome.core.transaction.Transaction;
@@ -242,7 +244,7 @@ class StateRootConsensusTest {
         // into the NEXT block's root and fork this node off the network. The path has no dedicated
         // test today, and its undo is one of the six hand-written copies of the domain order.
         byte[] boxId = rhizome.core.box.Box.deriveId(sender, 1);
-        byte[] tokenId = TokenMeta.deriveId(sender, 2);
+        TokenId tokenId = TokenMeta.deriveId(sender, 2);
         assertEquals(ExecutionStatus.SUCCESS, engine.addBlock(mine(List.of(
             transfer(1_000, 0),
             boxCreate(5_000, 1, BoxRegister.string("memory")),
@@ -252,7 +254,7 @@ class StateRootConsensusTest {
         long senderBefore = ledger.getWalletValue(sender).amount();
         long bobBefore = ledger.getWalletValue(bob).amount();
         byte[] boxBefore = engine.box(boxId).serialize();
-        long balanceBefore = engine.tokenBalance(tokenId, sender.toBytes());
+        long balanceBefore = engine.tokenBalance(TokenBalanceKey.of(tokenId, sender));
         long heightBefore = engine.height();
         long nonceBefore = engine.nextNonce(sender);
 
@@ -275,7 +277,7 @@ class StateRootConsensusTest {
         assertEquals(senderBefore, ledger.getWalletValue(sender).amount());
         assertEquals(bobBefore, ledger.getWalletValue(bob).amount());
         assertArrayEquals(boxBefore, engine.box(boxId).serialize());
-        assertEquals(balanceBefore, engine.tokenBalance(tokenId, sender.toBytes()));
+        assertEquals(balanceBefore, engine.tokenBalance(TokenBalanceKey.of(tokenId, sender)));
         assertEquals(heightBefore, engine.height());
         assertEquals(nonceBefore, engine.nextNonce(sender));
 
@@ -286,7 +288,7 @@ class StateRootConsensusTest {
     @Test
     void lightClientProvesLedgerBoxAndTokenAgainstRoot() {
         byte[] boxId = rhizome.core.box.Box.deriveId(sender, 1);
-        byte[] tokenId = TokenMeta.deriveId(sender, 2);
+        TokenId tokenId = TokenMeta.deriveId(sender, 2);
         assertEquals(ExecutionStatus.SUCCESS, engine.addBlock(mine(List.of(
             transfer(1_000, 0),
             boxCreate(5_000, 1, BoxRegister.string("memory")),
@@ -309,17 +311,17 @@ class StateRootConsensusTest {
 
         // Token metadata is provable.
         byte[] metaBytes = engine.tokenMeta(tokenId).serialize();
-        StateProof tokenProof = engine.stateProof(StateKeys.TOKEN_META, tokenId);
-        assertTrue(SparseMerkleTree.verify(root, StateKeys.key(StateKeys.TOKEN_META, tokenId),
+        StateProof tokenProof = engine.stateProof(StateKeys.TOKEN_META, tokenId.toBytes());
+        assertTrue(SparseMerkleTree.verify(root, StateKeys.key(StateKeys.TOKEN_META, tokenId.toBytes()),
             StateKeys.valueHash(metaBytes), tokenProof));
 
         // The minter's token balance is provable — and unlike every other domain here, its raw key
         // is a CONCATENATION, tokenId ‖ address, composed in ChainEngine.collectStateChanges. That
         // composition had no test at all: transposing the two halves, or dropping one, still
         // produces a well-formed 32-byte SMT key and a root that only disagrees with other nodes.
-        byte[] balanceKey = new byte[tokenId.length + sender.toBytes().length];
-        System.arraycopy(tokenId, 0, balanceKey, 0, tokenId.length);
-        System.arraycopy(sender.toBytes(), 0, balanceKey, tokenId.length, sender.toBytes().length);
+        byte[] balanceKey = new byte[tokenId.toBytes().length + sender.toBytes().length];
+        System.arraycopy(tokenId.toBytes(), 0, balanceKey, 0, tokenId.toBytes().length);
+        System.arraycopy(sender.toBytes(), 0, balanceKey, tokenId.toBytes().length, sender.toBytes().length);
         StateProof balanceProof = engine.stateProof(StateKeys.TOKEN_BALANCE, balanceKey);
         assertNotNull(balanceProof);
         assertArrayEquals(StateKeys.valueHash(Utils.longToBytes(1_000_000L)), balanceProof.valueHash());
@@ -329,7 +331,7 @@ class StateRootConsensusTest {
         // The reversed concatenation must NOT resolve: this is what pins the byte order.
         byte[] reversedKey = new byte[balanceKey.length];
         System.arraycopy(sender.toBytes(), 0, reversedKey, 0, sender.toBytes().length);
-        System.arraycopy(tokenId, 0, reversedKey, sender.toBytes().length, tokenId.length);
+        System.arraycopy(tokenId.toBytes(), 0, reversedKey, sender.toBytes().length, tokenId.toBytes().length);
         assertNull(engine.stateProof(StateKeys.TOKEN_BALANCE, reversedKey));
 
         // A wrong value must not verify against the honest proof.

@@ -21,6 +21,8 @@ import rhizome.core.state.InMemorySmtNodeStore;
 import rhizome.core.state.StateAccumulator;
 import rhizome.core.token.DefaultTokenProcessor;
 import rhizome.core.token.InMemoryTokenStore;
+import rhizome.core.token.TokenBalanceKey;
+import rhizome.core.token.TokenId;
 import rhizome.core.token.TokenMeta;
 import rhizome.core.token.TokenProcessor;
 import rhizome.core.token.TokenStore;
@@ -273,19 +275,19 @@ class StateDomainOrderTest {
             return delegate.changes(h);
         }
 
-        @Override public TokenMeta meta(byte[] tokenId) {
+        @Override public TokenMeta meta(TokenId tokenId) {
             return delegate.meta(tokenId);
         }
 
-        @Override public long balance(byte[] tokenId, byte[] address) {
-            return delegate.balance(tokenId, address);
+        @Override public long balance(TokenBalanceKey key) {
+            return delegate.balance(key);
         }
 
-        @Override public List<byte[]> tokenIdsByMinter(byte[] minter, byte[] afterId, int limit) {
+        @Override public List<TokenId> tokenIdsByMinter(byte[] minter, TokenId afterId, int limit) {
             return delegate.tokenIdsByMinter(minter, afterId, limit);
         }
 
-        @Override public List<byte[]> tokenIdsByHolder(byte[] address, byte[] afterId, int limit) {
+        @Override public List<TokenId> tokenIdsByHolder(byte[] address, TokenId afterId, int limit) {
             return delegate.tokenIdsByHolder(address, afterId, limit);
         }
     }

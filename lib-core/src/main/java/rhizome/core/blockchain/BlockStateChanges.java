@@ -93,9 +93,9 @@ final class BlockStateChanges {
     static void token(TokenProcessor tokens, long height, List<StateChange> out) {
         for (var op : tokens.changes(height)) {
             if (op instanceof TokenStore.TokenOp.MetaSet ms) {
-                out.add(StateChange.set(StateKeys.TOKEN_META, ms.meta().id(), ms.meta().serialize()));
+                out.add(StateChange.set(StateKeys.TOKEN_META, ms.meta().id().toBytes(), ms.meta().serialize()));
             } else if (op instanceof TokenStore.TokenOp.BalanceSet bs) {
-                byte[] rawKey = StateKeys.tokenBalanceKey(bs.tokenId(), bs.address());
+                byte[] rawKey = bs.key().toBytes();
                 out.add(bs.amount() == 0
                     ? StateChange.delete(StateKeys.TOKEN_BALANCE, rawKey)
                     : StateChange.set(StateKeys.TOKEN_BALANCE, rawKey, longBytesBE(bs.amount())));

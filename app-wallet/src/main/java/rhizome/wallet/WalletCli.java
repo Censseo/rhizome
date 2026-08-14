@@ -396,8 +396,7 @@ public final class WalletCli {
         var tx = wallet.signedToken(TransactionKind.TOKEN_MINT, wallet.address(), data, fee,
             verifiedChainId(client, args, wallet), nonce, System.currentTimeMillis());
         String status = client.submit(tx);
-        System.out.println("token: " + Utils.bytesToHex(
-            rhizome.core.token.TokenMeta.deriveId(wallet.address(), nonce)));
+        System.out.println("token: " + rhizome.core.token.TokenMeta.deriveId(wallet.address(), nonce));
         System.out.println("status: " + status);
         if (!"SUCCESS".equals(status)) {
             return 1;
@@ -430,7 +429,8 @@ public final class WalletCli {
                                           PublicAddress to, String tokenIdHex, long amount) throws Exception {
         warnIfInsecureNodeUrl(args[1]);
         WalletClient client = walletClient(args);
-        byte[] data = rhizome.core.token.TokenPayload.encodeAmount(idBytes(tokenIdHex, "tokenId"), amount);
+        byte[] data = rhizome.core.token.TokenPayload.encodeAmount(
+            rhizome.core.token.TokenId.of(idBytes(tokenIdHex, "tokenId")), amount);
         long fee = flagPdn(args, "--fee");
         System.err.println("amount: " + amount + " units of token " + tokenIdHex);
         echoPdn("fee", fee);

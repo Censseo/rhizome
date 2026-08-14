@@ -25,8 +25,8 @@ public final class DefaultTokenProcessor implements TokenProcessor {
     private final NetworkParameters params;
     private final int retainDepth;
 
-    private Map<String, TokenMeta> sessionMeta;
-    private Map<String, Long> sessionBalance;
+    private Map<TokenId, TokenMeta> sessionMeta;
+    private Map<TokenBalanceKey, Long> sessionBalance;
     private List<TokenEvent> currentEvents = new ArrayList<>();
     /**
      * Per-height retention for reorg reversal, bounded by heights AND bytes — see
@@ -92,7 +92,7 @@ public final class DefaultTokenProcessor implements TokenProcessor {
 
     private TokenResult mint(PublicAddress from, PublicAddress to, long nonce,
                              TokenPayload payload, long height) {
-        byte[] id = TokenMeta.deriveId(from, nonce);
+        TokenId id = TokenMeta.deriveId(from, nonce);
         if (getMeta(id) != null) {
             return TokenResult.fail(TOKEN_ALREADY_EXISTS);
         }
@@ -105,7 +105,7 @@ public final class DefaultTokenProcessor implements TokenProcessor {
     }
 
     private TokenResult transfer(PublicAddress from, PublicAddress to, TokenPayload payload) {
-        byte[] id = payload.tokenId();
+        TokenId id = payload.tokenId();
         if (getMeta(id) == null) {
             return TokenResult.fail(TOKEN_NOT_FOUND);
         }
@@ -139,7 +139,7 @@ public final class DefaultTokenProcessor implements TokenProcessor {
     }
 
     private TokenResult burn(PublicAddress from, TokenPayload payload) {
-        byte[] id = payload.tokenId();
+        TokenId id = payload.tokenId();
         TokenMeta meta = getMeta(id);
         if (meta == null) {
             return TokenResult.fail(TOKEN_NOT_FOUND);
@@ -156,32 +156,26 @@ public final class DefaultTokenProcessor implements TokenProcessor {
 
     // ---- session ----
 
-    private TokenMeta getMeta(byte[] id) {
-        String key = hex(id);
-        if (sessionMeta.containsKey(key)) {
-            return sessionMeta.get(key);
-        }
-        return store.getMeta(id);
+    private TokenMeta getMeta(TokenId id) {
+        return sessionMeta.containsKey(id) ? sessionMeta.get(id) : store.getMeta(id);
     }
 
     private void putMeta(TokenMeta meta) {
-        sessionMeta.put(hex(meta.id()), meta);
+        sessionMeta.put(meta.id(), meta);
     }
 
-    private long getBalance(byte[] id, PublicAddress addr) {
-        String key = balanceKey(id, addr);
-        if (sessionBalance.containsKey(key)) {
-            return sessionBalance.get(key);
-        }
-        return store.getBalance(id, addr.toBytes());
+    private long getBalance(TokenId id, PublicAddress addr) {
+        TokenBalanceKey key = TokenBalanceKey.of(id, addr);
+        return sessionBalance.containsKey(key) ? sessionBalance.get(key)
+            : store.getBalance(key);
     }
 
-    private void setBalance(byte[] id, PublicAddress addr, long amount) {
-        sessionBalance.put(balanceKey(id, addr), amount);
+    private void setBalance(TokenId id, PublicAddress addr, long amount) {
+        sessionBalance.put(TokenBalanceKey.of(id, addr), amount);
     }
 
-    private void event(PublicAddress actor, String type, byte[] id) {
-        currentEvents.add(new TokenEvent(actor, type, id.clone()));
+    private void event(PublicAddress actor, String type, TokenId id) {
+        currentEvents.add(new TokenEvent(actor, type, id));
     }
 
     @Override
@@ -192,7 +186,7 @@ public final class DefaultTokenProcessor implements TokenProcessor {
                 ops.add(new TokenStore.TokenOp.MetaSet(meta));
             }
             sessionBalance.forEach((key, amount) ->
-                ops.add(new TokenStore.TokenOp.BalanceSet(tokenIdOf(key), addressOf(key), amount)));
+                ops.add(new TokenStore.TokenOp.BalanceSet(key, amount)));
             // A block with NO token ops persists no journal: every revert path maps a missing
             // journal to "nothing to undo" (see RocksDbTokenStore.revertBlock's early return),
             // so the 4-byte empty-journal row was a synced write per block for nothing (audit:
@@ -232,7 +226,7 @@ public final class DefaultTokenProcessor implements TokenProcessor {
         for (TokenEvent e : events) {
             bytes += PublicAddress.SIZE
                 + (e.type() == null ? 0 : e.type().length() * 2L)
-                + (e.tokenId() == null ? 0 : e.tokenId().length);
+                + TokenId.SIZE;
         }
         return bytes;
     }
@@ -246,8 +240,7 @@ public final class DefaultTokenProcessor implements TokenProcessor {
                     + (ms.meta() == null ? 0
                         : ms.meta().symbol().length() * 2L + ms.meta().name().length() * 2L);
                 case TokenStore.TokenOp.BalanceSet bs ->
-                    (bs.tokenId() == null ? 0 : bs.tokenId().length)
-                    + (bs.address() == null ? 0 : bs.address().length) + 8L;
+                    TokenId.SIZE + PublicAddress.SIZE + 8L;
             };
         }
         return bytes;
@@ -278,44 +271,22 @@ public final class DefaultTokenProcessor implements TokenProcessor {
     }
 
     @Override
-    public TokenMeta meta(byte[] tokenId) {
+    public TokenMeta meta(TokenId tokenId) {
         return store.getMeta(tokenId);
     }
 
     @Override
-    public long balance(byte[] tokenId, byte[] address) {
-        return store.getBalance(tokenId, address);
+    public long balance(TokenBalanceKey key) {
+        return store.getBalance(key);
     }
 
     @Override
-    public List<byte[]> tokenIdsByMinter(byte[] minter, byte[] afterId, int limit) {
+    public List<TokenId> tokenIdsByMinter(byte[] minter, TokenId afterId, int limit) {
         return store.tokenIdsByMinter(minter, afterId, limit);
     }
 
     @Override
-    public List<byte[]> tokenIdsByHolder(byte[] address, byte[] afterId, int limit) {
+    public List<TokenId> tokenIdsByHolder(byte[] address, TokenId afterId, int limit) {
         return store.tokenIdsByHolder(address, afterId, limit);
-    }
-
-    // ---- key helpers: balance key = tokenIdHex(64) + addressHex(50) ----
-
-    private static String balanceKey(byte[] tokenId, PublicAddress addr) {
-        return hex(tokenId) + hex(addr.toBytes());
-    }
-
-    private static byte[] tokenIdOf(String key) {
-        return unhex(key.substring(0, 64));
-    }
-
-    private static byte[] addressOf(String key) {
-        return unhex(key.substring(64));
-    }
-
-    private static String hex(byte[] b) {
-        return rhizome.core.common.Utils.bytesToHex(b);
-    }
-
-    private static byte[] unhex(String s) {
-        return rhizome.core.common.Utils.hexStringToByteArray(s);
     }
 }

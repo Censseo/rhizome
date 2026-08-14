@@ -279,7 +279,7 @@ class BoxApiTest {
     @Test
     void tokenEndpointsReturnMetaBalanceAndList() throws Exception {
         mine(List.of(tokenMint(1_000_000, 8, "PNDA", "Panda Coin", 0)));
-        String id = Utils.bytesToHex(TokenMeta.deriveId(sender, 0));
+        String id = TokenMeta.deriveId(sender, 0).toHexString();
 
         HttpResponse meta = call(HttpRequest.get("http://x/token?id=" + id).build());
         assertEquals(200, meta.getCode());

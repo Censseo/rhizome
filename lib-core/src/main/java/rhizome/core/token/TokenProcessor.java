@@ -37,19 +37,19 @@ public interface TokenProcessor extends rhizome.core.blockchain.BlockStateProces
     }
 
     /** Committed metadata for {@code tokenId}, or {@code null}. */
-    TokenMeta meta(byte[] tokenId);
+    TokenMeta meta(TokenId tokenId);
 
-    /** Committed balance of {@code tokenId} held by {@code address}. */
-    long balance(byte[] tokenId, byte[] address);
+    /** Committed balance of {@code key.tokenId()} held by {@code key.address()}. */
+    long balance(TokenBalanceKey key);
 
     /** Token ids minted by {@code minter}, paginated after {@code afterId}. */
-    List<byte[]> tokenIdsByMinter(byte[] minter, byte[] afterId, int limit);
+    List<TokenId> tokenIdsByMinter(byte[] minter, TokenId afterId, int limit);
 
     /** Token ids {@code address} holds, paginated after {@code afterId}. */
-    List<byte[]> tokenIdsByHolder(byte[] address, byte[] afterId, int limit);
+    List<TokenId> tokenIdsByHolder(byte[] address, TokenId afterId, int limit);
 
     /** Outcome of one token op: a status and the affected token id. */
-    record TokenResult(ExecutionStatus status, byte[] tokenId) {
+    record TokenResult(ExecutionStatus status, TokenId tokenId) {
         public boolean success() {
             return status == ExecutionStatus.SUCCESS;
         }
@@ -60,5 +60,5 @@ public interface TokenProcessor extends rhizome.core.blockchain.BlockStateProces
     }
 
     /** A token lifecycle event: the acting account, an event type, and the token id. */
-    record TokenEvent(PublicAddress actor, String type, byte[] tokenId) {}
+    record TokenEvent(PublicAddress actor, String type, TokenId tokenId) {}
 }

@@ -42,11 +42,11 @@ public interface TokenStoreContract {
         store.applyBlock(2, List.of(
             new TokenStore.TokenOp.MetaSet(a),
             new TokenStore.TokenOp.MetaSet(b),
-            new TokenStore.TokenOp.BalanceSet(a.id(), holder.toBytes(), 1_000)));
+            new TokenStore.TokenOp.BalanceSet(TokenBalanceKey.of(a.id(), holder), 1_000)));
         assertEquals(2, store.tokenIdsByMinter(minter.toBytes(), null, 10).size());
         assertEquals(1, store.tokenIdsByHolder(holder.toBytes(), null, 10).size());
         // Emptying the balance drops the holder index entry.
-        store.applyBlock(3, List.of(new TokenStore.TokenOp.BalanceSet(a.id(), holder.toBytes(), 0)));
+        store.applyBlock(3, List.of(new TokenStore.TokenOp.BalanceSet(TokenBalanceKey.of(a.id(), holder), 0)));
         assertTrue(store.tokenIdsByHolder(holder.toBytes(), null, 10).isEmpty());
     }
 
@@ -58,16 +58,16 @@ public interface TokenStoreContract {
         TokenMeta m = meta(minter, 0, 1_000);
         store.applyBlock(2, List.of(
             new TokenStore.TokenOp.MetaSet(m),
-            new TokenStore.TokenOp.BalanceSet(m.id(), minter.toBytes(), 1_000)));
+            new TokenStore.TokenOp.BalanceSet(TokenBalanceKey.of(m.id(), minter), 1_000)));
         // Block 3: transfer 400 to holder.
         store.applyBlock(3, List.of(
-            new TokenStore.TokenOp.BalanceSet(m.id(), minter.toBytes(), 600),
-            new TokenStore.TokenOp.BalanceSet(m.id(), holder.toBytes(), 400)));
-        assertEquals(400, store.getBalance(m.id(), holder.toBytes()));
+            new TokenStore.TokenOp.BalanceSet(TokenBalanceKey.of(m.id(), minter), 600),
+            new TokenStore.TokenOp.BalanceSet(TokenBalanceKey.of(m.id(), holder), 400)));
+        assertEquals(400, store.getBalance(TokenBalanceKey.of(m.id(), holder)));
 
         store.revertBlock(3);
-        assertEquals(1_000, store.getBalance(m.id(), minter.toBytes()));
-        assertEquals(0, store.getBalance(m.id(), holder.toBytes()));
+        assertEquals(1_000, store.getBalance(TokenBalanceKey.of(m.id(), minter)));
+        assertEquals(0, store.getBalance(TokenBalanceKey.of(m.id(), holder)));
         assertTrue(store.tokenIdsByHolder(holder.toBytes(), null, 10).isEmpty());
 
         store.revertBlock(2);
@@ -134,13 +134,13 @@ public interface TokenStoreContract {
         store.applyBlock(2, List.of(
             new TokenStore.TokenOp.MetaSet(a),
             new TokenStore.TokenOp.MetaSet(b),
-            new TokenStore.TokenOp.BalanceSet(a.id(), holder.toBytes(), 1_000)));
+            new TokenStore.TokenOp.BalanceSet(TokenBalanceKey.of(a.id(), holder), 1_000)));
 
         // Block 3: transfer 400 to holder, then burn a's balance to zero (index removal).
         store.applyBlock(3, List.of(
-            new TokenStore.TokenOp.BalanceSet(a.id(), minter.toBytes(), 600),
-            new TokenStore.TokenOp.BalanceSet(a.id(), holder.toBytes(), 400)));
-        store.applyBlock(4, List.of(new TokenStore.TokenOp.BalanceSet(a.id(), holder.toBytes(), 0)));
+            new TokenStore.TokenOp.BalanceSet(TokenBalanceKey.of(a.id(), minter), 600),
+            new TokenStore.TokenOp.BalanceSet(TokenBalanceKey.of(a.id(), holder), 400)));
+        store.applyBlock(4, List.of(new TokenStore.TokenOp.BalanceSet(TokenBalanceKey.of(a.id(), holder), 0)));
         assertTrue(!wholeStoreBytes(store).equals(before),
             "the later blocks must actually change the store for the test to mean anything");
 
@@ -155,9 +155,8 @@ public interface TokenStoreContract {
     private static String wholeStoreBytes(TokenStore store) {
         java.util.List<String> parts = new java.util.ArrayList<>();
         store.forEachMeta(m -> parts.add(rhizome.core.common.Utils.bytesToHex(m.serialize())));
-        store.forEachBalance((tokenId, address, amount) -> parts.add(
-            rhizome.core.common.Utils.bytesToHex(tokenId) + rhizome.core.common.Utils.bytesToHex(address)
-                + Long.toHexString(amount)));
+        store.forEachBalance((key, amount) -> parts.add(
+            rhizome.core.common.Utils.bytesToHex(key.toBytes()) + Long.toHexString(amount)));
         parts.sort(String::compareTo);
         return String.join("|", parts);
     }

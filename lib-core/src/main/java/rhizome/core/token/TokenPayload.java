@@ -18,13 +18,13 @@ import rhizome.core.transaction.TransactionKind;
  */
 public final class TokenPayload {
 
-    private final byte[] tokenId;   // null for MINT
+    private final TokenId tokenId;  // null for MINT
     private final long amount;
     private final int decimals;     // MINT only
     private final String symbol;    // MINT only
     private final String name;      // MINT only
 
-    private TokenPayload(byte[] tokenId, long amount, int decimals, String symbol, String name) {
+    private TokenPayload(TokenId tokenId, long amount, int decimals, String symbol, String name) {
         this.tokenId = tokenId;
         this.amount = amount;
         this.decimals = decimals;
@@ -32,8 +32,8 @@ public final class TokenPayload {
         this.name = name;
     }
 
-    public byte[] tokenId() {
-        return tokenId == null ? null : tokenId.clone();
+    public TokenId tokenId() {
+        return tokenId;
     }
 
     public long amount() {
@@ -67,9 +67,9 @@ public final class TokenPayload {
         return buffer.array();
     }
 
-    public static byte[] encodeAmount(byte[] tokenId, long amount) {
+    public static byte[] encodeAmount(TokenId tokenId, long amount) {
         ByteBuffer buffer = ByteBuffer.allocate(32 + 8);
-        buffer.put(tokenId);
+        buffer.put(tokenId.toBytes());
         buffer.putLong(amount);
         return buffer.array();
     }
@@ -120,7 +120,7 @@ public final class TokenPayload {
         if (amount <= 0) {
             throw new IllegalArgumentException("amount must be positive");
         }
-        return new TokenPayload(tokenId, amount, 0, null, null);
+        return new TokenPayload(TokenId.of(tokenId), amount, 0, null, null);
     }
 
     private static String readString(ByteBuffer buffer, int max, String what) {

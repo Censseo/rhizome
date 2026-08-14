@@ -28,6 +28,8 @@ import rhizome.core.mempool.ExecutionStatus;
 import rhizome.core.merkletree.MerkleTree;
 import rhizome.core.token.DefaultTokenProcessor;
 import rhizome.core.token.InMemoryTokenStore;
+import rhizome.core.token.TokenBalanceKey;
+import rhizome.core.token.TokenId;
 import rhizome.core.token.TokenMeta;
 import rhizome.core.token.TokenPayload;
 import rhizome.core.transaction.Transaction;
@@ -100,29 +102,29 @@ class TokenConsensusTest {
 
     @Test
     void mintTransferBurnThenPop() {
-        byte[] id = TokenMeta.deriveId(sender, 0);
+        rhizome.core.token.TokenId id = TokenMeta.deriveId(sender, 0);
 
         assertEquals(ExecutionStatus.SUCCESS, mine(List.of(tokenTx(TransactionKind.TOKEN_MINT, sender,
             TokenPayload.encodeMint(1_000, 2, "PNDA", "Panda"), 0))));
         assertNotNull(engine.tokenMeta(id));
-        assertEquals(1_000, engine.tokenBalance(id, sender.toBytes()));
+        assertEquals(1_000, engine.tokenBalance(rhizome.core.token.TokenBalanceKey.of(id, sender)));
 
         assertEquals(ExecutionStatus.SUCCESS, mine(List.of(tokenTx(TransactionKind.TOKEN_TRANSFER, bob,
             TokenPayload.encodeAmount(id, 400), 1))));
-        assertEquals(400, engine.tokenBalance(id, bob.toBytes()));
+        assertEquals(400, engine.tokenBalance(rhizome.core.token.TokenBalanceKey.of(id, bob)));
 
         assertEquals(ExecutionStatus.SUCCESS, mine(List.of(tokenTx(TransactionKind.TOKEN_BURN, sender,
             TokenPayload.encodeAmount(id, 100), 2))));
-        assertEquals(500, engine.tokenBalance(id, sender.toBytes()));
+        assertEquals(500, engine.tokenBalance(rhizome.core.token.TokenBalanceKey.of(id, sender)));
         assertEquals(900, engine.tokenMeta(id).totalSupply());
 
         ChainEngineTestAccess.popBlock(engine); // undo burn
-        assertEquals(600, engine.tokenBalance(id, sender.toBytes()));
+        assertEquals(600, engine.tokenBalance(rhizome.core.token.TokenBalanceKey.of(id, sender)));
         assertEquals(1_000, engine.tokenMeta(id).totalSupply());
 
         ChainEngineTestAccess.popBlock(engine); // undo transfer
-        assertEquals(0, engine.tokenBalance(id, bob.toBytes()));
-        assertEquals(1_000, engine.tokenBalance(id, sender.toBytes()));
+        assertEquals(0, engine.tokenBalance(rhizome.core.token.TokenBalanceKey.of(id, bob)));
+        assertEquals(1_000, engine.tokenBalance(rhizome.core.token.TokenBalanceKey.of(id, sender)));
 
         ChainEngineTestAccess.popBlock(engine); // undo mint
         assertNull(engine.tokenMeta(id));
