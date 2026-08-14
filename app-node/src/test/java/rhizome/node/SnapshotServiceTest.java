@@ -24,6 +24,7 @@ import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.InMemoryNonceStore;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
+import rhizome.core.blockchain.TestNodeStores;
 import rhizome.core.box.DefaultBoxProcessor;
 import rhizome.core.box.InMemoryBoxStore;
 import rhizome.core.ledger.InMemoryLedger;
@@ -81,9 +82,15 @@ class SnapshotServiceTest {
         LedgerSnapshot genesis = new LedgerSnapshot("t", 0, PARAMS.chainId());
         genesis.put(sender, new TransactionAmount(5_000_000L));
 
-        engine = ChainEngine.init(PARAMS, ledger, new InMemoryChainStore(), nonces, genesis, null,
-            clock::get, null, null, new DefaultBoxProcessor(boxStore, PARAMS),
-            new DefaultTokenProcessor(tokenStore, PARAMS), accumulator);
+        engine = ChainEngine.boot(
+                PARAMS,
+                TestNodeStores.mixing(ledger, new InMemoryChainStore(), nonces),
+                genesis)
+            .clock(clock::get)
+            .boxes(new DefaultBoxProcessor(boxStore, PARAMS))
+            .tokens(new DefaultTokenProcessor(tokenStore, PARAMS))
+            .stateAccumulator(accumulator)
+            .build();
 
         // Two blocks with a transfer each, so the exported state is not just the genesis balance.
         PublicAddress miner = PublicAddress.random();

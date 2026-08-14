@@ -22,6 +22,7 @@ import rhizome.core.blockchain.ChainEngineTestAccess;
 import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
+import rhizome.core.blockchain.TestNodeStores;
 import rhizome.core.box.BoxPayload;
 import rhizome.core.box.BoxRegister;
 import rhizome.core.box.DefaultBoxProcessor;
@@ -96,8 +97,12 @@ class StateRootConsensusTest {
         LedgerSnapshot snapshot = new LedgerSnapshot("t", 0, params.chainId());
         snapshot.put(sender, new TransactionAmount(10_000_000L));
 
-        engine = ChainEngine.init(params, ledger, new InMemoryChainStore(), snapshot, null,
-            clock::get, null, null, boxes, tokens, accumulator);
+        engine = ChainEngine.boot(params, TestNodeStores.mixing(ledger, new InMemoryChainStore()), snapshot)
+            .clock(clock::get)
+            .boxes(boxes)
+            .tokens(tokens)
+            .stateAccumulator(accumulator)
+            .build();
     }
 
     private Transaction transfer(long amount, long nonce) {
@@ -161,8 +166,11 @@ class StateRootConsensusTest {
         LedgerSnapshot snap = new LedgerSnapshot("t", 0, params.chainId());
         snap.put(sender, new TransactionAmount(10_000_000L));
 
-        ChainEngine e1 = ChainEngine.init(params, led, chain, snap, null, clock::get,
-            null, null, boxProc, null, acc);
+        ChainEngine e1 = ChainEngine.boot(params, TestNodeStores.mixing(led, chain), snap)
+            .clock(clock::get)
+            .boxes(boxProc)
+            .stateAccumulator(acc)
+            .build();
         // A real coinbase-only block 2: chain and accumulator commit at height 2.
         var b = (BlockImpl) BlockImpl.builder().id(2).timestamp(clock.addAndGet(1000))
             .difficulty(e1.difficulty()).lastBlockHash(e1.tipHash()).build();
@@ -188,8 +196,11 @@ class StateRootConsensusTest {
 
         // Restart: a fresh engine + fresh box processor over the SAME stores reconciles down to 2.
         DefaultBoxProcessor boxProc2 = new DefaultBoxProcessor(boxStore, params);
-        ChainEngine e2 = ChainEngine.init(params, led, chain, snap, null, clock::get,
-            null, null, boxProc2, null, acc);
+        ChainEngine e2 = ChainEngine.boot(params, TestNodeStores.mixing(led, chain), snap)
+            .clock(clock::get)
+            .boxes(boxProc2)
+            .stateAccumulator(acc)
+            .build();
         assertEquals(2, e2.height());
         assertEquals(2, acc.committedHeight(), "state accumulator rewound to the chain height");
         assertArrayEquals(rootAt2, e2.stateRoot(), "state root restored to the consistent height");

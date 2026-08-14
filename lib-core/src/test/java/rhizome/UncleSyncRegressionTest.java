@@ -24,6 +24,7 @@ import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
 import rhizome.core.blockchain.PeerSource;
+import rhizome.core.blockchain.TestNodeStores;
 import rhizome.core.ledger.InMemoryLedger;
 import rhizome.core.ledger.Ledger;
 import rhizome.core.ledger.LedgerSnapshot;
@@ -62,8 +63,7 @@ class UncleSyncRegressionTest {
 
     private static ChainEngine newEngine() {
         LedgerSnapshot snapshot = new LedgerSnapshot("test", 0, PARAMS.chainId());
-        return ChainEngine.init(PARAMS, new InMemoryLedger(), new InMemoryChainStore(),
-            snapshot, null, () -> NOW);
+        return ChainEngine.boot(PARAMS, TestNodeStores.inMemory(), snapshot).clock(() -> NOW).build();
     }
 
     /** Mines an empty block onto {@code engine}. */
@@ -290,7 +290,10 @@ class UncleSyncRegressionTest {
         LedgerSnapshot snapshot = new LedgerSnapshot("test", 0, PARAMS.chainId());
         Ledger ledger = new InMemoryLedger();
         ChainStore store = new InMemoryChainStore();
-        ChainEngine node = ChainEngine.init(PARAMS, ledger, store, snapshot, null, () -> NOW);
+        ChainEngine node = ChainEngine.boot(
+                PARAMS,
+                TestNodeStores.mixing(ledger, store),
+                snapshot).clock(() -> NOW).build();
         mineBlock(node, PublicAddress.random(), clock);              // height 2
         BlockImpl orphan = mineOrphan(node, clock);                  // orphan @ height 2
         mineNephew(node, orphan, clock);                             // height 3, cites the uncle
@@ -299,7 +302,10 @@ class UncleSyncRegressionTest {
 
         // Logical restart: a fresh engine over the same store. Its orphan pool is empty (the
         // LRU's content is gone), so only the persisted uncle body can answer.
-        ChainEngine restarted = ChainEngine.init(PARAMS, ledger, store, snapshot, null, () -> NOW);
+        ChainEngine restarted = ChainEngine.boot(
+                PARAMS,
+                TestNodeStores.mixing(ledger, store),
+                snapshot).clock(() -> NOW).build();
         Block served = restarted.orphanBlock(orphan.hash());
         assertNotNull(served, "the persisted uncle survives the restart / empty pool");
         assertEquals(orphan.hash(), served.hash());
@@ -326,7 +332,10 @@ class UncleSyncRegressionTest {
         LedgerSnapshot snapshot = new LedgerSnapshot("test", 0, PARAMS.chainId());
         Ledger ledger = new InMemoryLedger();
         ChainStore store = new InMemoryChainStore();
-        ChainEngine node = ChainEngine.init(PARAMS, ledger, store, snapshot, null, () -> NOW);
+        ChainEngine node = ChainEngine.boot(
+                PARAMS,
+                TestNodeStores.mixing(ledger, store),
+                snapshot).clock(() -> NOW).build();
         PublicAddress miner = PublicAddress.random();
         mineBlock(node, miner, clock);                              // height 2
         BlockImpl orphan = mineOrphan(node, clock);                 // orphan @ height 2
@@ -349,7 +358,10 @@ class UncleSyncRegressionTest {
         assertEquals(6, peer.height());
 
         // Logical restart: same store, empty pool — the persisted uncle is the only source.
-        ChainEngine restarted = ChainEngine.init(PARAMS, ledger, store, snapshot, null, () -> NOW);
+        ChainEngine restarted = ChainEngine.boot(
+                PARAMS,
+                TestNodeStores.mixing(ledger, store),
+                snapshot).clock(() -> NOW).build();
         Result result = new HeaderSynchronizer(restarted).syncFrom(new FullPeer(peer));
 
         assertEquals(Result.REORGED, result,

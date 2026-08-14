@@ -23,6 +23,7 @@ import rhizome.core.blockchain.Contracts;
 import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
+import rhizome.core.blockchain.TestNodeStores;
 import rhizome.crypto.PowAlgorithm;
 import rhizome.crypto.PrivateKey;
 import rhizome.crypto.PublicKey;
@@ -123,7 +124,10 @@ class TokenPairTest {
         snapshot.put(sender, new TransactionAmount(100_000_000L));
 
         processor = new WasmContractProcessor(new WasmVm(), contracts);
-        engine = ChainEngine.init(params, ledger, store, snapshot, null, clock::get, null, processor);
+        engine = ChainEngine.boot(params, TestNodeStores.mixing(ledger, store), snapshot)
+            .clock(clock::get)
+            .contracts(processor)
+            .build();
 
         tokenA = Contracts.deriveAddress(sender, 0);
         tokenB = Contracts.deriveAddress(sender, 1);

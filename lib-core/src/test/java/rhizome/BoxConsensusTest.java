@@ -21,6 +21,7 @@ import rhizome.core.blockchain.ChainEngineTestAccess;
 import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
+import rhizome.core.blockchain.TestNodeStores;
 import rhizome.core.box.Box;
 import rhizome.core.box.BoxPayload;
 import rhizome.core.box.BoxProcessor;
@@ -86,7 +87,10 @@ class BoxConsensusTest {
         LedgerSnapshot snapshot = new LedgerSnapshot("t", 0, params.chainId());
         snapshot.put(sender, new TransactionAmount(10_000_000L));
 
-        engine = ChainEngine.init(params, ledger, store, snapshot, null, clock::get, null, null, boxes);
+        engine = ChainEngine.boot(params, TestNodeStores.mixing(ledger, store), snapshot)
+            .clock(clock::get)
+            .boxes(boxes)
+            .build();
         var verifier = new rhizome.core.blockchain.SignatureVerifier();
         mempool = new MemPool(params, verifier, engine, 1024);
     }
@@ -219,8 +223,10 @@ class BoxConsensusTest {
         // the scenario that corrupted the ledger when receipts were RAM-only.
         LedgerSnapshot snapshot = new LedgerSnapshot("t", 0, params.chainId());
         snapshot.put(sender, new TransactionAmount(10_000_000L));
-        ChainEngine restartedEngine = ChainEngine.init(params, ledger, store, snapshot, null,
-            clock::get, null, null, restarted);
+        ChainEngine restartedEngine = ChainEngine.boot(params, TestNodeStores.mixing(ledger, store), snapshot)
+            .clock(clock::get)
+            .boxes(restarted)
+            .build();
         ChainEngineTestAccess.popBlock(restartedEngine);
         assertNull(restartedEngine.box(id));
         assertEquals(start, ledger.getWalletValue(sender).amount());
@@ -249,8 +255,14 @@ class BoxConsensusTest {
         snapshot.put(sender, new TransactionAmount(10_000_000L));
         var accumulator = new StateAccumulator(new InMemorySmtNodeStore(), new InMemoryRootStore(),
             deepParams.maxReorgDepth());
-        ChainEngine deepEngine = ChainEngine.init(deepParams, deepLedger, new InMemoryChainStore(),
-            snapshot, null, deepClock::get, null, null, deepBoxes, null, accumulator);
+        ChainEngine deepEngine = ChainEngine.boot(
+                deepParams,
+                TestNodeStores.mixing(deepLedger, new InMemoryChainStore()),
+                snapshot)
+            .clock(deepClock::get)
+            .boxes(deepBoxes)
+            .stateAccumulator(accumulator)
+            .build();
 
         // Assemble exactly like the producer: stamp the root BEFORE mining the nonce.
         java.util.function.Function<List<Transaction>, ExecutionStatus> mineStamped = txs -> {

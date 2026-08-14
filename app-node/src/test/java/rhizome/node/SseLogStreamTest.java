@@ -21,10 +21,9 @@ import org.junit.jupiter.api.Test;
 
 import rhizome.core.blockchain.ChainEngine;
 import rhizome.core.blockchain.ContractApi.ContractLog;
-import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.NetworkParameters;
+import rhizome.core.blockchain.TestNodeStores;
 import rhizome.crypto.PowAlgorithm;
-import rhizome.core.ledger.InMemoryLedger;
 import rhizome.core.ledger.LedgerSnapshot;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.mempool.MemPool;
@@ -47,8 +46,12 @@ class SseLogStreamTest {
             .powAlgorithm(PowAlgorithm.SHA256).genesisDifficulty(4).build();
         eventloop = Eventloop.create();
         AtomicLong clock = new AtomicLong(0);
-        ChainEngine engine = ChainEngine.init(params, new InMemoryLedger(), new InMemoryChainStore(),
-            new LedgerSnapshot("t", 0, params.chainId()), null, clock::get);
+        ChainEngine engine = ChainEngine.boot(
+                params,
+                TestNodeStores.inMemory(),
+                new LedgerSnapshot("t", 0, params.chainId()))
+            .clock(clock::get)
+            .build();
         var node = new NodeService(engine, new MemPool(params, null, engine, 100));
 
         hub = new SseLogHub(eventloop, 2);

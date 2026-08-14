@@ -21,6 +21,7 @@ import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.InMemoryNonceStore;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
+import rhizome.core.blockchain.TestNodeStores;
 import rhizome.core.box.BoxPayload;
 import rhizome.core.box.BoxRegister;
 import rhizome.core.box.DefaultBoxProcessor;
@@ -99,8 +100,15 @@ class StateSnapshotTest {
         LedgerSnapshot snapshot = new LedgerSnapshot("t", 0, params.chainId());
         snapshot.put(sender, new TransactionAmount(10_000_000L));
 
-        engine = ChainEngine.init(params, ledger, new InMemoryChainStore(), nonces, snapshot, null,
-            clock::get, null, null, boxes, tokens, accumulator);
+        engine = ChainEngine.boot(
+                params,
+                TestNodeStores.mixing(ledger, new InMemoryChainStore(), nonces),
+                snapshot)
+            .clock(clock::get)
+            .boxes(boxes)
+            .tokens(tokens)
+            .stateAccumulator(accumulator)
+            .build();
 
         // Build real state: a transfer (ledger + nonce), a data box, a token mint.
         boxId = rhizome.core.box.Box.deriveId(sender, 1);

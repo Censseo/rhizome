@@ -10,7 +10,7 @@ import rhizome.core.ledger.Ledger;
  * atomic batch: the append stages pending ledger and nonce writes into the same durable batch as
  * the block. That batch only exists because the three views sit on one RocksDB instance. Passed
  * as three separate parameters, that requirement was a convention — nothing in the type system
- * stopped a caller handing {@link ChainEngine#init} a RocksDB chain store, a RocksDB ledger and an
+ * stopped a caller handing {@link ChainEngine#boot} a RocksDB chain store, a RocksDB ledger and an
  * unrelated {@code InMemoryNonceStore}. A crash would then lose the nonces the committed blocks
  * already assumed.
  *
@@ -24,6 +24,11 @@ import rhizome.core.ledger.Ledger;
  *
  * <p>No default methods, like {@link BootstrapTarget}: an implementation states all three or does
  * not exist.
+ *
+ * <p>No factories here either. An aggregate that skips the one-database requirement is a test
+ * affordance, so it lives in this module's test fixtures ({@code TestNodeStores}) where production
+ * cannot reach it. Offering it from this interface would hand back, one static method below the
+ * requirement, exactly what the requirement exists to forbid.
  */
 public interface NodeStores {
 

@@ -22,6 +22,7 @@ import rhizome.core.blockchain.Contracts;
 import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
+import rhizome.core.blockchain.TestNodeStores;
 import rhizome.crypto.PowAlgorithm;
 import rhizome.crypto.PrivateKey;
 import rhizome.crypto.PublicKey;
@@ -102,7 +103,10 @@ class AmmContractTest {
         snapshot.put(sender, new TransactionAmount(100_000_000L));
 
         processor = new WasmContractProcessor(new WasmVm(), contracts);
-        engine = ChainEngine.init(params, ledger, store, snapshot, null, clock::get, null, processor);
+        engine = ChainEngine.boot(params, TestNodeStores.mixing(ledger, store), snapshot)
+            .clock(clock::get)
+            .contracts(processor)
+            .build();
     }
 
     private Transaction tx(long nonce, PublicAddress to, byte[] data, TransactionKind kind) {

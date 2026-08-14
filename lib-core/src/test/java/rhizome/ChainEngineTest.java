@@ -20,6 +20,7 @@ import rhizome.core.blockchain.ChainEngineTestAccess;
 import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
+import rhizome.core.blockchain.TestNodeStores;
 import rhizome.crypto.PowAlgorithm;
 import rhizome.crypto.PrivateKey;
 import rhizome.crypto.PublicKey;
@@ -70,7 +71,10 @@ class ChainEngineTest {
         LedgerSnapshot snapshot = new LedgerSnapshot("test", 0, params.chainId());
         snapshot.put(sender, new TransactionAmount(1_000_000L));
 
-        engine = ChainEngine.init(params, ledger, store, snapshot, null, clock::get);
+        engine = ChainEngine.boot(
+                params,
+                TestNodeStores.mixing(ledger, store),
+                snapshot).clock(clock::get).build();
     }
 
     private Transaction send(long amount, long fee, long nonce) {
@@ -251,7 +255,10 @@ class ChainEngineTest {
         // Clock aligned with the genesis timestamp (0), so the first retarget
         // window measures the 1s block cadence, not the genesis offset.
         AtomicLong fastClock = new AtomicLong(0);
-        ChainEngine e = ChainEngine.init(fast, l, s, snap, null, fastClock::get);
+        ChainEngine e = ChainEngine.boot(
+                fast,
+                TestNodeStores.mixing(l, s),
+                snap).clock(fastClock::get).build();
 
         int initialDifficulty = e.difficulty();
         PublicAddress m = PublicAddress.random();
@@ -283,7 +290,10 @@ class ChainEngineTest {
 
         LedgerSnapshot snapshot = new LedgerSnapshot("test", 0, params.chainId());
         snapshot.put(sender, new TransactionAmount(1_000_000L));
-        ChainEngine rebooted = ChainEngine.init(params, ledger, store, snapshot, null, clock::get);
+        ChainEngine rebooted = ChainEngine.boot(
+                params,
+                TestNodeStores.mixing(ledger, store),
+                snapshot).clock(clock::get).build();
 
         assertEquals(engine.height(), rebooted.height());
         assertEquals(engine.tipHash(), rebooted.tipHash());

@@ -10,11 +10,10 @@ import org.junit.jupiter.api.Test;
 import rhizome.core.block.Block;
 import rhizome.core.block.BlockImpl;
 import rhizome.core.blockchain.ChainEngine;
-import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
+import rhizome.core.blockchain.TestNodeStores;
 import rhizome.crypto.PowAlgorithm;
-import rhizome.core.ledger.InMemoryLedger;
 import rhizome.core.ledger.LedgerSnapshot;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.mempool.ExecutionStatus;
@@ -39,8 +38,12 @@ class MinBlockTimeTest {
         .build();
 
     private final AtomicLong now = new AtomicLong(1_000_000L);
-    private final ChainEngine engine = ChainEngine.init(PARAMS, new InMemoryLedger(),
-        new InMemoryChainStore(), new LedgerSnapshot("t", 0, PARAMS.chainId()), null, now::get);
+    private final ChainEngine engine = ChainEngine.boot(
+            PARAMS,
+            TestNodeStores.inMemory(),
+            new LedgerSnapshot("t", 0, PARAMS.chainId()))
+        .clock(now::get)
+        .build();
     private final PublicAddress miner = PublicAddress.random();
 
     /** Builds a fully valid next block with an explicit timestamp (not added). */

@@ -78,8 +78,13 @@ class StateDomainOrderTest {
             params.maxReorgDepth());
 
         LedgerSnapshot snapshot = new LedgerSnapshot("t", 0, params.chainId());
-        engine = ChainEngine.init(params, ledger, new InMemoryChainStore(), snapshot, null,
-            clock::get, null, contracts, boxes, tokens, accumulator);
+        engine = ChainEngine.boot(params, TestNodeStores.mixing(ledger, new InMemoryChainStore()), snapshot)
+            .clock(clock::get)
+            .contracts(contracts)
+            .boxes(boxes)
+            .tokens(tokens)
+            .stateAccumulator(accumulator)
+            .build();
     }
 
     private BlockImpl mine() {

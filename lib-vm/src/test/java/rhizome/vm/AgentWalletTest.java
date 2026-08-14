@@ -22,6 +22,7 @@ import rhizome.core.blockchain.Contracts;
 import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
+import rhizome.core.blockchain.TestNodeStores;
 import rhizome.crypto.PowAlgorithm;
 import rhizome.crypto.PrivateKey;
 import rhizome.crypto.PublicKey;
@@ -120,7 +121,10 @@ class AgentWalletTest {
         snapshot.put(agent, new TransactionAmount(50_000_000L)); // gas money of its own
 
         processor = new WasmContractProcessor(new WasmVm(), contracts);
-        engine = ChainEngine.init(params, ledger, store, snapshot, null, clock::get, null, processor);
+        engine = ChainEngine.boot(params, TestNodeStores.mixing(ledger, store), snapshot)
+            .clock(clock::get)
+            .contracts(processor)
+            .build();
 
         token = Contracts.deriveAddress(owner, 0);
         wallet = Contracts.deriveAddress(owner, 1);

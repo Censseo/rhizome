@@ -19,6 +19,11 @@ dependencies {
 
     implementation "org.slf4j:slf4j-api:${slf4jVersion}"
     runtimeOnly "ch.qos.logback:logback-classic:${logbackVersion}"
+
+    // TestNodeStores: ChainEngine.boot takes ONE NodeStores, and only RocksDbNodeStore is one.
+    // The aggregate that lets a test hand it three unrelated views lives in lib-core's fixtures
+    // precisely so this module's MAIN source set cannot reach it — test-scoped here on purpose.
+    testImplementation testFixtures(project(':lib-core'))
 }
 
 application {

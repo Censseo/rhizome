@@ -24,6 +24,7 @@ import rhizome.core.blockchain.LocalSaturationException;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
 import rhizome.core.blockchain.PeerSource;
+import rhizome.core.blockchain.TestNodeStores;
 import rhizome.crypto.PowAlgorithm;
 import rhizome.crypto.SHA256Hash;
 import rhizome.core.ledger.InMemoryLedger;
@@ -50,8 +51,7 @@ class ChainSynchronizerTest {
 
     private static ChainEngine newEngine(NetworkParameters params) {
         LedgerSnapshot snapshot = new LedgerSnapshot("test", 0, params.chainId());
-        return ChainEngine.init(params, new InMemoryLedger(), new InMemoryChainStore(),
-            snapshot, null, () -> NOW);
+        return ChainEngine.boot(params, TestNodeStores.inMemory(), snapshot).clock(() -> NOW).build();
     }
 
     /** Mines empty blocks onto {@code engine} using {@code miner}; the engine shares {@code clock}. */
@@ -362,8 +362,12 @@ class ChainSynchronizerTest {
         AtomicLong localClock = new AtomicLong(1000);
         PublicAddress localMiner = PublicAddress.random();
         LedgerSnapshot snapshot = new LedgerSnapshot("test", 0, prunedParams.chainId());
-        ChainEngine local = ChainEngine.init(prunedParams, new InMemoryLedger(), new PrunedChainStore(7),
-            snapshot, null, () -> NOW);
+        ChainEngine local = ChainEngine.boot(
+                prunedParams,
+                TestNodeStores.mixing(new InMemoryLedger(), new PrunedChainStore(7)),
+                snapshot)
+            .clock(() -> NOW)
+            .build();
         List<Block> kept = new ArrayList<>();
         for (int i = 0; i < 7; i++) {
             kept.add(mineOne(local, localMiner, localClock, prunedParams)); // heights 2..8
@@ -394,7 +398,12 @@ class ChainSynchronizerTest {
         AtomicLong clock = new AtomicLong(1000);
         PopCountingStore store = new PopCountingStore();
         LedgerSnapshot snapshot = new LedgerSnapshot("test", 0, PARAMS.chainId());
-        ChainEngine local = ChainEngine.init(PARAMS, new InMemoryLedger(), store, snapshot, null, () -> NOW);
+        ChainEngine local = ChainEngine.boot(
+                PARAMS,
+                TestNodeStores.mixing(new InMemoryLedger(), store),
+                snapshot)
+            .clock(() -> NOW)
+            .build();
         mineBlocks(local, PublicAddress.random(), clock, 3); // heights 2..4 at difficulty 4
         SHA256Hash tipBefore = local.tipHash();
         BigInteger workBefore = local.totalWork();

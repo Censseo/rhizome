@@ -201,9 +201,14 @@ public final class RhizomeNode implements AutoCloseable {
             // Contracts read data boxes (Ergo-style data inputs) through the box processor's
             // session-aware view, so a box written earlier in the block is visible.
             contractProcessor.setBoxReader(boxProcessor::get);
-            var engine = ChainEngine.init(config.params(), store, snapshot, null,
-                System::currentTimeMillis, verifier, contractProcessor, boxProcessor, tokenProcessor,
-                stateAccumulator);
+            var engine = ChainEngine.boot(config.params(), store, snapshot)
+                .clock(System::currentTimeMillis)
+                .verifier(verifier)
+                .contracts(contractProcessor)
+                .boxes(boxProcessor)
+                .tokens(tokenProcessor)
+                .stateAccumulator(stateAccumulator)
+                .build();
             var mempool = new MemPool(config.params(), verifier, engine, config.mempoolSize());
             // Every node keeps a live peer set (seeded from config), serves /peers and
             // accepts announcements, so the network can self-organise from a few seeds.

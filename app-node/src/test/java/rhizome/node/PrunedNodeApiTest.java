@@ -24,6 +24,7 @@ import rhizome.core.block.BlockHeader;
 import rhizome.core.blockchain.ChainEngine;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
+import rhizome.core.blockchain.TestNodeStores;
 import rhizome.core.block.BlockImpl;
 import rhizome.crypto.PowAlgorithm;
 import rhizome.core.ledger.LedgerSnapshot;
@@ -61,8 +62,9 @@ class PrunedNodeApiTest {
         int keep = 5;
         store = new RocksDbNodeStore(tempDir.resolve("db").toString(), keep);
         AtomicLong clock = new AtomicLong(0);
-        ChainEngine engine = ChainEngine.init(PARAMS, store.ledger(), store.chainStore(), store.nonceStore(),
-            new LedgerSnapshot("t", 0, PARAMS.chainId()), null, clock::get, null, null, null, null, null);
+        ChainEngine engine = ChainEngine.boot(PARAMS, store, new LedgerSnapshot("t", 0, PARAMS.chainId()))
+            .clock(clock::get)
+            .build();
         PublicAddress miner = PublicAddress.random();
         for (int i = 0; i < 10; i++) {
             long h = engine.height() + 1;

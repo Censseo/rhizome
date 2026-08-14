@@ -21,6 +21,7 @@ import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
 import rhizome.core.blockchain.PeerSource;
+import rhizome.core.blockchain.TestNodeStores;
 import rhizome.crypto.PowAlgorithm;
 import rhizome.crypto.SHA256Hash;
 import rhizome.core.ledger.InMemoryLedger;
@@ -43,8 +44,12 @@ class HardeningTest {
     private static final long NOW = 100_000_000_000L;
 
     private static ChainEngine engine(NetworkParameters params, ChainStore store) {
-        return ChainEngine.init(params, new InMemoryLedger(), store,
-            new LedgerSnapshot("t", 0, params.chainId()), null, () -> NOW);
+        return ChainEngine.boot(
+                params,
+                TestNodeStores.mixing(new InMemoryLedger(), store),
+                new LedgerSnapshot("t", 0, params.chainId()))
+            .clock(() -> NOW)
+            .build();
     }
 
     private static Block mineNext(ChainEngine e, AtomicLong clock) {

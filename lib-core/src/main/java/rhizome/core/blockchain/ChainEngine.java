@@ -220,8 +220,9 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
         this.verifier = verifier;
         // Null means "this node has no such domain". Normalize it once, here, to the absent
         // singleton: every downstream site then talks to a processor instead of guarding against a
-        // null one, and "absent" is expressed by available() rather than by identity. The public
-        // init() overloads keep accepting null, so no caller changes.
+        // null one, and "absent" is expressed by available() rather than by identity. Boot never
+        // passes null deliberately — a domain is absent because no setter named it — but this
+        // constructor is the last line of defence and normalizes anyway.
         this.contractProcessor = contractProcessor == null ? ContractProcessor.NONE : contractProcessor;
         this.boxProcessor = boxProcessor == null ? rhizome.core.box.BoxProcessor.NONE : boxProcessor;
         this.tokenProcessor =
@@ -236,124 +237,143 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
     }
 
     /**
-     * Boots a chain: on an empty store, verifies the snapshot against
-     * {@code expectedGenesisHash} (null for a brand-new network), seeds the
-     * ledger and appends genesis. On a non-empty store, verifies the stored
-     * genesis matches and rebuilds derived state (difficulty, work, nonces).
-     */
-    public static ChainEngine init(NetworkParameters params, Ledger ledger, ChainStore store,
-                                   LedgerSnapshot snapshot, SHA256Hash expectedGenesisHash,
-                                   LongSupplier nowMillis) {
-        return init(params, ledger, store, snapshot, expectedGenesisHash, nowMillis, null);
-    }
-
-    /** As {@link #init}, with a shared {@link SignatureVerifier} for fast parallel/cached signature checks. */
-    public static ChainEngine init(NetworkParameters params, Ledger ledger, ChainStore store,
-                                   LedgerSnapshot snapshot, SHA256Hash expectedGenesisHash,
-                                   LongSupplier nowMillis, SignatureVerifier verifier) {
-        return init(params, ledger, store, snapshot, expectedGenesisHash, nowMillis, verifier, null);
-    }
-
-    /** As {@link #init}, with a {@link ContractProcessor} enabling contract transactions. */
-    public static ChainEngine init(NetworkParameters params, Ledger ledger, ChainStore store,
-                                   LedgerSnapshot snapshot, SHA256Hash expectedGenesisHash,
-                                   LongSupplier nowMillis, SignatureVerifier verifier,
-                                   ContractProcessor contractProcessor) {
-        return init(params, ledger, store, snapshot, expectedGenesisHash, nowMillis, verifier,
-            contractProcessor, null);
-    }
-
-    /** As {@link #init}, additionally enabling box transactions via a {@link rhizome.core.box.BoxProcessor}. */
-    public static ChainEngine init(NetworkParameters params, Ledger ledger, ChainStore store,
-                                   LedgerSnapshot snapshot, SHA256Hash expectedGenesisHash,
-                                   LongSupplier nowMillis, SignatureVerifier verifier,
-                                   ContractProcessor contractProcessor,
-                                   rhizome.core.box.BoxProcessor boxProcessor) {
-        return init(params, ledger, store, snapshot, expectedGenesisHash, nowMillis, verifier,
-            contractProcessor, boxProcessor, null);
-    }
-
-    /** As {@link #init}, additionally enabling native-token transactions via a {@link rhizome.core.token.TokenProcessor}. */
-    public static ChainEngine init(NetworkParameters params, Ledger ledger, ChainStore store,
-                                   LedgerSnapshot snapshot, SHA256Hash expectedGenesisHash,
-                                   LongSupplier nowMillis, SignatureVerifier verifier,
-                                   ContractProcessor contractProcessor,
-                                   rhizome.core.box.BoxProcessor boxProcessor,
-                                   rhizome.core.token.TokenProcessor tokenProcessor) {
-        return init(params, ledger, store, snapshot, expectedGenesisHash, nowMillis, verifier,
-            contractProcessor, boxProcessor, tokenProcessor, null);
-    }
-
-    /**
-     * As {@link #init}, additionally committing an authenticated state root via a
-     * {@link rhizome.core.state.StateAccumulator}.
+     * Starts building a chain engine over one node database.
      *
-     * <p>⚠ Fabricates a volatile {@link InMemoryNonceStore}: test-only. A durable node must pass
-     * its own store's nonce view, or a restart loses nonces the store's other durable views
-     * already assumed committed — see the {@link #init(NetworkParameters, NodeStores,
-     * LedgerSnapshot, SHA256Hash, LongSupplier, SignatureVerifier, ContractProcessor,
-     * rhizome.core.box.BoxProcessor, rhizome.core.token.TokenProcessor,
-     * rhizome.core.state.StateAccumulator) NodeStores overload} for that case.
+     * <p>This replaced eight positional {@code init} overloads. They had grown one parameter at a
+     * time, so the optional half of the argument list was a fixed order of nullable slots —
+     * verifier, contracts, boxes, tokens, accumulator — and the common call passed a run of five
+     * {@code null}s to reach the one it wanted. A {@code null} in the wrong slot is not a compile
+     * error and not a runtime one either: it silently disables a consensus domain, and the engine
+     * comes up refusing every token (or box, or contract) transaction as unsupported. Two of the
+     * overloads had also converged on the same arity, resolved only by the static type of the
+     * second argument. Naming each optional part removes both failure modes, and a domain the
+     * caller never names is now absent because it was never named, not because a {@code null}
+     * landed in its position.
+     *
+     * <p>The head is {@code (params, stores, snapshot)}: the three views must come from ONE
+     * database — see {@link NodeStores}. The overloads that took a loose {@code (ledger, store)}
+     * pair are gone; a test that deliberately mixes backends says so through
+     * {@code TestNodeStores.mixing} in this module's test fixtures, which production cannot
+     * reference.
+     *
+     * @param params  the network's consensus parameters
+     * @param stores  the chain store, ledger and nonce store of one node database
+     * @param snapshot the genesis ledger snapshot this chain starts from
      */
-    public static ChainEngine init(NetworkParameters params, Ledger ledger, ChainStore store,
-                                   LedgerSnapshot snapshot, SHA256Hash expectedGenesisHash,
-                                   LongSupplier nowMillis, SignatureVerifier verifier,
-                                   ContractProcessor contractProcessor,
-                                   rhizome.core.box.BoxProcessor boxProcessor,
-                                   rhizome.core.token.TokenProcessor tokenProcessor,
-                                   rhizome.core.state.StateAccumulator stateAccumulator) {
-        return init(params, ledger, store, new InMemoryNonceStore(), snapshot, expectedGenesisHash,
-            nowMillis, verifier, contractProcessor, boxProcessor, tokenProcessor, stateAccumulator);
+    public static Boot boot(NetworkParameters params, NodeStores stores, LedgerSnapshot snapshot) {
+        return new Boot(params, stores, snapshot);
     }
 
     /**
-     * As {@link #init}, with a persisted {@link NonceStore} so account nonces survive
-     * restarts and the boot rebuild need not walk historical transaction bodies.
+     * The only way to construct a {@link ChainEngine}. Required state is in
+     * {@link ChainEngine#boot}; everything below is optional and named.
+     *
+     * <p>Every setter rejects {@code null}. Absence is expressed by not calling the setter, so
+     * {@code .tokens(maybeNull)} cannot quietly produce a chain without native tokens — the exact
+     * accident the positional form allowed. A domain left unnamed resolves to its absent
+     * singleton, and {@link Executor} then rejects that domain's transactions by
+     * {@code available()} rather than ignoring them.
      */
-    public static ChainEngine init(NetworkParameters params, Ledger ledger, ChainStore store,
-                                   NonceStore nonceStore,
-                                   LedgerSnapshot snapshot, SHA256Hash expectedGenesisHash,
-                                   LongSupplier nowMillis, SignatureVerifier verifier,
-                                   ContractProcessor contractProcessor,
-                                   rhizome.core.box.BoxProcessor boxProcessor,
-                                   rhizome.core.token.TokenProcessor tokenProcessor,
-                                   rhizome.core.state.StateAccumulator stateAccumulator) {
-        ChainEngine engine = new ChainEngine(params, ledger, store, nonceStore, nowMillis, verifier,
-            contractProcessor, boxProcessor, tokenProcessor, stateAccumulator);
-        engine.genesisSnapshot = snapshot;
-        if (store.height() == 0) {
-            Block genesis = GenesisBlock.initChain(ledger, params, snapshot, expectedGenesisHash);
-            store.append(genesis);
-        } else if (!GenesisBlock.matches(store.blockAt(GenesisBlock.GENESIS_ID), params, snapshot)) {
-            throw new IllegalStateException("Stored genesis does not match network parameters and snapshot");
+    public static final class Boot {
+
+        private final NetworkParameters params;
+        private final NodeStores stores;
+        private final LedgerSnapshot snapshot;
+
+        private SHA256Hash expectedGenesisHash;
+        private LongSupplier nowMillis = System::currentTimeMillis;
+        private SignatureVerifier verifier;
+        private ContractProcessor contractProcessor;
+        private rhizome.core.box.BoxProcessor boxProcessor;
+        private rhizome.core.token.TokenProcessor tokenProcessor;
+        private rhizome.core.state.StateAccumulator stateAccumulator;
+
+        private Boot(NetworkParameters params, NodeStores stores, LedgerSnapshot snapshot) {
+            this.params = java.util.Objects.requireNonNull(params, "params");
+            this.stores = java.util.Objects.requireNonNull(stores, "stores");
+            this.snapshot = java.util.Objects.requireNonNull(snapshot, "snapshot");
         }
-        // Under the lock even though nothing else can see the engine yet: these three are tier-1
-        // methods, and "except at boot" is an exception every future reader would have to
-        // rediscover. One uncontended acquisition, once per process.
-        engine.runExclusive(() -> {
-            engine.reconcilePeripheralStores();
-            engine.rebuildDerivedState();
-            engine.seedGenesisStateRoot();
-        });
-        return engine;
-    }
 
-    /**
-     * As {@link #init}, taking the chain store, ledger and nonce store as ONE {@link NodeStores}
-     * so they cannot come from three different databases. This is the form production wiring
-     * uses; the ledger/store/nonceStore triple above stays for tests that deliberately mix
-     * backends (an in-memory chain store over a durable ledger, and similar).
-     */
-    public static ChainEngine init(NetworkParameters params, NodeStores stores,
-                                   LedgerSnapshot snapshot, SHA256Hash expectedGenesisHash,
-                                   LongSupplier nowMillis, SignatureVerifier verifier,
-                                   ContractProcessor contractProcessor,
-                                   rhizome.core.box.BoxProcessor boxProcessor,
-                                   rhizome.core.token.TokenProcessor tokenProcessor,
-                                   rhizome.core.state.StateAccumulator stateAccumulator) {
-        return init(params, stores.ledger(), stores.chainStore(), stores.nonceStore(), snapshot,
-            expectedGenesisHash, nowMillis, verifier, contractProcessor, boxProcessor,
-            tokenProcessor, stateAccumulator);
+        /**
+         * The genesis hash this chain must produce from {@code snapshot}. Set it when joining an
+         * existing network, where a snapshot that hashes to anything else is the wrong chain and
+         * must fail at boot rather than fork on block 2. Unset means "brand-new network": whatever
+         * genesis the snapshot yields is the chain's genesis by definition.
+         */
+        public Boot expectedGenesis(SHA256Hash expectedGenesisHash) {
+            this.expectedGenesisHash =
+                java.util.Objects.requireNonNull(expectedGenesisHash, "expectedGenesisHash");
+            return this;
+        }
+
+        /** The clock consensus reads. Defaults to {@code System::currentTimeMillis}; tests pin it. */
+        public Boot clock(LongSupplier nowMillis) {
+            this.nowMillis = java.util.Objects.requireNonNull(nowMillis, "nowMillis");
+            return this;
+        }
+
+        /** A shared {@link SignatureVerifier}, for cached and parallel signature checks. */
+        public Boot verifier(SignatureVerifier verifier) {
+            this.verifier = java.util.Objects.requireNonNull(verifier, "verifier");
+            return this;
+        }
+
+        /** Enables contract transactions. Unset, they are rejected as unsupported. */
+        public Boot contracts(ContractProcessor contractProcessor) {
+            this.contractProcessor =
+                java.util.Objects.requireNonNull(contractProcessor, "contractProcessor");
+            return this;
+        }
+
+        /** Enables data-box transactions. Unset, they are rejected as unsupported. */
+        public Boot boxes(rhizome.core.box.BoxProcessor boxProcessor) {
+            this.boxProcessor = java.util.Objects.requireNonNull(boxProcessor, "boxProcessor");
+            return this;
+        }
+
+        /** Enables native-token transactions. Unset, they are rejected as unsupported. */
+        public Boot tokens(rhizome.core.token.TokenProcessor tokenProcessor) {
+            this.tokenProcessor =
+                java.util.Objects.requireNonNull(tokenProcessor, "tokenProcessor");
+            return this;
+        }
+
+        /** Commits an authenticated state root in each header. Unset, headers carry none. */
+        public Boot stateAccumulator(rhizome.core.state.StateAccumulator stateAccumulator) {
+            this.stateAccumulator =
+                java.util.Objects.requireNonNull(stateAccumulator, "stateAccumulator");
+            return this;
+        }
+
+        /**
+         * Boots the chain: on an empty store, verifies the snapshot against
+         * {@link #expectedGenesis}, seeds the ledger and appends genesis. On a non-empty store,
+         * verifies the stored genesis matches and rebuilds derived state (difficulty, work,
+         * nonces).
+         */
+        public ChainEngine build() {
+            ChainEngine engine = new ChainEngine(params, stores.ledger(), stores.chainStore(),
+                stores.nonceStore(), nowMillis, verifier, contractProcessor, boxProcessor,
+                tokenProcessor, stateAccumulator);
+            engine.genesisSnapshot = snapshot;
+            ChainStore store = stores.chainStore();
+            if (store.height() == 0) {
+                Block genesis = GenesisBlock.initChain(stores.ledger(), params, snapshot,
+                    expectedGenesisHash);
+                store.append(genesis);
+            } else if (!GenesisBlock.matches(store.blockAt(GenesisBlock.GENESIS_ID), params, snapshot)) {
+                throw new IllegalStateException("Stored genesis does not match network parameters and snapshot");
+            }
+            // Under the lock even though nothing else can see the engine yet: these three are tier-1
+            // methods, and "except at boot" is an exception every future reader would have to
+            // rediscover. One uncontended acquisition, once per process.
+            engine.runExclusive(() -> {
+                engine.reconcilePeripheralStores();
+                engine.rebuildDerivedState();
+                engine.seedGenesisStateRoot();
+            });
+            return engine;
+        }
     }
 
     /**

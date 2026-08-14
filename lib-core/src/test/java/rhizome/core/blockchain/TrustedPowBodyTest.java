@@ -34,8 +34,12 @@ class TrustedPowBodyTest {
             .build();
         InMemoryLedger ledger = new InMemoryLedger();
         LedgerSnapshot snapshot = new LedgerSnapshot("t", 0, params.chainId());
-        ChainEngine engine = ChainEngine.init(params, ledger, new InMemoryChainStore(),
-            snapshot, null, () -> 100_000_000_000L);
+        ChainEngine engine = ChainEngine.boot(
+                params,
+                TestNodeStores.mixing(ledger, new InMemoryChainStore()),
+                snapshot)
+            .clock(() -> 100_000_000_000L)
+            .build();
 
         PublicAddress miner = PublicAddress.random();
         long h = engine.height() + 1;

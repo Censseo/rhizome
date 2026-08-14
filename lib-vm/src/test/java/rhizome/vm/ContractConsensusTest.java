@@ -22,6 +22,7 @@ import rhizome.core.blockchain.Contracts;
 import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
+import rhizome.core.blockchain.TestNodeStores;
 import rhizome.crypto.PowAlgorithm;
 import rhizome.crypto.PrivateKey;
 import rhizome.crypto.PublicKey;
@@ -95,7 +96,10 @@ class ContractConsensusTest {
         snapshot.put(sender, new TransactionAmount(10_000_000L));
 
         processor = new WasmContractProcessor(new WasmVm(), contracts);
-        engine = ChainEngine.init(params, ledger, store, snapshot, null, clock::get, null, processor);
+        engine = ChainEngine.boot(params, TestNodeStores.mixing(ledger, store), snapshot)
+            .clock(clock::get)
+            .contracts(processor)
+            .build();
     }
 
     private Transaction deployTx(long nonce, byte[] code) {
@@ -262,7 +266,10 @@ class ContractConsensusTest {
         LedgerSnapshot snapshot = new LedgerSnapshot("t", 0, params.chainId());
         snapshot.put(sender, new TransactionAmount(10_000_000L));
         processor = new WasmContractProcessor(new WasmVm(), contracts);
-        engine = ChainEngine.init(params, ledger, store, snapshot, null, clock::get, null, processor);
+        engine = ChainEngine.boot(params, TestNodeStores.mixing(ledger, store), snapshot)
+            .clock(clock::get)
+            .contracts(processor)
+            .build();
     }
 
     @Test

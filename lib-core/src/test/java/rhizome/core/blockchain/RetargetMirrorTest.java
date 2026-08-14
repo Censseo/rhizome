@@ -4,7 +4,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import rhizome.core.block.BlockImpl;
-import rhizome.core.ledger.InMemoryLedger;
 import rhizome.core.ledger.LedgerSnapshot;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.mempool.ExecutionStatus;
@@ -43,8 +42,12 @@ class RetargetMirrorTest {
             .medianTimeWindow(5).minBlockTimeSec(0).maxFutureBlockTimeSec(1_000_000).build();
         clock = new AtomicLong(1_000_000L);
         miner = PublicAddress.random();
-        engine = ChainEngine.init(params, new InMemoryLedger(), new InMemoryChainStore(),
-            new LedgerSnapshot("t", 0, params.chainId()), null, clock::get);
+        engine = ChainEngine.boot(
+                params,
+                TestNodeStores.inMemory(),
+                new LedgerSnapshot("t", 0, params.chainId()))
+            .clock(clock::get)
+            .build();
     }
 
     private void mine(long jitter) {

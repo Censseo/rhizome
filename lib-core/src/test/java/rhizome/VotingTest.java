@@ -10,15 +10,14 @@ import org.junit.jupiter.api.Test;
 import rhizome.core.block.BlockImpl;
 import rhizome.core.blockchain.ChainEngine;
 import rhizome.core.blockchain.ChainEngineTestAccess;
-import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
 import rhizome.core.blockchain.SignatureVerifier;
+import rhizome.core.blockchain.TestNodeStores;
 import rhizome.core.blockchain.VoteableParams;
 import rhizome.core.box.DefaultBoxProcessor;
 import rhizome.core.box.InMemoryBoxStore;
 import rhizome.crypto.PowAlgorithm;
-import rhizome.core.ledger.InMemoryLedger;
 import rhizome.core.ledger.LedgerSnapshot;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.mempool.ExecutionStatus;
@@ -52,8 +51,11 @@ class VotingTest {
         LedgerSnapshot snapshot = new LedgerSnapshot("t", 0, params.chainId());
         snapshot.put(PublicAddress.random(), new TransactionAmount(1_000_000L));
 
-        engine = ChainEngine.init(params, new InMemoryLedger(), new InMemoryChainStore(), snapshot, null,
-            clock::get, new SignatureVerifier(), null, boxes, null);
+        engine = ChainEngine.boot(params, TestNodeStores.inMemory(), snapshot)
+            .clock(clock::get)
+            .verifier(new SignatureVerifier())
+            .boxes(boxes)
+            .build();
     }
 
     private void mine(int vote) {

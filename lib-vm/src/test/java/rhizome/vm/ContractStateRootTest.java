@@ -22,6 +22,7 @@ import rhizome.core.blockchain.Contracts;
 import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
+import rhizome.core.blockchain.TestNodeStores;
 import rhizome.crypto.PowAlgorithm;
 import rhizome.crypto.PrivateKey;
 import rhizome.crypto.PublicKey;
@@ -99,8 +100,11 @@ class ContractStateRootTest {
         LedgerSnapshot snapshot = new LedgerSnapshot("t", 0, params.chainId());
         snapshot.put(sender, new TransactionAmount(10_000_000L));
 
-        engine = ChainEngine.init(params, ledger, new InMemoryChainStore(), snapshot, null,
-            clock::get, null, processor, null, null, accumulator);
+        engine = ChainEngine.boot(params, TestNodeStores.mixing(ledger, new InMemoryChainStore()), snapshot)
+            .clock(clock::get)
+            .contracts(processor)
+            .stateAccumulator(accumulator)
+            .build();
     }
 
     private Transaction deploy(long nonce) {

@@ -12,7 +12,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import rhizome.core.block.BlockImpl;
-import rhizome.core.ledger.InMemoryLedger;
 import rhizome.core.ledger.LedgerSnapshot;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.mempool.ExecutionStatus;
@@ -84,9 +83,19 @@ class DegradedBarrierTest {
         miner = PublicAddress.random();
     }
 
+    /** A chain with no contract domain at all — the control for the saboteur below. */
+    private ChainEngine newEngine() {
+        return newBoot().build();
+    }
+
     private ChainEngine newEngine(ContractProcessor contracts) {
-        return ChainEngine.init(params, new InMemoryLedger(), new InMemoryChainStore(),
-            new LedgerSnapshot("t", 0, params.chainId()), null, clock::get, null, contracts);
+        return newBoot().contracts(contracts).build();
+    }
+
+    private ChainEngine.Boot newBoot() {
+        return ChainEngine.boot(params, TestNodeStores.inMemory(),
+                new LedgerSnapshot("t", 0, params.chainId()))
+            .clock(clock::get);
     }
 
     /** A mined next block on the current tip (coinbase only). */
@@ -107,7 +116,7 @@ class DegradedBarrierTest {
     void failedPeripheralRevertLeavesStoreAndMemoryConsistentWithACleanPop() {
         var saboteur = new FailingOnceContractProcessor();
         ChainEngine torn = newEngine(saboteur);
-        ChainEngine control = newEngine(null);
+        ChainEngine control = newEngine();
         // Both engines share the genesis, so one block built on the common tip fits both.
         BlockImpl b2 = mineNext(control);
         assertEquals(ExecutionStatus.SUCCESS, torn.addBlock(b2));
@@ -161,7 +170,7 @@ class DegradedBarrierTest {
 
     @Test
     void aRestoreFailureMarkIsClearableOnceARestoreSucceeds() {
-        ChainEngine engine = newEngine(null);
+        ChainEngine engine = newEngine();
         // The synchronizer's mark: the local branch is truncated, and a full restore that
         // re-applies the whole range via trusted restoreBlock genuinely heals it.
         engine.markDegraded("failed to restore local branch after a rejected reorg", false);

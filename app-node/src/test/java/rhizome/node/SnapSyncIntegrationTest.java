@@ -29,6 +29,7 @@ import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.InMemoryNonceStore;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
+import rhizome.core.blockchain.TestNodeStores;
 import rhizome.core.box.DefaultBoxProcessor;
 import rhizome.core.box.InMemoryBoxStore;
 import rhizome.crypto.PowAlgorithm;
@@ -104,9 +105,15 @@ class SnapSyncIntegrationTest {
         genesisSnapshot = new LedgerSnapshot("t", 0, PARAMS.chainId());
         genesisSnapshot.put(sender, new TransactionAmount(50_000_000L));
 
-        minerEngine = ChainEngine.init(PARAMS, minerLedger, new InMemoryChainStore(), nonces,
-            genesisSnapshot, null, clock::get, null, null,
-            new DefaultBoxProcessor(boxStore, PARAMS), new DefaultTokenProcessor(tokenStore, PARAMS), accumulator);
+        minerEngine = ChainEngine.boot(
+                PARAMS,
+                TestNodeStores.mixing(minerLedger, new InMemoryChainStore(), nonces),
+                genesisSnapshot)
+            .clock(clock::get)
+            .boxes(new DefaultBoxProcessor(boxStore, PARAMS))
+            .tokens(new DefaultTokenProcessor(tokenStore, PARAMS))
+            .stateAccumulator(accumulator)
+            .build();
 
         minerNode = new NodeService(minerEngine,
             new MemPool(PARAMS, new rhizome.core.blockchain.SignatureVerifier(), minerEngine, 1000),
@@ -185,10 +192,12 @@ class SnapSyncIntegrationTest {
 
             // --- Normal engine boot on the seeded stores: starts at the pivot, header-only below ---
             var accumulator = new StateAccumulator(stateStore, stateStore, PARAMS.maxReorgDepth());
-            ChainEngine local = ChainEngine.init(PARAMS, store.ledger(), store.chainStore(),
-                store.nonceStore(), genesisSnapshot, null, () -> NOW, null, null,
-                new DefaultBoxProcessor(boxStore, PARAMS), new DefaultTokenProcessor(tokenStore, PARAMS),
-                accumulator);
+            ChainEngine local = ChainEngine.boot(PARAMS, store, genesisSnapshot)
+                .clock(() -> NOW)
+                .boxes(new DefaultBoxProcessor(boxStore, PARAMS))
+                .tokens(new DefaultTokenProcessor(tokenStore, PARAMS))
+                .stateAccumulator(accumulator)
+                .build();
 
             assertEquals(pivot, local.height());
             assertArrayEquals(minerNode.materializedSnapshot().stateRoot(), local.stateRoot());

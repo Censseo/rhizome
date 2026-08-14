@@ -15,12 +15,11 @@ import rhizome.core.block.Block;
 import rhizome.core.block.BlockCodec;
 import rhizome.core.block.BlockImpl;
 import rhizome.core.blockchain.ChainEngine;
-import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
 import rhizome.core.blockchain.SignatureVerifier;
+import rhizome.core.blockchain.TestNodeStores;
 import rhizome.core.common.Constants;
-import rhizome.core.ledger.InMemoryLedger;
 import rhizome.core.ledger.LedgerSnapshot;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.mempool.ExecutionStatus;
@@ -272,8 +271,10 @@ class SyncThroughputBenchmark {
     private static ChainEngine newEngine(PublicAddress fundedSender) {
         LedgerSnapshot snapshot = new LedgerSnapshot("bench", 0, PARAMS.chainId());
         snapshot.put(fundedSender, new TransactionAmount(Long.MAX_VALUE / 4));
-        return ChainEngine.init(PARAMS, new InMemoryLedger(), new InMemoryChainStore(),
-            snapshot, null, () -> NOW, new SignatureVerifier());
+        return ChainEngine.boot(PARAMS, TestNodeStores.inMemory(), snapshot)
+            .clock(() -> NOW)
+            .verifier(new SignatureVerifier())
+            .build();
     }
 
     private static Block nextBlock(ChainEngine engine, AtomicLong clock, PublicAddress miner,

@@ -17,13 +17,12 @@ import rhizome.core.block.Block;
 import rhizome.core.block.BlockImpl;
 import rhizome.core.blockchain.BlockProducer;
 import rhizome.core.blockchain.ChainEngine;
-import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.NetworkParameters;
 import rhizome.core.blockchain.SignatureVerifier;
+import rhizome.core.blockchain.TestNodeStores;
 import rhizome.crypto.PowAlgorithm;
 import rhizome.crypto.PrivateKey;
 import rhizome.crypto.PublicKey;
-import rhizome.core.ledger.InMemoryLedger;
 import rhizome.core.ledger.LedgerSnapshot;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.mempool.ExecutionStatus;
@@ -60,8 +59,10 @@ class BlockProducerTest {
         snapshot.put(sender, new TransactionAmount(1_000_000L));
 
         var verifier = new SignatureVerifier();
-        engine = ChainEngine.init(params, new InMemoryLedger(), new InMemoryChainStore(),
-            snapshot, null, clock::get, verifier);
+        engine = ChainEngine.boot(params, TestNodeStores.inMemory(), snapshot)
+            .clock(clock::get)
+            .verifier(verifier)
+            .build();
         mempool = new MemPool(params, verifier, engine, 1000);
         // Advance the clock each read so successive blocks get increasing timestamps.
         producer = new BlockProducer(engine, mempool, miner, () -> clock.addAndGet(90_000));

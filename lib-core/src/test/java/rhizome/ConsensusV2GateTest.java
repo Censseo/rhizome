@@ -20,9 +20,9 @@ import rhizome.core.block.BlockImpl;
 import rhizome.core.blockchain.ChainEngine;
 import rhizome.core.blockchain.Executor;
 import rhizome.core.blockchain.HeaderChain;
-import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
+import rhizome.core.blockchain.TestNodeStores;
 import rhizome.crypto.PowAlgorithm;
 import rhizome.crypto.PrivateKey;
 import rhizome.crypto.PublicKey;
@@ -116,8 +116,12 @@ class ConsensusV2GateTest {
             .consensusV2Height(20)
             .build();
         AtomicLong clock = new AtomicLong(1_000_000L);
-        ChainEngine e = ChainEngine.init(p, new InMemoryLedger(), new InMemoryChainStore(),
-            new LedgerSnapshot("t", 0, p.chainId()), null, clock::get);
+        ChainEngine e = ChainEngine.boot(
+                p,
+                TestNodeStores.inMemory(),
+                new LedgerSnapshot("t", 0, p.chainId()))
+            .clock(clock::get)
+            .build();
         long base = 1_000L;
         long inflatedTs = 0;
         for (int h = 2; h <= 10; h++) {

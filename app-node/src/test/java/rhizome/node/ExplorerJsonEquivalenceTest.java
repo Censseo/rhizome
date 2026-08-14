@@ -25,14 +25,13 @@ import rhizome.core.block.Block;
 import rhizome.core.block.BlockImpl;
 import rhizome.core.blockchain.ChainEngine;
 import rhizome.core.blockchain.Contracts;
-import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
 import rhizome.core.blockchain.SignatureVerifier;
+import rhizome.core.blockchain.TestNodeStores;
 import rhizome.crypto.PowAlgorithm;
 import rhizome.crypto.PrivateKey;
 import rhizome.crypto.PublicKey;
-import rhizome.core.ledger.InMemoryLedger;
 import rhizome.core.ledger.LedgerSnapshot;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.mempool.MemPool;
@@ -99,8 +98,13 @@ class ExplorerJsonEquivalenceTest {
             new rhizome.core.box.InMemoryBoxStore(), params);
         var tokenProcessor = new rhizome.core.token.DefaultTokenProcessor(
             new rhizome.core.token.InMemoryTokenStore(), params);
-        engine = ChainEngine.init(params, new InMemoryLedger(), new InMemoryChainStore(),
-            snapshot, null, clock::get, verifier, processor, boxProcessor, tokenProcessor);
+        engine = ChainEngine.boot(params, TestNodeStores.inMemory(), snapshot)
+            .clock(clock::get)
+            .verifier(verifier)
+            .contracts(processor)
+            .boxes(boxProcessor)
+            .tokens(tokenProcessor)
+            .build();
         var mempool = new MemPool(params, verifier, engine, 1000);
         node = new NodeService(engine, mempool, NodeSources.builder()
             .logSource(processor::logs).codeSource(processor::codeAt).contracts(processor).build());

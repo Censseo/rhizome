@@ -125,7 +125,7 @@ public final class RocksDbNodeStore extends RocksDbStore implements rhizome.core
 
     // Memoized: chainStore()/ledger()/nonceStore() used to build a NEW view object on every call —
     // harmless while these views are stateless, and a bug the day a caller compares instances or
-    // relies on identity. ChainEngine.init and DomainStateAdapter now see the SAME three objects
+    // relies on identity. ChainEngine.boot and DomainStateAdapter now see the SAME three objects
     // (see NodeStores), which is what makes "these three views are one atomic database" a type-level
     // fact instead of a convention. Assigned at the end of the constructor, after every field these
     // views read is already set.

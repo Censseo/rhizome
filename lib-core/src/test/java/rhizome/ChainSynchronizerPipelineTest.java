@@ -20,14 +20,13 @@ import rhizome.core.block.BlockImpl;
 import rhizome.core.blockchain.ChainEngine;
 import rhizome.core.blockchain.ChainSynchronizer;
 import rhizome.core.blockchain.ChainSynchronizer.Result;
-import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.LocalSaturationException;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
 import rhizome.core.blockchain.PeerSource;
 import rhizome.core.blockchain.PeerUnavailableException;
+import rhizome.core.blockchain.TestNodeStores;
 import rhizome.core.common.Constants;
-import rhizome.core.ledger.InMemoryLedger;
 import rhizome.core.ledger.LedgerSnapshot;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.mempool.ExecutionStatus;
@@ -141,8 +140,7 @@ class ChainSynchronizerPipelineTest {
 
     private static ChainEngine newEngine() {
         LedgerSnapshot snapshot = new LedgerSnapshot("test", 0, PARAMS.chainId());
-        return ChainEngine.init(PARAMS, new InMemoryLedger(), new InMemoryChainStore(),
-            snapshot, null, () -> NOW);
+        return ChainEngine.boot(PARAMS, TestNodeStores.inMemory(), snapshot).clock(() -> NOW).build();
     }
 
     /**

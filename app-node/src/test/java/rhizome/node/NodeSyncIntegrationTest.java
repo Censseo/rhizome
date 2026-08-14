@@ -22,13 +22,12 @@ import rhizome.core.blockchain.ChainEngine;
 import rhizome.core.blockchain.ChainSynchronizer;
 import rhizome.core.blockchain.ChainSynchronizer.Result;
 import rhizome.core.blockchain.HeaderSynchronizer;
-import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
 import rhizome.core.blockchain.ReorgWindowTestAccess;
 import rhizome.core.blockchain.SignatureVerifier;
+import rhizome.core.blockchain.TestNodeStores;
 import rhizome.crypto.PowAlgorithm;
-import rhizome.core.ledger.InMemoryLedger;
 import rhizome.core.ledger.LedgerSnapshot;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.mempool.ExecutionStatus;
@@ -53,8 +52,7 @@ class NodeSyncIntegrationTest {
 
     private static ChainEngine newEngine() {
         LedgerSnapshot snapshot = new LedgerSnapshot("test", 0, PARAMS.chainId());
-        return ChainEngine.init(PARAMS, new InMemoryLedger(), new InMemoryChainStore(),
-            snapshot, null, () -> NOW);
+        return ChainEngine.boot(PARAMS, TestNodeStores.inMemory(), snapshot).clock(() -> NOW).build();
     }
 
     private static void mine(ChainEngine engine, PublicAddress miner, AtomicLong clock, int count) {

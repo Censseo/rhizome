@@ -16,14 +16,13 @@ import rhizome.core.block.BlockImpl;
 import rhizome.core.blockchain.ChainEngine;
 import rhizome.core.blockchain.ChainSynchronizer;
 import rhizome.core.blockchain.HeaderSynchronizer;
-import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.LocalSaturationException;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
 import rhizome.core.blockchain.PeerSource;
+import rhizome.core.blockchain.TestNodeStores;
 import rhizome.crypto.PowAlgorithm;
 import rhizome.crypto.SHA256Hash;
-import rhizome.core.ledger.InMemoryLedger;
 import rhizome.core.ledger.LedgerSnapshot;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.mempool.ExecutionStatus;
@@ -43,8 +42,12 @@ class HeaderSynchronizerTest {
         .powAlgorithm(PowAlgorithm.SHA256).genesisDifficulty(4).minDifficulty(4).build();
 
     private static ChainEngine newEngine() {
-        return ChainEngine.init(PARAMS, new InMemoryLedger(), new InMemoryChainStore(),
-            new LedgerSnapshot("t", 0, PARAMS.chainId()), null, () -> 100_000_000_000L);
+        return ChainEngine.boot(
+                PARAMS,
+                TestNodeStores.inMemory(),
+                new LedgerSnapshot("t", 0, PARAMS.chainId()))
+            .clock(() -> 100_000_000_000L)
+            .build();
     }
 
     private static void mine(ChainEngine engine, PublicAddress miner, AtomicLong clock, int count) {

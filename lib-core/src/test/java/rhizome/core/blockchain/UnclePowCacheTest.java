@@ -12,7 +12,6 @@ import org.junit.jupiter.api.Test;
 import rhizome.core.block.Block;
 import rhizome.core.block.BlockImpl;
 import rhizome.core.block.UncleRef;
-import rhizome.core.ledger.InMemoryLedger;
 import rhizome.core.ledger.LedgerSnapshot;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.mempool.ExecutionStatus;
@@ -41,8 +40,12 @@ class UnclePowCacheTest {
         params = NetworkParameters.testnet().toBuilder()
             .powAlgorithm(PowAlgorithm.SHA256).genesisDifficulty(3).minDifficulty(3).build();
         clock = new AtomicLong(1_000_000L);
-        engine = ChainEngine.init(params, new InMemoryLedger(), new InMemoryChainStore(),
-            new LedgerSnapshot("t", 0, params.chainId()), null, clock::get);
+        engine = ChainEngine.boot(
+                params,
+                TestNodeStores.inMemory(),
+                new LedgerSnapshot("t", 0, params.chainId()))
+            .clock(clock::get)
+            .build();
     }
 
     private BlockImpl mine(long height, SHA256Hash parent, int salt) {

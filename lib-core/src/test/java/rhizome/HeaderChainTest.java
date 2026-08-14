@@ -16,12 +16,11 @@ import rhizome.core.block.BlockImpl;
 import rhizome.core.block.UncleRef;
 import rhizome.core.blockchain.ChainEngine;
 import rhizome.core.blockchain.HeaderChain;
-import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
+import rhizome.core.blockchain.TestNodeStores;
 import rhizome.crypto.PowAlgorithm;
 import rhizome.crypto.SHA256Hash;
-import rhizome.core.ledger.InMemoryLedger;
 import rhizome.core.ledger.LedgerSnapshot;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.mempool.ExecutionStatus;
@@ -49,8 +48,12 @@ class HeaderChainTest {
             .maxFutureBlockTimeSec(3600).build();
         clock = new AtomicLong(1_000_000L);
         miner = PublicAddress.random();
-        engine = ChainEngine.init(params, new InMemoryLedger(), new InMemoryChainStore(),
-            new LedgerSnapshot("t", 0, params.chainId()), null, clock::get);
+        engine = ChainEngine.boot(
+                params,
+                TestNodeStores.inMemory(),
+                new LedgerSnapshot("t", 0, params.chainId()))
+            .clock(clock::get)
+            .build();
     }
 
     /** Mines the next block on the engine's tip and applies it. */
@@ -108,10 +111,18 @@ class HeaderChainTest {
         NetworkParameters p = params.toBuilder()
             .difficultyLookback(10).genesisDifficulty(10).minDifficulty(4).build();
         AtomicLong c = new AtomicLong(1_000_000L);
-        ChainEngine attacked = ChainEngine.init(p, new InMemoryLedger(), new InMemoryChainStore(),
-            new LedgerSnapshot("t", 0, p.chainId()), null, c::get);
-        ChainEngine control = ChainEngine.init(p, new InMemoryLedger(), new InMemoryChainStore(),
-            new LedgerSnapshot("t", 0, p.chainId()), null, c::get);
+        ChainEngine attacked = ChainEngine.boot(
+                p,
+                TestNodeStores.inMemory(),
+                new LedgerSnapshot("t", 0, p.chainId()))
+            .clock(c::get)
+            .build();
+        ChainEngine control = ChainEngine.boot(
+                p,
+                TestNodeStores.inMemory(),
+                new LedgerSnapshot("t", 0, p.chainId()))
+            .clock(c::get)
+            .build();
         long base = 1_000L;
         for (int h = 2; h <= 10; h++) {
             long onTarget = base + h * 1000L;
@@ -133,8 +144,12 @@ class HeaderChainTest {
         NetworkParameters p = params.toBuilder()
             .difficultyLookback(10).genesisDifficulty(10).minDifficulty(4).build();
         AtomicLong c = new AtomicLong(1_000_000L);
-        ChainEngine e = ChainEngine.init(p, new InMemoryLedger(), new InMemoryChainStore(),
-            new LedgerSnapshot("t", 0, p.chainId()), null, c::get);
+        ChainEngine e = ChainEngine.boot(
+                p,
+                TestNodeStores.inMemory(),
+                new LedgerSnapshot("t", 0, p.chainId()))
+            .clock(c::get)
+            .build();
         for (int h = 2; h <= 10; h++) {
             mineOnEngineAt(e, p, miner, 1_000L + h * 16_000L);
         }

@@ -14,10 +14,9 @@ import rhizome.core.block.Block;
 import rhizome.core.block.BlockImpl;
 import rhizome.core.blockchain.BlockAssembler;
 import rhizome.core.blockchain.ChainEngine;
-import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
-import rhizome.core.ledger.InMemoryLedger;
+import rhizome.core.blockchain.TestNodeStores;
 import rhizome.core.ledger.LedgerSnapshot;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.mempool.ExecutionStatus;
@@ -101,8 +100,7 @@ class BlockAssemblerUncleSizeTest {
             .maxBlockSizeBytes(cap).build();
         LedgerSnapshot snapshot = new LedgerSnapshot("t", 0, params.chainId());
         snapshot.put(sender, new TransactionAmount(1_000_000L));
-        engine = ChainEngine.init(params, new InMemoryLedger(), new InMemoryChainStore(),
-            snapshot, null, clock::get);
+        engine = ChainEngine.boot(params, TestNodeStores.inMemory(), snapshot).clock(clock::get).build();
         mempool = new MemPool(params, new rhizome.core.blockchain.SignatureVerifier(), engine, 100);
 
         // Height 2 (fits: coinbase-only), then an orphan sibling of the tip so the next

@@ -10,9 +10,8 @@ import org.junit.jupiter.api.Test;
 import rhizome.core.blockchain.ChainEngine;
 import rhizome.core.blockchain.NetworkParameters;
 import rhizome.core.blockchain.SignatureVerifier;
-import rhizome.core.ledger.InMemoryLedger;
+import rhizome.core.blockchain.TestNodeStores;
 import rhizome.core.ledger.LedgerSnapshot;
-import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.mempool.MemPool;
 import rhizome.crypto.PowAlgorithm;
 import rhizome.net.RateLimiter;
@@ -57,8 +56,10 @@ class RoutePathNormalizationTest {
 
         LedgerSnapshot snapshot = new LedgerSnapshot("test", 0, params.chainId());
         var verifier = new SignatureVerifier();
-        ChainEngine engine = ChainEngine.init(params, new InMemoryLedger(), new InMemoryChainStore(),
-            snapshot, null, clock::get, verifier);
+        ChainEngine engine = ChainEngine.boot(params, TestNodeStores.inMemory(), snapshot)
+            .clock(clock::get)
+            .verifier(verifier)
+            .build();
         node = new NodeService(engine, new MemPool(params, verifier, engine, 1000));
 
         eventloop.keepAlive(true);

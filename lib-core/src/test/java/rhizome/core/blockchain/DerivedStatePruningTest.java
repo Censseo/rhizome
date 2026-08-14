@@ -10,7 +10,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import rhizome.core.block.BlockImpl;
-import rhizome.core.ledger.InMemoryLedger;
 import rhizome.core.ledger.LedgerSnapshot;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.mempool.ExecutionStatus;
@@ -40,8 +39,12 @@ class DerivedStatePruningTest {
             .powAlgorithm(PowAlgorithm.SHA256).genesisDifficulty(3).minDifficulty(3)
             .difficultyLookback(4).votingEpochLength(4).maxReorgDepth(2).build();
         clock = new AtomicLong(1_000_000L);
-        engine = ChainEngine.init(params, new InMemoryLedger(), new InMemoryChainStore(),
-            new LedgerSnapshot("t", 0, params.chainId()), null, clock::get);
+        engine = ChainEngine.boot(
+                params,
+                TestNodeStores.inMemory(),
+                new LedgerSnapshot("t", 0, params.chainId()))
+            .clock(clock::get)
+            .build();
     }
 
     /** A mined next block voting +1 on the storage-fee-factor parameter. */

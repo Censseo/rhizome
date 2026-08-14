@@ -23,10 +23,10 @@ import org.junit.jupiter.api.Test;
 import rhizome.core.block.Block;
 import rhizome.core.block.BlockImpl;
 import rhizome.core.blockchain.ChainEngine;
-import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
 import rhizome.core.blockchain.SignatureVerifier;
+import rhizome.core.blockchain.TestNodeStores;
 import rhizome.core.box.Box;
 import rhizome.core.box.BoxPayload;
 import rhizome.core.box.BoxRegister;
@@ -36,7 +36,6 @@ import rhizome.crypto.PowAlgorithm;
 import rhizome.core.common.Utils;
 import rhizome.crypto.PrivateKey;
 import rhizome.crypto.PublicKey;
-import rhizome.core.ledger.InMemoryLedger;
 import rhizome.core.ledger.LedgerSnapshot;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.mempool.MemPool;
@@ -97,8 +96,14 @@ class BoxApiTest {
             new rhizome.core.state.InMemorySmtNodeStore(),
             new rhizome.core.state.InMemoryRootStore(), params.maxReorgDepth());
         contracts.setBoxReader(boxes::get);
-        engine = ChainEngine.init(params, new InMemoryLedger(), new InMemoryChainStore(),
-            snapshot, null, clock::get, verifier, contracts, boxes, tokens, accumulator);
+        engine = ChainEngine.boot(params, TestNodeStores.inMemory(), snapshot)
+            .clock(clock::get)
+            .verifier(verifier)
+            .contracts(contracts)
+            .boxes(boxes)
+            .tokens(tokens)
+            .stateAccumulator(accumulator)
+            .build();
         mempool = new MemPool(params, verifier, engine, 1000);
         var node = new NodeService(engine, mempool, NodeSources.builder()
             .contracts(contracts).boxEventSource(boxes::events).tokenEventSource(tokens::events).build());

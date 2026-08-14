@@ -18,9 +18,9 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import rhizome.core.blockchain.ChainEngine;
-import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.NetworkParameters;
 import rhizome.core.blockchain.SignatureVerifier;
+import rhizome.core.blockchain.TestNodeStores;
 import rhizome.core.box.Box;
 import rhizome.core.box.BoxRegister;
 import rhizome.core.box.BoxRegisterType;
@@ -28,7 +28,6 @@ import rhizome.core.box.BoxStore;
 import rhizome.core.box.DefaultBoxProcessor;
 import rhizome.core.box.InMemoryBoxStore;
 import rhizome.core.box.ScanPredicate;
-import rhizome.core.ledger.InMemoryLedger;
 import rhizome.core.ledger.LedgerSnapshot;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.mempool.MemPool;
@@ -75,8 +74,12 @@ class BoxTokenJsonEquivalenceTest {
         tokenStore = new InMemoryTokenStore();
         var boxProcessor = new DefaultBoxProcessor(boxStore, params);
         var tokenProcessor = new DefaultTokenProcessor(tokenStore, params);
-        ChainEngine engine = ChainEngine.init(params, new InMemoryLedger(), new InMemoryChainStore(),
-            snapshot, null, () -> 0L, verifier, null, boxProcessor, tokenProcessor);
+        ChainEngine engine = ChainEngine.boot(params, TestNodeStores.inMemory(), snapshot)
+            .clock(() -> 0L)
+            .verifier(verifier)
+            .boxes(boxProcessor)
+            .tokens(tokenProcessor)
+            .build();
         MemPool mempool = new MemPool(params, verifier, engine, 1000);
         node = new NodeService(engine, mempool);
     }

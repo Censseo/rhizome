@@ -11,10 +11,9 @@ import org.junit.jupiter.api.Test;
 import rhizome.core.block.Block;
 import rhizome.core.block.BlockImpl;
 import rhizome.core.blockchain.ChainEngine;
-import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
-import rhizome.core.ledger.InMemoryLedger;
+import rhizome.core.blockchain.TestNodeStores;
 import rhizome.core.ledger.LedgerSnapshot;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.mempool.ExecutionStatus;
@@ -58,8 +57,7 @@ class PowUpgradeTest {
         miner = PublicAddress.random();
 
         LedgerSnapshot snapshot = new LedgerSnapshot("test", 0, params.chainId());
-        engine = ChainEngine.init(params, new InMemoryLedger(), new InMemoryChainStore(), snapshot,
-            null, clock::get);
+        engine = ChainEngine.boot(params, TestNodeStores.inMemory(), snapshot).clock(clock::get).build();
     }
 
     /** Builds the next block on the engine's tip, mined under the given cost parameters. */

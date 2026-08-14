@@ -18,10 +18,9 @@ import io.activej.http.HttpResponse;
 import io.activej.http.HttpHeaders;
 
 import rhizome.core.blockchain.ChainEngine;
-import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.NetworkParameters;
 import rhizome.core.blockchain.SignatureVerifier;
-import rhizome.core.ledger.InMemoryLedger;
+import rhizome.core.blockchain.TestNodeStores;
 import rhizome.core.ledger.LedgerSnapshot;
 import rhizome.core.mempool.MemPool;
 import rhizome.crypto.PowAlgorithm;
@@ -51,9 +50,13 @@ class NodeApiHardeningFlagsTest {
         var params = NetworkParameters.testnet().toBuilder()
             .powAlgorithm(PowAlgorithm.SHA256).genesisDifficulty(4).build();
         eventloop = Eventloop.create();
-        var engine = ChainEngine.init(params, new InMemoryLedger(), new InMemoryChainStore(),
-            new LedgerSnapshot("test", 0, params.chainId()), null, new AtomicLong(0)::get,
-            new SignatureVerifier());
+        var engine = ChainEngine.boot(
+                params,
+                TestNodeStores.inMemory(),
+                new LedgerSnapshot("test", 0, params.chainId()))
+            .clock(new AtomicLong(0)::get)
+            .verifier(new SignatureVerifier())
+            .build();
         var node = new NodeService(engine, new MemPool(params, new SignatureVerifier(), engine, 100));
         // apiToken + protectReads=true + trustXff=false: the private-node configuration.
         privateNode = NodeApi.servlet(eventloop, node, new rhizome.net.RateLimiter(1000, 1000, 8192),

@@ -14,7 +14,6 @@ import rhizome.core.block.BlockHeader;
 import rhizome.core.block.BlockImpl;
 import rhizome.crypto.PowAlgorithm;
 import rhizome.crypto.SHA256Hash;
-import rhizome.core.ledger.InMemoryLedger;
 import rhizome.core.ledger.LedgerSnapshot;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.mempool.ExecutionStatus;
@@ -37,8 +36,12 @@ class SynchronizerForkParityTest {
     private static final long NOW = 100_000_000_000L;
 
     private static ChainEngine newEngine() {
-        return ChainEngine.init(PARAMS, new InMemoryLedger(), new InMemoryChainStore(),
-            new LedgerSnapshot("test", 0, PARAMS.chainId()), null, () -> NOW);
+        return ChainEngine.boot(
+                PARAMS,
+                TestNodeStores.inMemory(),
+                new LedgerSnapshot("test", 0, PARAMS.chainId()))
+            .clock(() -> NOW)
+            .build();
     }
 
     private static void mine(ChainEngine engine, PublicAddress miner, AtomicLong clock, int count) {

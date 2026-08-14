@@ -16,6 +16,7 @@ import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.InMemoryNonceStore;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
+import rhizome.core.blockchain.TestNodeStores;
 import rhizome.crypto.PowAlgorithm;
 import rhizome.crypto.PrivateKey;
 import rhizome.crypto.PublicKey;
@@ -53,8 +54,12 @@ class NonceMonotonicCounterTest {
 
         InMemoryNonceStore nonces = new InMemoryNonceStore();
         AtomicLong clock = new AtomicLong(0);
-        ChainEngine engine = ChainEngine.init(params, new InMemoryLedger(), new InMemoryChainStore(),
-            nonces, snapshot, null, clock::get, null, null, null, null, null);
+        ChainEngine engine = ChainEngine.boot(
+                params,
+                TestNodeStores.mixing(new InMemoryLedger(), new InMemoryChainStore(), nonces),
+                snapshot)
+            .clock(clock::get)
+            .build();
 
         int k = 6;
         for (int n = 0; n < k; n++) {

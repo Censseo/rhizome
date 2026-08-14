@@ -47,7 +47,9 @@ class BlockUnclesTest {
         miner = PublicAddress.random();
         ledger = new InMemoryLedger();
         LedgerSnapshot snapshot = new LedgerSnapshot("t", 0, params.chainId());
-        engine = ChainEngine.init(params, ledger, new InMemoryChainStore(), snapshot, null, clock::get);
+        engine = ChainEngine.boot(params, TestNodeStores.mixing(ledger, new InMemoryChainStore()), snapshot)
+            .clock(clock::get)
+            .build();
     }
 
     /** The coinbase (mining fee) recipient of a block. */
@@ -112,8 +114,12 @@ class BlockUnclesTest {
         assertEquals(ExecutionStatus.SUCCESS, engine.addBlock(nephew));
 
         InMemoryLedger bLedger = new InMemoryLedger();
-        ChainEngine b = ChainEngine.init(params, bLedger, new InMemoryChainStore(),
-            new LedgerSnapshot("t", 0, params.chainId()), null, clock::get);
+        ChainEngine b = ChainEngine.boot(
+                params,
+                TestNodeStores.mixing(bLedger, new InMemoryChainStore()),
+                new LedgerSnapshot("t", 0, params.chainId()))
+            .clock(clock::get)
+            .build();
         assertEquals(ExecutionStatus.SUCCESS, b.addBlock(engine.blockAt(2))); // replay the shared prefix
 
         // The orphan was never registered on b, so full validation cannot find it...
@@ -138,8 +144,12 @@ class BlockUnclesTest {
         BlockImpl orphan = registerOrphanSiblingOfTip();      // orphan sibling at height 2
 
         InMemoryLedger bLedger = new InMemoryLedger();
-        ChainEngine b = ChainEngine.init(params, bLedger, new InMemoryChainStore(),
-            new LedgerSnapshot("t", 0, params.chainId()), null, clock::get);
+        ChainEngine b = ChainEngine.boot(
+                params,
+                TestNodeStores.mixing(bLedger, new InMemoryChainStore()),
+                new LedgerSnapshot("t", 0, params.chainId()))
+            .clock(clock::get)
+            .build();
         assertEquals(ExecutionStatus.SUCCESS, b.addBlock(engine.blockAt(2))); // shared prefix
 
         UncleRef good = ref(orphan);
@@ -394,8 +404,12 @@ class BlockUnclesTest {
             .difficultyLookback(10).desiredBlockTimeSec(1).minBlockTimeSec(0)
             .maxFutureBlockTimeSec(1_000_000).build();
         AtomicLong clk = new AtomicLong(10_000_000L);
-        ChainEngine eng = ChainEngine.init(p, new InMemoryLedger(), new InMemoryChainStore(),
-            new LedgerSnapshot("t", 0, p.chainId()), null, clk::get);
+        ChainEngine eng = ChainEngine.boot(
+                p,
+                TestNodeStores.inMemory(),
+                new LedgerSnapshot("t", 0, p.chainId()))
+            .clock(clk::get)
+            .build();
 
         // Fill the first window fast (1 ms apart) but stop one block short of the boundary:
         // difficulty is still the genesis 4.
@@ -442,8 +456,12 @@ class BlockUnclesTest {
             .powAlgorithm(PowAlgorithm.SHA256).genesisDifficulty(5).minDifficulty(3).build();
         AtomicLong clk = new AtomicLong(2_000_000L);
         InMemoryLedger led = new InMemoryLedger();
-        ChainEngine eng = ChainEngine.init(p, led, new InMemoryChainStore(),
-            new LedgerSnapshot("t", 0, p.chainId()), null, clk::get);
+        ChainEngine eng = ChainEngine.boot(
+                p,
+                TestNodeStores.mixing(led, new InMemoryChainStore()),
+                new LedgerSnapshot("t", 0, p.chainId()))
+            .clock(clk::get)
+            .build();
 
         // height 2 at difficulty 5
         eng.addBlock(mineAt(p, clk, eng.height() + 1, eng.tipHash(), List.of(), 7,

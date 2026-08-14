@@ -18,10 +18,9 @@ import rhizome.core.block.BlockImpl;
 import rhizome.core.blockchain.ChainEngine;
 import rhizome.core.blockchain.ContractApi.ContractLog;
 import rhizome.core.blockchain.Contracts;
-import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
-import rhizome.core.ledger.InMemoryLedger;
+import rhizome.core.blockchain.TestNodeStores;
 import rhizome.core.ledger.LedgerSnapshot;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.mempool.ExecutionStatus;
@@ -101,8 +100,10 @@ class LogOrderingTest {
         snapshot.put(sender, new TransactionAmount(100_000_000L));
 
         processor = new WasmContractProcessor(new WasmVm(), contracts);
-        engine = ChainEngine.init(params, new InMemoryLedger(), new InMemoryChainStore(),
-            snapshot, null, clock::get, null, processor);
+        engine = ChainEngine.boot(params, TestNodeStores.inMemory(), snapshot)
+            .clock(clock::get)
+            .contracts(processor)
+            .build();
 
         logtree = Contracts.deriveAddress(sender, 0);
         emitter = Contracts.deriveAddress(sender, 1);

@@ -11,11 +11,10 @@ import rhizome.core.block.Block;
 import rhizome.core.block.BlockImpl;
 import rhizome.core.blockchain.ChainEngine;
 import rhizome.core.blockchain.ChainEngineTestAccess;
-import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
+import rhizome.core.blockchain.TestNodeStores;
 import rhizome.crypto.PowAlgorithm;
-import rhizome.core.ledger.InMemoryLedger;
 import rhizome.core.ledger.LedgerSnapshot;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.merkletree.MerkleTree;
@@ -43,8 +42,12 @@ class DifficultyRetargetTest {
         .build();
 
     private final AtomicLong clock = new AtomicLong(10_000_000L);
-    private final ChainEngine engine = ChainEngine.init(PARAMS, new InMemoryLedger(),
-        new InMemoryChainStore(), new LedgerSnapshot("t", 0, PARAMS.chainId()), null, clock::get);
+    private final ChainEngine engine = ChainEngine.boot(
+            PARAMS,
+            TestNodeStores.inMemory(),
+            new LedgerSnapshot("t", 0, PARAMS.chainId()))
+        .clock(clock::get)
+        .build();
     private final PublicAddress miner = PublicAddress.random();
 
     private Block blockAt(long timestampMs) {
@@ -97,8 +100,12 @@ class DifficultyRetargetTest {
         }
 
         // Ground truth: a fresh engine replaying the exact same final chain folds difficulty cold.
-        ChainEngine fresh = ChainEngine.init(PARAMS, new InMemoryLedger(), new InMemoryChainStore(),
-            new LedgerSnapshot("t", 0, PARAMS.chainId()), null, clock::get);
+        ChainEngine fresh = ChainEngine.boot(
+                PARAMS,
+                TestNodeStores.inMemory(),
+                new LedgerSnapshot("t", 0, PARAMS.chainId()))
+            .clock(clock::get)
+            .build();
         for (long h = 2; h <= engine.height(); h++) {
             assertEquals(rhizome.core.mempool.ExecutionStatus.SUCCESS, fresh.addBlock(engine.blockAt(h)));
         }

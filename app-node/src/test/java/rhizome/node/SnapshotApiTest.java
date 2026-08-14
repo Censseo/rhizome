@@ -29,6 +29,7 @@ import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
 import rhizome.core.blockchain.PeerSource;
 import rhizome.core.blockchain.SignatureVerifier;
+import rhizome.core.blockchain.TestNodeStores;
 import rhizome.core.box.DefaultBoxProcessor;
 import rhizome.core.box.InMemoryBoxStore;
 import rhizome.crypto.PowAlgorithm;
@@ -88,9 +89,15 @@ class SnapshotApiTest {
         LedgerSnapshot genesis = new LedgerSnapshot("t", 0, PARAMS.chainId());
         genesis.put(sender, new TransactionAmount(5_000_000L));
 
-        engine = ChainEngine.init(PARAMS, ledger, new InMemoryChainStore(), nonces, genesis, null,
-            clock::get, null, null, new DefaultBoxProcessor(boxStore, PARAMS),
-            new DefaultTokenProcessor(tokenStore, PARAMS), accumulator);
+        engine = ChainEngine.boot(
+                PARAMS,
+                TestNodeStores.mixing(ledger, new InMemoryChainStore(), nonces),
+                genesis)
+            .clock(clock::get)
+            .boxes(new DefaultBoxProcessor(boxStore, PARAMS))
+            .tokens(new DefaultTokenProcessor(tokenStore, PARAMS))
+            .stateAccumulator(accumulator)
+            .build();
 
         // A few blocks with a transfer each, so the state is non-trivial.
         PublicAddress miner = PublicAddress.random();

@@ -18,6 +18,7 @@ import rhizome.core.blockchain.ChainStore;
 import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
+import rhizome.core.blockchain.TestNodeStores;
 import rhizome.crypto.PowAlgorithm;
 import rhizome.crypto.SHA256Hash;
 import rhizome.core.ledger.InMemoryLedger;
@@ -62,9 +63,12 @@ class HeaderDerivedStateTest {
     private final AtomicLong clock = new AtomicLong(10_000_000L);
 
     private ChainEngine engineWith(NetworkParameters params) {
-        return ChainEngine.init(params, new InMemoryLedger(),
-            new NoHistoricalBodyStore(new InMemoryChainStore()),
-            new LedgerSnapshot("t", 0, params.chainId()), null, clock::get);
+        return ChainEngine.boot(
+                params,
+                TestNodeStores.mixing(new InMemoryLedger(), new NoHistoricalBodyStore(new InMemoryChainStore())),
+                new LedgerSnapshot("t", 0, params.chainId()))
+            .clock(clock::get)
+            .build();
     }
 
     private BlockImpl mine(ChainEngine engine, NetworkParameters params, long timestampMs,

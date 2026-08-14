@@ -30,6 +30,7 @@ import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
 import rhizome.core.blockchain.SignatureVerifier;
+import rhizome.core.blockchain.TestNodeStores;
 import rhizome.crypto.PowAlgorithm;
 import rhizome.crypto.PrivateKey;
 import rhizome.crypto.PublicKey;
@@ -74,8 +75,10 @@ class NodeApiTest {
         snapshot.put(sender, new TransactionAmount(1_000_000L));
 
         var verifier = new SignatureVerifier();
-        engine = ChainEngine.init(params, new InMemoryLedger(), new InMemoryChainStore(),
-            snapshot, null, clock::get, verifier);
+        engine = ChainEngine.boot(params, TestNodeStores.inMemory(), snapshot)
+            .clock(clock::get)
+            .verifier(verifier)
+            .build();
         mempool = new MemPool(params, verifier, engine, 1000);
         var node = new NodeService(engine, mempool);
         servlet = NodeApi.servlet(eventloop, node);
@@ -421,8 +424,13 @@ class NodeApiTest {
         // uncle-sync blocker). 404 when unknown, 400 on a malformed hash.
         var store = new InMemoryChainStore();
         LedgerSnapshot snapshot = new LedgerSnapshot("test", 0, params.chainId());
-        var localEngine = ChainEngine.init(params, new InMemoryLedger(), store,
-            snapshot, null, clock::get, new SignatureVerifier());
+        var localEngine = ChainEngine.boot(
+                params,
+                TestNodeStores.mixing(new InMemoryLedger(), store),
+                snapshot)
+            .clock(clock::get)
+            .verifier(new SignatureVerifier())
+            .build();
         var node = new NodeService(localEngine, mempool);
         var s = NodeApi.servlet(eventloop, node);
 
