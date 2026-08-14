@@ -37,3 +37,68 @@ dependencies {
     // above for why this fixture exists).
     testFixturesApi "org.junit.jupiter:junit-jupiter:${junitVersion}"
 }
+
+// ---- the contract toolchain: one reproducible way to turn a .rs into its .wasm ----
+//
+// The contracts are #![no_std] Rust compiled to wasm32, and their binaries are CHECKED IN: the
+// ordinary build, CI and the native image must not require a Rust toolchain to exist. That is
+// what makes them driftable — token.rs shipped three times with a stale token.wasm beside it,
+// once dropping the audit-T1 deployer guard from the source the dashboard served.
+//
+// This commit gives them a reproducible way back: compileContracts regenerates every binary from
+// its source, opt-in so an ordinary build never needs rustc. The guard that REFUSES a stale pair
+// is the next commit.
+def contractsDir = file('contracts')
+def contractFixturesDir = file('src/test/resources')
+
+// The exact invocation that reproduces every checked-in binary byte for byte, recovered from the
+// artefacts themselves (see contracts/README.md for how, and for the two that had drifted):
+//   - opt-level=3 and strip=debuginfo are what the 9 binaries agree on once normalised;
+//   - the working directory is contracts/, because rustc embeds the panic-location path VERBATIM
+//     as given on the command line. Compiling `pair.rs` from contracts/ writes "pair.rs" into
+//     .rodata; compiling an absolute path writes the absolute path, and the build stops being
+//     reproducible across machines. This is not cosmetic — it is 41 bytes of the output.
+//   - rustup resolves `rustc` through contracts/rust-toolchain.toml, so the pin needs no flag.
+def rustcArgs = ['--target', 'wasm32-unknown-unknown', '--crate-type=cdylib',
+                 '-C', 'opt-level=3', '-C', 'strip=debuginfo']
+
+def contractNames = { ->
+    contractsDir.listFiles({ f -> f.name.endsWith('.rs') } as FileFilter)
+            .collect { it.name[0..-4] }.sort()
+}
+
+tasks.register('compileContracts') {
+    group = 'build'
+    description = 'Recompiles every contract .rs to its checked-in .wasm. Opt-in: -Pcontracts=rebuild.'
+
+    // Opt-in by property, not by toolchain detection: a build that silently changes behaviour
+    // depending on whether a machine happens to have rustc is worse than one that never rebuilds.
+    enabled = project.findProperty('contracts') == 'rebuild'
+
+    inputs.dir(contractsDir)
+    outputs.dir(contractFixturesDir)
+
+    doLast {
+        def rebuilt = []
+        contractNames().each { name ->
+            def out = new File(contractFixturesDir, "${name}.wasm")
+            def before = out.exists() ? out.bytes : null
+            def result = providers.exec {
+                // From contracts/: fixes both the panic path and the toolchain resolution.
+                workingDir = contractsDir
+                commandLine(['rustc'] + rustcArgs + ['-o', out.absolutePath, "${name}.rs"])
+                ignoreExitValue = true
+            }
+            if (result.result.get().exitValue != 0) {
+                throw new GradleException("rustc failed on contracts/${name}.rs:\n" +
+                        result.standardError.asText.get())
+            }
+            if (before == null || !java.util.Arrays.equals(before, out.bytes)) {
+                rebuilt << name
+            }
+        }
+        logger.lifecycle(rebuilt.isEmpty()
+                ? 'compileContracts: every .wasm was already byte-identical to its source'
+                : "compileContracts: rebuilt ${rebuilt.join(', ')} — review the binary diff before committing")
+    }
+}
