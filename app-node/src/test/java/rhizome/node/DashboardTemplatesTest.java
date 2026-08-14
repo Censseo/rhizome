@@ -1,12 +1,17 @@
 package rhizome.node;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 
+import org.json.JSONArray;
+import org.json.JSONObject;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -26,11 +31,26 @@ import org.junit.jupiter.api.Test;
  */
 class DashboardTemplatesTest {
 
-    // The manifest's non-null template ids (see templates/manifest.json), in file-name terms.
-    // logtree is deliberately excluded: it is a lib-vm test fixture (LogOrderingTest), never a
-    // dashboard template.
-    private static final List<String> TEMPLATE_IDS = List.of(
-        "counter", "token", "agent_wallet", "amm", "pair", "launchpad", "router", "emitter");
+    /**
+     * The (wasm, source) file pairs the dashboard serves, read from the STAGED manifest — the
+     * same manifest the build task stages from and {@code DashboardAssets} serves from, so it
+     * is the single source of the template list. A hard-coded id list here would silently stop
+     * covering a template added to the manifest later (staged and served correctly, never
+     * compared against the audited originals). lib-vm test fixtures that are not dashboard
+     * templates (logtree) are excluded by the manifest itself, not by a comment here.
+     */
+    private static List<String[]> servedTemplatePairs() throws Exception {
+        byte[] manifestBytes = Files.readAllBytes(served("manifest.json"));
+        JSONArray templates = new JSONObject(new String(manifestBytes, StandardCharsets.UTF_8))
+            .getJSONArray("templates");
+        assertFalse(templates.isEmpty(), "the staged manifest must list at least one template");
+        List<String[]> pairs = new ArrayList<>();
+        for (int i = 0; i < templates.length(); i++) {
+            JSONObject t = templates.getJSONObject(i);
+            pairs.add(new String[] { t.getString("wasm"), t.getString("source") });
+        }
+        return pairs;
+    }
 
     // build/resources/main is what stageContractTemplates + processResources actually produce —
     // the merged output that ends up in the jar — not src/main/resources/dashboard/templates/,
@@ -49,8 +69,8 @@ class DashboardTemplatesTest {
 
     @Test
     void everyServedWasmMatchesTheAuditedFixtureByteForByte() throws Exception {
-        for (String id : TEMPLATE_IDS) {
-            String wasm = id + ".wasm";
+        for (String[] pair : servedTemplatePairs()) {
+            String wasm = pair[0];
             Path servedPath = served(wasm);
             Path auditedPath = audited(wasm);
             assertTrue(Files.exists(servedPath), servedPath + " must exist");
@@ -62,8 +82,8 @@ class DashboardTemplatesTest {
 
     @Test
     void everyServedSourceMatchesTheAuditedOriginalByteForByte() throws Exception {
-        for (String id : TEMPLATE_IDS) {
-            String rs = id + ".rs";
+        for (String[] pair : servedTemplatePairs()) {
+            String rs = pair[1];
             Path servedPath = served(rs);
             Path sourcePath = source(rs);
             assertTrue(Files.exists(servedPath), servedPath + " must exist");

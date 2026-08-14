@@ -22,9 +22,12 @@ No CI is active — `.github/ci-workflow.yml.example` must be copied into
 - Test sources live in **both** `src/test/java` and `src/java/test` (extra dir registered in
   the root `build.gradle` `sourceSets`). Search both before concluding a test doesn't exist.
 - Editing a contract template in `lib-vm/contracts/*.rs` requires rebuilding the matching
-  checked-in `.wasm` in `lib-vm/src/test/resources/` (also bundled in
-  `app-node/src/main/resources/dashboard/templates/`) — tests and the dashboard use the
-  compiled fixtures, not the Rust sources.
+  checked-in `.wasm` in `lib-vm/src/test/resources/` — tests and the dashboard use the
+  compiled fixtures, not the Rust sources. The dashboard carries no copy of its own:
+  `app-node`'s `stageContractTemplates` Gradle task stages the lib-vm files into
+  `build/resources/main/dashboard/templates/` at build time, against the checked-in
+  `app-node/src/main/resources/dashboard/templates/manifest.json` (the one editorial list
+  of which contracts are templates — that directory holds only the manifest).
 - Nebula lint runs with the `all-dependency` rule: every module's `build.gradle` must declare
   exactly what it uses. `./gradlew build` fails on unused/missing declarations.
 - Dependency pins in root `build.gradle` are deliberate (ActiveJ v7.0.0, BouncyCastle 1.85.2,
