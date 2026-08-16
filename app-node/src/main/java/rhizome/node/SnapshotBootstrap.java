@@ -183,9 +183,9 @@ final class SnapshotBootstrap {
         long[] offsets = new long[info.chunkCount()];
         long[] lengths = new long[info.chunkCount()];
         long spooledBytes = 0;
-        // Hoisted: the seed phase after the try needs both (the spool is already deleted by then;
-        // chunks re-read nothing — it is only the decoded view the importer verified).
-        DomainStateAdapter adapter = null;
+        // Hoisted: the completion log after the try needs the count (the spool is already
+        // deleted by then; chunks re-read nothing — it is only the decoded view the importer
+        // verified).
         List<SnapshotChunk> chunks = null;
         // One try/finally covers BOTH the fetch/spool loop and the verify/replay below: every
         // failure path (bound exceeded, fetch error, verification failure) deletes the spool —
@@ -217,19 +217,61 @@ final class SnapshotBootstrap {
             // fully transactional sink would avoid the two-pass decode; the bootstrap peer is an
             // operator-configured trusted seed and the chunk count is already bounded).
             var contracts = new ContractStateAdapter(contractStore);
-            adapter = new DomainStateAdapter(target.ledger(), target.nonceStore(), target.boxes(), target.tokens(),
-                contracts, contracts);
-            try (var channel = java.nio.channels.FileChannel.open(spool, java.nio.file.StandardOpenOption.READ)) {
-                chunks = new SpooledChunks(channel, offsets, lengths, info.chunkCount());
-                try {
-                    StateSnapshotImporter.importVerified(chunks, target.stateNodes(), committedRoot.toBytes(), adapter);
-                } catch (StateSnapshotImporter.SnapshotVerificationException e) {
-                    log.warn("Snapshot verification failed: {}", e.getMessage());
+            DomainStateAdapter adapter = new DomainStateAdapter(target.ledger(), target.nonceStore(),
+                target.boxes(), target.tokens(), contracts, contracts);
+            // From here on we mutate several independent stores that commit separately. Mark the
+            // bootstrap in progress BEFORE the first seeding write — the old order marked only the
+            // flush/commit tail, so a crash during the replay left half-seeded stores no boot
+            // check could detect (audit M8) — and open the contract store's bulk-import window
+            // with it: the marker's crash coverage is exactly what makes the window's unsynced,
+            // WAL-throttled seeding writes sound (see RocksDbStore's bulk-path contract).
+            target.beginBootstrap();
+            contractStore.beginBulkImport();
+            boolean adopted = false;
+            try {
+                try (var channel = java.nio.channels.FileChannel.open(spool, java.nio.file.StandardOpenOption.READ)) {
+                    chunks = new SpooledChunks(channel, offsets, lengths, info.chunkCount());
+                    try {
+                        StateSnapshotImporter.importVerified(chunks, target.stateNodes(), committedRoot.toBytes(), adapter);
+                    } catch (StateSnapshotImporter.SnapshotVerificationException e) {
+                        log.warn("Snapshot verification failed: {}", e.getMessage());
+                        return false;
+                    }
+                } catch (java.io.IOException e) {
+                    log.warn("Snapshot spool could not be read: {}", e.toString());
                     return false;
                 }
-            } catch (java.io.IOException e) {
-                log.warn("Snapshot spool could not be read: {}", e.toString());
-                return false;
+                adapter.flush(pivot);
+                // Durability barrier for the contract seed, closing its bulk-import window: the
+                // import wrote code/storage slots unsynced (WAL syncs only bound the tail), so
+                // fsync before the bootstrap marker can clear — a power loss must not drop seeded
+                // slots the pivot root commits to.
+                contractStore.syncToDisk();
+                target.stateRoots().putRoot(pivot, committedRoot.toBytes());
+
+                // Adopt the chain: genesis with its body, then validated headers (body-less) to the
+                // pivot; the nonces imported above are current exactly as of the pivot.
+                target.chainStore().append(genesis);
+                target.bootstrapHeaders(headers.subList(0, (int) (pivot - 1)));
+                target.nonceStore().markSyncedThrough(pivot);
+                target.endBootstrap();
+                adopted = true;
+            } finally {
+                if (!adopted) {
+                    // A refused or failed attempt restores the pre-attempt state: the bulk window
+                    // closes and the marker clears, so the node may retry another peer or fall
+                    // back to full sync exactly as before the marker covered the seed. A CRASH
+                    // mid-seed never runs this — the marker stays set and the next boot refuses
+                    // to run on half-seeded state (audit M8). Best-effort: a failed clear fails
+                    // closed (the marker stays set, boot refuses) and must not mask the refusal.
+                    try {
+                        contractStore.syncToDisk();
+                        target.endBootstrap();
+                    } catch (RuntimeException e) {
+                        log.warn("Bootstrap abort cleanup failed; the marker may stay set (fail-closed): {}",
+                            e.toString());
+                    }
+                }
             }
         } finally {
             try {
@@ -238,24 +280,6 @@ final class SnapshotBootstrap {
                 log.warn("Snapshot spool {} could not be deleted", spool);
             }
         }
-        // From here on we mutate several independent stores that commit separately. Mark the
-        // bootstrap in progress so an interrupted seed is detected at the next boot instead of
-        // running on half-written, inconsistent state (audit M8). The marker lives in the node
-        // store and is cleared only after the final commit below succeeds.
-        target.beginBootstrap();
-        adapter.flush(pivot);
-        // Durability barrier for the contract seed: import wrote code/storage slots unsynced
-        // (batched WAL syncs only bound the tail), so fsync before the bootstrap marker can
-        // clear — a power loss must not drop seeded slots the pivot root commits to.
-        contractStore.syncToDisk();
-        target.stateRoots().putRoot(pivot, committedRoot.toBytes());
-
-        // Adopt the chain: genesis with its body, then validated headers (body-less) to the
-        // pivot; the nonces imported above are current exactly as of the pivot.
-        target.chainStore().append(genesis);
-        target.bootstrapHeaders(headers.subList(0, (int) (pivot - 1)));
-        target.nonceStore().markSyncedThrough(pivot);
-        target.endBootstrap();
 
         log.info("Snap-sync bootstrap complete: pivot={} stateRoot={} ({} chunks); body sync resumes above pivot",
             pivot, committedRoot.toHexString(), chunks.size());

@@ -64,6 +64,33 @@ class RocksDbContractStoreTest implements ContractStoreContract {
     }
 
     @Test
+    void bulkImportedCodeAndStorageAreReadableAfterAReopen() throws Exception {
+        // The snapshot-import window (beginBulkImport .. syncToDisk) seeds slots unsynced —
+        // one fsync per slot made snap-sync unusable. What this pins: a slot written inside the
+        // window still reads back after a close/reopen, exactly like the synced path outside it.
+        //
+        // What it CANNOT pin: the closing fsync barrier. A clean close() flushes RocksDB, so
+        // this test passes with syncToDisk's barrier removed (the same mutation was run against
+        // the node store's twin of this test). The barrier's value is under power loss, which no
+        // JVM test observes; what covers a crash mid-import is the bootstrap marker in
+        // RocksDbNodeStore, tested there.
+        PublicAddress contract = PublicAddress.random();
+        byte[] code = {0x00, 0x61, 0x73, 0x6d, 4, 5, 6};
+        byte[] key = {7};
+        byte[] value = {1, 2, 3};
+        try (var store = new RocksDbContractStore(dir.toString())) {
+            store.beginBulkImport();
+            store.putCode(contract, code);
+            store.putStorage(contract, key, value);
+            store.syncToDisk(); // the barrier closes the window
+        }
+        try (var store = new RocksDbContractStore(dir.toString())) {
+            assertArrayEquals(code, store.getCode(contract));
+            assertArrayEquals(value, store.getStorage(contract, key));
+        }
+    }
+
+    @Test
     void undoJournalSurvivesReopen() throws Exception {
         byte[] journal = {1, 2, 3, 4, 5};
         try (var store = new RocksDbContractStore(dir.toString())) {

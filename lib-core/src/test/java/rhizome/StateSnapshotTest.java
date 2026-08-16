@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static rhizome.crypto.Crypto.generateKeyPairTyped;
 
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
@@ -36,7 +37,9 @@ import rhizome.core.mempool.ExecutionStatus;
 import rhizome.core.merkletree.MerkleTree;
 import rhizome.core.state.InMemoryRootStore;
 import rhizome.core.state.InMemorySmtNodeStore;
+import rhizome.core.state.SparseMerkleTree;
 import rhizome.core.state.StateAccumulator;
+import rhizome.core.state.StateKeys;
 import rhizome.core.state.snapshot.DomainStateAdapter;
 import rhizome.core.state.snapshot.SnapshotChunk;
 import rhizome.core.state.snapshot.StateSnapshotExporter;
@@ -218,6 +221,101 @@ class StateSnapshotTest {
         assertThrows(StateSnapshotImporter.SnapshotVerificationException.class,
             () -> StateSnapshotImporter.verify(chunks, new InMemorySmtNodeStore(), committedRoot));
     }
+
+    /**
+     * The rebuild batches its SMT node writes in bounded windows instead of writing each node
+     * straight through: on the durable store an unbatched rebuild pays one fsync PER NODE,
+     * which made snap-sync effectively unusable (a full batch of the whole tree would pin the
+     * rebuilt tree on the heap instead). A counting wrapper pins the mechanism — one open, at
+     * least one flush, no discard on success — since the fsync itself is not observable here.
+     */
+    @Test
+    void importRebuildsTheTreeInBatchedWindows() {
+        byte[] committedRoot = engine.stateRoot();
+        List<SnapshotChunk> chunks = exportedChunks(2);
+        var counting = new CountingSmtNodeStore();
+
+        byte[] rebuilt = StateSnapshotImporter.importVerified(chunks, counting, committedRoot,
+            new DomainStateAdapter(new InMemoryLedger(), new InMemoryNonceStore(),
+                new InMemoryBoxStore(), new InMemoryTokenStore(), null, null));
+
+        assertArrayEquals(committedRoot, rebuilt);
+        assertEquals(1, counting.begins, "the rebuild opens one batch window");
+        assertTrue(counting.flushes >= 1, "the rebuild flushes its staged nodes");
+        assertEquals(0, counting.discards, "a successful rebuild discards nothing");
+    }
+
+    /**
+     * The window is BOUNDED — which the test above cannot show. A chain state smaller than one
+     * window makes "batched in bounded windows" and "one batch for the entire tree"
+     * indistinguishable, and the second is exactly what the bound exists to prevent: the whole
+     * rebuilt tree pinned in the staging overlay while a large state imports.
+     *
+     * <p>So feed one entry MORE than a full window and require the second window to open. The
+     * expected root is computed here through {@link SparseMerkleTree} rather than taken from the
+     * engine: this test is about the flush cadence, and {@code exportImportRebuildsTheExactRoot}
+     * already pins the root itself against a real chain.
+     */
+    @Test
+    void theRebuildWindowIsBoundedRatherThanOneBatchForTheWholeTree() {
+        // Mirrors StateSnapshotImporter.IMPORT_BATCH_ENTRIES, which is private to that class.
+        // Stated here as a promise rather than an implementation detail: moving the bound is a
+        // deliberate act, and it should mean editing a test that says what the bound buys.
+        final int windowEntries = 10_000;
+
+        List<SnapshotChunk.Entry> entries = new ArrayList<>(windowEntries + 1);
+        for (int i = 0; i <= windowEntries; i++) {
+            byte[] key = ByteBuffer.allocate(8).putLong(i).array();
+            entries.add(new SnapshotChunk.Entry(key, ByteBuffer.allocate(8).putLong(~i).array()));
+        }
+        List<SnapshotChunk> chunks = List.of(new SnapshotChunk(StateKeys.LEDGER, entries));
+
+        var reference = new SparseMerkleTree(new InMemorySmtNodeStore());
+        byte[] expectedRoot = SparseMerkleTree.EMPTY_ROOT;
+        for (SnapshotChunk.Entry e : entries) {
+            expectedRoot = reference.update(expectedRoot, StateKeys.key(StateKeys.LEDGER, e.key()),
+                StateKeys.valueHash(e.value()));
+        }
+
+        var counting = new CountingSmtNodeStore();
+        assertArrayEquals(expectedRoot,
+            StateSnapshotImporter.verify(chunks, counting, expectedRoot));
+
+        // One window fills and flushes; the single leftover entry opens and flushes a second.
+        // An unbounded rebuild would report exactly one of each however large the state got.
+        assertEquals(2, counting.begins, "the entry past the window must open a second one");
+        assertEquals(2, counting.flushes, "each window flushes exactly once");
+        assertEquals(0, counting.discards, "a successful rebuild discards nothing");
+    }
+
+    /** Records the batch-protocol calls the importer makes, over an in-memory store. */
+    private static final class CountingSmtNodeStore implements rhizome.core.state.SmtNodeStore {
+        private final InMemorySmtNodeStore inner = new InMemorySmtNodeStore();
+        int begins;
+        int flushes;
+        int discards;
+
+        @Override public byte[] get(byte[] hash) {
+            return inner.get(hash);
+        }
+
+        @Override public void put(byte[] hash, byte[] node) {
+            inner.put(hash, node);
+        }
+
+        @Override public void beginBatch() {
+            begins++;
+        }
+
+        @Override public void flushBatch() {
+            flushes++;
+        }
+
+        @Override public void discardBatch() {
+            discards++;
+        }
+    }
+
 
     @Test
     void droppedEntryIsRefused() {

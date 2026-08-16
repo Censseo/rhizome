@@ -36,6 +36,7 @@ import rhizome.crypto.PublicKey;
 import rhizome.core.ledger.Ledger;
 import rhizome.core.ledger.LedgerContract;
 import rhizome.core.ledger.LedgerException;
+import rhizome.core.ledger.LedgerOp;
 import rhizome.core.ledger.LedgerSnapshot;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.mempool.ExecutionStatus;
@@ -160,6 +161,108 @@ class RocksDbNodeStoreTest implements ChainStoreContract, NonceStoreContract, Le
             assertEquals(150, ledger.getWalletValue(w).amount()); // visible within the block
             chain.discardBlockCommit();
             assertEquals(100, ledger.getWalletValue(w).amount()); // dropped: the column family is untouched
+        }
+    }
+
+    @Test
+    void bulkSeededLedgerAndNoncesAreReadableAfterAReopen() throws IOException {
+        // The snap-sync seed writes one entry per account/nonce through the bulk window the
+        // bootstrap marker opens. What this pins: those writes reach the right column families
+        // and are still there after a close/reopen, and endBootstrap clears the marker.
+        //
+        // What it CANNOT pin, despite the barrier living in endBootstrap: the syncWal() fsync.
+        // A clean close() flushes RocksDB, so removing BOTH barriers (endBootstrap's and
+        // close()'s) leaves this test — and the whole class — green; verified by deliberate
+        // mutation, not assumed. Observing an fsync needs a power cut, not a JVM test. The
+        // barrier is held by review; what makes a lost tail DETECTABLE rather than silent is
+        // the marker, and that is the test below.
+        String path = tempDir.resolve("db").toString();
+        PublicAddress wallet = PublicAddress.random();
+        try (RocksDbNodeStore store = new RocksDbNodeStore(path)) {
+            store.beginBootstrap();
+            store.ledger().createWallet(wallet);
+            store.ledger().deposit(wallet, new TransactionAmount(100));
+            store.nonceStore().set(wallet, 3L);
+            store.endBootstrap();
+        }
+        try (RocksDbNodeStore store = new RocksDbNodeStore(path)) {
+            assertEquals(100, store.ledger().getWalletValue(wallet).amount());
+            assertEquals(3L, store.nonceStore().next(wallet));
+            assertFalse(store.bootstrapInProgress(), "a closed window leaves no marker behind");
+        }
+    }
+
+    @Test
+    void anUnclosedSeedingWindowKeepsItsMarkerAcrossAReopen() throws IOException {
+        // The property that actually carries the durability argument (audit M8): a seed that
+        // never reached endBootstrap — a crash mid-import — leaves the marker set, so the next
+        // boot refuses to run on half-seeded state instead of diverging silently. This is what
+        // makes the unsynced bulk window sound; the fsync barrier only bounds how much of a
+        // successfully closed window a power loss can take back.
+        String path = tempDir.resolve("crashed").toString();
+        PublicAddress wallet = PublicAddress.random();
+        try (RocksDbNodeStore store = new RocksDbNodeStore(path)) {
+            store.beginBootstrap();
+            store.ledger().createWallet(wallet);
+        }
+        try (RocksDbNodeStore store = new RocksDbNodeStore(path)) {
+            assertTrue(store.bootstrapInProgress(), "an interrupted seed must be detected at boot");
+        }
+    }
+
+    @Test
+    void journalDeleteRidesTheOpenCommitBatch() throws IOException {
+        // Revert inside an open commit (the popBlock reorg path) must stage the journal delete
+        // with the inverses: deleting it straight through while the inverses were still staged
+        // left a crash window where the journal was durably gone but the inverses never landed.
+        // Observable seam: a DISCARDED commit must leave the journal — and the balance — intact.
+        try (RocksDbNodeStore store = new RocksDbNodeStore(tempDir.resolve("db").toString())) {
+            ChainStore chain = store.chainStore();
+            Ledger ledger = store.ledger();
+            PublicAddress w = PublicAddress.random();
+            ledger.createWallet(w);
+            ledger.deposit(w, new TransactionAmount(100));
+            ledger.deposit(w, new TransactionAmount(50));
+            ledger.applyBlock(2, List.of(new LedgerOp(LedgerOp.Op.DEPOSIT, w, 50))); // durable journal
+
+            chain.beginBlockCommit();
+            assertTrue(ledger.revertBlock(2));
+            assertEquals(100, ledger.getWalletValue(w).amount()); // staged inverse reads back
+            chain.discardBlockCommit(); // the reorg is abandoned: nothing may have leaked through
+
+            assertEquals(150, ledger.getWalletValue(w).amount(), "the staged inverse was discarded");
+            assertTrue(ledger.revertBlock(2), "the journal must survive the discarded commit");
+            assertEquals(100, ledger.getWalletValue(w).amount());
+            assertFalse(ledger.revertBlock(2), "the revert consumed its journal");
+        }
+    }
+
+    @Test
+    void aFailedRevertOutsideACommitLeavesNoResidue() throws IOException {
+        // Boot reconciliation reverts with no commit open. A journal whose replay throws part-way
+        // (corruption) must leave NOTHING behind: the straight-through replay applied the valid
+        // prefix with one synced put per op before throwing, so the next boot's replay of the
+        // still-present journal double-reverted it and wedged on the checked arithmetic.
+        String path = tempDir.resolve("db").toString();
+        PublicAddress wallet = PublicAddress.random();
+        PublicAddress ghost = PublicAddress.random();
+        try (RocksDbNodeStore store = new RocksDbNodeStore(path)) {
+            Ledger ledger = store.ledger();
+            ledger.createWallet(wallet);
+            ledger.deposit(wallet, new TransactionAmount(100));
+            // Replayed in reverse: the wallet credit succeeds, the ghost debit then throws.
+            ledger.applyBlock(2, List.of(
+                new LedgerOp(LedgerOp.Op.WITHDRAW, ghost, 50),
+                new LedgerOp(LedgerOp.Op.WITHDRAW, wallet, 100)));
+            assertThrows(LedgerException.class, () -> ledger.revertBlock(2));
+            assertEquals(100, ledger.getWalletValue(wallet).amount(),
+                "a failed revert must not partially apply");
+        }
+        // The journal survived the failure intact: the boot sweep can retry it (and fail the
+        // same clean way) rather than compounding a partial revert.
+        try (RocksDbNodeStore store = new RocksDbNodeStore(path)) {
+            assertEquals(100, store.ledger().getWalletValue(wallet).amount());
+            assertThrows(LedgerException.class, () -> store.ledger().revertBlock(2));
         }
     }
 

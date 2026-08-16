@@ -29,11 +29,25 @@ import static rhizome.core.common.Utils.longToBytes;
  *
  * <p>Every point write in this module is SYNCED ({@link #writeOptions}): a write that
  * advances or rewinds committed state must be fsync-durable before the node reports the
- * block applied (audit F3). The old unsynced bulk path — a per-slot fsync made snap-sync
- * effectively unusable — was retired when the durability of the straight-through writes was
- * moved into the type itself (audit: durability in the type): the interfaces no longer
- * expose a write that can silently vanish on power loss, whatever the caller believed it
- * was for.
+ * block applied (audit F3). The interfaces expose no unsynced write a caller could
+ * mistake for a durable one (audit: durability in the type).
+ *
+ * <p>The ONE exception is the bulk path ({@link #putBulk}/{@link #deleteBulk}), and it is a
+ * contract, not a caller choice: it exists solely for the snap-sync bootstrap's seeding
+ * window, where a per-entry fsync made importing a large state effectively unusable. Three
+ * rules keep that window sound, and each store that opens one is responsible for all three:
+ * <ol>
+ *   <li>a SYNCED marker ({@code beginBootstrap}) lands before the first bulk write, so a
+ *       crash or power loss inside the window is detected at the next boot instead of
+ *       running on half-seeded state (audit M8);</li>
+ *   <li>the WAL is fsynced every {@link #BULK_SYNC_EVERY} bulk writes ({@link
+ *       #noteBulkWrite()}), bounding the power-loss tail inside the window; and</li>
+ *   <li>an explicit {@link #syncWal()} barrier runs before the marker clears, so a
+ *       successfully closed window is fully durable.</li>
+ * </ol>
+ * Nothing outside such a marker-guarded window may call the bulk methods — that is the
+ * whole difference from the pre-L10 world, where the same unsynced writes were a
+ * call-site convention maintained by comments.
  */
 abstract class RocksDbStore implements AutoCloseable {
 
@@ -44,6 +58,9 @@ abstract class RocksDbStore implements AutoCloseable {
         // it first into the shared test JVM (audit 17th pass, latent).
         RocksDB.loadLibrary();
     }
+
+    /** Throttles the unsynced bulk-write tail: one WAL fsync per {@link #BULK_SYNC_EVERY} writes. */
+    private static final long BULK_SYNC_EVERY = 4096;
 
     private final String storeName;
 
@@ -57,6 +74,10 @@ abstract class RocksDbStore implements AutoCloseable {
     // Synced: every write that advances (or rewinds) committed state must be fsync-durable
     // before the node reports the block applied (audit F3).
     protected final WriteOptions writeOptions = new WriteOptions().setSync(true);
+    // Unsynced: ONLY for the marker-guarded bootstrap seeding window (see the class javadoc) —
+    // a per-entry fsync made snap-sync effectively unusable (audit perf).
+    protected final WriteOptions bulkWriteOptions = new WriteOptions().setSync(false);
+    private long bulkWritesSinceSync;
 
     protected RocksDbStore(String path, String storeName, byte[]... cfNames) throws IOException {
         this.storeName = storeName;
@@ -111,10 +132,45 @@ abstract class RocksDbStore implements AutoCloseable {
         }
     }
 
-    /** fsyncs the WAL — the durability barrier at the end of a bulk-import tail. */
+    // ---- bulk path: marker-guarded bootstrap seeding ONLY (see the class javadoc) ----
+
+    /**
+     * Unsynced write for the bootstrap seeding window: process-crash safe (WAL), with the
+     * power-loss tail bounded by {@link #noteBulkWrite()} and closed by the window's {@link
+     * #syncWal()} barrier. Calling this outside a marker-guarded window is a durability bug.
+     */
+    protected final void putBulk(ColumnFamilyHandle cf, byte[] key, byte[] value) {
+        try {
+            db.put(cf, bulkWriteOptions, key, value);
+            noteBulkWrite();
+        } catch (RocksDBException e) {
+            throw new PersistenceException(storeName + " bulk write failed", e);
+        }
+    }
+
+    /** Unsynced delete, same window contract as {@link #putBulk}. */
+    protected final void deleteBulk(ColumnFamilyHandle cf, byte[] key) {
+        try {
+            db.delete(cf, bulkWriteOptions, key);
+            noteBulkWrite();
+        } catch (RocksDBException e) {
+            throw new PersistenceException(storeName + " bulk delete failed", e);
+        }
+    }
+
+    /** Bounds the unsynced tail: one WAL fsync per {@link #BULK_SYNC_EVERY} bulk writes. */
+    private void noteBulkWrite() {
+        if (++bulkWritesSinceSync >= BULK_SYNC_EVERY) {
+            syncWal();
+            bulkWritesSinceSync = 0;
+        }
+    }
+
+    /** fsyncs the WAL — the durability barrier that closes a bulk-import window. */
     protected final void syncWal() {
         try {
             db.syncWal();
+            bulkWritesSinceSync = 0;
         } catch (RocksDBException e) {
             throw new PersistenceException(storeName + " WAL sync failed", e);
         }
@@ -167,6 +223,7 @@ abstract class RocksDbStore implements AutoCloseable {
             cf.close();
         }
         writeOptions.close();
+        bulkWriteOptions.close();
         db.close();
         dbOptions.close(); // after the DB: rocksdbjni references the options while the DB is live
     }

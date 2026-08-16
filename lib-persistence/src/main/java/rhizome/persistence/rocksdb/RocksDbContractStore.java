@@ -108,17 +108,28 @@ public final class RocksDbContractStore extends RocksDbStore implements Contract
         return raw(codeCf, contract.toBytes());
     }
 
-    // Code/storage slot writes are DURABLE straight-through puts: every write path this type
+    // Code/storage slot writes are SYNCED straight-through puts: every write path this type
     // exposes commits durably (audit: durability in the type), so a caller can never believe a
-    // block-applied write survived when it did not.
+    // block-applied write survived when it did not. The single exception is the snapshot-import
+    // window between beginBulkImport() and syncToDisk() — one fsync per seeded slot made
+    // snap-sync effectively unusable, and the window is crash-guarded by the node store's
+    // bootstrap marker (see RocksDbStore's bulk-path javadoc).
     @Override
     public void putCode(PublicAddress contract, byte[] code) {
-        put(codeCf, contract.toBytes(), code);
+        if (bulkImport) {
+            putBulk(codeCf, contract.toBytes(), code);
+        } else {
+            put(codeCf, contract.toBytes(), code);
+        }
     }
 
     @Override
     public void deleteCode(PublicAddress contract) {
-        delete(codeCf, contract.toBytes());
+        if (bulkImport) {
+            deleteBulk(codeCf, contract.toBytes());
+        } else {
+            delete(codeCf, contract.toBytes());
+        }
     }
 
     @Override
@@ -149,12 +160,20 @@ public final class RocksDbContractStore extends RocksDbStore implements Contract
 
     @Override
     public void putStorage(PublicAddress contract, byte[] key, byte[] value) {
-        put(storageCf, slot(contract, key), value);
+        if (bulkImport) {
+            putBulk(storageCf, slot(contract, key), value);
+        } else {
+            put(storageCf, slot(contract, key), value);
+        }
     }
 
     @Override
     public void deleteStorage(PublicAddress contract, byte[] key) {
-        delete(storageCf, slot(contract, key));
+        if (bulkImport) {
+            deleteBulk(storageCf, slot(contract, key));
+        } else {
+            delete(storageCf, slot(contract, key));
+        }
     }
 
     @Override
@@ -296,9 +315,24 @@ public final class RocksDbContractStore extends RocksDbStore implements Contract
         }
     }
 
+    /**
+     * While {@code true}, the straight-through code/storage writes go unsynced (WAL-sync
+     * throttled): the snapshot-import window opened by {@link #beginBulkImport()} and closed by
+     * {@link #syncToDisk()}'s barrier. False everywhere else — every block-apply write path
+     * stays synced.
+     */
+    private volatile boolean bulkImport;
+
+    @Override
+    public void beginBulkImport() {
+        bulkImport = true;
+    }
+
     @Override
     public void syncToDisk() {
-        // fsync any bulk-seeded writes not yet covered by a synced batch (snapshot-import tail).
+        // The barrier CLOSES the bulk-import window: fsync every seeded write not yet covered
+        // by the throttle, so the bootstrap marker can clear with the whole seed durable.
+        bulkImport = false;
         syncWal();
     }
 

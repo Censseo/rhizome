@@ -24,6 +24,15 @@ public final class StateSnapshotImporter {
         }
     }
 
+    /**
+     * Entries rebuilt per batch flush during {@link #verify}. Each entry writes ~path-length
+     * new SMT nodes, and a durable store syncs one batch per flush — unbatched, the rebuild
+     * paid one fsync PER NODE and snap-sync was effectively unusable; unbounded, the staging
+     * overlay held the whole rebuilt tree on the heap. 10k entries bounds the overlay to a
+     * few tens of MB and the cost to one fsync per window. In-memory stores see no-ops.
+     */
+    private static final int IMPORT_BATCH_ENTRIES = 10_000;
+
     private StateSnapshotImporter() {}
 
     /**
@@ -35,11 +44,26 @@ public final class StateSnapshotImporter {
         SparseMerkleTree tree = new SparseMerkleTree(nodes);
         byte[] root = SparseMerkleTree.EMPTY_ROOT;
         long entries = 0;
-        for (SnapshotChunk chunk : chunks) {
-            for (SnapshotChunk.Entry e : chunk.entries()) {
-                root = tree.update(root, StateKeys.key(chunk.domain(), e.key()), StateKeys.valueHash(e.value()));
-                entries++;
+        int sinceFlush = 0;
+        nodes.beginBatch();
+        try {
+            for (SnapshotChunk chunk : chunks) {
+                for (SnapshotChunk.Entry e : chunk.entries()) {
+                    root = tree.update(root, StateKeys.key(chunk.domain(), e.key()), StateKeys.valueHash(e.value()));
+                    entries++;
+                    if (++sinceFlush >= IMPORT_BATCH_ENTRIES) {
+                        nodes.flushBatch();
+                        nodes.beginBatch();
+                        sinceFlush = 0;
+                    }
+                }
             }
+            nodes.flushBatch();
+        } catch (RuntimeException e) {
+            // Drop the unflushed tail: the residue rule above holds on failure too — flushed
+            // windows are unreferenced content-addressed nodes, re-derived by the next attempt.
+            nodes.discardBatch();
+            throw e;
         }
         if (!Arrays.equals(root, expectedRoot)) {
             throw new SnapshotVerificationException(

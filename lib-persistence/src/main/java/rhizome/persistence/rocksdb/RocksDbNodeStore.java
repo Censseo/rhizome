@@ -110,6 +110,15 @@ public final class RocksDbNodeStore extends RocksDbStore implements rhizome.core
      * a block ahead of the mutations it undoes). Set with the block commit; cleared with it.
      */
     private volatile java.util.Map<Long, byte[]> pendingLedgerJournal;
+    /**
+     * Journal heights whose delete is staged for the open block commit, flushed by the same
+     * batch as the ledger inverses they belong to (audit: revert-path tear). A revert that
+     * deleted its journal straight through — while its inverses were still only staged — left
+     * a crash window where the journal was durably gone and the inverses never landed: the
+     * next reorg of that height found no journal and silently fell back to the arithmetic
+     * mirrors the journal exists to replace (audit: one undo protocol).
+     */
+    private volatile java.util.List<Long> pendingLedgerJournalDeletes;
 
     /**
      * Account-nonce writes staged for the current block, flushed in the SAME batch as the block
@@ -323,6 +332,12 @@ public final class RocksDbNodeStore extends RocksDbStore implements rhizome.core
                 batch.put(ledgerJournalCf, longToBytes(e.getKey()), e.getValue());
             }
         }
+        var journalDeletes = pendingLedgerJournalDeletes;
+        if (journalDeletes != null) {
+            for (Long h : journalDeletes) {
+                batch.delete(ledgerJournalCf, longToBytes(h));
+            }
+        }
     }
 
     /** Adds the block commit's staged nonce writes and watermark (if any) to {@code batch}. */
@@ -353,14 +368,29 @@ public final class RocksDbNodeStore extends RocksDbStore implements rhizome.core
      * Marks that a snap-sync bootstrap has begun seeding the several independent stores
      * (ledger, boxes, tokens, state, contracts, chain). Because those commit separately, a
      * crash between them leaves the node inconsistent; the marker lets boot detect that and
-     * refuse to run on half-seeded data rather than silently diverging (audit M8).
+     * refuse to run on half-seeded data rather than silently diverging (audit M8). The marker
+     * is written BEFORE the first seeding write so the whole seed — not just its tail — is
+     * covered, and cleared only after every store's durability barrier has run.
+     *
+     * <p>The marker also opens this store's bulk-write window ({@link #bulkSeeding}): the
+     * seed writes one entry per account/nonce through the straight-through paths, where a
+     * per-entry fsync made snap-sync effectively unusable. The window is exactly the marker's
+     * lifetime, so an unsynced write can never land outside crash-detected seeding.
      */
     public void beginBootstrap() {
+        // Synced, and ordered before any bulk write of the window it opens: a crash mid-seed
+        // must find the marker durably set at the next boot.
         put(metaCf, BOOTSTRAP_KEY, new byte[] {1});
+        bulkSeeding = true;
     }
 
     /** Clears the bootstrap marker after every store has been seeded and committed. */
     public void endBootstrap() {
+        // Durability barrier FIRST: every bulk-seeded ledger/nonce write of the window must be
+        // fsynced before the marker clears, or a power loss just after the clear could drop
+        // seeded state the pivot root commits to with nothing left to detect the loss.
+        syncWal();
+        bulkSeeding = false;
         delete(metaCf, BOOTSTRAP_KEY);
     }
 
@@ -368,6 +398,14 @@ public final class RocksDbNodeStore extends RocksDbStore implements rhizome.core
     public boolean bootstrapInProgress() {
         return raw(metaCf, BOOTSTRAP_KEY) != null;
     }
+
+    /**
+     * While {@code true}, the straight-through ledger/nonce writes go unsynced (WAL-sync
+     * throttled) — the snap-sync seeding window opened by {@link #beginBootstrap()} and closed
+     * by {@link #endBootstrap()}'s barrier. False everywhere else: every write a block apply,
+     * revert or boot re-sync exposes stays synced (audit: durability in the type).
+     */
+    private volatile boolean bulkSeeding;
 
     @Override
     public void close() {
@@ -452,6 +490,7 @@ public final class RocksDbNodeStore extends RocksDbStore implements rhizome.core
                 // (audit F9).
                 pendingLedger = null;
                 pendingLedgerJournal = null;
+                pendingLedgerJournalDeletes = null;
                 pendingNonces = null;
                 pendingNonceHeight = null;
             }
@@ -464,6 +503,7 @@ public final class RocksDbNodeStore extends RocksDbStore implements rhizome.core
             }
             pendingLedger = new java.util.concurrent.ConcurrentHashMap<>();
             pendingLedgerJournal = new java.util.concurrent.ConcurrentHashMap<>();
+            pendingLedgerJournalDeletes = new java.util.ArrayList<>();
             pendingNonces = new java.util.concurrent.ConcurrentHashMap<>();
             pendingNonceHeight = null;
         }
@@ -472,6 +512,7 @@ public final class RocksDbNodeStore extends RocksDbStore implements rhizome.core
         public void discardBlockCommit() {
             pendingLedger = null;
             pendingLedgerJournal = null;
+            pendingLedgerJournalDeletes = null;
             pendingNonces = null;
             pendingNonceHeight = null;
         }
@@ -539,6 +580,7 @@ public final class RocksDbNodeStore extends RocksDbStore implements rhizome.core
             } finally {
                 pendingLedger = null; // same failed-commit rule as append (audit F9)
                 pendingLedgerJournal = null;
+                pendingLedgerJournalDeletes = null;
                 pendingNonces = null;
                 pendingNonceHeight = null;
             }
@@ -660,15 +702,23 @@ public final class RocksDbNodeStore extends RocksDbStore implements rhizome.core
 
         private void setValue(PublicAddress wallet, long amount) {
             // Inside a block commit, buffer the write so it flushes atomically with the height in
-            // append/pop; otherwise (genesis/snapshot seeding) write straight through (audit S3) —
-            // durably: every write path this type exposes commits with fsync (audit: durability in
-            // the type).
+            // append/pop; otherwise (genesis/snapshot seeding, boot reconciliation) write straight
+            // through (audit S3). The straight-through write is synced — every write path this type
+            // exposes commits with fsync (audit: durability in the type) — EXCEPT inside the
+            // marker-guarded bootstrap window, where one fsync per seeded account made snap-sync
+            // effectively unusable; the marker and endBootstrap's barrier carry the durability
+            // contract there (see RocksDbStore's bulk-path javadoc).
             var pending = pendingLedger;
             if (pending != null) {
                 pending.put(wallet, amount);
                 return;
             }
-            put(ledgerCf, wallet.toBytes(), ByteBuffer.allocate(8).putLong(amount).array());
+            byte[] value = ByteBuffer.allocate(8).putLong(amount).array();
+            if (bulkSeeding) {
+                putBulk(ledgerCf, wallet.toBytes(), value);
+            } else {
+                put(ledgerCf, wallet.toBytes(), value);
+            }
         }
 
         @Override
@@ -706,11 +756,50 @@ public final class RocksDbNodeStore extends RocksDbStore implements rhizome.core
 
         @Override
         public boolean revertBlock(long height) {
-            byte[] encoded = raw(ledgerJournalCf, longToBytes(height));
+            byte[] key = longToBytes(height);
+            byte[] encoded = raw(ledgerJournalCf, key);
             if (encoded == null) {
                 return false;
             }
             java.util.List<rhizome.core.ledger.LedgerOp> journal = LedgerJournalCodec.decode(encoded);
+            if (pendingLedger != null) {
+                // Reorg path (popBlock opens the block commit): the inverses stage into the open
+                // commit and flush atomically with the height decrement in pop() (audit S3) — and
+                // the journal delete rides the SAME batch. Deleting it straight through while the
+                // inverses were still only staged left a crash window where the journal was
+                // durably gone but the inverses never landed: a later reorg of that height found
+                // no journal and silently fell back to the arithmetic mirrors the journal exists
+                // to replace (audit: one undo protocol).
+                replayInverses(journal);
+                pendingLedgerJournalDeletes.add(height);
+                return true;
+            }
+            // Boot reconciliation (reconcilePeripheralStores) runs with no commit open. Replaying
+            // the inverses as straight-through synced puts and only then deleting the journal
+            // left a crash window with HALF the inverses applied and the journal still present:
+            // the next boot replayed the whole journal over the partial revert, a double-revert
+            // the checked arithmetic throws on — the node wedged. Open a short-lived commit
+            // instead, so the inverses and the journal delete land as ONE synced batch — the same
+            // atomic unit the box/token/contract stores revert with.
+            chainStoreView.beginBlockCommit();
+            try {
+                replayInverses(journal);
+                pendingLedgerJournalDeletes.add(height);
+                try (WriteBatch batch = new WriteBatch()) {
+                    stagePendingLedgerInto(batch);
+                    db.write(writeOptions, batch);
+                } catch (RocksDBException e) {
+                    throw new LedgerException("Failed to revert ledger block " + height, e);
+                }
+            } finally {
+                // Clears the staged state whether the batch landed or not; on a failure nothing
+                // durable was touched, so the next boot replays the intact journal cleanly.
+                chainStoreView.discardBlockCommit();
+            }
+            return true;
+        }
+
+        private void replayInverses(java.util.List<rhizome.core.ledger.LedgerOp> journal) {
             for (int i = journal.size() - 1; i >= 0; i--) {
                 // Replay through the store's own checked inverses — the exact undo the in-memory
                 // ledger runs, not a second arithmetic to keep in sync. A journal naming an
@@ -718,8 +807,6 @@ public final class RocksDbNodeStore extends RocksDbStore implements rhizome.core
                 // never be written back as a balance the consensus path then reads.
                 journal.get(i).revert(this);
             }
-            delete(ledgerJournalCf, longToBytes(height));
-            return true;
         }
 
         @Override
@@ -755,15 +842,21 @@ public final class RocksDbNodeStore extends RocksDbStore implements rhizome.core
         @Override
         public void set(PublicAddress sender, long next) {
             // Inside a block commit, buffer the write so it flushes atomically with the height in
-            // append/pop (audit perf: per-sender fsync); otherwise write straight through — durably
-            // (bulk seeding / boot re-sync: every write path this type exposes commits with fsync,
-            // audit: durability in the type).
+            // append/pop (audit perf: per-sender fsync); otherwise write straight through — synced
+            // (boot re-sync path: durability in the type), or bulk inside the marker-guarded
+            // bootstrap window (snapshot seeding: one fsync per sender made snap-sync unusable).
             var pending = pendingNonces;
             if (pending != null) {
                 pending.put(sender, next);
                 return;
             }
-            if (next <= 0) {
+            if (bulkSeeding) {
+                if (next <= 0) {
+                    deleteBulk(noncesCf, sender.toBytes());
+                } else {
+                    putBulk(noncesCf, sender.toBytes(), longToBytes(next));
+                }
+            } else if (next <= 0) {
                 delete(noncesCf, sender.toBytes());
             } else {
                 put(noncesCf, sender.toBytes(), longToBytes(next));

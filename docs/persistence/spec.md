@@ -86,6 +86,17 @@ kept per height (see [state](../state/spec.md)).
 Height-advancing writes are **fsynced** (`sync(true)`) in every store, so an individual database
 survives power loss.
 
+The one exception is the snap-sync **bulk-seeding window**: between the synced
+`bootstrapInProgress` marker and the barrier that clears it, the ledger, nonce and contract-slot
+seed writes go unsynced with the WAL fsynced every 4096 writes, because one fsync per seeded
+entry made importing a large state effectively unusable. The window is sound because the marker
+is written **before the first seeding write**: a crash or power loss inside the window is
+detected at the next boot, which refuses to run on half-seeded state (M8), and the closing
+barrier (`syncWal` per store) runs before the marker clears. The SMT rebuild seeds through
+bounded `WriteBatch` windows instead (content-addressed nodes need no marker coverage: an
+interrupted rebuild leaves only unreferenced nodes). Outside the window no unsynced write path
+exists.
+
 `close()` **waits out the network scheduler** rather than closing a store under it — a RocksDB
 use-after-free that had been aborting the JVM in integration tests. Node shutdown closes the HTTP
 listener **first**, then closes the stores under the engine lock, because the newly fsynced writes
@@ -118,7 +129,8 @@ deterministic, fast, and native-friendly. See
   lead or lag the chain height.
 - Every peripheral store commits its mutations and its undo journal in a single atomic
   `WriteBatch`, guarded against double-apply.
-- Height-advancing writes are fsynced.
+- Height-advancing writes are fsynced; the only unsynced path is the marker-guarded snap-sync
+  seeding window (D-4), bracketed by the synced bootstrap marker and its closing barrier.
 - Boot reconciliation rewinds any peripheral store found ahead of the chain height.
 - Undo journals and receipts for boxes and contracts are **persisted**, so reorg-after-restart works.
 - Secondary indexes are always derived locally, never imported.
