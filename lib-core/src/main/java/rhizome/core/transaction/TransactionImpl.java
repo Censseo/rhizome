@@ -214,7 +214,10 @@ public final class TransactionImpl implements Transaction, Comparable<Transactio
         // Coinbase and rent collection (BOX_COLLECT) are self-authorized: minted by the
         // block producer, carrying no signature, validated by consensus rules instead.
         if (isTransactionFee() || kind == TransactionKind.BOX_COLLECT) return true;
-        return checkSignature(hashContents().toBytes(), this.signature.toBytes(), this.signingKey);
+        // Verified through THIS transaction's scheme table entry, not a hard-coded primitive:
+        // a scheme that ships a different algorithm changes one SignatureScheme row, not the
+        // consensus path (constat 43b — the dispatch is what makes the table load-bearing).
+        return checkSignature(hashContents().toBytes(), this.signature.toBytes(), this.signingKey, scheme);
     }
 
     public SHA256Hash hash() {

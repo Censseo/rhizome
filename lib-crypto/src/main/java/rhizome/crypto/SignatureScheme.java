@@ -86,7 +86,15 @@ public enum SignatureScheme {
         this.algorithm = algorithm;
     }
 
-    /** The algorithm that verifies this scheme's signatures (see {@link SignatureAlgorithm}). */
+    /**
+     * The algorithm that verifies this scheme's signatures (see {@link SignatureAlgorithm}).
+     * Transaction verification dispatches through this entry ({@code TransactionImpl.signatureValid}
+     * passes the transaction's scheme to {@code Crypto.checkSignature}), so a scheme shipping a
+     * different primitive changes this one row, not the consensus path. Signing and public-key
+     * derivation still route through the Ed25519 row explicitly: a {@link PrivateKey} is
+     * scheme-less, and threading the scheme through those call sites is part of what adding a
+     * non-Ed25519 scheme entails.
+     */
     public SignatureAlgorithm algorithm() {
         return algorithm;
     }

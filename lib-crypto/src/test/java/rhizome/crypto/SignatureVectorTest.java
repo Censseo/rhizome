@@ -73,4 +73,22 @@ class SignatureVectorTest {
         assertFalse(Crypto.checkSignature(new byte[0], forged, publicKey));
         assertFalse(Crypto.checkSignature("message".getBytes(StandardCharsets.UTF_8), forged, publicKey));
     }
+
+    /**
+     * Transaction verification dispatches through the DECLARED scheme's table entry
+     * ({@code TransactionImpl.signatureValid} passes its scheme to {@code Crypto.checkSignature}):
+     * a scheme shipping a different primitive then changes one table row, not the consensus
+     * path. Both implemented schemes name Ed25519 today, so each must verify the RFC vector —
+     * a row wired to nothing (or to the wrong primitive) fails here.
+     */
+    @Test
+    void everySchemeVerifiesTheVectorThroughItsTableEntry() {
+        PublicKey publicKey = PublicKey.of(PUBLIC_KEY);
+        for (SignatureScheme scheme : SignatureScheme.values()) {
+            assertTrue(Crypto.checkSignature(new byte[0], SIGNATURE_EMPTY, publicKey, scheme),
+                scheme + " must verify the vector through its algorithm table entry");
+            assertFalse(Crypto.checkSignature(new byte[] {1}, SIGNATURE_EMPTY, publicKey, scheme),
+                scheme + " must reject a different message through the same entry");
+        }
+    }
 }

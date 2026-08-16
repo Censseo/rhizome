@@ -46,8 +46,11 @@ public class Crypto {
     /**
      * Signs a raw digest. RESERVED for transaction hashes (consensus); see the note on
      * {@link #signWithPrivateKey(String, PrivateKey)}. Use {@link #signMessage} for general
-     * message signing. Signed through the scheme's algorithm table, not a hard-coded signer
-     * (constat 43b): the scheme names which primitive produces its signatures.
+     * message signing. Routed through the scheme table's Ed25519 row, not an inline signer
+     * (constat 43b): every implemented scheme signs Ed25519, and a {@link PrivateKey} is
+     * scheme-less — a future scheme with a different primitive must thread its scheme through
+     * this call site, exactly as verification already does (see the checkSignature overload
+     * taking a {@link SignatureScheme}).
      */
     public static byte[] signWithPrivateKey(byte[] message, PrivateKey privateKey) {
         try {
@@ -66,8 +69,23 @@ public class Crypto {
         // signer's (audit F7).
         return checkSignature(content.getBytes(StandardCharsets.UTF_8), signature, publicKey);
     }
-    
+
+    /**
+     * Scheme-less verification, for the off-chain message path ({@link #verifyMessage}) where no
+     * transaction declares a scheme: delegates with {@link SignatureScheme#ED25519}, the scheme
+     * every message signature is produced under.
+     */
     public static boolean checkSignature(byte[] bytes, byte[] signature, PublicKey publicKey) {
+        return checkSignature(bytes, signature, publicKey, SignatureScheme.ED25519);
+    }
+
+    /**
+     * Verifies through the DECLARED scheme's algorithm table entry — the consensus path
+     * ({@code TransactionImpl.signatureValid()}) passes the transaction's scheme, so a scheme
+     * that ships a different primitive changes one table row, not this code (constat 43b).
+     */
+    public static boolean checkSignature(byte[] bytes, byte[] signature, PublicKey publicKey,
+                                         SignatureScheme scheme) {
         // An absent/empty public key (e.g. an all-zero signing key decoded to PublicKey.empty())
         // has no Ed25519 parameters: signer.init(false, null) would NPE inside BouncyCastle. A
         // missing key is definitionally an invalid signature, so return false rather than throw —
@@ -75,9 +93,7 @@ public class Crypto {
         if (publicKey == null || publicKey.isEmpty() || signature == null) {
             return false;
         }
-        // Verified through the scheme's algorithm table, not a hard-coded signer: the scheme
-        // names which primitive verifies its signatures (constat 43b; SignatureAlgorithm).
-        return SignatureScheme.ED25519.algorithm().verify(bytes, signature, publicKey.toBytes());
+        return scheme.algorithm().verify(bytes, signature, publicKey.toBytes());
     }
 
     public static AsymmetricCipherKeyPair generateKeyPair() {
