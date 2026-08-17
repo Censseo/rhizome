@@ -26,7 +26,10 @@ INTERVAL="${RHIZOME_SIM_CONTRACT_INTERVAL:-5}"
 GAS_LIMIT="${RHIZOME_SIM_GAS_LIMIT:-100000}"
 GAS_PRICE="${RHIZOME_SIM_GAS_PRICE:-1}"
 FUND="${RHIZOME_SIM_CONTRACT_FUND:-5}"
-TEMPLATES="$ROOT/app-node/src/main/resources/dashboard/templates"
+# Les .wasm ne sont PAS dans src/main/resources/dashboard/templates (qui ne garde que
+# manifest.json, volontairement — cf. app-node/build.gradle:stageContractTemplates, qui les
+# copie à la volée dans build/generated/). La source unique checked-in est lib-vm/src/test/resources.
+TEMPLATES="$ROOT/lib-vm/src/test/resources"
 KEY="$KEYS_DIR/sim-contract.key"
 PIDF="$PID_DIR/sim-contract.pid"
 

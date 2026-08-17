@@ -1,10 +1,12 @@
 # Plan de test — testnet local (30 nœuds natifs)
 
-> **Campagne 3 (2026-08-10).** Les campagnes 1 (10 nœuds) et 2 (16 nœuds) sont closes ; leurs
-> résultats et les correctifs qu'elles ont produits sont archivés en fin de document. Cette
-> campagne change trois choses : le **binaire natif GraalVM** au lieu de la JVM, **30 nœuds et
-> 10 mineurs** au lieu de 16 et 4, et une **charge continue** produite par deux simulateurs
-> (transactions et contrats) au lieu de transactions ponctuelles.
+> **Campagne 4 (2026-08-17).** Les campagnes 1 (10 nœuds), 2 (16 nœuds) et 3 (30 nœuds, première
+> campagne native) sont closes ; leurs résultats et les correctifs qu'elles ont produits sont
+> archivés en fin de document. Cette campagne rejoue le protocole de la campagne 3 à l'identique
+> (30 nœuds natifs, 10 mineurs, charge continue) et couvre en plus les scénarios P1-P5 (S11-S15)
+> que la campagne 3 avait laissés pour partie non concluants. Elle a aussi débusqué un bug
+> d'outillage (chemin des fixtures `.wasm` dans `sim-contract.sh`) et documenté deux incidents
+> d'environnement propres à une machine de dev partagée (conflit de port, contention RAM).
 
 ## Objectif
 
@@ -313,6 +315,81 @@ scripts/local-testnet/sim-tx.sh stop && scripts/local-testnet/sim-contract.sh st
 scripts/local-testnet/stop.sh
 rm -rf .testnet          # données RocksDB + logs + CSV + pids
 ```
+
+## Journal de résultats — campagne 4
+
+Campagne exécutée le 2026-08-17 (base 4300 — le port 3000 a été pris par un service tiers
+*pendant* le lancement, voir constat 1 ci-dessous), 30 nœuds **natifs** devnet, 10 mineurs
+(0, 3, 6, 9, 12, 15, 18, 21, 24, 27), `-Xmx128m` par nœud (réduit depuis le défaut 256 m faute de
+marge RAM sur la machine, voir constat 2), charge continue des deux simulateurs. Réseau poussé
+jusqu'à h≈1100 sur la durée de la campagne, `degraded` resté **`null` sur les 30 nœuds pendant
+toute la campagne** (0 occurrence sur 5330+ lignes de `monitor.csv`).
+
+| Scénario | Résultat | Détail |
+|---|---|---|
+| S0 Lancement/convergence | **PASS** | 30/30 répondent ; écart=0, tip unique, **18 pairs dès la première lecture** (plus rapide qu'en campagne 3, l'amorçage PEX ayant eu plus de temps de propagation avant le premier `status.sh`) |
+| S1 Gossip de transactions | **PASS** *(critère adapté)* | `/mempool` ne renvoie que la taille, pas les hachages : la mesure littérale « tx vue sur ≥28/30 mempools » n'est pas possible via l'API. Preuve opérationnelle de substitution : **1788/1876 (95,3 %)** transferts du simulateur, chacun soumis à un nœud **tiré au hasard**, minés avec succès sur tout le réseau |
+| S2 Propagation de blocs | **PASS** | Écart de hauteur ≤ 3 en régime stable sur l'ensemble de la campagne (30 nœuds répondants à chaque `status.sh`) |
+| S3 PEX | **PASS** | 18 pairs par nœud tout du long, aucun doublon ni auto-référence observés sur les échantillons pris |
+| S4 Churn (31ᵉ nœud) | **PASS** | Rattrape la hauteur commune en **< 5 s** (nettement plus vite qu'en campagne 3 — chaîne courte, PEX déjà chaud), 18 pairs, `degraded=null` |
+| S5 Panne d'un mineur | **PASS** | Mineur 3 arrêté 3 min : les 29 restants croissent sans arrêt (274→282), `stallR` max=2, zéro `degraded`, zéro ban, zéro alerte de scission |
+| S6 Redémarrage | **PASS** | Le nœud 3 rattrape en **< 20 s**, `reorgInProgress` reste `false` (retard, pas divergence), tip rejoint |
+| S7 Partition 15/15 | **PASS** | Partition étanche (0 pair hors camp, vérifié via `/peers`) ; guérison en **< 15 s** après les ponts croisés (plus rapide que les 32,5 s de la campagne 3) ; `degraded` resté `null`, aucun ban ; soldes des 4 mineurs testés (0, 3, 15, 27) **identiques bit-à-bit** vus depuis les deux anciens camps |
+| S8 Wallet E2E | **PASS** | 1,5 PDN émis via le nœud 3, confirmé sur le nœud 29 en **3 s** |
+| S9 Contrat distribué | **PASS** | Compteur + solde token : un seul état par groupe de tip à chaque contrôle (avant et après S7), y compris sur le contrôle final en fin de campagne |
+| S10 Supervision | **PASS** | `degraded` resté `null` sur les 30 nœuds sur l'intégralité de la campagne ; l'alerte « RÉSEAU SCINDÉ » n'est apparue que pendant les fenêtres de partition volontaires (S7, S15), jamais en régime stable, confirmé en croisant les horodatages du CSV avec les fenêtres de test |
+| S11 Pair perdu en reorg (P1) | **PASS** | Guet resserré (grep pur, sans interpréteur, ~50 ms/poll) sur `reorgInProgress` : source (nœud 5) tuée en pleine fenêtre de reorg du nœud 20 après une divergence locale de 150 s (paire isolée 20+21) → **aucune troncature** (progression continue 699→705→707→715 au `monitor.csv`), `degraded=null`, reprise via d'autres pairs après ajout |
+| S12 Éclipse registre vide (P2) | **PASS** | Nœud lancé sans seed (span de partition =1) : `peers=0`, `syncEclipsed=true`, `syncRoundsWithoutProgress=3` et montant, WARN « sync eclipsed » au log, `degraded=null` |
+| S13 Hôte partagé sans escalade (P3) | **PARTIEL** *(même verdict qu'en campagne 3)* | 3 faux pairs `127.0.0.1` injoignables : journalisés « peer request failed », **jamais bannis** (le chemin de ban n'est atteint que par un pair confirmé qui se comporte mal, pas par un endpoint simplement injoignable). Propriété de sécurité positive confirmée : un vrai pair `127.0.0.1` ajouté ensuite reste pleinement joignable et permet un rattrapage complet (223→623, 16 pairs, 0 ban) |
+| S14 Dashboard en reorg (P4) | **PASS** | Endpoints gardés identifiés dans le code (`/blocks`, `/block`, `/block_count`, `/total_work`, `/sync`, `/headers` — pas `/stats` ni `/peers`, d'où un premier essai infructueux) ; **5 réponses `503 {"error":"reorg in progress; retry shortly"}`** capturées sur `/total_work` pendant la fenêtre exacte de reorg (guet à ~1075 polls en 45 s), endpoint de nouveau `200` juste après |
+| S15 Départage déterministe (P5) | **PARTIEL** *(même verdict qu'en campagne 3)* | Égalité stricte de `totalWork` jamais captée en direct sur 1430 sondages (~63 ms/poll, écart final 448 unités de travail) — les deux camps minaient en continu et le prochain bloc tranchait avant l'instant exact de l'égalité, comme en campagne 3. Le pont posé malgré tout a convergé **proprement et vite** (tip identique dès +5 s, aucune oscillation sur 40 s observées) : la mécanique de reconnexion fonctionne, mais le départage strict par tip hash lexicographique reste non isolé en réseau live — toujours couvert par `HeaderSynchronizerTest` |
+
+### Constats de campagne
+
+**1. Sur une machine de dev partagée, l'indisponibilité d'un port peut apparaître *entre* le
+contrôle de pré-vol et le `bind()` du nœud.** Le premier lancement a échoué : le port 3000,
+libre au moment du contrôle `check_ports_free`, était occupé par un service tiers (login-gated,
+sans rapport avec Rhizome) au moment précis où le nœud 0 a tenté de démarrer — `BindException`,
+nœud 0 mort, 29 autres nœuds up mais sans hub PEX. Résolu en relançant sur
+`RHIZOME_TESTNET_BASE_PORT=4300` (déjà le contournement documenté pour cette machine). Le
+pré-vol reste utile (il aurait bloqué un conflit stable) mais ne couvre pas une fenêtre de course
+avec un tiers qui bind après coup.
+
+**2. La marge RAM disponible sur une machine de dev partagée peut s'effondrer en quelques
+minutes, sans lien avec le testnet.** Entre le premier contrôle d'environnement (8,3 Gio
+disponibles) et le premier `start.sh`, la RAM disponible est tombée à 3,0 Gio à cause d'un run de
+tests Maven d'un projet tiers (`atelier/backend`, ~4,3 Gio à lui seul) et de plusieurs serveurs de
+langage VS Code actifs en tâche de fond — le garde-fou mémoire de `start.sh` a **correctement
+refusé de lancer** plutôt que risquer un OOM en cours de campagne. Une attente de 9 min n'a pas
+suffi (la RAM a continué de baisser, jusqu'à 5,3 Gio) : la charge concurrente n'était pas un pic
+transitoire mais un plateau durable. Solution retenue : `RHIZOME_TESTNET_HEAP=128m` (au lieu du
+défaut 256 m) — la topologie (30 nœuds, 10 mineurs) reste inchangée, seul le plafond `-Xmx` est
+réduit. Aucun effet secondaire observé sur toute la campagne (RSS réelle mesurée bien en dessous
+du plafond, comme en campagne 3 où 192 m suffisaient déjà largement à des nœuds consommant en
+réalité 75-100 Mo).
+
+**3. Les endpoints protégés pendant une fenêtre de reorg sont un sous-ensemble précis de l'API**
+(`/blocks`, `/block`, `/block_count`, `/total_work`, `/sync`, `/headers`), pas `/stats` ni
+`/peers` — ces deux derniers restent servis normalement même quand le nœud est en pleine
+reconstruction de sa vue locale. Un premier essai de S14 scrutant `/stats` n'a donc rien capté ;
+il a fallu lire `SyncApi`/`NodeApi` pour identifier les bonnes routes.
+
+**4. `reorgInProgress` peut être une fenêtre très étroite (dizaines à centaines de ms).** Un
+premier essai de S11 avec un scrutin à ~150 ms (interprète Python par extraction JSON) n'a rien
+capté sur deux tentatives malgré une hauteur de fork croissante ; passer à une extraction
+`grep`/`sed` pure (sans fork d'interpréteur, ~50 ms/poll) a permis de capter la fenêtre dès la
+troisième tentative. Le choix de l'outil d'instrumentation change directement le résultat d'un
+scénario réseau chronosensible.
+
+### Correctifs livrés
+
+| Défaut | Effet | Correctif |
+|---|---|---|
+| `sim-contract.sh` : `TEMPLATES` pointait vers `app-node/src/main/resources/dashboard/templates` | Ce répertoire ne contient **que** `manifest.json` par construction (`stageContractTemplates` copie les `.wasm` dans `build/generated/`, jamais dans les sources) — tout premier appel à `sim-contract.sh start` échouait avec `error: .../counter.wasm` avant même d'atteindre le réseau | `TEMPLATES` pointe désormais vers `lib-vm/src/test/resources`, la source unique checked-in des fixtures `.wasm` documentée dans `CLAUDE.md` |
+
+---
+
+# Archive — campagne 3 (30 nœuds natifs, 2026-08-10)
 
 ## Journal de résultats — campagne 3
 
