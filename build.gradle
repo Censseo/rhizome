@@ -83,4 +83,37 @@ subprojects {
             }
         }
     }
+
+    // The dedicated attack suites of the adversarial test protocol (docs/adversarial/spec.md),
+    // which sit in more than one module — the forgery suites in lib-core, the sandbox one in
+    // lib-vm — so they need an entry point that crosses module boundaries rather than a directory
+    // someone has to remember to run. This is NOT the whole catalogue: most of the ~90 files the
+    // protocol cites as proofs are ordinary tests living beside the code they cover, and
+    // `./gradlew test` is what runs those. What guarantees they still exist and still run is
+    // AdversarialProtocolTest, which this task does include. failOnNoMatchingTests is off because
+    // most modules legitimately hold none of these classes.
+    tasks.register('adversarialTest', Test) {
+        group = 'verification'
+        description = 'Runs this module\'s adversarial attack suites (see docs/adversarial/spec.md).'
+        testClassesDirs = sourceSets.test.output.classesDirs
+        classpath = sourceSets.test.runtimeClasspath
+        useJUnitPlatform()
+        filter {
+            includeTestsMatching 'rhizome.adversarial.*'
+            includeTestsMatching '*AttackTest'
+            includeTestsMatching '*AdversarialTest'
+            setFailOnNoMatchingTests(false)
+        }
+    }
+}
+
+tasks.register('adversarial') {
+    group = 'verification'
+    description = 'Runs the protocol gate and every dedicated attack suite (docs/adversarial/spec.md).'
+    // The gate is named explicitly rather than left to the adversarialTest filter that also matches
+    // it: only :lib-core:adversarialProtocolCheck declares the catalogue and the cited sources as
+    // inputs, so only it is guaranteed to re-run after a catalogue edit instead of reporting a
+    // cached green.
+    dependsOn ':lib-core:adversarialProtocolCheck'
+    dependsOn subprojects.collect { "${it.path}:adversarialTest" }
 }

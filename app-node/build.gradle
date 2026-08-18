@@ -42,6 +42,7 @@ application {
 def docPages = [
     [slug: 'readme',       group: 'Vue d\'ensemble', source: 'README.md'],
     [slug: 'whitepaper',   group: 'Vue d\'ensemble', source: 'WHITEPAPER.md'],
+    [slug: 'adversarial',  group: 'Vue d\'ensemble', source: 'docs/adversarial/spec.md'],
     [slug: 'index',        group: 'Vue d\'ensemble', source: 'docs/README.md'],
     [slug: 'platform',     group: 'Vue d\'ensemble', source: 'docs/platform/spec.md'],
     [slug: 'consensus',    group: 'Protocole',       source: 'docs/consensus/spec.md'],

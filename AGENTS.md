@@ -10,6 +10,7 @@ reorgs); each rule exists to fix a specific Pandanite bug.
 ./gradlew build                                                   # build + lint + all tests
 ./gradlew :lib-core:test --tests "rhizome.ChainEngineTest.someTestMethod"   # one test
 ./gradlew :lib-core:test -Dbench=true --tests "rhizome.ValidationBenchmark" # benchmark
+./gradlew adversarial                                             # attack suites + protocol gate
 RHIZOME_NETWORK=testnet RHIZOME_MINER=<addr> RHIZOME_BLOCK_INTERVAL_MS=1000 \
   ./gradlew :app-node:run                                          # local node, UI on :3000
 ```
@@ -30,6 +31,13 @@ No CI is active — `.github/ci-workflow.yml.example` must be copied into
   of which contracts are templates — that directory holds only the manifest).
 - Nebula lint runs with the `all-dependency` rule: every module's `build.gradle` must declare
   exactly what it uses. `./gradlew build` fails on unused/missing declarations.
+- `docs/adversarial/spec.md` catalogues exploit scenarios and names, for each, the test that runs
+  it. `AdversarialProtocolTest` enforces the link **both ways**, so two ordinary-looking edits fail
+  the build: renaming, deleting or `@Disabled`-ing a cited test without updating the catalogue, and
+  changing an attack suite's in-file `FAMILY-NN` javadoc labels so they no longer match the rows
+  that cite those methods. Every `@Test` in `*AttackTest` must open its javadoc with its scenario id.
+  Note that `./gradlew adversarial` runs only the gate and the dedicated suites — most cited proofs
+  are ordinary tests, run by `./gradlew test`.
 - Dependency pins in root `build.gradle` are deliberate (ActiveJ v7.0.0, BouncyCastle 1.85.2,
   logback ≥1.5.13 — the legacy ASM force is gone, neither ActiveJ graph resolves one).
   Do not "upgrade/downgrade to stable" — the comments explain why.

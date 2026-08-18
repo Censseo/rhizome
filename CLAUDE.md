@@ -16,11 +16,21 @@ Requires JDK 25 (Gradle toolchain enforces it).
 
 ```bash
 ./gradlew build                 # build + lint + all tests
-./gradlew test                  # all tests (~799)
+./gradlew test                  # all tests (~1140)
 ./gradlew :lib-core:test        # one module's tests
 ./gradlew :lib-core:test --tests "rhizome.ChainEngineTest"                    # one class
 ./gradlew :lib-core:test --tests "rhizome.ChainEngineTest.someTestMethod"     # one method
+./gradlew adversarial           # protocol gate + the dedicated attack suites
 ```
+
+`docs/adversarial/spec.md` is the adversarial test protocol: a catalogue of exploit scenarios, each
+naming the test that runs it. It is machine-checked in both directions by `AdversarialProtocolTest` —
+a cited proof that was renamed, deleted or `@Disabled` fails the build, and so does an attack suite
+whose in-file `FAMILY-NN` labels disagree with the catalogue. Renaming an attack test therefore means
+updating the catalogue. The suites live in `lib-core/src/test/java/rhizome/adversarial/` over the
+fixtures in `lib-core/src/testFixtures/java/rhizome/adversarial/`, but most scenarios point at the
+test that already covered them wherever it lives — so `./gradlew adversarial` runs the gate and those
+suites, not the whole catalogue, which `./gradlew test` covers.
 
 Run a node (config is environment variables — see README table: `RHIZOME_NETWORK`, `RHIZOME_PORT`,
 `RHIZOME_MINER`, `RHIZOME_PEERS`, `RHIZOME_API_TOKEN`, `RHIZOME_PEER_TOKEN`, …):

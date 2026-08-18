@@ -32,3 +32,36 @@ dependencies {
     // discovered. The root `subprojects` block only wires JUnit onto src/test, not testFixtures.
     testFixturesApi "org.junit.jupiter:junit-jupiter:${junitVersion}"
 }
+
+// ---- adversarial test protocol gate ----
+// AdversarialProtocolTest reads docs/adversarial/spec.md and the test SOURCES it cites as text, at
+// runtime. Gradle sees none of that as an input, so editing ONLY the catalogue left :lib-core:test
+// UP-TO-DATE and the build green with a broken proof link — precisely the failure the protocol
+// exists to prevent, and its most likely edit. The gate therefore gets its own task with those
+// files declared.
+//
+// Why not simply declare them on `test`: the cited proofs live in every module, so `test` would
+// re-run lib-core's 550 tests whenever any test anywhere is touched. Isolated, the gate is six
+// tests and re-runs in about a second, which is affordable at that trigger rate.
+def adversarialProtocolCheck = tasks.register('adversarialProtocolCheck', Test) {
+    group = 'verification'
+    description = 'Checks docs/adversarial/spec.md against the tests it cites, in both directions.'
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    useJUnitPlatform()
+    filter {
+        includeTestsMatching 'rhizome.adversarial.AdversarialProtocolTest'
+    }
+    inputs.file(rootProject.file('docs/adversarial/spec.md'))
+        .withPropertyName('protocolCatalogue')
+        .withPathSensitivity(PathSensitivity.RELATIVE)
+    inputs.files(rootProject.subprojects.collect { module ->
+            module.fileTree('src/test/java') { include '**/*.java' }
+        })
+        .withPropertyName('citedProofSources')
+        .withPathSensitivity(PathSensitivity.RELATIVE)
+}
+
+tasks.named('check') {
+    dependsOn adversarialProtocolCheck
+}
