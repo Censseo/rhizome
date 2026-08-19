@@ -163,8 +163,14 @@ final class TestNetwork implements AutoCloseable {
         private long blockIntervalMs = 30;
         private final List<String> peers = new ArrayList<>();
         private String apiToken;
-        private int keepBlocks;
         private Path snapshot;
+        /**
+         * Settings that live only in the {@link NodeConfig} record and have no {@code with*}
+         * helper — pruning, snap-sync, the snapshot cadence. Applied as a transformation at start
+         * rather than mirrored as fields here, so adding one costs a method instead of a
+         * twenty-argument constructor call per knob.
+         */
+        private java.util.function.UnaryOperator<NodeConfig> tweak = config -> config;
 
         private Builder(String name) {
             this.name = name;
@@ -218,9 +224,44 @@ final class TestNetwork implements AutoCloseable {
             return this;
         }
 
+        /** Retains only the last {@code keep} block bodies; older ones are pruned at boot. */
         Builder keepBlocks(int keep) {
-            this.keepBlocks = keep;
+            return tweak(c -> new NodeConfig(c.params(), c.dataDir(), c.apiPort(), c.snapshotPath(),
+                c.miner(), c.peers(), c.advertisedUrl(), c.syncPeriodMs(), c.blockIntervalMs(),
+                c.mempoolSize(), c.allowPrivatePeers(), c.bindAddress(), c.apiToken(),
+                keep, c.allowOpenApi(), c.peerToken(), c.snapSync(), c.protectReads(),
+                c.trustXff(), c.vote(), c.snapshotEveryBlocks(), c.hostAllowlistEnabled(),
+                c.extraAllowedHosts()));
+        }
+
+        /** Bootstraps from a peer's materialised state snapshot instead of replaying every block. */
+        Builder snapSync() {
+            return tweak(c -> new NodeConfig(c.params(), c.dataDir(), c.apiPort(), c.snapshotPath(),
+                c.miner(), c.peers(), c.advertisedUrl(), c.syncPeriodMs(), c.blockIntervalMs(),
+                c.mempoolSize(), c.allowPrivatePeers(), c.bindAddress(), c.apiToken(),
+                c.keepBlocks(), c.allowOpenApi(), c.peerToken(), true, c.protectReads(),
+                c.trustXff(), c.vote(), c.snapshotEveryBlocks(), c.hostAllowlistEnabled(),
+                c.extraAllowedHosts()));
+        }
+
+        /** Materialises a state snapshot every {@code blocks} blocks. */
+        Builder snapshotEvery(long blocks) {
+            return tweak(c -> new NodeConfig(c.params(), c.dataDir(), c.apiPort(), c.snapshotPath(),
+                c.miner(), c.peers(), c.advertisedUrl(), c.syncPeriodMs(), c.blockIntervalMs(),
+                c.mempoolSize(), c.allowPrivatePeers(), c.bindAddress(), c.apiToken(),
+                c.keepBlocks(), c.allowOpenApi(), c.peerToken(), c.snapSync(), c.protectReads(),
+                c.trustXff(), c.vote(), blocks, c.hostAllowlistEnabled(), c.extraAllowedHosts()));
+        }
+
+        Builder tweak(java.util.function.UnaryOperator<NodeConfig> more) {
+            java.util.function.UnaryOperator<NodeConfig> previous = this.tweak;
+            this.tweak = config -> more.apply(previous.apply(config));
             return this;
+        }
+
+        /** The data directory this node will use — so a scenario can restart it by hand. */
+        Path dataDir() {
+            return root.resolve(name);
         }
 
         RhizomeNode start() throws IOException {
@@ -239,17 +280,7 @@ final class TestNetwork implements AutoCloseable {
             if (apiToken != null) {
                 config = config.withApiToken(apiToken);
             }
-            if (keepBlocks > 0) {
-                config = new NodeConfig(config.params(), config.dataDir(), config.apiPort(),
-                    config.snapshotPath(), config.miner(), config.peers(), config.advertisedUrl(),
-                    config.syncPeriodMs(), config.blockIntervalMs(), config.mempoolSize(),
-                    config.allowPrivatePeers(), config.bindAddress(), config.apiToken(),
-                    keepBlocks, config.allowOpenApi(), config.peerToken(), config.snapSync(),
-                    config.protectReads(), config.trustXff(), config.vote(),
-                    config.snapshotEveryBlocks(), config.hostAllowlistEnabled(),
-                    config.extraAllowedHosts());
-            }
-            RhizomeNode node = new RhizomeNode(config);
+            RhizomeNode node = new RhizomeNode(tweak.apply(config));
             node.start();
             started.add(node);
             return node;
