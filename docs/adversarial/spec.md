@@ -98,9 +98,9 @@ The two are complements, not substitutes. A component test can prove a rule and 
 assembled node never reaches it; a network test can prove the node held its chain and never tell
 you which rule saved it.
 
-The distribution is deliberate and worth stating, because "160 DEFENDED" reads as if it were
-uniform: of the 171 scenarios, **116** rest at component level, **13** at the surface, **36** reach
-the network, and 3 are residuals with no proof by definition. The network figure is the `E2E`
+The distribution is deliberate and worth stating, because "162 DEFENDED" reads as if it were
+uniform: of the 170 catalogued scenarios, **115** rest at component level, **13** at the surface,
+**39** reach the network, and 3 are residuals with no proof by definition. The network figure is the `E2E`
 family plus the scenarios elsewhere that gained a second, network-level proof. Component level
 dominates on purpose — it is the only level that can name the gate that refused — but a rule with
 no network proof anywhere is a rule nobody has watched an assembled node apply.
@@ -316,7 +316,7 @@ catalogue is never run as one suite.
 
 | ID | Scenario | Class | Verdict | Proof |
 |----|----------|-------|---------|-------|
-| PERS-01 | Leave contract, box or token state behind after a reorg, so a rewritten block leaves residue. | A3 | DEFENDED | `lib-vm/src/test/java/rhizome/vm/ContractConsensusTest.java#popRevertsContractStateExactly`, `lib-core/src/test/java/rhizome/BoxConsensusTest.java#popRevertsBoxStateExactly`, `lib-core/src/test/java/rhizome/TokenConsensusTest.java#mintTransferBurnThenPop` |
+| PERS-01 | Leave contract, box or token state behind after a reorg, so a rewritten block leaves residue. | A3 | DEFENDED | `lib-vm/src/test/java/rhizome/vm/ContractConsensusTest.java#popRevertsContractStateExactly`, `lib-core/src/test/java/rhizome/BoxConsensusTest.java#popRevertsBoxStateExactly`, `lib-core/src/test/java/rhizome/TokenConsensusTest.java#mintTransferBurnThenPop`, `app-node/src/test/java/rhizome/adversarial/e2e/E2EStateDomainsTest.java#aReorgReversesBoxAndTokenStateExactlyOnARealNode` |
 | PERS-02 | Make apply and rollback inexact, so a reorg silently changes balances. | A3 | DEFENDED | `lib-core/src/test/java/rhizome/core/blockchain/LedgerReversalExactnessTest.java#aBlockCarryingEveryDomainReversesExactly`, `lib-core/src/test/java/rhizome/core/blockchain/LedgerReversalExactnessTest.java#uncleRewardsReverseAtTheirWorkScaledAmount` |
 | PERS-03 | Cut power mid-commit so a peripheral store ends up ahead of the chain height. | A6 | DEFENDED | `lib-core/src/test/java/rhizome/StateRootConsensusTest.java#bootReconciliationRewindsPeripheralStoresAheadOfTheChainHeight`, `lib-persistence/src/test/java/rhizome/RocksDbNodeStoreTest.java#chainStoreAppendPopIsAtomicAndIndexed`, `app-node/src/test/java/rhizome/adversarial/e2e/E2ENodeResilienceTest.java#aRestartOnTheSameDataDirectoryRestoresChainBalancesAndNonces` |
 | PERS-04 | Corrupt a persisted undo journal so a restart either loses state or allocates unboundedly on it. | A6 | DEFENDED | `lib-vm/src/test/java/rhizome/vm/WasmContractProcessorPersistenceTest.java#aCorruptJournalCountFailsCleanlyWithoutAGiantAllocation`, `lib-vm/src/test/java/rhizome/vm/WasmContractProcessorPersistenceTest.java#aTruncatedJournalFailsCleanly` |
@@ -416,6 +416,8 @@ work, real RocksDB. Fixtures live in `app-node/src/test/java/rhizome/adversarial
 | E2E-26 | Break contract execution on the wire, so a deploy or a call is accepted by the API and never mined or paid for. | A1 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EContractTest.java#aContractIsDeployedAndCalledThroughTheHttpSurface` |
 | E2E-27 | Push a "poison block" at `/submit`: a free contract call declaring more gas than the ceiling, to stall every validating node under its consensus lock. | A3 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EContractTest.java#aPoisonBlockPushedAtTheSubmitRouteIsRefusedAndTheNodeStaysHealthy` |
 | E2E-28 | Sit in two honest nodes' peer sets at once and poison the fork choice between them. | A2 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EHostilePeerTest.java#twoHonestNodesConvergeWithEachOtherDespiteALiarInBothPeerSets` |
+| E2E-29 | Create a box or mint a token whose state the node commits but does not serve back, so clients and consensus disagree. | A1 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EStateDomainsTest.java#aBoxAndATokenCreatedOnARealNodeAreCommittedAndServedBack` |
+| E2E-30 | Leave box or token state behind after the branch that created it is orphaned — a partial revert, which is a permanent state-root fork rather than a lost box. | A3 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EStateDomainsTest.java#aReorgReversesBoxAndTokenStateExactlyOnARealNode` |
 
 ---
 
@@ -432,14 +434,15 @@ beyond writing a test — a fixture that does not exist, or a decision that has 
 
 ## Change log
 
-- **2026-08-19** — Network layer added. A new `E2E` family of 28 scenarios covering the assembled
+- **2026-08-19** — Network layer added. A new `E2E` family of 30 scenarios covering the assembled
   system: fork convergence and partition heal between real mining nodes, a cross-branch double
   spend and its reorg-replay mirror on a shared premined genesis, HTTP abuse written on raw sockets
   (bearer, CSRF, DNS rebinding, read floods, malformed input, slow loris), a hostile peer serving
   unproven and undecodable branches over a real socket, a signed-transaction flood, and a restart
   on a live data directory, a contract deployed and called over HTTP, a poison block pushed at
-  `/submit`, and a liar sitting in two honest nodes' peer sets while they converge with each other.
-  Twenty new proofs under `rhizome.adversarial.e2e`, plus eight
+  `/submit`, a liar sitting in two honest nodes' peer sets while they converge with each other, and
+  box/token state reversing exactly on RocksDB through a peer-driven reorg.
+  Twenty-two new proofs under `rhizome.adversarial.e2e`, plus eight
   pre-existing full-node tests that the catalogue had never cited — `RhizomeNodeTest`,
   `GossipPropagationTest`, `PeerDiscoveryTest`, `SnapSyncIntegrationTest`,
   `WalletNodeIntegrationTest`, `NodeSyncIntegrationTest`. Eight component scenarios gained a
