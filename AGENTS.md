@@ -35,9 +35,15 @@ No CI is active — `.github/ci-workflow.yml.example` must be copied into
   it. `AdversarialProtocolTest` enforces the link **both ways**, so two ordinary-looking edits fail
   the build: renaming, deleting or `@Disabled`-ing a cited test without updating the catalogue, and
   changing an attack suite's in-file `FAMILY-NN` javadoc labels so they no longer match the rows
-  that cite those methods. Every `@Test` in `*AttackTest` must open its javadoc with its scenario id.
+  that cite those methods. Every `@Test` in any module's `rhizome.adversarial` package must open its javadoc
+  with its scenario id.
   Note that `./gradlew adversarial` runs only the gate and the dedicated suites — most cited proofs
   are ordinary tests, run by `./gradlew test`.
+- The `E2E` suites (`app-node/src/test/java/rhizome/adversarial/e2e/`) start real nodes: RocksDB on
+  disk, an HTTP server on a loopback port, a producer thread. They are the slow part of the suite
+  (~1 min) and they assert only what an outside observer sees. Mining is instant at 3 bits, so the
+  producer's `blockInterval` IS the block rate — set it too low and two nodes fork past the reorg
+  window before any sync round fires, which looks like a consensus bug and is a test bug.
 - Dependency pins in root `build.gradle` are deliberate (ActiveJ v7.0.0, BouncyCastle 1.85.2,
   logback ≥1.5.13 — the legacy ASM force is gone, neither ActiveJ graph resolves one).
   Do not "upgrade/downgrade to stable" — the comments explain why.

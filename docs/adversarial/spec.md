@@ -83,6 +83,28 @@ only holds against a weaker adversary than the one who can reach it is not a def
 | `RESIDUAL` | Not defended. Accepted, with a stated bound. | A note; no test asserts the absence of the vector. |
 | `GAP` | Identified, not yet proven. | Listed in [Known gaps](#known-gaps) with why. |
 
+### Proof levels
+
+A verdict says whether an attack fails; it does not say *where* the code that refuses it was
+exercised. Three levels appear in this catalogue, and they answer different questions:
+
+| Level | What runs | What it can assert |
+|-------|-----------|--------------------|
+| **component** | An engine, a VM or a store in-process, with its collaborators real but its transport absent. | The exact gate that refused, by status code — `INVALID_TRANSACTION_NONCE`, not merely "rejected". |
+| **surface** | The real HTTP servlet or a real socket, driven with real requests. | That a forged header, an oversized body or a malformed request is handled as designed on the wire. |
+| **network** | Assembled `RhizomeNode` processes: RocksDB on disk, an HTTP server on a port, a producer thread, sync loops. | Only what an outside observer sees — a height, a tip hash, a balance, a status — but about the *system*, including its threading, durability and recovery. |
+
+The two are complements, not substitutes. A component test can prove a rule and still miss that the
+assembled node never reaches it; a network test can prove the node held its chain and never tell
+you which rule saved it.
+
+The distribution is deliberate and worth stating, because "160 DEFENDED" reads as if it were
+uniform: of the 171 scenarios, **116** rest at component level, **13** at the surface, **36** reach
+the network, and 3 are residuals with no proof by definition. The network figure is the `E2E`
+family plus the scenarios elsewhere that gained a second, network-level proof. Component level
+dominates on purpose — it is the only level that can name the gate that refused — but a rule with
+no network proof anywhere is a rule nobody has watched an assembled node apply.
+
 ### Families
 
 `CONS` block validation gate ·
@@ -101,14 +123,21 @@ only holds against a weaker adversary than the one who can reach it is not a def
 `NET` peer transport and discovery ·
 `API` node HTTP surface ·
 `CODEC` wire decoding bounds ·
-`WALLET` client key handling
+`WALLET` client key handling ·
+`E2E` the assembled node and network
 
 ## Running the protocol
 
 ```bash
 ./gradlew adversarial          # the protocol gate plus the dedicated attack suites
+./gradlew :app-node:test --tests "rhizome.adversarial.e2e.*"   # the network layer alone
 ./gradlew test                 # every proof this catalogue cites
 ```
+
+The `E2E` suites start real nodes and mine real blocks, so they cost roughly a minute of wall clock
+between them — against a second or so for the whole component layer. That ratio is the reason the
+catalogue is not written at network level throughout: the layer buys assurance about the assembled
+system, and it buys it at a price that only makes sense for the properties nothing else can reach.
 
 The suites written specifically for this protocol live in `lib-core/src/test/java/rhizome/adversarial/`
 and share the fixtures in `lib-core/src/testFixtures/java/rhizome/adversarial/`
@@ -137,7 +166,7 @@ catalogue is never run as one suite.
 | CONS-06 | Carry a miner vote outside the protocol domain to corrupt the parameter tally. | A3 | DEFENDED | `lib-core/src/test/java/rhizome/VotingTest.java#consensusGateRejectsOutOfRangeVote` |
 | CONS-07 | Break account-nonce sequencing inside a block to execute a sender's transactions out of order. | A3 | DEFENDED | `lib-core/src/test/java/rhizome/ChainEngineTest.java#enforcesAccountNonceSequence` |
 | CONS-08 | Submit a block containing a box or token transaction on a node that has no such processor, so validity depends on the node's wiring. | A3 | DEFENDED | `lib-core/src/test/java/rhizome/core/blockchain/ChainEngineBootTest.java#aDomainThatWasNeverNamedRejectsItsTransactionsInsteadOfIgnoringThem` |
-| CONS-09 | Force a validating node to run unbounded VM work by mining a free, enormous `gasLimit` call into a block ("poison block"). | A3 | DEFENDED | `lib-vm/src/test/java/rhizome/vm/ContractConsensusTest.java#contractTxOverPerTxGasCapIsRejectedBeforeExecution`, `lib-vm/src/test/java/rhizome/vm/ContractConsensusTest.java#perTxUnderCapButBlockGasSumOverCapIsRejected` |
+| CONS-09 | Force a validating node to run unbounded VM work by mining a free, enormous `gasLimit` call into a block ("poison block"). | A3 | DEFENDED | `lib-vm/src/test/java/rhizome/vm/ContractConsensusTest.java#contractTxOverPerTxGasCapIsRejectedBeforeExecution`, `lib-vm/src/test/java/rhizome/vm/ContractConsensusTest.java#perTxUnderCapButBlockGasSumOverCapIsRejected`, `app-node/src/test/java/rhizome/adversarial/e2e/E2EContractTest.java#aPoisonBlockPushedAtTheSubmitRouteIsRefusedAndTheNodeStaysHealthy` |
 | CONS-10 | Exploit the difference between a node's rejection order and its cost by making an invalid block expensive to reject. | A1 | DEFENDED | `lib-core/src/test/java/rhizome/core/blockchain/BlockUnclesTest.java#blocksOwnPowIsVerifiedBeforeUncleWork` |
 
 ## POW — proof of work and difficulty
@@ -193,7 +222,7 @@ catalogue is never run as one suite.
 | REPLAY-01 | Resubmit a confirmed transaction on the same branch. | A0 | DEFENDED | `lib-core/src/test/java/rhizome/adversarial/ReplayAttackTest.java#resubmittingAConfirmedTransactionIsRefused`, `lib-core/src/test/java/rhizome/ExecutorTest.java#rejectsAlreadyExecuted` |
 | REPLAY-02 | Reuse a spent nonce for a different payment. | A1 | DEFENDED | `lib-core/src/test/java/rhizome/adversarial/ReplayAttackTest.java#aDifferentTransactionReusingASpentNonceIsRefused` |
 | REPLAY-03 | Replay a transaction captured on one network onto another. | A0 | DEFENDED | `lib-core/src/test/java/rhizome/adversarial/ReplayAttackTest.java#aTransactionSignedForAnotherNetworkCarriesNoAuthorityHere`, `lib-core/src/test/java/rhizome/ExecutorTest.java#rejectsWrongChainId` |
-| REPLAY-04 | Have a transaction mined into a branch, orphan that branch, and either double-pay it on the winner or leave it permanently unspendable. | A3 | DEFENDED | `lib-core/src/test/java/rhizome/adversarial/ReplayAttackTest.java#aTransactionUndoneByAReorgIsSpendableAgainAndPaysExactlyOnce` |
+| REPLAY-04 | Have a transaction mined into a branch, orphan that branch, and either double-pay it on the winner or leave it permanently unspendable. | A3 | DEFENDED | `lib-core/src/test/java/rhizome/adversarial/ReplayAttackTest.java#aTransactionUndoneByAReorgIsSpendableAgainAndPaysExactlyOnce`, `app-node/src/test/java/rhizome/adversarial/e2e/E2EDoubleSpendTest.java#aPaymentUndoneByAReorgCanBeMinedAgainOnTheWinningBranchAndPaysOnce` |
 | REPLAY-05 | Spend the same balance twice within one block. | A3 | DEFENDED | `lib-core/src/test/java/rhizome/ExecutorTest.java#insufficientBalanceRollsBackTheWholeBlock`, `lib-core/src/test/java/rhizome/MemPoolTest.java#enforcesCumulativeBalanceNotPerTransaction` |
 
 ## INFL — issuance and ledger arithmetic
@@ -229,8 +258,8 @@ catalogue is never run as one suite.
 |----|----------|-------|---------|-------|
 | REORG-01 | Rewrite recent history with sustained majority hash power. | A4 | RESIDUAL | Irreducible in any proof-of-work chain. Bounded in depth by `maxReorgDepth` (120 blocks, ≈10 min) — see REORG-02. |
 | REORG-02 | Rewrite history deeper than the finality window by presenting a heavier branch. | A4 | BOUNDED | `lib-core/src/test/java/rhizome/adversarial/ReorgAttackTest.java#aHeavierWithheldBranchForkingExactlyAtTheWindowIsAdopted`, `lib-core/src/test/java/rhizome/adversarial/ReorgAttackTest.java#oneBlockPastTheWindowTheSameHeavierBranchIsRefused`, `lib-core/src/test/java/rhizome/HardeningTest.java#reorgDeeperThanFinalityWindowIsRefused` |
-| REORG-03 | Make a refused reorg expensive: leave the victim truncated, degraded, or unable to keep mining. | A2 | DEFENDED | `lib-core/src/test/java/rhizome/adversarial/ReorgAttackTest.java#aRefusedDeepReorgLeavesTheNodeAbleToKeepMiningItsOwnBranch`, `lib-core/src/test/java/rhizome/ChainSynchronizerTest.java#fallbackGateRejectsWrongDifficultyBeforeAnyPop` |
-| REORG-04 | Claim enormous cumulative work without proving any, to force a pop/restore cycle per round. | A2 | DEFENDED | `lib-core/src/test/java/rhizome/HardeningTest.java#claimedButUnprovenWorkCausesZeroStateMutation`, `lib-core/src/test/java/rhizome/HeaderSynchronizerTest.java#peerLyingAboutTotalWorkCostsOnlyHeaders` |
+| REORG-03 | Make a refused reorg expensive: leave the victim truncated, degraded, or unable to keep mining. | A2 | DEFENDED | `lib-core/src/test/java/rhizome/adversarial/ReorgAttackTest.java#aRefusedDeepReorgLeavesTheNodeAbleToKeepMiningItsOwnBranch`, `lib-core/src/test/java/rhizome/ChainSynchronizerTest.java#fallbackGateRejectsWrongDifficultyBeforeAnyPop`, `app-node/src/test/java/rhizome/node/RhizomeNodeTest.java#aDeepForkedPeerIsRefusedButNeverBanned` |
+| REORG-04 | Claim enormous cumulative work without proving any, to force a pop/restore cycle per round. | A2 | DEFENDED | `lib-core/src/test/java/rhizome/HardeningTest.java#claimedButUnprovenWorkCausesZeroStateMutation`, `lib-core/src/test/java/rhizome/HeaderSynchronizerTest.java#peerLyingAboutTotalWorkCostsOnlyHeaders`, `app-node/src/test/java/rhizome/adversarial/e2e/E2EHostilePeerTest.java#aPeerClaimingHugeWorkAndProvingNoneChangesNothing` |
 | REORG-05 | Abandon the exchange mid-reorg, leaving the victim popped to the fork with a partial branch applied. | A2 | DEFENDED | `lib-core/src/test/java/rhizome/HeaderSynchronizerTest.java#aPeerThatGoesUnavailableMidBodyLeavesTheLocalBranchIntact`, `lib-core/src/test/java/rhizome/ChainSynchronizerPipelineTest.java#aTransportFailureMidRangeStaysUnavailableAndNeverReadsAsInvalid` |
 | REORG-06 | Hold two equal-work camps split indefinitely, so neither side can ever rejoin. | A3 | DEFENDED | `lib-core/src/test/java/rhizome/HeaderSynchronizerTest.java#equalBaseWorkAndEqualTotalResolvesDeterministically`, `lib-core/src/test/java/rhizome/HeaderSynchronizerTest.java#equalTotalTiebreakAlsoConvergesViaTheLegacyBlockFallback` |
 | REORG-07 | Serve a branch from an incompatible genesis to make the victim adopt another network's history. | A2 | DEFENDED | `lib-core/src/test/java/rhizome/ChainSynchronizerTest.java#incompatibleGenesisIsRejected` |
@@ -289,7 +318,7 @@ catalogue is never run as one suite.
 |----|----------|-------|---------|-------|
 | PERS-01 | Leave contract, box or token state behind after a reorg, so a rewritten block leaves residue. | A3 | DEFENDED | `lib-vm/src/test/java/rhizome/vm/ContractConsensusTest.java#popRevertsContractStateExactly`, `lib-core/src/test/java/rhizome/BoxConsensusTest.java#popRevertsBoxStateExactly`, `lib-core/src/test/java/rhizome/TokenConsensusTest.java#mintTransferBurnThenPop` |
 | PERS-02 | Make apply and rollback inexact, so a reorg silently changes balances. | A3 | DEFENDED | `lib-core/src/test/java/rhizome/core/blockchain/LedgerReversalExactnessTest.java#aBlockCarryingEveryDomainReversesExactly`, `lib-core/src/test/java/rhizome/core/blockchain/LedgerReversalExactnessTest.java#uncleRewardsReverseAtTheirWorkScaledAmount` |
-| PERS-03 | Cut power mid-commit so a peripheral store ends up ahead of the chain height. | A6 | DEFENDED | `lib-core/src/test/java/rhizome/StateRootConsensusTest.java#bootReconciliationRewindsPeripheralStoresAheadOfTheChainHeight`, `lib-persistence/src/test/java/rhizome/RocksDbNodeStoreTest.java#chainStoreAppendPopIsAtomicAndIndexed` |
+| PERS-03 | Cut power mid-commit so a peripheral store ends up ahead of the chain height. | A6 | DEFENDED | `lib-core/src/test/java/rhizome/StateRootConsensusTest.java#bootReconciliationRewindsPeripheralStoresAheadOfTheChainHeight`, `lib-persistence/src/test/java/rhizome/RocksDbNodeStoreTest.java#chainStoreAppendPopIsAtomicAndIndexed`, `app-node/src/test/java/rhizome/adversarial/e2e/E2ENodeResilienceTest.java#aRestartOnTheSameDataDirectoryRestoresChainBalancesAndNonces` |
 | PERS-04 | Corrupt a persisted undo journal so a restart either loses state or allocates unboundedly on it. | A6 | DEFENDED | `lib-vm/src/test/java/rhizome/vm/WasmContractProcessorPersistenceTest.java#aCorruptJournalCountFailsCleanlyWithoutAGiantAllocation`, `lib-vm/src/test/java/rhizome/vm/WasmContractProcessorPersistenceTest.java#aTruncatedJournalFailsCleanly` |
 | PERS-05 | Continue writing new tips after a failed revert or restore, entrenching state that boot recovery has not repaired. | A6 | DEFENDED | `lib-core/src/test/java/rhizome/core/blockchain/DegradedBarrierTest.java#degradedBarsEveryNewTipWriteAndATornPopIsNotRestoreClearable` |
 | PERS-06 | Lose an unrelated store's mutations because there is no single cross-store atomic commit. | A6 | RESIDUAL | Each store commits its own mutations and undo journal in one fsynced `WriteBatch`; a power cut between two stores' commits is reconciled at boot by rewinding any store left ahead of the chain height (WHITEPAPER §6.2, §7.6) rather than prevented. |
@@ -300,9 +329,9 @@ catalogue is never run as one suite.
 |----|----------|-------|---------|-------|
 | NET-01 | Register an internal or cloud-metadata address as a peer, turning the node into an SSRF proxy. | A1 | DEFENDED | `lib-net/src/test/java/rhizome/net/PeerRegistrySecurityTest.java#ssrfClassifierRejectsInternalAndMetadataHosts`, `lib-net/src/test/java/rhizome/net/PeerRegistrySecurityTest.java#ipv6TransitionTunnelsAreRejected` |
 | NET-02 | Rebind a peer's DNS name between validation and connection. | A1 | DEFENDED | `lib-net/src/test/java/rhizome/net/PeerHostsCacheBoundTest.java#failedResolutionsAreCachedWithAShortTtl`, `app-node/src/test/java/rhizome/node/NodeApiHardeningFlagsTest.java#xffHopResolutionUsesOnlyTheParsedLiteralNeverTheResolver` |
-| NET-03 | OOM the node with a giant response body on an automatic discovery round. | A2 | DEFENDED | `lib-net/src/test/java/rhizome/net/PeerDiscoveryBodyBoundTest.java#oversizedPeersBodyIsRejectedNotBuffered`, `lib-net/src/test/java/rhizome/net/HttpPeerSourceTest.java#oversizedTotalWorkIsRejectedNotParsed` |
+| NET-03 | OOM the node with a giant response body on an automatic discovery round. | A2 | DEFENDED | `lib-net/src/test/java/rhizome/net/PeerDiscoveryBodyBoundTest.java#oversizedPeersBodyIsRejectedNotBuffered`, `lib-net/src/test/java/rhizome/net/HttpPeerSourceTest.java#oversizedTotalWorkIsRejectedNotParsed`, `app-node/src/test/java/rhizome/adversarial/e2e/E2EHostilePeerTest.java#aPeerAnsweringWithAnEnormousScalarIsRejectedNotParsed` |
 | NET-04 | Hold the sync thread with a slow trickle, or with an absurd `Retry-After`. | A2 | DEFENDED | `lib-net/src/test/java/rhizome/net/HttpPeerSourceTest.java#slowDripBodyHitsWholeExchangeDeadline`, `lib-net/src/test/java/rhizome/net/HttpPeerSourceThrottleTest.java#anAbsurdRetryAfterIsClampedSoAPeerCannotParkTheSyncThread` |
-| NET-05 | Eclipse a node by filling its peer table from one subnet with many identities. | A2 | DEFENDED | `lib-net/src/test/java/rhizome/net/PeerRegistrySecurityTest.java#subnetBucketCapsDiscoveredPeersFromOneSubnet`, `lib-net/src/test/java/rhizome/net/PeerBanListTest.java#portRotationEscalatesToAnAddressWideBan` |
+| NET-05 | Eclipse a node by filling its peer table from one subnet with many identities. | A2 | DEFENDED | `lib-net/src/test/java/rhizome/net/PeerRegistrySecurityTest.java#subnetBucketCapsDiscoveredPeersFromOneSubnet`, `lib-net/src/test/java/rhizome/net/PeerBanListTest.java#portRotationEscalatesToAnAddressWideBan`, `app-node/src/test/java/rhizome/node/RhizomeNodeTest.java#allPeersBannedIsObservedAsAnEclipsedSync` |
 | NET-06 | Evade a ban by rotating ports or URL spellings. | A2 | DEFENDED | `lib-net/src/test/java/rhizome/net/PeerBanListTest.java#banIsKeyedByEndpointNotAddress`, `lib-net/src/test/java/rhizome/net/PeerIdentityTest.java#oneIdentityPerCanonicalUrlWhateverTheReceivedSpelling` |
 | NET-07 | Get an innocent host banned by sharing its address, or by spraying offences to overflow the ban table. | A2 | DEFENDED | `lib-net/src/test/java/rhizome/net/PeerBanListTest.java#overflowBucketCountsButNeverBansInnocentHosts`, `lib-net/src/test/java/rhizome/net/PeerBanListTest.java#concurrentSprayKeepsTablesBoundedAndActiveBansStick` |
 | NET-08 | Capture the node's configured peer bearer token by getting itself gossiped in, or by downgrading to cleartext. | A2 | DEFENDED | `lib-net/src/test/java/rhizome/net/PeerTokenPolicyTest.java#gossipLearnedPeerNeverReceivesTheToken`, `lib-net/src/test/java/rhizome/net/PeerTokenPolicyTest.java#configuredHttpPeerNeverReceivesTheToken` |
@@ -313,10 +342,10 @@ catalogue is never run as one suite.
 
 | ID | Scenario | Class | Verdict | Proof |
 |----|----------|-------|---------|-------|
-| API-01 | Make the operator's browser submit a state-changing POST to their own node. | A5 | DEFENDED | `app-node/src/test/java/rhizome/node/NodeApiTest.java#browserPostIsRefusedUnlessSameOriginWithTheCsrfHeader`, `app-node/src/test/java/rhizome/node/NodeAssemblyTest.java#theHostAllowlistIsComputedAtAssemblyAndCarriesTheAdvertisedName` |
+| API-01 | Make the operator's browser submit a state-changing POST to their own node. | A5 | DEFENDED | `app-node/src/test/java/rhizome/node/NodeApiTest.java#browserPostIsRefusedUnlessSameOriginWithTheCsrfHeader`, `app-node/src/test/java/rhizome/node/NodeAssemblyTest.java#theHostAllowlistIsComputedAtAssemblyAndCarriesTheAdvertisedName`, `app-node/src/test/java/rhizome/adversarial/e2e/E2EApiAbuseTest.java#aRebindingPostThatLooksSameOriginIsRefusedByTheHostAllowlist` |
 | API-02 | Occupy the single event-loop thread with a flood of cheap submissions that each trigger proof-of-work verification. | A1 | DEFENDED | `app-node/src/test/java/rhizome/node/NodeApiTest.java#submitPowGateShedsBlocksBeforeTheBodyIsDecoded`, `app-node/src/test/java/rhizome/node/NodeApiTest.java#aggregateMempoolSignatureGateShedsTransactionsBeforeVerifying` |
 | API-03 | Occupy the event loop with read-only VM calls or explorer reads that decode blocks under the consensus lock. | A1 | DEFENDED | `app-node/src/test/java/rhizome/node/NodeApiTest.java#readonlyGasGateShedsCallsOnceTheGlobalBudgetIsSpent`, `app-node/src/test/java/rhizome/node/NodeApiTest.java#aggregateReadGateShedsExplorerReadsPastTheGlobalBudget` |
-| API-04 | Stall sockets to hold connections open without sending or draining bytes. | A1 | DEFENDED | `lib-net/src/test/java/rhizome/net/BodyReadDeadlineTest.java#idleDeadlineKillsAStalledExchange`, `lib-net/src/test/java/rhizome/net/BodyReadDeadlineTest.java#saturatedPoolRejectsInsteadOfRunningInline` |
+| API-04 | Stall sockets to hold connections open without sending or draining bytes. | A1 | DEFENDED | `lib-net/src/test/java/rhizome/net/BodyReadDeadlineTest.java#idleDeadlineKillsAStalledExchange`, `lib-net/src/test/java/rhizome/net/BodyReadDeadlineTest.java#saturatedPoolRejectsInsteadOfRunningInline`, `app-node/src/test/java/rhizome/adversarial/e2e/E2EApiAbuseTest.java#aStalledClientDoesNotHoldTheNodeHostage` |
 | API-05 | Reach a token-guarded route through an alternative path spelling — trailing slash, percent-encoding, dot segments. | A1 | DEFENDED | `app-node/src/test/java/rhizome/node/RoutePathNormalizationTest.java#everySpellingThatReachesTheIngestHandlerIsBearerGated`, `app-node/src/test/java/rhizome/node/RoutePolicyCompletenessTest.java#everyRegisteredRouteIsClassified` |
 | API-06 | Bypass the per-request cost accounting by choosing a route spelling the cost table does not recognise. | A1 | DEFENDED | `app-node/src/test/java/rhizome/node/RoutePathNormalizationTest.java#everySpellingThatReachesTheIngestHandlerCarriesTheSubmitCost`, `app-node/src/test/java/rhizome/node/RoutePathNormalizationTest.java#readCostsSurviveTrailingSlashesAndPercentEncoding` |
 | API-07 | Crash or wedge a handler with malformed input, out-of-range indexes, or oversized bodies. | A1 | DEFENDED | `app-node/src/test/java/rhizome/node/NodeApiTest.java#badInputAlwaysGets400NeverCrashes`, `app-node/src/test/java/rhizome/node/NodeApiTest.java#outOfIntRangeIndexesAreRejectedBeforeTheCast`, `app-node/src/test/java/rhizome/node/NodeApiTest.java#oversizedBodyIsRejectedNotBuffered` |
@@ -350,6 +379,44 @@ catalogue is never run as one suite.
 | WALLET-06 | Inject JSON metacharacters through a node URL to corrupt the key file. | A5 | DEFENDED | `app-wallet/src/test/java/rhizome/wallet/WalletTest.java#nodeUrlWithJsonMetacharactersDoesNotCorruptTheKeyFile` |
 | WALLET-07 | Make the browser wallet and the node disagree on a derivation, so a signed transaction spends from an address the user never saw. | A5 | DEFENDED | `app-node/src/test/java/rhizome/node/BrowserWalletVectorTest.java#browserSignedTransferParsesAndVerifies`, `app-node/src/test/java/rhizome/node/BrowserWalletVectorTest.java#contractAddressDerivationMatchesJs` |
 
+
+## E2E — the assembled node and network
+
+Scenarios whose subject is the system rather than a rule: real nodes, real sockets, real proof of
+work, real RocksDB. Fixtures live in `app-node/src/test/java/rhizome/adversarial/e2e/`
+(`TestNetwork`, `E2EFixtures`, `HostilePeer`, `RawHttp`).
+
+| ID | Scenario | Class | Verdict | Proof |
+|----|----------|-------|---------|-------|
+| E2E-01 | A node that mined its own branch in isolation keeps it, refusing the heavier history its peers hold. | A3 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EForkConvergenceTest.java#aNodeOnALighterBranchAdoptsTheHeavierOneItLearnsOverHttp` |
+| E2E-02 | Two camps that mined through a partition stay split after it heals. | A3 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EForkConvergenceTest.java#twoIsolatedMiningNodesThatMeetAgreeOnHistory` |
+| E2E-03 | Spend the same coins on two branches and keep both payments once the branches meet. | A3 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EDoubleSpendTest.java#conflictingSpendsOnTwoBranchesResolveToExactlyOnePayment` |
+| E2E-04 | Censor a payment permanently by getting it mined into a branch and then orphaning that branch. | A3 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EDoubleSpendTest.java#aPaymentUndoneByAReorgCanBeMinedAgainOnTheWinningBranchAndPaysOnce` |
+| E2E-05 | Reach a state-changing route on a token-protected node without the bearer. | A1 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EApiAbuseTest.java#stateChangingRoutesAreRefusedWithoutTheBearerAndTheNodeKeepsProducing` |
+| E2E-06 | Make the operator's browser POST to their own node from an attacker's page. | A5 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EApiAbuseTest.java#aCrossOriginBrowserPostIsRefused` |
+| E2E-07 | Defeat the same-origin check by rebinding DNS so `Origin` and `Host` agree. | A5 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EApiAbuseTest.java#aRebindingPostThatLooksSameOriginIsRefusedByTheHostAllowlist` |
+| E2E-08 | Drive lock-guarded block decodes from one address until production is starved. | A1 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EApiAbuseTest.java#anExpensiveReadFloodIsShedWith429AndTheNodeKeepsProducing` |
+| E2E-09 | Crash a handler with malformed input across the whole surface. | A1 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EApiAbuseTest.java#malformedInputIsAlwaysAnswereWithAStatusAndNeverKillsTheNode` |
+| E2E-10 | Hold the event loop with a client that announces a body and never sends it. | A1 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EApiAbuseTest.java#aStalledClientDoesNotHoldTheNodeHostage` |
+| E2E-11 | Claim an enormous chain over the wire and serve a branch that paid for nothing. | A2 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EHostilePeerTest.java#aPeerClaimingHugeWorkAndProvingNoneChangesNothing` |
+| E2E-12 | Serve a branch the decoder cannot parse, mid-sync, to a node that is also mining. | A2 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EHostilePeerTest.java#aPeerServingAnUndecodableBranchIsContainedInsideTheSyncPass` |
+| E2E-13 | Answer a scalar endpoint with megabytes, to be parsed before it is bounded. | A2 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EHostilePeerTest.java#aPeerAnsweringWithAnEnormousScalarIsRejectedNotParsed` |
+| E2E-14 | Get an honest-but-broken peer banned, so failing to answer becomes an eclipse primitive. | A2 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EHostilePeerTest.java#aPeerFailingEveryRequestIsNotTreatedAsMisbehaviour` |
+| E2E-15 | Trickle a response forever so every byte is progress and no idle timeout fires. | A2 | BOUNDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EHostilePeerTest.java#aPeerThatDripsForeverParksOnlyItsOwnSyncRoundAndNeverProduction` |
+| E2E-16 | Flood a node with valid signed transactions until it stops producing blocks. | A1 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2ENodeResilienceTest.java#aFloodOfSignedTransactionsOverHttpNeverStopsBlockProduction` |
+| E2E-17 | Restart a node and have it come back short, or with replayable nonces. | A6 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2ENodeResilienceTest.java#aRestartOnTheSameDataDirectoryRestoresChainBalancesAndNonces` |
+| E2E-18 | Eclipse a node silently, so it syncs from nobody and nothing says so. | A2 | DEFENDED | `app-node/src/test/java/rhizome/node/RhizomeNodeTest.java#allPeersBannedIsObservedAsAnEclipsedSync`, `app-node/src/test/java/rhizome/node/RhizomeNodeTest.java#noPeerAtAllIsAlsoAnEclipse` |
+| E2E-19 | Lock two forked camps into a mutual ban so the natural heal can never happen. | A3 | DEFENDED | `app-node/src/test/java/rhizome/node/RhizomeNodeTest.java#aDeepForkedPeerIsRefusedButNeverBanned` |
+| E2E-20 | Ban an honest node by proxy: enqueue its address as a peer and let it serve non-protocol replies. | A1 | DEFENDED | `app-node/src/test/java/rhizome/node/RhizomeNodeTest.java#aHostThatNeverSpokeTheProtocolIsDroppedNotBanned` |
+| E2E-21 | Withhold blocks from peers by never gossiping what is mined. | A3 | DEFENDED | `app-node/src/test/java/rhizome/node/GossipPropagationTest.java#minerPushesBlocksToPeer` |
+| E2E-22 | Have a node advertise its loopback peers, leaking an internal topology into discovery. | A2 | DEFENDED | `app-node/src/test/java/rhizome/node/PeerDiscoveryTest.java#loopbackPeersAreNotDiscoveredByDefault` |
+| E2E-23 | Break the wallet against a real node, so a signed payment is accepted locally and refused on chain. | A1 | DEFENDED | `app-wallet/src/test/java/rhizome/wallet/WalletNodeIntegrationTest.java#fundedWalletSendsCoinsThroughRunningNode` |
+| E2E-24 | Bootstrap a fresh node from a hostile or unburied snapshot pivot. | A2 | DEFENDED | `app-node/src/test/java/rhizome/node/SnapSyncIntegrationTest.java#freshNodeBootstrapsFromSnapshotAndConvergesWithoutHistoricalBodies`, `app-node/src/test/java/rhizome/node/SnapSyncIntegrationTest.java#bootstrapRefusesAnUnburiedPivot` |
+| E2E-25 | Serve a truncated or reorging view mid-sync so a fresh node adopts a partial chain. | A2 | DEFENDED | `app-node/src/test/java/rhizome/node/NodeSyncIntegrationTest.java#freshNodeSyncsFromHttpPeer`, `app-node/src/test/java/rhizome/node/NodeSyncIntegrationTest.java#aReorgingPeerServes503AndReadsAsUnavailableNotInvalid` |
+| E2E-26 | Break contract execution on the wire, so a deploy or a call is accepted by the API and never mined or paid for. | A1 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EContractTest.java#aContractIsDeployedAndCalledThroughTheHttpSurface` |
+| E2E-27 | Push a "poison block" at `/submit`: a free contract call declaring more gas than the ceiling, to stall every validating node under its consensus lock. | A3 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EContractTest.java#aPoisonBlockPushedAtTheSubmitRouteIsRefusedAndTheNodeStaysHealthy` |
+| E2E-28 | Sit in two honest nodes' peer sets at once and poison the fork choice between them. | A2 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EHostilePeerTest.java#twoHonestNodesConvergeWithEachOtherDespiteALiarInBothPeerSets` |
+
 ---
 
 ## Known gaps
@@ -359,16 +426,32 @@ beyond writing a test — a fixture that does not exist, or a decision that has 
 
 | ID | Scenario | Why it is open |
 |----|----------|----------------|
-| REORG-11 | Selfish mining: withhold blocks and release them to orphan honest work, measured as a revenue advantage rather than a validity failure. | Needs a multi-node simulation harness with a hash-rate model; every individual block in the attack is valid, so there is no rejection to assert. The depth bound (REORG-02) caps the damage; the revenue question is economic, not a consensus rule. |
-| NET-11 | Partition a node by exploiting the interaction between ban scoring and the discovery round over long periods. | Needs a time-accelerated multi-node network fixture. The individual mechanisms are pinned (NET-05..NET-07); their composition over hours is not. |
+| REORG-11 | Selfish mining: withhold blocks and release them to orphan honest work, measured as a revenue advantage rather than a validity failure. | The multi-node harness now exists (`TestNetwork`, used by E2E-01/02), so the missing piece is narrower than it was: a hash-rate model and a revenue metric. Every block in the attack is valid, so there is no rejection to assert — the question is economic, and the depth bound (REORG-02) already caps the damage. |
+| NET-11 | Partition a node by exploiting the interaction between ban scoring and the discovery round over long periods. | Needs a time-accelerated fixture: the mechanisms are pinned individually (NET-05..NET-07) and a single heal is pinned end to end (E2E-02), but their composition over hours cannot be observed in a suite that must finish in a minute. |
 | API-13 | Timing side channels on the API token comparison. | No constant-time comparison audit has been done; the token is a bearer secret over a loopback-or-proxy interface, so the exposure is low, but the claim is untested. |
 
 ## Change log
 
+- **2026-08-19** — Network layer added. A new `E2E` family of 28 scenarios covering the assembled
+  system: fork convergence and partition heal between real mining nodes, a cross-branch double
+  spend and its reorg-replay mirror on a shared premined genesis, HTTP abuse written on raw sockets
+  (bearer, CSRF, DNS rebinding, read floods, malformed input, slow loris), a hostile peer serving
+  unproven and undecodable branches over a real socket, a signed-transaction flood, and a restart
+  on a live data directory, a contract deployed and called over HTTP, a poison block pushed at
+  `/submit`, and a liar sitting in two honest nodes' peer sets while they converge with each other.
+  Twenty new proofs under `rhizome.adversarial.e2e`, plus eight
+  pre-existing full-node tests that the catalogue had never cited — `RhizomeNodeTest`,
+  `GossipPropagationTest`, `PeerDiscoveryTest`, `SnapSyncIntegrationTest`,
+  `WalletNodeIntegrationTest`, `NodeSyncIntegrationTest`. Eight component scenarios gained a
+  network-level proof alongside their existing one. A **Proof levels** section now states which
+  layer a scenario rests on, because "133 DEFENDED" read as if it were uniform and was not.
+  The gate was extended to scan every module's `rhizome.adversarial` package rather than
+  `lib-core`'s alone — and to accept family prefixes containing digits, which had silently made
+  the whole `E2E` family invisible to it.
 - **2026-08-18** — Protocol established. 17 families, 143 catalogued scenarios — 133 `DEFENDED`,
   4 `BOUNDED`, 3 `RESIDUAL`, 3 `GAP` — resting on 247 proof references into 89 test files.
   Fixtures (`AdversarialChain`, `BlockForge`, `AdversarialPeer`) and six attack suites added under
-  `rhizome.adversarial`, closing the vectors that had no direct proof: the CVE-2012-2459 body swap,
+  `rhizome.adversarial`, closing the component vectors that had no direct proof: the CVE-2012-2459 body swap,
   the Ed25519 malleability double-spend, reorg replay, the finality-window boundary on both sides,
   the multi-window timestamp campaign, and supply conservation. Enforced by
   `AdversarialProtocolTest`, which runs as its own Gradle task (`:lib-core:adversarialProtocolCheck`,

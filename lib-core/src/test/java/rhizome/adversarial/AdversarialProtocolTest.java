@@ -45,16 +45,23 @@ import org.junit.jupiter.api.Test;
  */
 class AdversarialProtocolTest {
 
+    /**
+     * A scenario id: a family prefix then a two-digit number. The family may contain digits after
+     * its first character — {@code E2E} does — which a letters-only prefix silently excluded,
+     * making that family's rows invisible to every check in this class rather than failing one.
+     */
+    private static final String ID = "[A-Z][A-Z0-9]{1,5}-\\d{2}";
+
     /** {@code | ID | Scenario | Class | Verdict | Proof |} */
     private static final Pattern SCENARIO_ROW =
-        Pattern.compile("^\\|\\s*([A-Z]{2,6}-\\d{2})\\s*\\|(.+)\\|\\s*$", Pattern.MULTILINE);
+        Pattern.compile("^\\|\\s*(" + ID + ")\\s*\\|(.+)\\|\\s*$", Pattern.MULTILINE);
 
     /** A proof reference: {@code `module/src/.../SomeTest.java#someMethod`}. */
     private static final Pattern PROOF_REFERENCE =
         Pattern.compile("`([a-z0-9\\-]+/src/[^`#]+\\.java)#(\\w+)`");
 
     /** A family prefix as the Families section declares it: a backticked code, then its gloss. */
-    private static final Pattern FAMILY_DECLARATION = Pattern.compile("`([A-Z]{2,6})`\\s+\\w");
+    private static final Pattern FAMILY_DECLARATION = Pattern.compile("`([A-Z][A-Z0-9]{1,5})`\\s+\\w");
 
     /** A javadoc block immediately preceding a {@code @Test} method — never spanning another. */
     private static final Pattern DOCUMENTED_TEST = Pattern.compile(
@@ -67,7 +74,7 @@ class AdversarialProtocolTest {
 
     /** The scenario label convention: the javadoc opens with the id, then a dash. */
     private static final Pattern SCENARIO_LABEL =
-        Pattern.compile("^([A-Z]{2,6}-\\d{2})\\s*[\\u2014-]");
+        Pattern.compile("^(" + ID + ")\\s*[\\u2014-]");
 
     private static final Set<String> VERDICTS = Set.of("DEFENDED", "BOUNDED", "RESIDUAL");
     private static final Set<String> ATTACKER_CLASSES = Set.of("A0", "A1", "A2", "A3", "A4", "A5", "A6");
@@ -169,13 +176,34 @@ class AdversarialProtocolTest {
         }
     }
 
-    /** The attack suites written for this protocol, as repo-relative paths. */
+    /**
+     * The suites written for this protocol, across every module — the component attack suites in
+     * {@code lib-core} and the end-to-end ones in {@code app-node} alike.
+     *
+     * <p>Scoping this to one module was wrong and silently so: a scenario suite added under
+     * another module's {@code rhizome.adversarial} package was neither label-checked nor required
+     * to appear in the catalogue, which is exactly the drift the reverse direction exists to catch.
+     * {@code AdversarialProtocolTest} itself is excluded — its tests check the catalogue, they do
+     * not run scenarios.
+     */
     private static List<Path> attackSuites() throws IOException {
-        try (var stream = Files.list(Path.of("src/test/java/rhizome/adversarial"))) {
-            return stream.filter(p -> p.getFileName().toString().endsWith("AttackTest.java"))
-                .sorted()
-                .toList();
+        Path root = repoRoot();
+        List<Path> suites = new ArrayList<>();
+        try (var modules = Files.list(root)) {
+            for (Path module : modules.sorted().toList()) {
+                Path packageDir = module.resolve("src/test/java/rhizome/adversarial");
+                if (!Files.isDirectory(packageDir)) {
+                    continue;
+                }
+                try (var files = Files.walk(packageDir)) {
+                    files.filter(p -> p.getFileName().toString().endsWith("Test.java"))
+                        .filter(p -> !p.getFileName().toString().equals("AdversarialProtocolTest.java"))
+                        .sorted()
+                        .forEach(suites::add);
+                }
+            }
         }
+        return suites;
     }
 
     private static String repoRelative(Path file) {
