@@ -137,7 +137,14 @@ public final class PeerBanList {
         this(banThreshold, banMillis, maxTracked, System::currentTimeMillis);
     }
 
-    PeerBanList(int banThreshold, long banMillis, int maxTracked, LongSupplier nowMillis) {
+    /**
+     * As above, with the clock injected — public for the same reason {@link
+     * rhizome.core.blockchain.ChainEngine.Boot#clock} is: a virtual-time adversarial scenario
+     * (NET-11) needs to drive a ban window measured in hours without spending real wall-clock time
+     * on it, and this repo's established idiom for that is a {@link LongSupplier} seam, not a test
+     * hook of its own.
+     */
+    public PeerBanList(int banThreshold, long banMillis, int maxTracked, LongSupplier nowMillis) {
         this.banThreshold = banThreshold;
         this.banMillis = banMillis;
         // A peer's score bleeds off completely over one ban window of good behaviour.

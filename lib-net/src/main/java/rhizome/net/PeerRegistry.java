@@ -101,9 +101,14 @@ public final class PeerRegistry {
         this(selfUrl, maxPeers, banList, blockPrivateHosts, System::currentTimeMillis);
     }
 
-    /** As above, with an injectable clock for the removal cooldown (package-private for tests). */
-    PeerRegistry(String selfUrl, int maxPeers, PeerBanList banList, boolean blockPrivateHosts,
-                 LongSupplier nowMillis) {
+    /**
+     * As above, with an injectable clock for the removal cooldown. Public for the same reason
+     * {@link PeerBanList}'s clock-injecting constructor is: a virtual-time adversarial scenario
+     * (NET-11) needs to drive the removal cooldown across a horizon measured in hours without
+     * spending real wall-clock time on it.
+     */
+    public PeerRegistry(String selfUrl, int maxPeers, PeerBanList banList, boolean blockPrivateHosts,
+                         LongSupplier nowMillis) {
         this.self = PeerId.of(selfUrl);
         this.maxPeers = maxPeers;
         this.banList = banList;

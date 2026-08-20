@@ -344,6 +344,7 @@ catalogue is never run as one suite.
 | NET-08 | Capture the node's configured peer bearer token by getting itself gossiped in, or by downgrading to cleartext. | A2 | DEFENDED | `lib-net/src/test/java/rhizome/net/PeerTokenPolicyTest.java#gossipLearnedPeerNeverReceivesTheToken`, `lib-net/src/test/java/rhizome/net/PeerTokenPolicyTest.java#configuredHttpPeerNeverReceivesTheToken` |
 | NET-09 | Exhaust memory through unbounded rate-limiter, DNS-cache or gossip-backlog tables. | A2 | DEFENDED | `lib-net/src/test/java/rhizome/net/RateLimiterTest.java#clientTableIsBoundedAndSweepsExpired`, `lib-net/src/test/java/rhizome/net/PeerHostsCacheBoundTest.java#dnsCacheStaysBoundedUnderManyDistinctHosts`, `lib-net/src/test/java/rhizome/net/PeerBroadcasterTest.java#gossipBacklogIsBoundedInBytes` |
 | NET-10 | Follow a redirect to reach a target the SSRF filter refused. | A2 | DEFENDED | `lib-net/src/test/java/rhizome/net/PeerRegistrySecurityTest.java#rejectsMalformedSchemes`, `lib-net/src/test/java/rhizome/net/PeerUrlsTest.java#degenerateInputsDegradeWithoutThrowing` |
+| NET-11 | Partition a node permanently by composing ban scoring and PEX eviction over a long horizon — hours to days, not one round or one strike. | A2 | BOUNDED | `lib-net/src/test/java/rhizome/adversarial/BanDiscoveryPartitionAttackTest.java#sixteenSybilsSaturatingTheLoopbackSubnetLockOutAnHonestPeerForTheWholeHorizon`, `lib-net/src/test/java/rhizome/adversarial/BanDiscoveryPartitionAttackTest.java#aSeedSurvivesFortyEightHoursOfMisbehavingSybilsFillingTheTable`, `lib-net/src/test/java/rhizome/adversarial/BanDiscoveryPartitionAttackTest.java#fiveScatteredFailuresNeverEvictButThreeConsecutiveDo`, `lib-net/src/test/java/rhizome/adversarial/BanDiscoveryPartitionAttackTest.java#anEvictedPeerRejoinsExactlyWhenTheRemovalCooldownExpires`, `lib-net/src/test/java/rhizome/adversarial/BanDiscoveryPartitionAttackTest.java#aBanHoldsForExactlyItsWindowAndDoesNotRenewOnASingleLateStrike` |
 
 ## API — node HTTP surface
 
@@ -440,7 +441,6 @@ beyond writing a test — a fixture that does not exist, or a decision that has 
 | ID | Scenario | Why it is open |
 |----|----------|----------------|
 | REORG-11 | Selfish mining: withhold blocks and release them to orphan honest work, measured as a revenue advantage rather than a validity failure. | The multi-node harness now exists (`TestNetwork`, used by E2E-01/02), so the missing piece is narrower than it was: a hash-rate model and a revenue metric. Every block in the attack is valid, so there is no rejection to assert — the question is economic, and the depth bound (REORG-02) already caps the damage. |
-| NET-11 | Partition a node by exploiting the interaction between ban scoring and the discovery round over long periods. | Needs a time-accelerated fixture: the mechanisms are pinned individually (NET-05..NET-07) and a single heal is pinned end to end (E2E-02), but their composition over hours cannot be observed in a suite that must finish in a minute. |
 
 ## Change log
 
