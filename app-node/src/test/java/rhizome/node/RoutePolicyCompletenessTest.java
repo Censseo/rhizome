@@ -13,6 +13,8 @@ import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import rhizome.testsupport.JavaSource;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -42,52 +44,7 @@ class RoutePolicyCompletenessTest {
     private static String nodeApiCode() throws Exception {
         Path source = Path.of("src/main/java/rhizome/node/NodeApi.java");
         assertTrue(Files.exists(source), "NodeApi source must be readable from the module directory");
-        return codeWithoutComments(Files.readString(source));
-    }
-
-    /**
-     * The source with {@code //}, {@code /*} and javadoc comments removed — string and char
-     * literals are copied verbatim, so a path-looking literal inside a comment cannot trip the
-     * literal ban below (and a comment cannot hide a live one).
-     */
-    private static String codeWithoutComments(String source) {
-        StringBuilder out = new StringBuilder(source.length());
-        int i = 0;
-        int n = source.length();
-        while (i < n) {
-            char c = source.charAt(i);
-            if (c == '"' || c == '\'') {
-                char quote = c;
-                out.append(c);
-                i++;
-                while (i < n) {
-                    char d = source.charAt(i);
-                    out.append(d);
-                    i++;
-                    if (d == '\\' && i < n) {
-                        out.append(source.charAt(i));
-                        i++;
-                    } else if (d == quote) {
-                        break;
-                    }
-                }
-            } else if (c == '/' && i + 1 < n && source.charAt(i + 1) == '/') {
-                i += 2;
-                while (i < n && source.charAt(i) != '\n') {
-                    i++;
-                }
-            } else if (c == '/' && i + 1 < n && source.charAt(i + 1) == '*') {
-                i += 2;
-                while (i + 1 < n && !(source.charAt(i) == '*' && source.charAt(i + 1) == '/')) {
-                    i++;
-                }
-                i = Math.min(i + 2, n);
-            } else {
-                out.append(c);
-                i++;
-            }
-        }
-        return out.toString();
+        return JavaSource.withoutComments(Files.readString(source));
     }
 
     private static Set<String> registeredRoutes() throws Exception {

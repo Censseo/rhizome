@@ -361,6 +361,7 @@ catalogue is never run as one suite.
 | API-10 | Read a served file outside the bundled asset set. | A1 | DEFENDED | `app-node/src/test/java/rhizome/node/DocsAssetsTest.java#lookupsOutsideTheManifestMiss` |
 | API-11 | Exhaust the log-stream subscriber table to deny the dashboard to the operator. | A1 | DEFENDED | `app-node/src/test/java/rhizome/node/SseLogStreamTest.java#subscriberCapReturns503AndClosedSubscribersArePruned` |
 | API-12 | Push junk blocks repeatedly to keep the node verifying, without ever earning a ban. | A2 | DEFENDED | `app-node/src/test/java/rhizome/node/NodeApiTest.java#pushAbuseAccumulatesStrikesAndGetsShedEarly`, `app-node/src/test/java/rhizome/node/PushStrikeTableTest.java#onlyProvableJunkCounts` |
+| API-13 | Ship a bearer comparison that leaks timing information through short-circuiting equality or a length-only check, so a shared prefix of the token can be recovered by repeated probing. | A1 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/TokenComparisonAttackTest.java#bearerComparisonStaysConstantTimeAndIsTheOnlyPlaceTheTokenIsCompared`, `app-node/src/test/java/rhizome/adversarial/e2e/E2EApiAbuseTest.java#everyStrictPrefixOfTheBearerIsRefusedAndOnlyTheFullTokenPasses` |
 
 ## CODEC — wire decoding bounds
 
@@ -427,6 +428,7 @@ work, real RocksDB. Fixtures live in `app-node/src/test/java/rhizome/adversarial
 | E2E-30 | Leave box or token state behind after the branch that created it is orphaned — a partial revert, which is a permanent state-root fork rather than a lost box. | A3 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EStateDomainsTest.java#aReorgReversesBoxAndTokenStateExactlyOnARealNode` |
 | E2E-31 | Have a pruned node answer for history it no longer holds — a truncated view served as if it were the chain, rather than a refusal carrying the watermark. | A2 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EPrunedAndSnapSyncTest.java#aPrunedNodeRefusesPrunedBodiesWithItsWatermarkAndKeepsServingHeaders` |
 | E2E-32 | Have a snap-syncing node adopt state it cannot then serve or extend, so a bootstrap ends in silent disagreement with its source. | A2 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EPrunedAndSnapSyncTest.java#aFreshNodeBootstrapsFromAPeersSnapshotAndAgreesWithIt` |
+| E2E-33 | Slip a bearer past the gate with a shared prefix or a length shortcut, on a real socket and header parser. | A1 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EApiAbuseTest.java#everyStrictPrefixOfTheBearerIsRefusedAndOnlyTheFullTokenPasses` |
 
 ---
 
@@ -439,7 +441,6 @@ beyond writing a test — a fixture that does not exist, or a decision that has 
 |----|----------|----------------|
 | REORG-11 | Selfish mining: withhold blocks and release them to orphan honest work, measured as a revenue advantage rather than a validity failure. | The multi-node harness now exists (`TestNetwork`, used by E2E-01/02), so the missing piece is narrower than it was: a hash-rate model and a revenue metric. Every block in the attack is valid, so there is no rejection to assert — the question is economic, and the depth bound (REORG-02) already caps the damage. |
 | NET-11 | Partition a node by exploiting the interaction between ban scoring and the discovery round over long periods. | Needs a time-accelerated fixture: the mechanisms are pinned individually (NET-05..NET-07) and a single heal is pinned end to end (E2E-02), but their composition over hours cannot be observed in a suite that must finish in a minute. |
-| API-13 | Timing side channels on the API token comparison. | No constant-time comparison audit has been done; the token is a bearer secret over a loopback-or-proxy interface, so the exposure is low, but the claim is untested. |
 
 ## Change log
 

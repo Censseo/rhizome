@@ -74,6 +74,41 @@ class E2EApiAbuseTest {
     }
 
     /**
+     * E2E-33 — no bearer prefix is treated as "close enough". Every one of the token's strict
+     * prefixes, presented over the same real socket and header parser as the test above, must be
+     * refused exactly like a wrong token entirely — a truncating or length-only comparison would
+     * let a sufficiently long shared prefix slip through undetected. This is the behavioural half
+     * of the API-13 proof that the bearer comparison cannot be shortcut; the structural half, that
+     * the comparison is actually {@code MessageDigest.isEqual} rather than a comparison this test
+     * could pass by accident, is {@code TokenComparisonAttackTest}.
+     */
+    @Test
+    void everyStrictPrefixOfTheBearerIsRefusedAndOnlyTheFullTokenPasses() throws Exception {
+        try (TestNetwork network = new TestNetwork(tempDir)) {
+            RhizomeNode node = network.node("guarded")
+                .mining().blockInterval(150).apiToken(TOKEN).start();
+            int port = node.apiPort();
+
+            for (int len = 0; len < TOKEN.length(); len++) {
+                String prefix = TOKEN.substring(0, len);
+                assertEquals(401, RawHttp.post(port, "/add_transaction",
+                        Map.of("Authorization", "Bearer " + prefix), json()).status(),
+                    "a " + len + "-byte prefix of the " + TOKEN.length()
+                        + "-byte token must be refused, not partially accepted");
+            }
+            assertEquals(401, RawHttp.post(port, "/add_transaction",
+                    Map.of("Authorization", "Bearer " + TOKEN + "x"), json()).status(),
+                "a token one byte too long must also be refused");
+
+            int prefixAuthorized = RawHttp.post(port, "/add_transaction",
+                Map.of("Authorization", "Bearer " + TOKEN), json()).status();
+            assertNotEquals(401, prefixAuthorized, "the exact, full-length token must still pass the gate");
+
+            assertStillProducing(node);
+        }
+    }
+
+    /**
      * E2E-06 — a classic cross-site POST from a page the operator visited. The browser attaches
      * {@code Origin} automatically and cannot attach the custom marker without a preflight the
      * node never answers, so the request is refused.
