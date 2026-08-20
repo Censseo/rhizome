@@ -230,6 +230,7 @@ public final class AdversarialChain {
 
         private final NetworkParameters params;
         private final Map<String, Long> funded = new LinkedHashMap<>();
+        private PublicAddress miner;
 
         private Builder(NetworkParameters params) {
             this.params = params;
@@ -240,11 +241,23 @@ public final class AdversarialChain {
             return this;
         }
 
+        /**
+         * Fixes the address every honest coinbase in this chain pays, instead of the default
+         * random one. Scenarios that need a deterministic, reproducible chain (selfish-mining
+         * revenue simulation, chiefly) cannot tolerate a per-build random miner address: it lands
+         * in the coinbase transaction, which is a Merkle leaf, so a random miner makes every block
+         * hash — and therefore every tie-break outcome — non-reproducible run to run.
+         */
+        public Builder miner(PublicAddress miner) {
+            this.miner = miner;
+            return this;
+        }
+
         public AdversarialChain build() {
             InMemoryLedger ledger = new InMemoryLedger();
             InMemoryChainStore store = new InMemoryChainStore();
             AtomicLong clock = new AtomicLong(EPOCH);
-            PublicAddress miner = PublicAddress.random();
+            PublicAddress miner = this.miner != null ? this.miner : PublicAddress.random();
 
             LedgerSnapshot snapshot = new LedgerSnapshot("adversarial", 0, params.chainId());
             Map<String, Crypto.KeyPair> pairs = new LinkedHashMap<>();

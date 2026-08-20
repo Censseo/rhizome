@@ -51,6 +51,19 @@ public final class AdversarialPeer implements PeerSource {
     }
 
     /**
+     * Serves a referenced orphan the same way the real {@code /orphan} endpoint does — required
+     * for any branch that cites uncles: without it, {@code validateUncles} cannot fetch an
+     * eligible reference from a fresh pool and every such sync fails {@code INVALID_UNCLES} /
+     * {@code PEER_INVALID}, which is a silent scenario failure (Rule 2) rather than a fidelity
+     * nicety. The default in {@link PeerSource#orphan} returns {@code null} precisely because a
+     * transport that predates uncles has nothing to serve here; this peer is never that transport.
+     */
+    @Override
+    public Block orphan(SHA256Hash hash) {
+        return engine.orphanBlock(hash);
+    }
+
+    /**
      * The peer's bodies for the requested range, clamped to what the branch actually holds. The
      * synchronizer deliberately over-fetches past the fork depth, so a fixture that answered the
      * full range with filler would make every honest peer read as PEER_INVALID — turning an

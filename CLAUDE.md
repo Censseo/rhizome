@@ -16,7 +16,7 @@ Requires JDK 25 (Gradle toolchain enforces it).
 
 ```bash
 ./gradlew build                 # build + lint + all tests
-./gradlew test                  # all tests (~1160)
+./gradlew test                  # all tests (~1180)
 ./gradlew :lib-core:test        # one module's tests
 ./gradlew :lib-core:test --tests "rhizome.ChainEngineTest"                    # one class
 ./gradlew :lib-core:test --tests "rhizome.ChainEngineTest.someTestMethod"     # one method

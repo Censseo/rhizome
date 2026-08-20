@@ -6,6 +6,7 @@ import java.util.concurrent.atomic.AtomicLong;
 
 import rhizome.core.block.Block;
 import rhizome.core.block.BlockImpl;
+import rhizome.core.block.UncleRef;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
 import rhizome.core.ledger.PublicAddress;
@@ -91,6 +92,28 @@ public final class BlockForge {
     /** Replaces the coinbase — for reward-inflation and coinbase-shape scenarios. */
     public BlockForge coinbase(Transaction replacement) {
         this.coinbase = replacement;
+        return this;
+    }
+
+    /**
+     * Redirects the coinbase to {@code miner} — the block's own height and timestamp are
+     * unchanged, so this is purely who gets paid, not how much or when. For scenarios that need to
+     * attribute mined blocks to an address other than the fixture's default miner (selfish-mining
+     * revenue attribution, chiefly).
+     */
+    public BlockForge coinbaseTo(PublicAddress miner) {
+        this.coinbase = coinbaseFor(miner, params.miningReward(block.id()), block.timestamp());
+        return this;
+    }
+
+    /**
+     * Commits {@code uncles} into the header — exactly what {@code BlockAssembler} does with
+     * {@code engine.selectUncles()}. No fixture could otherwise construct a valid, PoW-eligible
+     * {@code UncleRef} by hand, so this exists for scenarios that need a real uncle commitment
+     * (GHOST weighting, uncle-reward attribution) rather than a forged one.
+     */
+    public BlockForge uncles(List<UncleRef> uncles) {
+        block.uncles(uncles);
         return this;
     }
 

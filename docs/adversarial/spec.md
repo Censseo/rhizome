@@ -98,9 +98,9 @@ The two are complements, not substitutes. A component test can prove a rule and 
 assembled node never reaches it; a network test can prove the node held its chain and never tell
 you which rule saved it.
 
-The distribution is deliberate and worth stating, because "164 DEFENDED" reads as if it were
-uniform: of the 172 catalogued scenarios, **115** rest at component level, **13** at the surface,
-**41** reach the network, and 3 are residuals with no proof by definition. The network figure is the `E2E`
+The distribution is deliberate and worth stating, because "173 DEFENDED" reads as if it were
+uniform: of the 184 catalogued scenarios, **124** rest at component level, **14** at the surface,
+**43** reach the network, and 3 are residuals with no proof by definition. The network figure is the `E2E`
 family plus the scenarios elsewhere that gained a second, network-level proof. Component level
 dominates on purpose — it is the only level that can name the gate that refused — but a rule with
 no network proof anywhere is a rule nobody has watched an assembled node apply.
@@ -266,6 +266,8 @@ catalogue is never run as one suite.
 | REORG-08 | Over-report height so the victim fetches an unbounded range. | A2 | DEFENDED | `lib-core/src/test/java/rhizome/ChainSynchronizerTest.java#extensionWindowIsCappedDespiteAnOverReportingPeer` |
 | REORG-09 | Serve a malformed body window mid-sync to crash or wedge the sync pass. | A2 | DEFENDED | `lib-core/src/test/java/rhizome/HeaderSynchronizerTest.java#aMalformedBodyWindowIsThePeersFaultAndNeverEscapesTheSyncPass`, `lib-core/src/test/java/rhizome/UncleSyncRegressionTest.java#aServedOrphanWithBadProofOfWorkIsRejected` |
 | REORG-10 | Get an honest peer banned by making local backpressure or a transport hiccup look like a protocol violation, then eclipse the victim. | A2 | DEFENDED | `lib-core/src/test/java/rhizome/ChainSynchronizerTest.java#localSaturationDuringSyncIsNotPeerInvalid`, `lib-core/src/test/java/rhizome/HeaderSynchronizerTest.java#localBackpressureMidBodyIsNotAPeerFaultOnTheHeadersPath` |
+| REORG-11 | Selfish mining: withhold blocks and release them selectively to earn a revenue share above the miner's hash-rate share. | A3 | BOUNDED | `lib-core/src/test/java/rhizome/adversarial/SelfishMiningAttackTest.java#onlyTheFirstBlockOfAnOrphanedBranchIsEverRefundedAsAnUncle`, `lib-core/src/test/java/rhizome/adversarial/SelfishMiningAttackTest.java#aBranchWithheldPastTheFinalityWindowEarnsNothingAtAll`, `lib-core/src/test/java/rhizome/adversarial/SelfishMiningAttackTest.java#aMinerThatPublishesEveryBlockEarnsExactlyItsHashRateShare`, `lib-core/src/test/java/rhizome/adversarial/SelfishMiningAttackTest.java#aRunIsAPureFunctionOfItsSeedSoTheMeasurementIsReproducible`, `lib-core/src/test/java/rhizome/adversarial/SelfishMiningAttackTest.java#withholdingBlocksEarnsAFortyPercentMinerMoreThanItsHashRateShare`, `lib-core/src/test/java/rhizome/adversarial/SelfishMiningAttackTest.java#withholdingBlocksCostsATenPercentMinerMoreThanItEarns`, `lib-core/src/test/java/rhizome/adversarial/SelfishMiningAttackTest.java#ghostUncleRewardsShrinkTheSelfishMinersEdgeWithoutClosingIt` |
+| REORG-12 | Grind the deterministic tip-hash tie-break by re-mining a contested block in search of a smaller hash. | A3 | BOUNDED | `lib-core/src/test/java/rhizome/adversarial/SelfishMiningAttackTest.java#grindingTheTieBreakRequiresAFullProofOfWorkSolvePerAttemptAgainstAFairCoin` |
 
 ## POOL — mempool and relay policy
 
@@ -435,15 +437,36 @@ work, real RocksDB. Fixtures live in `app-node/src/test/java/rhizome/adversarial
 
 ## Known gaps
 
-Scenarios the protocol names but does not yet prove. Each is here because closing it needs work
-beyond writing a test — a fixture that does not exist, or a decision that has not been taken.
+Scenarios the protocol names but does not yet prove. Each entry here would be because closing it
+needs work beyond writing a test — a fixture that does not exist, or a decision that has not been
+taken.
 
-| ID | Scenario | Why it is open |
-|----|----------|----------------|
-| REORG-11 | Selfish mining: withhold blocks and release them to orphan honest work, measured as a revenue advantage rather than a validity failure. | The multi-node harness now exists (`TestNetwork`, used by E2E-01/02), so the missing piece is narrower than it was: a hash-rate model and a revenue metric. Every block in the attack is valid, so there is no rejection to assert — the question is economic, and the depth bound (REORG-02) already caps the damage. |
+_None — every catalogued scenario carries a proof._
 
 ## Change log
 
+- **2026-08-20** — The last three declared gaps closed, none of them the way they were declared.
+  API-13 turned out to already be defended in code (`NodeApi.bearerMatches` uses
+  `MessageDigest.isEqual`) with nothing enforcing it — closed with a structural tripwire
+  (`TokenComparisonAttackTest`) plus a behavioural prefix-scale proof on a real socket (E2E-33).
+  NET-11 turned out to be a sound design, not a missing fixture: `PeerBanList`'s score decays
+  because a ban is culpability that must lapse, while `PeerDiscovery`'s consecutive-failure counter
+  resets on success because it measures the length of the current outage — neither composes into a
+  long-horizon eviction primitive against an honest peer, and the real limit is structural
+  (`MAX_PER_SUBNET`) and conditional on an operator running a seed
+  (`BanDiscoveryPartitionAttackTest`, BOUNDED). REORG-11 (selfish mining) needed the harness the gap
+  note predicted, built as `SelfishMiningModel`: two real `ChainEngine`s, real proof of work, a
+  seeded Bernoulli hash-rate draw, and every adoption decision run through the real
+  `ChainSynchronizer`. On this chain the 2014 Eyal–Sirer numbers do not transfer unmodified — GHOST
+  uncle rewards refund half a block to an orphaned miner, so an orphaned block is not a total loss —
+  but the qualitative result holds: a 40%-hash-rate miner that withholds earns a share of issuance
+  clearly above 40%, a 10% miner earns clearly below 10%, and enabling uncle rewards shrinks the
+  edge without closing it (`SelfishMiningAttackTest`, BOUNDED). Building the harness surfaced an
+  uncatalogued vector, closed alongside it: the fork-choice tie-break on an exact work tie compares
+  tip hashes deterministically, so a miner can in principle grind for a smaller one — measured and
+  bounded as REORG-12 (grinding costs a full PoW solve per attempt against a fair coin, for at most
+  half a reward, which is negative expected value). The Known gaps table is now empty for the first
+  time since this protocol was established.
 - **2026-08-19** — Network layer added. A new `E2E` family of 32 scenarios covering the assembled
   system: fork convergence and partition heal between real mining nodes, a cross-branch double
   spend and its reorg-replay mirror on a shared premined genesis, HTTP abuse written on raw sockets
