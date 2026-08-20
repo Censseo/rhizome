@@ -86,6 +86,7 @@ class WasmAdversarialTest {
 
     // ---- float / SIMD rejection ----
 
+    /** VM-01 — deploy a module using a floating-point opcode, whose results differ per JVM. */
     @Test
     void rejectsAModuleUsingAFloatOpcode() {
         // One function ()->() whose body pushes an f64 and drops it. f64.const is opcode 0x44, whose
@@ -110,6 +111,7 @@ class WasmAdversarialTest {
 
     // ---- WASM GC rejection (C1) ----
 
+    /** VM-02 — use a WASM GC array type to allocate on the JVM heap outside every gas budget. */
     @Test
     void rejectsAGcArrayTypeInTheTypeSection() {
         // One array type: (array (mut i64)) — 0x5E, storage type i64 (0x7E), immutable (0x00).
@@ -122,6 +124,7 @@ class WasmAdversarialTest {
         assertTrue(ex.getMessage().contains("GC"), ex.getMessage());
     }
 
+    /** VM-02 — allocate an unmetered array via {@code array.new_default} inside a function body. */
     @Test
     void rejectsArrayNewDefaultInAFunctionBody() {
         // type 0: () -> ();  type 1: (array i64 immutable). Body: i32.const 4; array.new_default 1;
@@ -141,6 +144,7 @@ class WasmAdversarialTest {
         assertTrue(ex.getMessage().contains("GC"), ex.getMessage());
     }
 
+    /** VM-02 — reach {@code array.new_default} through a global init expression, before any metering. */
     @Test
     void rejectsArrayNewDefaultInAGlobalInitExpression() {
         // Global init const-expressions are evaluated at INSTANTIATION — before any metering — and
@@ -155,6 +159,7 @@ class WasmAdversarialTest {
 
     // ---- intrinsic CALL gas (H2) ----
 
+    /** VM-17 — get a CALL that fails before metering anything for gasUsed=0, at any gasPrice. */
     @Test
     void aCallToAnUnknownContractStillPaysTheIntrinsicGas() {
         // A CALL that fails before metering anything (no contract at the address) still costs the
@@ -172,6 +177,7 @@ class WasmAdversarialTest {
             "an early-failing CALL must still pay the intrinsic gas (audit H2)");
     }
 
+    /** VM-17 — declare a gasLimit below the intrinsic CALL charge to get a free call at gasLimit=0. */
     @Test
     void aCallBelowTheIntrinsicGasLimitPaysItsWholeLimit() {
         // gasLimit < CALL_BASE: the intrinsic charge exhausts the meter (saturating at the limit),
@@ -189,6 +195,7 @@ class WasmAdversarialTest {
 
     // ---- table growth ceiling (S2) ----
 
+    /** VM-06 — omit a table's max limit so {@code table.grow} can OOM one node and not another. */
     @Test
     void rejectsATableWhoseUnboundedMaxCouldGrowUnmetered() {
         // A funcref table with limits flag 0x00 (min only, min=1): Chicory treats the absent max as
@@ -200,6 +207,7 @@ class WasmAdversarialTest {
         assertTrue(ex.getMessage().contains("table"), ex.getMessage());
     }
 
+    /** VM-06 — declare an explicit table max above the deploy-time entry cap. */
     @Test
     void rejectsATableDeclaringAnOversizedExplicitMax() {
         // Explicit limits flag 0x01, min=1, max=100000 (LEB128 A0 8D 06) — above MAX_TABLE_ENTRIES.
@@ -243,6 +251,7 @@ class WasmAdversarialTest {
         return module(type, importSec, func, mem, export, section(10, code.toByteArray()));
     }
 
+    /** VM-07 — buy an arbitrarily long {@code transfer_value} read for a flat host-call charge. */
     @Test
     void transferValueGasScalesWithTheReadLengthNotFlat() {
         // The default host transferValue returns -1 (no ledger), so both runs complete OK; the only
@@ -294,6 +303,7 @@ class WasmAdversarialTest {
         return module(type, func, mem, export, section(10, code.toByteArray()));
     }
 
+    /** VM-07 — grow memory by an arbitrary page count for a flat, non-scaling instruction charge. */
     @Test
     void memoryGrowGasScalesWithThePageCountNotFlat() {
         // memory.grow does O(pages) heap work, so it must be charged by its runtime page operand — a flat
@@ -358,6 +368,7 @@ class WasmAdversarialTest {
         return module(type, importSec, func, mem, export, section(10, code.toByteArray()));
     }
 
+    /** VM-07 — buy an arbitrarily long callee-address read in {@code call_contract} for flat gas. */
     @Test
     void callContractGasScalesWithTheCalleeAddressLengthNotJustInput() {
         // No call dispatcher is wired (calls == null), so both runs return -1 and complete OK;
@@ -403,6 +414,8 @@ class WasmAdversarialTest {
         return module(section(1, type.toByteArray()), func, export, code);
     }
 
+    /** VM-18 — declare a function type with an oversized parameter list to force an unmetered
+     *  per-frame locals allocation Chicory enforces no cap of its own on. */
     @Test
     void rejectsAFunctionTypeDeclaringTooManyParams() {
         // Chicory sizes each StackFrame's locals array as (params+locals) but enforces no param cap
@@ -413,6 +426,7 @@ class WasmAdversarialTest {
         assertTrue(ex.getMessage().contains("params"), ex.getMessage());
     }
 
+    /** VM-18 — the boundary companion: exactly at the params cap must still deploy. */
     @Test
     void acceptsAFunctionTypeAtTheParamsCap() {
         // Exactly MAX_FUNCTION_PARAMS is allowed: the runtime test in WasmLocalsGuardTest relies on
@@ -433,6 +447,8 @@ class WasmAdversarialTest {
         return module(section(6, body.toByteArray()));
     }
 
+    /** VM-19 — declare an unbounded global count, each materialised at instantiation before any
+     *  gas is charged. */
     @Test
     void rejectsAModuleDeclaringTooManyGlobals() {
         // Each global is materialised at instantiation, before any gas is charged — an unbounded
@@ -442,6 +458,7 @@ class WasmAdversarialTest {
         assertTrue(ex.getMessage().contains("globals"), ex.getMessage());
     }
 
+    /** VM-19 — declare an unbounded function count, each forcing per-entry instantiation structures. */
     @Test
     void rejectsAModuleDeclaringTooManyFunctions() {
         // Every declared function forces per-entry instantiation structures; Chicory enforces no
@@ -465,6 +482,7 @@ class WasmAdversarialTest {
         assertTrue(ex.getMessage().contains("functions"), ex.getMessage());
     }
 
+    /** VM-19 — declare an unbounded import count to force the same unmetered per-entry cost. */
     @Test
     void rejectsAModuleDeclaringTooManyImports() {
         int imports = WasmVm.MAX_MODULE_IMPORTS + 1;
@@ -481,6 +499,7 @@ class WasmAdversarialTest {
         assertTrue(ex.getMessage().contains("imports"), ex.getMessage());
     }
 
+    /** VM-19 — declare an unbounded export count to force the same unmetered per-entry cost. */
     @Test
     void rejectsAModuleDeclaringTooManyExports() {
         int exports = WasmVm.MAX_MODULE_EXPORTS + 1;
@@ -527,6 +546,8 @@ class WasmAdversarialTest {
         return module(type, func, mem, export, section(10, code.toByteArray()));
     }
 
+    /** VM-20 — make a failed {@code memory.grow} at the instance cap reserve pages it never
+     *  allocated against the tree-wide budget, reverting a later grow for memory that never existed. */
     @Test
     void aFailedGrowDoesNotConsumeTheTreePageBudget() {
         // The instance is capped at MAX_CONTRACT_PAGES = 1024 (= TREE_MAX_PAGES). memory.grow(1024) from
@@ -545,6 +566,7 @@ class WasmAdversarialTest {
 
     // ---- float init-expressions in globals (audit: floats in init-expressions) ----
 
+    /** VM-01 — reach a float opcode through a global init expression, outside the code-section scan. */
     @Test
     void rejectsAnF32ConstInAGlobalInitExpression() {
         // Global init expressions are evaluated at INSTANTIATION, before any metering, and the
@@ -557,6 +579,7 @@ class WasmAdversarialTest {
             || ex.getMessage().toLowerCase().contains("float"), ex.getMessage());
     }
 
+    /** VM-01 — the f64 sibling of the same global-init-expression float vector. */
     @Test
     void rejectsAnF64ConstInAGlobalInitExpression() {
         // Same vector with f64 (0x7C) and f64.const (0x44) — the NaN-payload fork class the scan
@@ -571,6 +594,7 @@ class WasmAdversarialTest {
 
     // ---- deploy-time ABI controls: memory cap, import whitelist, call export (FIX 3) ----
 
+    /** VM-06 — declare an initial memory page count above the deploy-time cap. */
     @Test
     void rejectsMemoryDeclaringTooManyInitialPages() {
         // The runtime boundedMemory cap was enforced only at instantiation; validateCode must reject
@@ -586,6 +610,7 @@ class WasmAdversarialTest {
         assertTrue(ex.getMessage().contains("memory"), ex.getMessage());
     }
 
+    /** VM-08 — import a host function name outside the declared ABI whitelist. */
     @Test
     void rejectsAnImportOutsideTheHostWhitelist() {
         // env.evil is not a host function: instantiation would fail it per call, but deploy must
@@ -601,6 +626,8 @@ class WasmAdversarialTest {
         assertTrue(ex.getMessage().contains("non-whitelisted"), ex.getMessage());
     }
 
+    /** VM-08 — import a memory/table/global under a whitelisted host-function name to escape the
+     *  bounded memory factory. */
     @Test
     void rejectsANonFunctionImportEvenWithAWhitelistedName() {
         // A MEMORY import named env.storage_read: the name is whitelisted but the sandbox only
@@ -617,6 +644,7 @@ class WasmAdversarialTest {
         assertTrue(ex.getMessage().contains("non-whitelisted"), ex.getMessage());
     }
 
+    /** VM-21 — deploy a module missing the {@code call} export, installing code that can only revert. */
     @Test
     void rejectsAModuleWithoutACallExport() {
         // The executor invokes the "call" entry point; a module exporting only "main" deploys
@@ -630,6 +658,7 @@ class WasmAdversarialTest {
         assertTrue(ex.getMessage().contains("call"), ex.getMessage());
     }
 
+    /** VM-21 — the boundary companion: the exact shape every deployed template has must still deploy. */
     @Test
     void acceptsAModuleUsingOnlyTheWhitelistedAbi() {
         // transfer_value module: imports env.transfer_value, exports "call", 1-page memory — the
@@ -670,6 +699,7 @@ class WasmAdversarialTest {
             section(10, code.toByteArray()));
     }
 
+    /** VM-22 — the boundary companion: a host buffer exactly at the cap must still be allowed. */
     @Test
     void aHostBufferAtTheCapIsAllowed() {
         // 17 pages = 1,114,112 bytes >= HOST_BUFFER_CAP, so the capped read fits guest memory.
@@ -680,6 +710,8 @@ class WasmAdversarialTest {
             "a host buffer at exactly HOST_BUFFER_CAP must be allowed");
     }
 
+    /** VM-22 — force a host buffer read whose allocation size depends on the requested length rather
+     *  than a deterministic cap, so nodes with different heaps could diverge. */
     @Test
     void aHostBufferAboveTheCapIsFullGasOutOfGas() {
         // The per-byte charge on the length lands first, then the cap turns the rest of the budget
@@ -695,6 +727,8 @@ class WasmAdversarialTest {
             "the cap rejection consumes the full budget, never a heap-dependent amount");
     }
 
+    /** VM-22 — the cap decision itself must be a pure function of (length, limit), never of local
+     *  heap pressure. */
     @Test
     void theCapPathIsDeterministicRegardlessOfHeapPressure() {
         // Drive the cap decision directly: the outcome and the resulting meter state are a pure
@@ -758,6 +792,8 @@ class WasmAdversarialTest {
         };
     }
 
+    /** VM-23 — read a box's contents for less than its full serialized-size gas charge, by having
+     *  the charge land after {@code serialize()} runs instead of before. */
     @Test
     void boxReadChargesTheFullSerializedSizeBeforeSerializing() {
         // The per-byte charge on the KNOWN serialized size must land before serialize() runs:

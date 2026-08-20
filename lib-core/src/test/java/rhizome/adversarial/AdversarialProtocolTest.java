@@ -79,6 +79,14 @@ class AdversarialProtocolTest {
     private static final Set<String> VERDICTS = Set.of("DEFENDED", "BOUNDED", "RESIDUAL");
     private static final Set<String> ATTACKER_CLASSES = Set.of("A0", "A1", "A2", "A3", "A4", "A5", "A6");
 
+    /**
+     * What the Known gaps section says when it is legitimately empty. Required so an empty table
+     * cannot mean two different things — "the format broke" and "there is nothing left to close" —
+     * with the same silent shape; see {@link #everyKnownGapIsExplained()}.
+     */
+    private static final String NO_GAPS_SENTINEL =
+        "_None — every catalogued scenario carries a proof._";
+
     private record Scenario(String id, String family, String attacker, String verdict, String proof) {}
 
     // ---- reading the protocol ----
@@ -185,25 +193,55 @@ class AdversarialProtocolTest {
      * to appear in the catalogue, which is exactly the drift the reverse direction exists to catch.
      * {@code AdversarialProtocolTest} itself is excluded — its tests check the catalogue, they do
      * not run scenarios.
+     *
+     * <p>Scoping this to the {@code rhizome.adversarial} package alone was <em>also</em> wrong: the
+     * {@code adversarialTest} Gradle task (root {@code build.gradle}) matches a suite by class name
+     * too — {@code *AttackTest} or {@code *AdversarialTest} — regardless of package. A suite named
+     * that way but placed elsewhere would run under {@code ./gradlew adversarial} while escaping
+     * every check in this class entirely, which is the same silent drift the whole point of this
+     * method is to prevent, just via the other Gradle filter. {@link #matchesGradleAdversarialFilter}
+     * mirrors all three {@code includeTestsMatching} patterns for that reason.
      */
     private static List<Path> attackSuites() throws IOException {
         Path root = repoRoot();
         List<Path> suites = new ArrayList<>();
         try (var modules = Files.list(root)) {
             for (Path module : modules.sorted().toList()) {
-                Path packageDir = module.resolve("src/test/java/rhizome/adversarial");
-                if (!Files.isDirectory(packageDir)) {
-                    continue;
-                }
-                try (var files = Files.walk(packageDir)) {
-                    files.filter(p -> p.getFileName().toString().endsWith("Test.java"))
-                        .filter(p -> !p.getFileName().toString().equals("AdversarialProtocolTest.java"))
-                        .sorted()
-                        .forEach(suites::add);
+                // Both registered test source directories (root build.gradle's subprojects block
+                // adds src/java/test alongside the conventional src/test/java) — a suite is
+                // compiled into the test classes, and therefore reachable by the Gradle filter,
+                // from either one.
+                for (String testSrc : List.of("src/test/java", "src/java/test")) {
+                    Path testRoot = module.resolve(testSrc);
+                    if (!Files.isDirectory(testRoot)) {
+                        continue;
+                    }
+                    try (var files = Files.walk(testRoot)) {
+                        files.filter(p -> p.getFileName().toString().endsWith(".java"))
+                            .filter(p -> !p.getFileName().toString().equals("AdversarialProtocolTest.java"))
+                            .filter(AdversarialProtocolTest::matchesGradleAdversarialFilter)
+                            .sorted()
+                            .forEach(suites::add);
+                    }
                 }
             }
         }
         return suites;
+    }
+
+    /**
+     * Mirrors the three {@code includeTestsMatching} patterns the {@code adversarialTest} Gradle
+     * task filters on: the {@code rhizome.adversarial} package, or a class name ending
+     * {@code AttackTest} or {@code AdversarialTest} in any package.
+     */
+    private static boolean matchesGradleAdversarialFilter(Path file) {
+        String fileName = file.getFileName().toString();
+        String className = fileName.substring(0, fileName.length() - ".java".length());
+        if (className.endsWith("AttackTest") || className.endsWith("AdversarialTest")) {
+            return true;
+        }
+        return fileName.endsWith("Test.java")
+            && file.toString().replace('\\', '/').contains("/rhizome/adversarial/");
     }
 
     private static String repoRelative(Path file) {
@@ -391,7 +429,16 @@ class AdversarialProtocolTest {
         assertTrue(uncited.isEmpty(), "attack suites absent from the protocol catalogue: " + uncited);
     }
 
-    /** Every gap is a deliberate, explained entry — not an empty row someone meant to fill in. */
+    /**
+     * Every gap is a deliberate, explained entry — not an empty row someone meant to fill in.
+     *
+     * <p>An empty section is legitimate exactly once: when every catalogued scenario finally
+     * carries a proof, closing the last gap. That state must say so with
+     * {@link #NO_GAPS_SENTINEL} rather than by simply having no rows — otherwise this test cannot
+     * tell "the last gap closed" from "the table format broke", and the second one is exactly the
+     * silent failure the rest of this class exists to catch. Both a real gap row and the sentinel
+     * present together is equally wrong: the sentinel claims something the table contradicts.
+     */
     @Test
     void everyKnownGapIsExplained() throws IOException {
         String gaps = section(protocol(), "## Known gaps", "## Change log");
@@ -407,6 +454,12 @@ class AdversarialProtocolTest {
                 rows.group(1) + " is listed as a gap without saying what closing it needs");
             count++;
         }
-        assertTrue(count > 0, "the Known gaps table parsed as empty — the format changed");
+        boolean sentinel = gaps.contains(NO_GAPS_SENTINEL);
+        assertTrue(count > 0 || sentinel,
+            "the Known gaps table parsed as empty — either the table format changed, or every "
+                + "scenario now has a proof and the section must say so with \"" + NO_GAPS_SENTINEL + "\"");
+        assertFalse(count > 0 && sentinel,
+            "the Known gaps table has both real gap rows and the \"" + NO_GAPS_SENTINEL
+                + "\" sentinel — a section cannot be both open and empty");
     }
 }
