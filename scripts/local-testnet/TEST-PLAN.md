@@ -1,12 +1,18 @@
 # Plan de test — testnet local (30 nœuds natifs)
 
-> **Campagne 4 (2026-08-17).** Les campagnes 1 (10 nœuds), 2 (16 nœuds) et 3 (30 nœuds, première
-> campagne native) sont closes ; leurs résultats et les correctifs qu'elles ont produits sont
-> archivés en fin de document. Cette campagne rejoue le protocole de la campagne 3 à l'identique
-> (30 nœuds natifs, 10 mineurs, charge continue) et couvre en plus les scénarios P1-P5 (S11-S15)
-> que la campagne 3 avait laissés pour partie non concluants. Elle a aussi débusqué un bug
-> d'outillage (chemin des fixtures `.wasm` dans `sim-contract.sh`) et documenté deux incidents
-> d'environnement propres à une machine de dev partagée (conflit de port, contention RAM).
+> **Campagne 5 (2026-08-20).** Les campagnes 1 (10 nœuds), 2 (16 nœuds), 3 (30 nœuds, première
+> campagne native) et 4 (S11-S15) sont closes ; leurs résultats et les correctifs qu'elles ont
+> produits sont archivés en fin de document. Cette campagne rejoue S0-S15 à l'identique (30 nœuds
+> natifs, 10 mineurs, charge continue) et l'ancre en plus dans la revue adverse
+> (`docs/adversarial/spec.md`, passée de 0 à 171 scénarios catalogués depuis la campagne 4) : S16
+> et S17, nouveaux, poussent en réseau réel deux fermetures récentes du catalogue — NET-11 (score
+> de ban contre un pair réellement confirmé, pas seulement injoignable) et API-13
+> (`RHIZOME_API_TOKEN` sur un déploiement multi-nœuds, jusqu'ici hors périmètre de ce plan).
+> REORG-11/12 (minage égoïste, grinding du départage) n'a délibérément aucun nouveau scénario
+> réseau — voir le journal de cette campagne pour le raisonnement. Elle a aussi débusqué un défaut
+> d'outillage (mort silencieuse de `sim-contract.sh start` juste après le genesis) et une dérive
+> doc/code sur `RHIZOME_TESTNET_BLOCK_MS`, et reproduit à l'identique le conflit de port 3000 déjà
+> documenté par la campagne 4.
 
 ## Objectif
 
@@ -86,7 +92,9 @@ N > 18. Le bon critère est : **18 pairs partout, sans doublon et sans auto-réf
 
 Sur devnet la difficulté est collée à son plancher (6) : le PoW est instantané et **ne régule
 rien**. Le seul levier est `RHIZOME_BLOCK_INTERVAL_MS`, posé par `start.sh` sur chaque mineur
-depuis `RHIZOME_TESTNET_BLOCK_MS` (défaut 10 s). Il faut le régler : au défaut devnet (5 s), 10
+depuis `RHIZOME_TESTNET_BLOCK_MS` (défaut 25 s, calibré ci-dessous — pas 10 s, valeur qui a
+trainé ici jusqu'à la campagne 5 alors que `common.sh` et le reste de cette section pointaient
+déjà vers 25 s). Il faut le régler : au défaut devnet (5 s), 10
 mineurs produisent ~1 bloc/s, et la fenêtre de finalité (120 blocs, `maxReorgDepth`) ne dure
 alors que 2 minutes — moins qu'une partition utile, donc les deux camps finiraient en
 `REORG_TOO_DEEP` mutuel et S7/S15 deviendraient intestables.
@@ -140,7 +148,7 @@ scripts/local-testnet/stop.sh -p 15-29      # arrêt d'une moitié (partition)
 
 Variables d'override : `RHIZOME_TESTNET_NODES` (30), `RHIZOME_TESTNET_MINERS` (10),
 `RHIZOME_TESTNET_NATIVE` (1), `RHIZOME_TESTNET_HEAP` (`256m`), `RHIZOME_TESTNET_BLOCK_MS`
-(10000), `RHIZOME_TESTNET_DIR` (`.testnet/`), `RHIZOME_TESTNET_BASE_PORT` (3000).
+(25000), `RHIZOME_TESTNET_DIR` (`.testnet/`), `RHIZOME_TESTNET_BASE_PORT` (3000).
 
 > **Lancement des nœuds** : `start.sh` passe par `setsid`, de sorte qu'un nœud survit à la mort
 > du shell qui l'a lancé. Ne pas contourner `start.sh` en lançant le binaire à la main.
@@ -296,6 +304,52 @@ Notation : hauteur du nœud `i` = `h_i` (via `curl -s http://127.0.0.1:$((BASE+i
    moment exact du pontage, sinon le résultat n'est pas attribuable au départage — le test
    exact reste couvert par `HeaderSynchronizerTest`.
 
+### S16 — Pair confirmé mais menteur : le score de ban compose avec l'éviction de découverte *(NET-11)*
+1. Lancer un pair hostile autonome (processus Java séparé, hors des scripts du testnet) qui
+   réutilise directement `BlockCodec`/`BlockImpl`/`SHA256Hash` de `lib-core` pour servir des blocs
+   structurellement valides mais sans preuve de travail réelle — même posture que la fixture JUnit
+   `HostilePeer` (`app-node/src/test/java/rhizome/adversarial/e2e/`), mais sur un vrai socket TCP,
+   hors du harnais de test. `/total_work` **doit** répondre `{"totalWork":"<décimal>"}` (objet
+   JSON), pas un scalaire nu — `HttpPeerSource.totalWork()` décode via
+   `PeerJson.parseObject(...).getString("totalWork")` ; un scalaire nu lève une
+   `PeerProtocolException` AVANT le bloc `try` de `HeaderSynchronizer.syncFromOrThrow`, donc le
+   pair n'est jamais confirmé et `SyncDriver.penalize` le *drop* sans le pénaliser (audit B-3) —
+   ce qui prouve autre chose (S13) que ce que ce scénario vise.
+2. Présenter le pair hostile via `/add_peer` à un nœud dont le registre a de la place dans son
+   bucket `MAX_PER_SUBNET` (16 pairs découverts par /16 — voir « Le maillage sature à 18 pairs »
+   ci-dessus) : sur un nœud du maillage principal déjà à 18 pairs, l'admission du pair hostile est
+   silencieusement refusée par le cap anti-éclipse avant même d'atteindre le chemin de ban. Un
+   nœud fraîchement isolé (0 pair, cf. S12) a toute la place.
+3. **Passe si** : le pair hostile est **confirmé** (`registry.isConfirmed`, visible aux lignes de
+   log `Penalized peer ... (served an invalid chain)`, pas `Dropped unconfirmed`) puis pénalisé
+   d'au moins une frappe PEER_INVALID (+34) — la preuve que le score de ban s'applique bien à un
+   pair réel sur un vrai socket, pas seulement dans la fixture à horloge virtuelle
+   `BanDiscoveryPartitionAttackTest`. Qu'il atteigne le seuil de ban (100, trois frappes) avant que
+   `PeerDiscovery` ne l'évince pour échecs consécutifs n'est **pas** un critère — les deux
+   mécanismes ont des horizons différents (score qui décroît sur la fenêtre de ban entière contre
+   compteur qui se remet à zéro au prochain contact réussi), et le catalogue documente déjà qu'ils
+   ne composent pas en primitive d'éviction longue durée contre un pair honnête ; ce scénario
+   corrobore seulement, sur un vrai réseau, que chacun des deux chemins se déclenche correctement
+   pour ce qu'il mesure.
+
+### S17 — `RHIZOME_API_TOKEN` sur un déploiement multi-nœuds réel *(API-13, opérationnel)*
+1. Ajouter au réseau un nœud supplémentaire avec `RHIZOME_API_TOKEN` positionné (les scripts de ce
+   plan ne l'exposent pas par nœud ; lancer le binaire directement, comme `start.sh` le ferait,
+   avec cette variable en plus). Le peupler normalement (`/add_peer` vers un nœud existant).
+2. **Passe si** : une route état-changeant/opérateur (`/add_peer`, `/submit`, `/add_transaction`,
+   …) répond 401 sans jeton et avec un jeton erroné, 200 avec le bon jeton (`Authorization: Bearer
+   <token>`) ; les routes du protocole pair-à-pair (`/sync`, `/headers`, `/peers`, `/block_count`,
+   `/total_work`) restent servies **sans aucun jeton** ; le nœud rattrape la hauteur du réseau par
+   ses propres rounds de sync (GET, non gatées) bien qu'aucun pair ne lui présente de jeton pair —
+   la lecture reste ouverte même quand l'écriture est gardée.
+   *Hors portée* : la composition avec `RHIZOME_PEER_TOKEN` (gossip poussé entre pairs authentifiés)
+   ne peut pas se tester sur ce testnet — le jeton pair n'est envoyé que sur `https://`
+   (`RHIZOME_PEER_TOKEN`, README), et ce plan reste volontairement en clair sur loopback (voir
+   « Périmètre »). Un nœud token-gaté dans un maillage `http://` non gaté reste donc joignable en
+   lecture mais un opérateur qui active le jeton sur un déploiement gossipant doit encore mettre
+   `RHIZOME_PEER_TOKEN` sur ses pairs pour que les push `/submit`/`/add_transaction` continuent
+   d'être acceptés — non vérifié en direct ici, dérivé du code (`NodeApi`/README).
+
 ## Supervision & alertes
 
 `monitor.sh` (boucle 2 s) écrit `monitor.csv` : horodatage, nœud, hauteur, **tipHash**,
@@ -315,6 +369,94 @@ scripts/local-testnet/sim-tx.sh stop && scripts/local-testnet/sim-contract.sh st
 scripts/local-testnet/stop.sh
 rm -rf .testnet          # données RocksDB + logs + CSV + pids
 ```
+
+## Journal de résultats — campagne 5
+
+Campagne exécutée le 2026-08-20 (base 4300 — même conflit de port que la campagne 4, voir constat
+1), 30 nœuds **natifs** devnet, 10 mineurs (0, 3, 6, 9, 12, 15, 18, 21, 24, 27), `-Xmx128m` par
+nœud, charge continue des deux simulateurs. Contrairement aux campagnes 1-4, l'objectif n'était
+pas seulement de rejouer S0-S15 mais de fonder la campagne sur la revue adverse
+(`docs/adversarial/spec.md`) : entre la campagne 4 (2026-08-17) et cette campagne, le catalogue est
+passé de 0 à 143 scénarios `lib-core`/`lib-net`/`lib-vm`/etc. plus 28 scénarios `E2E`, et trois
+lacunes déclarées ont été fermées la veille et le jour même (API-13, NET-11, REORG-11/12, voir le
+changelog de `docs/adversarial/spec.md`). S16 et S17 ci-dessus étendent en réseau réel deux de ces
+trois fermetures ; REORG-11/12 n'a délibérément **pas** de nouveau scénario réseau (voir plus bas).
+Réseau poussé jusqu'à h≈394, `degraded` resté **`null` sur les 30 nœuds pendant toute la
+campagne** (0 occurrence sur ~1950 lignes de `monitor.csv`).
+
+| Scénario | Résultat | Détail |
+|---|---|---|
+| S0 Lancement/convergence | **PASS** | 30/30 répondent dès le premier `status.sh` ; écart=0, tip unique, 18 pairs déjà atteints |
+| S1 Gossip de transactions | **PASS** | Mempool à 7 sur la majorité des 30 nœuds quelques secondes après une rafale de transferts du simulateur, chacun soumis à un nœud tiré au hasard |
+| S2 Propagation de blocs | **PASS** | Écart ≤ 2-3 blocs en régime stable ; une bouffée à 3 tips distincts (écart=2) observée en fin de campagne (hors toute partition volontaire) s'est résorbée à `tips distincts: 1` en < 90 s sans intervention — exactement le régime « rafales de fork transitoires » que les campagnes 3/4 ont déjà caractérisé à cette cadence, pas une anomalie |
+| S3 PEX | **PASS** | 18 pairs par nœud tout du long |
+| S4 Churn (31ᵉ nœud) | **PASS** | Nœud 30 rattrape la hauteur commune en **15-20 s**, 18 pairs, `degraded=null` |
+| S5 Panne d'un mineur | **PASS** | Mineur 3 arrêté ~2,5 min : les 29 restants croissent sans arrêt (h 18→25), écart=0, zéro `degraded`, zéro ban, zéro éclipse |
+| S6 Redémarrage | **PASS** | Le nœud 3 rattrape en **~20 s**, `reorgInProgress` reste `false` (retard, pas divergence) |
+| S7 Partition 15/15 | **PASS** | Partition étanche (pairs de chaque camp confirmés 100 % internes via `/peers`) ; camp B (15-29) en tête de 6 blocs / 576 unités de travail au moment du pont ; guérison en **< 20 s** après quelques ponts croisés seulement (pas un pont exhaustif) ; `tips distincts: 1`, `écart=0` sur les 30 nœuds, aucun `degraded`, aucun ban ; soldes de miner-0 et miner-27 **identiques bit-à-bit** (35,1099 PDN et 33,5923 PDN) vus depuis un nœud de chaque ancien camp |
+| S8 Wallet E2E | **PASS** | 1,5 PDN émis via le nœud 3 (`app-wallet send`) vers l'adresse du mineur 9, confirmé sur le nœud 29 en **~12 s**, `status: SUCCESS` |
+| S9 Contrat distribué | **PASS** | Compteur + token déployés et exercés en continu (simulateur relancé après un incident d'outillage, voir correctifs) ; `sim-contract.sh check` : 4 groupes de tip (décalage de gossip normal sous charge), **exactement 1 état par groupe** — aucune divergence d'exécution |
+| S10 Supervision | **PASS** | `monitor.csv` : `degraded` reste `"null"` sur les ~1950 lignes couvrant toute la campagne (vérifié par lecture directe des valeurs distinctes de la colonne, pas par estimation) |
+| S11 Pair perdu en reorg (P1) | **PASS** | Nœud vanguard (5) bridgé en tête-à-tête avec sa seule source (nœud 20) ; guet `grep`-pur sur `reorgInProgress` : source tuée à l'instant exact où la fenêtre s'ouvre (`reorgInProgress:true` capté) → hauteur du vanguard **44 → 59** après coup (pas de troncature), `degraded=null`, `reorgInProgress=false` retombé, `mempool=1`, `peers=18` — reprise complète via un autre pair |
+| S12 Éclipse registre vide (P2) | **PASS** | Nœud isolé lancé sans seed (partition à un seul nœud) : `peers=0`, `syncEclipsed=true`, `syncRoundsWithoutProgress` croissant (3 → 46 sur la campagne), WARN « sync eclipsed » au log, `degraded=null` |
+| S13 Hôte partagé sans escalade (P3) | **non rejoué cette campagne** | L'effort NET-11 est allé dans S16 (ci-dessous), qui pousse plus loin que S13 : un pair réellement **confirmé** menteur, pas seulement injoignable. Le constat historique de S13 (chemin de ban non atteint par un simple endpoint injoignable, campagnes 2-4) n'a pas été remis en cause, juste pas re-mesuré indépendamment |
+| S14 Dashboard en reorg (P4) | **PASS** | **56 réponses** `503 {"error":"reorg in progress; retry shortly"}` capturées sur `/total_work` à travers 7 nœuds du camp perdant pendant la fenêtre de reorg de S7 (poll continu, ~2800 sondages au total), endpoint de nouveau `200` juste après |
+| S15 Départage déterministe (P5) | **PARTIEL** *(même verdict que les 4 campagnes précédentes)* | Le pont de S7 est intervenu avec 576 unités de travail d'écart, pas une égalité stricte — la convergence a été décisive par le poids, pas par le départage. Toujours couvert par `HeaderSynchronizerTest` uniquement |
+| **S16** Pair confirmé menteur *(NET-11, nouveau)* | **corroboré en réseau réel** | Pair hostile autonome (réutilise `BlockCodec`/`BlockImpl`/`SHA256Hash` de production, cf. description du scénario) ajouté à un nœud isolé : **confirmé** puis pénalisé deux fois (+34, +34 = 68/100) pour « served an invalid chain » avant que `PeerDiscovery` ne l'évince pour échecs consécutifs — le score de ban s'applique bien à un vrai pair sur un vrai socket (pas seulement dans la fixture à horloge virtuelle), et c'est la voie de découverte, pas le seuil de ban, qui a tranché en premier sur un registre neuf. Voir constat 3 |
+| **S17** `RHIZOME_API_TOKEN` multi-nœuds *(API-13, nouveau)* | **PASS** | Nœud supplémentaire token-gaté ajouté au réseau vivant : `/add_peer` → 401 sans jeton, 401 avec jeton erroné, 200 avec le bon jeton ; `/sync`, `/peers`, `/block_count`, `/total_work` servis **sans jeton** ; le nœud a rattrapé la hauteur du réseau (1 → 354) par ses propres rounds de sync malgré la garde, 18 pairs, `degraded=null` — la garde token protège l'écriture sans jamais bloquer la lecture ni le rattrapage |
+| REORG-11/12 (sélectif/grinding) | **aucun nouveau scénario réseau** | Délibéré, pas un oubli : reproduire le retenue sélective de blocs ou le grinding du nonce exige un mineur hostile qui triche, que ce testnet ne fournit pas (les binaires stock diffusent tout ce qu'ils minent) — en fabriquer un juste pour cette campagne aurait violé la règle 2 du protocole (l'attaque doit atteindre la porte qu'elle prétend nommer). La preuve reste `SelfishMiningModel`/`SelfishMiningAttackTest` (tirage de Bernoulli contrôlé, horloge et hash-rate maîtrisés) ; les reorgs réels de S7/S15 sont cohérents avec ce modèle sans le prouver eux-mêmes, comme dans les 4 campagnes précédentes |
+
+### Constats de campagne
+
+**1. Le conflit de port 3000 de la campagne 4 s'est reproduit à l'identique.** Même signature
+exacte (`BindException` sur le nœud 0, un service tiers login-gated ayant bindé le port entre le
+pré-vol et le `bind()` du nœud) — voir constat 1 de la campagne 4 ci-dessous, qui documente déjà
+le même contournement (`RHIZOME_TESTNET_BASE_PORT=4300`). Ce n'est donc pas un incident isolé sur
+cette machine de dev partagée mais une condition récurrente ; le contournement documenté suffit
+toujours, mais un opérateur qui rejoue ce plan devrait s'y attendre par défaut plutôt que le
+découvrir à chaque campagne.
+
+**2. `sim-contract.sh start` peut mourir silencieusement si on le lance trop tôt après le
+genesis.** `deploy_all` → `fund_owner` a un délai de dotation de 300 s ; juste après le genesis,
+aucun mineur n'a encore gagné assez pour doter le portefeuille de contrats, `fund_owner` retourne
+1, et sous `set -e` cela tuait tout le `start` en arrière-plan avec une seule ligne de log
+(« dotation … : 0 PDN demandés ») et rien d'autre — la même classe de silence que les boucles de
+`sim-tx.sh` et le `loop()` de ce même script avaient déjà appris à éviter (voir correctifs de la
+campagne 3). Corrigé (voir Correctifs livrés) ; contournement immédiat pendant cette campagne :
+déploiement manuel via `app-wallet` une fois le réseau à hauteur suffisante.
+
+**3. Sur un registre neuf (un seul pair), l'éviction de `PeerDiscovery` tranche avant le seuil de
+ban.** Le pair hostile de S16 a encaissé deux frappes PEER_INVALID confirmées (68/100, sous le
+seuil de ban à 100) avant que `PeerDiscovery` ne l'évince pour échecs de contact consécutifs — les
+deux mécanismes ont des horizons différents (score qui décroît sur la fenêtre de ban entière,
+compteur qui se remet à zéro au prochain contact réussi) et le catalogue documente déjà qu'ils ne
+composent pas en primitive d'éviction longue durée. Ce n'est pas une régression : c'est la première
+fois que cette interaction est observée contre un pair réellement confirmé sur un vrai socket
+plutôt que dans la fixture à horloge virtuelle `BanDiscoveryPartitionAttackTest` — qui prouve
+l'horizon complet (48 h simulées) que ce testnet ne peut pas dérouler en temps réel.
+
+**4. Un pair hostile doit imiter le format du fil, pas seulement la forme de l'attaque.**
+Premier essai de S16 : `/total_work` renvoyait un scalaire nu (`"340282…"`) au lieu de l'objet JSON
+`{"totalWork":"…"}` que `HttpPeerSource.totalWork()` attend — la `PeerProtocolException` qui en
+résultait se produisait *avant* le bloc `try` de `HeaderSynchronizer.syncFromOrThrow`, donc le pair
+n'était jamais confirmé et `SyncDriver.penalize` le *droppait* sans le pénaliser (audit B-3) :
+symptomatiquement identique à S13 (« Dropped unconfirmed … not banned »), mais pour une raison
+d'outillage et non de conception. Corrigé en encodant `/total_work` comme l'attend
+`HttpPeerSource`. Séparément : présenter le même pair à un nœud du maillage principal (déjà à 18
+pairs) échouait silencieusement à l'admission — `PeerRegistry.MAX_PER_SUBNET` (16 pairs découverts
+par bucket /16) refuse une nouvelle entrée avant même que le chemin de ban existe, sur un bucket
+loopback déjà saturé. Un nœud isolé (S12) a servi de cible à la place.
+
+### Correctifs livrés
+
+| Défaut | Effet | Correctif |
+|---|---|---|
+| `sim-contract.sh` : `deploy_all` (via `fund_owner`) peut échouer juste après le genesis, faute de solde minier suffisant | Sous `set -e`, le `start` en arrière-plan mourait avec une seule ligne de log et aucune trace de la cause | Le call site échoue maintenant bruyamment (`ERREUR: déploiement des contrats échoué … relancer 'sim-contract.sh start'`) au lieu de disparaître silencieusement |
+| `TEST-PLAN.md` : la liste des variables d'override documentait `RHIZOME_TESTNET_BLOCK_MS` à 10000 alors que `common.sh` et le corps de cette section (« Cadence de production ») pointent tous deux vers 25000, la valeur réellement calibrée depuis la campagne 3 | Un opérateur qui ne changeait rien lisait un défaut faux ; la valeur réelle (25 s) n'était documentée que dans la section « Cadence de production », pas dans le résumé des variables | Les deux mentions corrigées à 25000, avec une note expliquant la dérive |
+
+---
+
+# Archive — campagne 4 (30 nœuds natifs, 2026-08-17)
 
 ## Journal de résultats — campagne 4
 

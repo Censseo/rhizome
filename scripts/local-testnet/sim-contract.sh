@@ -171,7 +171,16 @@ case "${1:-start}" in
     while getopts "i:" opt; do
       case "$opt" in i) INTERVAL=$OPTARG ;; *) echo "usage: $0 start [-i sec]" >&2; exit 2 ;; esac
     done
-    [[ -f "$STATE" ]] || deploy_all
+    # deploy_all's fund_owner can legitimately fail this early: right after genesis, 300 s is not
+    # always enough for FUND-worth of block reward to land on any single miner (campaign 5, S9
+    # prep). Under `set -e` an unguarded call here kills the whole backgrounded `start` with a
+    # single silent line and no trace of why — the same class of failure sim-tx.sh's workers and
+    # this file's own loop() already learned to guard against. Fail loud instead: the operator
+    # (or a retry of `start`) sees exactly why nothing deployed instead of a vanished process.
+    if [[ ! -f "$STATE" ]] && ! deploy_all; then
+      echo "ERREUR: déploiement des contrats échoué (mineurs pas encore assez dotés ?) — relancer 'sim-contract.sh start' une fois le réseau plus avancé" >&2
+      exit 1
+    fi
     [[ -f "$CSV" ]] || echo "time,action,node,status" > "$CSV"
     setsid bash -c 'echo $$ > "$1"; shift; exec env "$@"' _ \
       "$PIDF" "RHIZOME_SIM_CONTRACT_INTERVAL=$INTERVAL" "$0" loop \
