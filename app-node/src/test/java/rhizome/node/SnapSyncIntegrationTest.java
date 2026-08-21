@@ -29,6 +29,7 @@ import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.InMemoryNonceStore;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
+import rhizome.core.blockchain.SupplyStamp;
 import rhizome.core.blockchain.TestNodeStores;
 import rhizome.core.box.DefaultBoxProcessor;
 import rhizome.core.box.InMemoryBoxStore;
@@ -144,7 +145,8 @@ class SnapSyncIntegrationTest {
         for (int i = 0; i < count; i++) {
             long h = minerEngine.height() + 1;
             var b = (BlockImpl) BlockImpl.builder().id((int) h).timestamp(clock.addAndGet(90_000))
-                .difficulty(minerEngine.difficulty()).lastBlockHash(minerEngine.tipHash()).build();
+                .difficulty(minerEngine.difficulty()).lastBlockHash(minerEngine.tipHash())
+                .supply(SupplyStamp.next(minerEngine, h, minerEngine.difficulty())).build();
             b.addTransaction(Transaction.of(PublicAddress.random(),
                 new TransactionAmount(PARAMS.miningReward(h))));
             Transaction t = Transaction.of(sender, PublicAddress.random(), new TransactionAmount(1_000),

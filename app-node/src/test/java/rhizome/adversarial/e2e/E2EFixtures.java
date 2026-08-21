@@ -12,6 +12,7 @@ import rhizome.core.block.Block;
 import rhizome.core.block.BlockImpl;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
+import rhizome.core.blockchain.SupplyStamp;
 import rhizome.core.ledger.LedgerSnapshot;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.mempool.ExecutionStatus;
@@ -116,6 +117,7 @@ final class E2EFixtures {
             .timestamp(node.engine().nextBlockTimestamp(System.currentTimeMillis()))
             .difficulty(node.engine().difficulty())
             .lastBlockHash(node.engine().tipHash())
+            .supply(SupplyStamp.next(node.engine(), height, node.engine().difficulty()))
             .build();
         block.addTransaction(Transaction.of(miner, new TransactionAmount(params.miningReward(height))));
         for (Transaction transaction : transactions) {

@@ -44,7 +44,8 @@ class TrustedPowBodyTest {
         PublicAddress miner = PublicAddress.random();
         long h = engine.height() + 1;
         var b = (BlockImpl) BlockImpl.builder().id((int) h).timestamp(5_000_000L)
-            .difficulty(engine.difficulty()).lastBlockHash(engine.tipHash()).build();
+            .difficulty(engine.difficulty()).lastBlockHash(engine.tipHash())
+            .supply(SupplyStamp.next(engine, h, engine.difficulty())).build();
         b.addTransaction(Transaction.of(miner, new TransactionAmount(params.miningReward(h))));
         MerkleTree tree = new MerkleTree();
         tree.setItems(b.transactions());

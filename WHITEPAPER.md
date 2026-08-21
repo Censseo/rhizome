@@ -114,10 +114,14 @@ hash = H( merkleRoot || lastBlockHash || id || difficulty || numTransactions || 
 (integers big-endian). Unlike the C++ node — whose `getHash` covered only
 `{merkleRoot, lastBlockHash, difficulty, timestamp}`, leaving `id` and the PoW-algorithm
 choice *outside* the preimage — **every header field is committed**. A reordered or
-re-timestamped block yields a different hash, hence an invalid proof of work. Three optional
-fields — the referenced uncles (§3.7), the authenticated **state root** (§5.7) and the
-miner's parameter **vote** (§5.8) — are folded in only when present, so a plain, stateless,
-abstaining block hashes byte-for-byte as it did before those features existed.
+re-timestamped block yields a different hash, hence an invalid proof of work. Four optional
+fields — the authenticated **state root** (§5.7), the miner's parameter **vote** (§5.8), the
+header-committed **circulating supply** (§5.3) and the referenced uncles (§3.7) — are folded
+in, in that order, only when present: `stateRoot` (32 bytes, when non-empty), `vote` (4 bytes,
+when non-zero), `supply` (8 bytes big-endian, when `>= 0` — the `-1` sentinel means "not
+committed"; `0` is itself a legal committed value, e.g. an empty genesis), then the uncle
+records. A plain, stateless, abstaining block on a chain that does not commit supply hashes
+byte-for-byte as it did before those features existed.
 
 ### 3.2 Proof of work — Pufferfish2
 
@@ -365,6 +369,23 @@ keeps spam expensive. On mainnet every admitted transaction must promise the min
 transact with unfunded fees. The block builder then fills a block **greedily by miner revenue** —
 fronting each sender's ready nonce run, with deterministic tie-breaks — rather than in raw
 address order, so a fee market forms under contention instead of first-come ordering.
+
+**Committed circulating supply.** A header may additionally commit the circulating supply as of
+that block — the running total of everything minted so far. This changes **no emission rule**:
+the geometric ×2/3 decay schedule above, the per-height reward table and the
+`coinbase == miningReward(h)` exactness check the `Executor` already enforces are all untouched.
+What changes is that the running total becomes an observable, verifiable fact carried in the
+header itself, rather than a quantity only obtainable by replaying every block from genesis.
+Each block commits `supply = parent.supply + minted(block)`, where `minted(block)` is the
+scheduled `miningReward(h)` at that height plus, for each referenced uncle, its work-scaled
+uncle and nephew reward (§3.7's `>>>`-shift scaling) — one formula (`Issuance.minted`), checked
+both in the structural pass of `addBlock` (§3.5) and, header-only, in `HeaderChain.validate`
+before a single byte of the block body is downloaded. Genesis commits
+`supply = LedgerSnapshot.totalSupply()`, the sum of seeded balances (0 for the default empty
+snapshot). The commitment is prefix-closed (§7.1): a chain commits supply at every height from
+genesis or at none, so there is no mid-chain opt-in and no silently dropped commitment. Because
+the figure lives entirely in the header, a reorg needs no supply-specific rollback of its own —
+the popped-to header's committed value already is the correct supply at that height.
 
 ### 5.4 Smart contracts
 
@@ -973,11 +994,12 @@ history below records nine successive review passes and the invariants they esta
   (a function of the binding *set*), so it can never fork on map iteration order.
 - **Codec round-trip fidelity.** Every codec (binary wire form and JSON) must decode a block or
   transaction to one whose hash equals the original: a hash-committed field can never be silently
-  dropped on one path. This is load-bearing because the miner `vote` and `stateRoot` enter the
-  header preimage only when non-zero/non-empty, so a decoder that omits one produces a body whose
-  recomputed hash no longer matches the mined header — rejected by every peer, and hashing
-  differently across the two wire forms (a latent split). Pinned by a decode(encode(b)).hash()
-  round-trip test over non-zero votes and non-empty uncles.
+  dropped on one path. This is load-bearing because the miner `vote`, `stateRoot` and the
+  committed `supply` enter the header preimage only when non-zero / non-empty / `>= 0`
+  respectively, so a decoder that omits one produces a body whose recomputed hash no longer
+  matches the mined header — rejected by every peer, and hashing differently across the two wire
+  forms (a latent split). Pinned by a decode(encode(b)).hash() round-trip test over non-zero
+  votes, non-empty uncles, and both a committed and an absent supply.
 
 ### 7.2 Determinism and fork resistance
 

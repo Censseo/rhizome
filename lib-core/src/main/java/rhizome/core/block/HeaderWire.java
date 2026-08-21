@@ -40,11 +40,11 @@ public final class HeaderWire {
     private HeaderWire() {
     }
 
-    /** Bytes of the shared prefix: everything through {@code vote}. */
+    /** Bytes of the shared prefix: everything through {@code supply}. */
     public static final int PREFIX_BYTES =
         Integer.BYTES + Long.BYTES + Integer.BYTES + Integer.BYTES
         + SHA256Hash.SIZE + SHA256Hash.SIZE + SHA256Hash.SIZE + SHA256Hash.SIZE
-        + Integer.BYTES;
+        + Integer.BYTES + Long.BYTES;
 
     /** Bytes of one uncle record: hash, difficulty, miner. */
     public static final int UNCLE_BYTES = SHA256Hash.SIZE + Integer.BYTES + PublicAddress.SIZE;
@@ -52,7 +52,7 @@ public final class HeaderWire {
     /** The fields both header shapes carry, in wire order. */
     public record Prefix(int id, long timestamp, int difficulty, int numTransactions,
                          SHA256Hash lastBlockHash, SHA256Hash merkleRoot, SHA256Hash nonce,
-                         SHA256Hash stateRoot, int vote) {
+                         SHA256Hash stateRoot, int vote, long supply) {
     }
 
     public static void writePrefix(ByteBuffer buffer, Prefix p) {
@@ -65,6 +65,7 @@ public final class HeaderWire {
         BinaryIO.putFixed(buffer, p.nonce().toBytes(), SHA256Hash.SIZE);
         BinaryIO.putFixed(buffer, p.stateRoot().toBytes(), SHA256Hash.SIZE);
         buffer.putInt(p.vote());
+        buffer.putLong(p.supply());
     }
 
     /**
@@ -105,8 +106,15 @@ public final class HeaderWire {
         if (Math.abs((long) vote) > 2) {
             throw new IllegalArgumentException("vote out of range: " + vote);
         }
+        long supply = buffer.getLong();
+        // Consensus range is [0, Long.MAX_VALUE]; -1 (BlockImpl.SUPPLY_ABSENT) is the one value
+        // below it that means "not committed" (§ supply header commitment). Anything lower is
+        // malformed and must never reach the accounting identity in ChainEngine/HeaderChain.
+        if (supply < -1L) {
+            throw new IllegalArgumentException("supply out of range: " + supply);
+        }
         return new Prefix(id, timestamp, difficulty, numTransactions,
-            lastBlockHash, merkleRoot, nonce, stateRoot, vote);
+            lastBlockHash, merkleRoot, nonce, stateRoot, vote, supply);
     }
 
     /** Reads and bounds an uncle count before any caller sizes a list from it. */

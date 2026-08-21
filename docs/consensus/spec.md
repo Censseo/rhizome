@@ -48,9 +48,13 @@ window. It does **not** own what a transaction means once a block is accepted �
 big-endian. Every header field is committed, unlike the C++ node whose `getHash` covered only
 `{merkleRoot, lastBlockHash, difficulty, timestamp}`.
 
-Three optional fields — uncle references (C-6), the **state root** (§5.7) and the miner **vote**
-(C-8) — are folded in **only when present**, so a plain stateless abstaining block hashes
-byte-for-byte as it did before those features existed.
+Four optional fields — the **state root** (§5.7), the miner **vote** (C-8), the header-committed
+**supply** (§5.3) and uncle references (C-6) — are folded in, in that order, **only when
+present**, so a plain stateless abstaining block hashes byte-for-byte as it did before those
+features existed: `stateRoot` (32 bytes, when non-empty), `vote` (4 bytes, when non-zero),
+`supply` (8 bytes big-endian, when `>= 0` — i.e. committed; `-1` is the absent sentinel and `0`
+is a legal committed value, e.g. an empty genesis), then the uncle records (when any are
+referenced).
 
 ### C-2 — `addBlock` validation order *(implemented)*
 
@@ -194,13 +198,27 @@ ratio (×18 = 90/5) so the **real-time schedule is preserved**: `rewardEpochBloc
 - All public `ChainEngine` methods serialise on a single lock; reorg phases are individually atomic.
 - Difficulty is always recomputed from timestamp history, never cached across `popBlock`.
 - The Merkle tree preserves transaction insertion order — never sort transactions.
-- Optional header fields (uncles, state root, vote) are folded into the hash **only when present**,
-  so old blocks hash unchanged.
+- Optional header fields (uncles, state root, vote, supply) are folded into the hash **only when
+  present**, so old blocks hash unchanged.
+- **Supply accounting.** Whenever a block commits a supply, it must equal exactly
+  `parent.supply + Issuance.minted(...)`: the scheduled mining reward at that height plus, for
+  each referenced uncle, its work-scaled uncle and nephew reward (the same `scaleRewardToWork`
+  shift `Executor` applies). The parent supply is read from the parent **header** only, never
+  from ledger state. `Issuance.minted` is the single formula — shared byte-for-byte by
+  `ChainEngine.addBlock`, the stateless `HeaderChain.validate` gate, and `BlockAssembler` — so an
+  honestly-assembled candidate always satisfies the check it is later re-validated against.
+- **Supply prefix closure.** A block whose parent commits a supply MUST also commit one (dropping
+  the commitment mid-chain is invalid); a block whose parent does not commit supply MUST NOT
+  start one (no mid-chain opt-in). A chain therefore commits supply at every height from genesis,
+  or at none. This is also what makes reorg reversal of supply free: popping back through a
+  supply-committing branch needs no rollback of its own, because the popped-to header's committed
+  value already IS the supply at that height.
 - **Codec round-trip fidelity** — every codec (binary and JSON) must decode a block to one whose
-  hash equals the original. Load-bearing: `vote` and `stateRoot` enter the preimage only when
-  non-zero/non-empty, so a decoder that drops one produces a body whose recomputed hash no longer
-  matches the mined header (rejected network-wide) and hashes differently across wire forms (a
-  latent split). Pinned by a `decode(encode(b)).hash()` round-trip test.
+  hash equals the original. Load-bearing: `vote`, `stateRoot` and `supply` enter the preimage only
+  when non-zero / non-empty / `>= 0` respectively, so a decoder that drops one produces a body
+  whose recomputed hash no longer matches the mined header (rejected network-wide) and hashes
+  differently across wire forms (a latent split). Pinned by a `decode(encode(b)).hash()`
+  round-trip test.
 - No consensus quantity is ever a floating-point comparison — reward is an integer table by height,
   GHOST rewards scale by `>>>` shifts.
 - Difficulty, median-time, uncle work and vote tallies read **only** `headerAt(h)`, never bodies

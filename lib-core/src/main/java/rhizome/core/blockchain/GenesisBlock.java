@@ -40,11 +40,31 @@ public final class GenesisBlock {
         return SHA256Hash.of(out);
     }
 
-    /** Builds the deterministic genesis block for the given network and snapshot. */
+    /**
+     * Builds the deterministic genesis block for the given network and snapshot.
+     *
+     * <p>Commits {@code supply = snapshot.totalSupply()} (§ supply header commitment, FR-005) --
+     * the base case {@code S0} that every later block's {@code Issuance.minted} accounting builds
+     * on. Fails loudly rather than silently clamping when the snapshot's unsigned total overflows
+     * past {@code Long.MAX_VALUE} (see the bounds check below).
+     */
     public static Block build(NetworkParameters params, LedgerSnapshot snapshot) {
         if (snapshot.chainId() != params.chainId()) {
             throw new IllegalArgumentException(
                 "Snapshot chainId " + snapshot.chainId() + " does not match network " + params.chainId());
+        }
+        // Genesis commits S0 = LedgerSnapshot.totalSupply() (§ supply header commitment, FR-005):
+        // the sum of seeded balances, 0 for the default empty snapshot. totalSupply() adds with
+        // plain `+=` and is documented as an UNSIGNED 64-bit total (mirrored by its
+        // Long.toUnsignedString JSON form); the consensus supply range is the non-negative SIGNED
+        // 64-bit integers (data-model.md), so an unsigned sum landing past Long.MAX_VALUE wraps
+        // negative here and must fail loud at chain init rather than silently commit a bogus S0
+        // (research.md Decision 6, FR-013).
+        long supply = snapshot.totalSupply();
+        if (supply < 0) {
+            throw new IllegalArgumentException(
+                "Snapshot total supply " + Long.toUnsignedString(supply)
+                    + " exceeds Long.MAX_VALUE -- outside the signed 64-bit consensus range");
         }
         return BlockImpl.builder()
             .id(GENESIS_ID)
@@ -53,6 +73,7 @@ public final class GenesisBlock {
             .merkleRoot(genesisCommitment(params, snapshot))
             .lastBlockHash(SHA256Hash.empty())
             .nonce(SHA256Hash.empty())
+            .supply(supply)
             .build();
     }
 

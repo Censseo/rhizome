@@ -26,6 +26,7 @@ truth: what each area does, what it owns, and which invariants must never regres
 | [wallet](wallet/spec.md) | CLI wallet, encrypted keystore, chain-id pin, local signing | `app-wallet` | Draft |
 | [crypto](crypto/spec.md) | Ed25519, Pufferfish2 PoW, hashes | `lib-crypto` | Draft |
 | [platform](platform/spec.md) | Java 25 toolchain, Gradle wrapper, dependency pins & rationale, native image, lint gate | *(build-wide)* | Draft |
+| [adversarial](adversarial/spec.md) | The exploit-scenario catalogue every domain is tested against — each scenario names its proof, machine-checked by `AdversarialProtocolTest` | *(test-wide)* | Active |
 
 ## Reading order
 

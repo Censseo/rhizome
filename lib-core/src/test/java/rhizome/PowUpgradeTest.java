@@ -13,6 +13,7 @@ import rhizome.core.block.BlockImpl;
 import rhizome.core.blockchain.ChainEngine;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
+import rhizome.core.blockchain.SupplyStamp;
 import rhizome.core.blockchain.TestNodeStores;
 import rhizome.core.ledger.LedgerSnapshot;
 import rhizome.core.ledger.PublicAddress;
@@ -68,6 +69,7 @@ class PowUpgradeTest {
             .timestamp(clock.addAndGet(params.desiredBlockTimeSec() * 1000L))
             .difficulty(engine.difficulty())
             .lastBlockHash(engine.tipHash())
+            .supply(SupplyStamp.next(engine, height, engine.difficulty()))
             .build();
         b.addTransaction(Transaction.of(miner, new TransactionAmount(params.miningReward(height))));
 

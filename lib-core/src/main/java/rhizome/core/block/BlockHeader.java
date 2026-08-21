@@ -29,6 +29,9 @@ import static rhizome.crypto.Crypto.verifyHash;
  * @param nonce          PoW solution
  * @param stateRoot      authenticated state root after the block (empty ⇒ not committed)
  * @param vote           miner parameter vote (0 ⇒ abstain, not committed)
+ * @param supply         circulating native supply committed after the block (§ supply header
+ *                       commitment); {@code -1} (absent) ⇒ not committed, {@code 0} is a legal
+ *                       committed value (empty genesis)
  * @param uncles         referenced uncle blocks (empty ⇒ not committed)
  */
 public record BlockHeader(
@@ -41,6 +44,7 @@ public record BlockHeader(
         SHA256Hash nonce,
         SHA256Hash stateRoot,
         int vote,
+        long supply,
         List<UncleRef> uncles) {
 
     /** Extracts the logical header of a block (its full PoW preimage + uncle refs). */
@@ -56,6 +60,7 @@ public record BlockHeader(
             b.nonce(),
             b.stateRoot(),
             b.vote(),
+            b.supply(),
             b.uncles());
     }
 
@@ -66,9 +71,10 @@ public record BlockHeader(
      * numTransactions || timestamp} (integers big-endian), then folds in the
      * optional fields only when set, so a block that uses none of them hashes
      * byte-for-byte as it did before those fields existed:
-     * {@code stateRoot} (when non-empty), {@code vote} (when non-zero), and the
-     * uncle references (when present: each uncle's hash and miner interleaved,
-     * followed by all uncle difficulties).
+     * {@code stateRoot} (when non-empty), {@code vote} (when non-zero),
+     * {@code supply} (when {@code >= 0}, i.e. committed — 8 bytes big-endian, after
+     * {@code vote} and before uncles), and the uncle references (when present:
+     * each uncle's hash and miner interleaved, followed by all uncle difficulties).
      */
     public SHA256Hash hash() {
         // Single contiguous preimage buffer + one digest call: the previous incremental form
@@ -77,10 +83,12 @@ public record BlockHeader(
         // identical to the incremental preimage — consensus-critical, do not reorder.
         boolean withStateRoot = stateRoot != null && !stateRoot.equals(SHA256Hash.empty());
         boolean withVote = vote != 0;
+        boolean withSupply = supply >= 0;
         boolean withUncles = uncles != null && !uncles.isEmpty();
         int size = 2 * SHA256Hash.SIZE + 3 * Integer.BYTES + Long.BYTES
             + (withStateRoot ? SHA256Hash.SIZE : 0)
             + (withVote ? Integer.BYTES : 0)
+            + (withSupply ? Long.BYTES : 0)
             + (withUncles ? uncles.size() * (SHA256Hash.SIZE + rhizome.core.ledger.PublicAddress.SIZE)
                 + uncles.size() * Integer.BYTES : 0);
         ByteBuffer buffer = ByteBuffer.allocate(size);
@@ -98,6 +106,9 @@ public record BlockHeader(
         }
         if (withVote) {
             buffer.putInt(vote);
+        }
+        if (withSupply) {
+            buffer.putLong(supply);
         }
         if (withUncles) {
             ByteBuffer uncleBuf = ByteBuffer.allocate(uncles.size() * Integer.BYTES);

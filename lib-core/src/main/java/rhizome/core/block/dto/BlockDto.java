@@ -12,8 +12,9 @@ import rhizome.core.serialization.BinaryIO;
  * ({@link #BUFFER_SIZE} bytes), hand-written for determinism and native-image
  * friendliness: {@code id(4) || timestamp(8) || difficulty(4) ||
  * numTransactions(4) || lastBlockHash(32) || merkleRoot(32) || nonce(32) ||
- * stateRoot(32)}. The state root is carried on the wire always (zero when the
- * producer runs without the accumulator), so the header format is fixed once.
+ * stateRoot(32) || vote(4) || supply(8)}. The state root and supply are
+ * carried on the wire always (absent sentinels when the producer does not
+ * commit them), so the header format is fixed once.
  */
 @Getter
 public class BlockDto {
@@ -26,10 +27,12 @@ public class BlockDto {
     public final SHA256Hash nonce;
     public final SHA256Hash stateRoot;
     public final int vote;
+    public final long supply;
 
     public static final int BUFFER_SIZE =
         Integer.BYTES + Long.BYTES + Integer.BYTES + Integer.BYTES
-        + SHA256Hash.SIZE + SHA256Hash.SIZE + SHA256Hash.SIZE + SHA256Hash.SIZE + Integer.BYTES;
+        + SHA256Hash.SIZE + SHA256Hash.SIZE + SHA256Hash.SIZE + SHA256Hash.SIZE + Integer.BYTES
+        + Long.BYTES;
 
     public BlockDto(
         int id,
@@ -39,7 +42,10 @@ public class BlockDto {
         SHA256Hash lastBlockHash,
         SHA256Hash merkleRoot,
         SHA256Hash nonce) {
-        this(id, timestamp, difficulty, numTransactions, lastBlockHash, merkleRoot, nonce, SHA256Hash.empty(), 0);
+        // -1: BlockImpl.SUPPLY_ABSENT, spelled as a literal to avoid a package cycle back to
+        // rhizome.core.block (BlockImpl itself imports this package's BlockDto).
+        this(id, timestamp, difficulty, numTransactions, lastBlockHash, merkleRoot, nonce,
+            SHA256Hash.empty(), 0, -1L);
     }
 
     public BlockDto(
@@ -52,6 +58,22 @@ public class BlockDto {
         SHA256Hash nonce,
         SHA256Hash stateRoot,
         int vote) {
+        // -1: BlockImpl.SUPPLY_ABSENT (see the note on the 7-arg constructor above).
+        this(id, timestamp, difficulty, numTransactions, lastBlockHash, merkleRoot, nonce,
+            stateRoot, vote, -1L);
+    }
+
+    public BlockDto(
+        int id,
+        long timestamp,
+        int difficulty,
+        int numTransactions,
+        SHA256Hash lastBlockHash,
+        SHA256Hash merkleRoot,
+        SHA256Hash nonce,
+        SHA256Hash stateRoot,
+        int vote,
+        long supply) {
 
         this.id = id;
         this.timestamp = timestamp;
@@ -62,17 +84,18 @@ public class BlockDto {
         this.nonce = nonce;
         this.stateRoot = stateRoot;
         this.vote = vote;
+        this.supply = supply;
     }
 
     public void writeTo(ByteBuffer buffer) {
         HeaderWire.writePrefix(buffer, new HeaderWire.Prefix(id, timestamp, difficulty,
-            numTransactions, lastBlockHash, merkleRoot, nonce, stateRoot, vote));
+            numTransactions, lastBlockHash, merkleRoot, nonce, stateRoot, vote, supply));
     }
 
     public static BlockDto readFrom(ByteBuffer buffer) {
         HeaderWire.Prefix p = HeaderWire.readPrefix(buffer);
         return new BlockDto(p.id(), p.timestamp(), p.difficulty(), p.numTransactions(),
-            p.lastBlockHash(), p.merkleRoot(), p.nonce(), p.stateRoot(), p.vote());
+            p.lastBlockHash(), p.merkleRoot(), p.nonce(), p.stateRoot(), p.vote(), p.supply());
     }
 
     public int getSize() {

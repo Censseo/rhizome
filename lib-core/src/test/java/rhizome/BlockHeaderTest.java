@@ -48,6 +48,12 @@ class BlockHeaderTest {
     }
 
     private static List<BlockImpl> allShapes() {
+        BlockImpl plusSupply = block(SHA256Hash.empty(), 0, List.of());
+        plusSupply.supply(999L);
+        BlockImpl supplyZero = block(SHA256Hash.empty(), 0, List.of());
+        supplyZero.supply(0L); // 0 is a legal committed value (empty genesis), not absent
+        BlockImpl everythingPlusSupply = block(SHA256Hash.random(), 2, List.of(uncle(), uncle()));
+        everythingPlusSupply.supply(123_456_789L);
         return List.of(
             block(SHA256Hash.empty(), 0, List.of()),                              // plain
             block(SHA256Hash.random(), 0, List.of()),                             // + stateRoot
@@ -55,7 +61,10 @@ class BlockHeaderTest {
             block(SHA256Hash.empty(), -2, List.of()),                             // + negative vote
             block(SHA256Hash.empty(), 0, List.of(uncle())),                       // + one uncle
             block(SHA256Hash.empty(), 0, List.of(uncle(), uncle())),              // + two uncles
-            block(SHA256Hash.random(), 2, List.of(uncle(), uncle())));            // + everything
+            block(SHA256Hash.random(), 2, List.of(uncle(), uncle())),             // + everything (no supply)
+            plusSupply,                                                          // + supply only
+            supplyZero,                                                          // + supply = 0
+            everythingPlusSupply);                                               // + everything incl. supply
     }
 
     @Test
@@ -78,10 +87,38 @@ class BlockHeaderTest {
         BlockImpl withState = fixed(lbh, mr, nc, SHA256Hash.random(), 0, List.of());
         BlockImpl withVote = fixed(lbh, mr, nc, SHA256Hash.empty(), 3, List.of());
         BlockImpl withUncle = fixed(lbh, mr, nc, SHA256Hash.empty(), 0, List.of(uncle()));
+        BlockImpl withSupply = fixed(lbh, mr, nc, SHA256Hash.empty(), 0, List.of());
+        withSupply.supply(12_345L);
+        BlockImpl withSupplyZero = fixed(lbh, mr, nc, SHA256Hash.empty(), 0, List.of());
+        withSupplyZero.supply(0L);
         assertNotEquals(base.hash(), withState.hash());
         assertNotEquals(base.hash(), withVote.hash());
         assertNotEquals(base.hash(), withUncle.hash());
+        assertNotEquals(base.hash(), withSupply.hash());
+        // supply=0 is a committed value, distinct from absent (-1): both must fold differently.
+        assertNotEquals(base.hash(), withSupplyZero.hash());
+        assertNotEquals(withSupply.hash(), withSupplyZero.hash());
         assertNotEquals(plain, null);
+    }
+
+    /**
+     * Regression lock (contracts/wire-format.md #2): the preimage must be byte-identical to the
+     * pre-feature layout when supply is absent (the default), so every block minted before this
+     * feature keeps its hash. Recomputes the ORIGINAL (pre-supply) preimage by hand.
+     */
+    @Test
+    void supplyLessBlockHashesByteForByteAsBeforeTheField() {
+        BlockImpl b = block(SHA256Hash.empty(), 0, List.of()); // supply absent (builder default)
+        java.nio.ByteBuffer expected = java.nio.ByteBuffer.allocate(
+            2 * SHA256Hash.SIZE + 3 * Integer.BYTES + Long.BYTES);
+        expected.put(b.merkleRoot().raw());
+        expected.put(b.lastBlockHash().raw());
+        expected.putInt(b.id());
+        expected.putInt(b.difficulty());
+        expected.putInt(b.transactions().size());
+        expected.putLong(b.timestamp());
+        SHA256Hash expectedHash = rhizome.crypto.Crypto.SHA256(expected.array());
+        assertEquals(expectedHash, b.hash());
     }
 
     private static BlockImpl fixed(SHA256Hash lbh, SHA256Hash mr, SHA256Hash nc,

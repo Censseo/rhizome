@@ -82,6 +82,7 @@ final class HostilePeer implements AutoCloseable {
         private Supplier<String> totalWork = () -> BigInteger.TWO.pow(200).toString();
         private RhizomeNode sharesGenesisWith;
         private Supplier<byte[]> syncBody = () -> unprovenWindow(2, 33, 30);
+        private Supplier<byte[]> headersSupplier;
         private int failEverythingWith;
         private boolean dripForever;
 
@@ -109,6 +110,19 @@ final class HostilePeer implements AutoCloseable {
 
         Builder serves(Supplier<byte[]> syncBody) {
             this.syncBody = syncBody;
+            return this;
+        }
+
+        /**
+         * Answers {@code /headers} — any range — with a fixed self-framing {@code HeaderCodec}
+         * stream. Like {@link #serves}, this fixture does not slice by the requested range: a
+         * real peer would, but every scenario here needs is a fixed byte stream a real client
+         * downloads, bounds and decodes, so one answer for the whole encounter is enough. Unset
+         * by default, so every existing scenario keeps getting the unmodified 404 the switch
+         * always answered for this path.
+         */
+        Builder servesHeaders(Supplier<byte[]> headers) {
+            this.headersSupplier = headers;
             return this;
         }
 
@@ -153,6 +167,13 @@ final class HostilePeer implements AutoCloseable {
                         totalWork.get().getBytes(StandardCharsets.UTF_8));
                     case "/block" -> respond(exchange, 200, blockJson(exchange));
                     case "/sync" -> respond(exchange, 200, syncBody.get());
+                    case "/headers" -> {
+                        if (headersSupplier != null) {
+                            respond(exchange, 200, headersSupplier.get());
+                        } else {
+                            respond(exchange, 404, new byte[0]);
+                        }
+                    }
                     case "/peers" -> respond(exchange, 200, "[]".getBytes(StandardCharsets.UTF_8));
                     default -> respond(exchange, 404, new byte[0]);
                 }

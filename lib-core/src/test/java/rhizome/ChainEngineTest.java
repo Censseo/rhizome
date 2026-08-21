@@ -20,6 +20,7 @@ import rhizome.core.blockchain.ChainEngineTestAccess;
 import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
+import rhizome.core.blockchain.SupplyStamp;
 import rhizome.core.blockchain.TestNodeStores;
 import rhizome.crypto.PowAlgorithm;
 import rhizome.crypto.PrivateKey;
@@ -92,6 +93,7 @@ class ChainEngineTest {
             .timestamp(clock.addAndGet(params.desiredBlockTimeSec() * 1000L))
             .difficulty(engine.difficulty())
             .lastBlockHash(engine.tipHash())
+            .supply(SupplyStamp.next(engine, height, engine.difficulty()))
             .build();
         b.addTransaction(Transaction.of(miner, new TransactionAmount(params.miningReward(height))));
         transactions.forEach(b::addTransaction);
@@ -116,6 +118,7 @@ class ChainEngineTest {
             .timestamp(clock.addAndGet(params.desiredBlockTimeSec() * 1000L))
             .difficulty(engine.difficulty())
             .lastBlockHash(engine.tipHash())
+            .supply(SupplyStamp.next(engine, height, engine.difficulty()))
             .build();
         b.addTransaction(TransactionImpl.builder()
             .to(miner).amount(new TransactionAmount(params.miningReward(height)))
@@ -271,6 +274,7 @@ class ChainEngineTest {
                 .timestamp(fastClock.addAndGet(1000))
                 .difficulty(e.difficulty())
                 .lastBlockHash(e.tipHash())
+                .supply(SupplyStamp.next(e, h, e.difficulty()))
                 .build();
             b.addTransaction(Transaction.of(m, new TransactionAmount(fast.miningReward(h))));
             var tree = new MerkleTree();

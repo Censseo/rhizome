@@ -104,6 +104,8 @@ class PushStrikeTableTest {
         assertTrue(PushStrikeTable.isFault(ExecutionStatus.INVALID_SIGNATURE));
         assertTrue(PushStrikeTable.isFault(ExecutionStatus.INVALID_CHAIN_ID));
         assertTrue(PushStrikeTable.isFault(ExecutionStatus.INVALID_NONCE), "failed PoW");
+        assertTrue(PushStrikeTable.isFault(ExecutionStatus.INVALID_SUPPLY),
+            "a wrong emission delta is a deterministic structural violation");
 
         assertFalse(PushStrikeTable.isFault(ExecutionStatus.SUCCESS));
         assertFalse(PushStrikeTable.isFault(null));

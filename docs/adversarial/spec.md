@@ -99,8 +99,8 @@ assembled node never reaches it; a network test can prove the node held its chai
 you which rule saved it.
 
 The distribution is deliberate and worth stating, because "173 DEFENDED" reads as if it were
-uniform: of the 184 catalogued scenarios, **124** rest at component level, **14** at the surface,
-**43** reach the network, and 3 are residuals with no proof by definition. The network figure is the `E2E`
+uniform: of the 198 catalogued scenarios, **135** rest at component level, **14** at the surface,
+**46** reach the network, and 3 are residuals with no proof by definition. The network figure is the `E2E`
 family plus the scenarios elsewhere that gained a second, network-level proof. Component level
 dominates on purpose — it is the only level that can name the gate that refused — but a rule with
 no network proof anywhere is a rule nobody has watched an assembled node apply.
@@ -115,6 +115,7 @@ no network proof anywhere is a rule nobody has watched an assembled node apply.
 `REPLAY` replay and double-spend ·
 `INFL` issuance and ledger arithmetic ·
 `UNCLE` GHOST uncle rewards ·
+`SUPPLY` circulating supply header commitment ·
 `REORG` fork choice, finality, synchronisation ·
 `POOL` mempool and relay policy ·
 `VM` contract sandbox and determinism ·
@@ -251,6 +252,32 @@ catalogue is never run as one suite.
 | UNCLE-05 | Pad headers with in-range fake uncle references to inflate a branch's apparent work at the reorg gate and force a pop/restore cycle. | A2 | DEFENDED | `lib-core/src/test/java/rhizome/HeaderChainTest.java#committedUncleWorkDoesNotInflateTheReorgGateWork`, `lib-core/src/test/java/rhizome/core/blockchain/BlockUnclesTest.java#baseWorkExcludesUncleWorkThatTotalWorkIncludes` |
 | UNCLE-06 | Exceed the per-block uncle count so a submitted block forces unbounded memory-hard hashing. | A1 | DEFENDED | `lib-core/src/test/java/rhizome/core/blockchain/BlockUnclesTest.java#rejectsTooManyUncles`, `lib-core/src/test/java/rhizome/BlockAssemblerUncleSizeTest.java#uncleBytesAreChargedAgainstTheSizeCap` |
 | UNCLE-07 | Churn the bounded orphan pool so an honest node cannot restore its own suffix after a rejected reorg, forcing a full resync. | A2 | DEFENDED | `lib-core/src/test/java/rhizome/core/blockchain/BlockUnclesTest.java#restoreBlockRecoversANephewWhoseUncleIsMissingFromThePool`, `lib-core/src/test/java/rhizome/core/blockchain/BlockUnclesTest.java#restoreBlockStillEnforcesStructuralUncleBounds` |
+
+## SUPPLY — circulating supply header commitment
+
+The optional eleventh header field committing each block's circulating supply: `block.supply ==
+parent.supply + Issuance.minted(...)`, prefix-closed across a chain's history — a chain commits
+supply at every height from genesis, or at none — and checked by one `checkSupply` formula shared
+by both consensus gates that see a header, `ChainEngine.addBlock` and header-only sync's
+`HeaderChain.validate`. Most proofs live in `lib-core/src/test/java/rhizome/SupplyCommitmentTest.java`,
+alongside the genesis, codec and header-sync suites that already covered the seeding, wire and
+bootstrap boundaries; the two gaps those left — the accounting identity's own arithmetic overflowing,
+and a pre-feature-shaped header blob surviving truncated — are closed by
+`lib-core/src/test/java/rhizome/adversarial/SupplyLedgerAttackTest.java`.
+
+| ID | Scenario | Class | Verdict | Proof |
+|----|----------|-------|---------|-------|
+| SUPPLY-01 | Forge a block that commits supply one base unit above or below the exact accounting identity, to slip a phantom mint or a silent burn past a node that only checks the coinbase. | A3 | DEFENDED | `lib-core/src/test/java/rhizome/SupplyCommitmentTest.java#supplyCommitmentMatchesScheduledIssuanceExactly` |
+| SUPPLY-02 | Graft a supply commitment onto a block whose parent chain never carried one, or drop the commitment beneath a parent that did, laundering a discontinuous supply history into an otherwise well-formed chain. | A3 | DEFENDED | `lib-core/src/test/java/rhizome/SupplyCommitmentTest.java#supplyCommitmentIsPrefixClosed` |
+| SUPPLY-03 | Under-report a block's committed supply by omitting the work-scaled share of an uncle or nephew reward, hiding real issuance behind an otherwise-exact coinbase. | A3 | DEFENDED | `lib-core/src/test/java/rhizome/SupplyCommitmentTest.java#supplyAccountingIncludesWorkScaledUncleAndNephewIssuance` |
+| SUPPLY-04 | Push the accounting identity's sum past the signed 64-bit range so it wraps instead of failing, escaping the exact-match check through integer overflow. | A3 | DEFENDED | `lib-core/src/test/java/rhizome/adversarial/SupplyLedgerAttackTest.java#anOverflowingSupplySumIsRejectedRatherThanWrappedIntoAFalseMatch` |
+| SUPPLY-05 | Seed a genesis snapshot whose unsigned balance sum exceeds the signed 64-bit range, so every downstream supply figure is undefined or silently wrapped from block zero. | A6 | DEFENDED | `lib-core/src/test/java/rhizome/GenesisBlockTest.java#genesisCommitsSnapshotTotalSupply` |
+| SUPPLY-06 | Submit a supply value below the absent sentinel at the wire boundary, hoping a malformed decode is silently accepted as legitimate absence, or crashes the decoder, before consensus arithmetic ever sees it. | A2 | DEFENDED | `lib-core/src/test/java/rhizome/CodecBoundsTest.java#everyDecoderRejectsOutOfRangeSupply` |
+| SUPPLY-07 | Feed the current decoder a pre-feature-shaped header blob, eight bytes short of the field it now expects, hoping the truncated legacy shape is silently misread as a valid supply-less header instead of blocking boot. | A6 | DEFENDED | `lib-core/src/test/java/rhizome/adversarial/SupplyLedgerAttackTest.java#aHeaderTruncatedRightBeforeTheSupplyFieldIsRejectedOnEveryDecoder` |
+| SUPPLY-08 | Pop back through a reorg and look for any supply figure that needs rollback arithmetic to come out right, instead of being the popped-to header's committed value by construction. | A3 | DEFENDED | `lib-core/src/test/java/rhizome/SupplyCommitmentTest.java#reorgRestoresCommittedSupplyStructurally` |
+| SUPPLY-09 | Abandon a reorg mid-apply so the victim falls back to its trusted-restore path, hoping the restored suffix's supply is skipped or re-validated to the wrong value rather than its exact pre-pop figure. | A2 | DEFENDED | `lib-core/src/test/java/rhizome/SupplyCommitmentTest.java#failedReorgRestoreRevalidatesIdenticalSupply` |
+| SUPPLY-10 | Forge a header chain's per-height supply delta so a headers-first sync client accepts a later header's proof of work before ever checking the emission chain beneath it. | A2 | DEFENDED | `lib-core/src/test/java/rhizome/HeaderChainTest.java#headerGateRejectsForgedSupplyBeforeProofOfWork` |
+| SUPPLY-11 | Get a syncing node to download even one block body from a branch whose emission chain is already forged at the header level, turning a free header lie into a paid-for body fetch. | A2 | DEFENDED | `lib-core/src/test/java/rhizome/HeaderSynchronizerTest.java#peerServingAForgedEmissionHeaderIsRejectedBeforeAnyBodyFetch` |
 
 ## REORG — fork choice, finality, synchronisation
 
@@ -432,6 +459,9 @@ work, real RocksDB. Fixtures live in `app-node/src/test/java/rhizome/adversarial
 | E2E-31 | Have a pruned node answer for history it no longer holds — a truncated view served as if it were the chain, rather than a refusal carrying the watermark. | A2 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EPrunedAndSnapSyncTest.java#aPrunedNodeRefusesPrunedBodiesWithItsWatermarkAndKeepsServingHeaders` |
 | E2E-32 | Have a snap-syncing node adopt state it cannot then serve or extend, so a bootstrap ends in silent disagreement with its source. | A2 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EPrunedAndSnapSyncTest.java#aFreshNodeBootstrapsFromAPeersSnapshotAndAgreesWithIt` |
 | E2E-33 | Slip a bearer past the gate with a shared prefix or a length shortcut, on a real socket and header parser. | A1 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EApiAbuseTest.java#everyStrictPrefixOfTheBearerIsRefusedAndOnlyTheFullTokenPasses` |
+| E2E-34 | Push a supply-forged block straight at a real node's `/submit` route, hoping the API boundary, the real consensus engine and the gossip fault table disagree about whether it is an accepted mutation or a rejected structural fault. | A3 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2ESupplyCommitmentTest.java#aSupplyForgedBlockPushedAtTheSubmitRouteIsRejectedAndTheNodeStaysHealthy` |
+| E2E-35 | Serve a real syncing node a headers-only response whose supply delta is forged partway through, over a real socket, hoping the lie survives real parsing, real caps and real deadlines long enough to cost the victim a single body fetch or a byte of local state. | A2 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2ESupplyCommitmentTest.java#aHostileHeadersResponseWithAForgedSupplyDeltaLeavesTheVictimsChainUntouched` |
+| E2E-36 | Fork two real mining nodes with divergent uncle inclusion so their per-block issuance genuinely diverges, let them reorg to the heavier branch over real HTTP sync, and see whether the two nodes' real, independently-read supply figures agree once they converge. | A3 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2ESupplyCommitmentTest.java#twoForkedMiningNodesThatConvergeAgreeOnSupplyAtTheSettledHeight` |
 
 ---
 
@@ -445,6 +475,33 @@ _None — every catalogued scenario carries a proof._
 
 ## Change log
 
+- **2026-08-21** — A new `SUPPLY` family (11 scenarios) and three `E2E` scenarios (E2E-34..36) added
+  for the supply header commitment (branch `002-supply-header-commitment`): the optional eleventh
+  header field, `block.supply == parent.supply + Issuance.minted(...)`, prefix-closed and enforced
+  by one `checkSupply` formula shared by `ChainEngine.addBlock` and header-only sync's
+  `HeaderChain.validate`. Nine of the eleven `SUPPLY` scenarios were satisfied by tests already
+  written for the feature (`SupplyCommitmentTest`, `GenesisBlockTest`, `CodecBoundsTest`,
+  `HeaderChainTest`, `HeaderSynchronizerTest`) with zero new test code; two needed a new suite,
+  `SupplyLedgerAttackTest` — SUPPLY-04 forces the accounting identity's own `Math.addExact` to
+  overflow rather than silently wrap into a false match, and SUPPLY-07 feeds every binary decoder a
+  header blob truncated exactly at the pre-feature 152-byte boundary, eight bytes short of the
+  supply field, and confirms all three ingress paths refuse it loudly instead of misreading it as a
+  legitimate supply-less header. All three `E2E` rows are new real-node, real-socket proofs
+  (`E2ESupplyCommitmentTest`), extending the family to 36. E2E-34 posts a block whose `supply` field
+  is forged after mining straight at a real node's `/submit` route and confirms
+  `ChainEngine.addBlock`'s cheap supply check (WHITEPAPER §3.5 cheapest-first) refuses it before the
+  now-stale nonce is ever re-verified, and that the node stays healthy and keeps producing. E2E-35
+  serves a real syncing node a forged headers-only stream over a real socket, needing one
+  shared-fixture extension — `HostilePeer` gained a `servesHeaders` capability, answering every
+  `/headers` query with one fixed byte stream, same as the existing `/sync` case — which means the
+  header run the victim actually validates fails at its first candidate rather than deep at the
+  forged tail; the proof is written to the weaker-but-real claim the scenario allows: the victim's
+  local chain, read back from its own engine, is provably untouched. E2E-36 forks two real mining
+  nodes, converges them over real HTTP sync, and checks the two nodes' independently-read committed
+  supply against a sum recomputed from the converged chain's own headers (`Issuance.minted`, real
+  per-block difficulty and uncle refs, not a hardcoded number); it does not engineer divergent uncle
+  inclusion between the two miners: no wiring exists in this harness to force one node's orphans
+  into another's uncle set on a schedule.
 - **2026-08-20** — The last three declared gaps closed, none of them the way they were declared.
   API-13 turned out to already be defended in code (`NodeApi.bearerMatches` uses
   `MessageDigest.isEqual`) with nothing enforcing it — closed with a structural tripwire

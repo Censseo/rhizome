@@ -22,6 +22,7 @@ import rhizome.core.blockchain.Executor;
 import rhizome.core.blockchain.HeaderChain;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
+import rhizome.core.blockchain.SupplyStamp;
 import rhizome.core.blockchain.TestNodeStores;
 import rhizome.crypto.PowAlgorithm;
 import rhizome.crypto.PrivateKey;
@@ -92,7 +93,8 @@ class ConsensusV2GateTest {
     private static void mineOnEngineAt(ChainEngine e, NetworkParameters p, PublicAddress miner, long ts) {
         long h = e.height() + 1;
         var b = (BlockImpl) BlockImpl.builder().id((int) h).timestamp(ts)
-            .difficulty(e.difficulty()).lastBlockHash(e.tipHash()).build();
+            .difficulty(e.difficulty()).lastBlockHash(e.tipHash())
+            .supply(SupplyStamp.next(e, h, e.difficulty())).build();
         b.addTransaction(Transaction.of(miner, new TransactionAmount(p.miningReward(h))));
         var tree = new MerkleTree();
         tree.setItems(b.transactions());

@@ -50,11 +50,11 @@ class MinerTest {
         for (PowAlgorithm algorithm : new PowAlgorithm[] {PowAlgorithm.SHA256, PowAlgorithm.PUFFERFISH2}) {
             var header = new BlockHeader(2, 1_000L, DIFFICULTY, 1,
                 SHA256Hash.random(), SHA256Hash.random(), SHA256Hash.empty(), SHA256Hash.empty(),
-                0, java.util.List.of());
+                0, -1L, java.util.List.of());
             SHA256Hash nonce = Miner.mineNonce(header.hash(), DIFFICULTY, algorithm, PowCosts.DEFAULT);
             var mined = new BlockHeader(2, 1_000L, DIFFICULTY, 1,
                 header.lastBlockHash(), header.merkleRoot(), nonce, SHA256Hash.empty(),
-                0, java.util.List.of());
+                0, -1L, java.util.List.of());
             assertTrue(mined.verifyNonce(algorithm, PowCosts.DEFAULT),
                 "header with a mined nonce must verify under " + algorithm);
         }

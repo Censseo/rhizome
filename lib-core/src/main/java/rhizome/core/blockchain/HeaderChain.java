@@ -6,6 +6,7 @@ import java.util.List;
 import java.util.function.LongFunction;
 
 import rhizome.core.block.BlockHeader;
+import rhizome.core.block.BlockImpl;
 import rhizome.crypto.SHA256Hash;
 
 /**
@@ -44,6 +45,7 @@ public final class HeaderChain {
         TIMESTAMP_IN_FUTURE,
         INVALID_UNCLES,
         INVALID_VOTE,
+        INVALID_SUPPLY,
         CHECKPOINT_MISMATCH
     }
 
@@ -139,6 +141,18 @@ public final class HeaderChain {
             if (Math.abs((long) header.vote()) > 2) {
                 return Result.reject(Rejection.INVALID_VOTE, h);
             }
+            // Supply accounting (§ supply header commitment, FR-003/FR-004/FR-006/US3): cheap,
+            // header-only integer arithmetic reading only the previous header through the
+            // combined `at` view (never a body, never ledger state) -- so it sits with the other
+            // structural checks, after vote/difficulty and BEFORE the memory-hard PoW check below
+            // (DoS armor ordering, WHITEPAPER §3.5). This is the SAME Issuance.minted formula and
+            // the SAME prefix-closure rule ChainEngine.addBlock's checkSupply enforces (FR-007) --
+            // a forged emission chain is rejected at ~158 B/header, before this header's own PoW
+            // is even verified, let alone any later header's.
+            Rejection supplyRejection = checkSupply(params, header, at.apply(h - 1));
+            if (supplyRejection != null) {
+                return Result.reject(supplyRejection, h);
+            }
             // Cheapest-first, mirroring ChainEngine.addBlock (audit: validation order): the
             // timestamp bounds are pure comparisons, so they run BEFORE the memory-hard PoW —
             // a forged window then costs the verifier zero hashes instead of one.
@@ -229,5 +243,43 @@ public final class HeaderChain {
      */
     private static BigInteger uncleWork(BlockHeader header, NetworkParameters params) {
         return UncleWeight.structuralWork(header.uncles(), header.difficulty(), params);
+    }
+
+    /**
+     * Supply accounting gate (§ supply header commitment, FR-003/FR-004), header-only: byte-for-
+     * byte the same rule as {@code ChainEngine.checkSupply} --
+     *
+     * <ul>
+     *   <li>Parent supply-less (FR-004 prefix closure): {@code header} must ALSO be supply-less --
+     *       a mid-chain start is rejected exactly like a dropped commitment.</li>
+     *   <li>Parent committed: {@code header} MUST commit too, and must equal EXACTLY
+     *       {@code parent.supply + Issuance.minted(header)} (FR-003), the single formula shared
+     *       with {@link ChainEngine} and {@code BlockAssembler} (FR-007) -- computed here from
+     *       {@code header} and {@code parent} alone, no body, no ledger state.</li>
+     * </ul>
+     *
+     * <p>Returns {@code null} on success, or the {@link Rejection} to report at this header's
+     * height. Uses {@link Math#addExact}: an overflowing identity can never be satisfied by any
+     * legal {@code long}, so it is rejected rather than crashing (FR-014).
+     */
+    private static Rejection checkSupply(NetworkParameters params, BlockHeader header, BlockHeader parent) {
+        long parentSupply = parent.supply();
+        long headerSupply = header.supply();
+        if (parentSupply == BlockImpl.SUPPLY_ABSENT) {
+            return headerSupply == BlockImpl.SUPPLY_ABSENT ? null : Rejection.INVALID_SUPPLY;
+        }
+        if (headerSupply < 0) {
+            // Parent committed: dropping the commitment (or any value below the absent sentinel,
+            // which decode-time bounds already reject on every wire ingress path) is invalid too.
+            return Rejection.INVALID_SUPPLY;
+        }
+        long expected;
+        try {
+            expected = Math.addExact(parentSupply,
+                Issuance.minted(params, header.id(), header.difficulty(), header.uncles()));
+        } catch (ArithmeticException overflow) {
+            return Rejection.INVALID_SUPPLY;
+        }
+        return headerSupply == expected ? null : Rejection.INVALID_SUPPLY;
     }
 }

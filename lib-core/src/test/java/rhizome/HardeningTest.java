@@ -21,6 +21,7 @@ import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
 import rhizome.core.blockchain.PeerSource;
+import rhizome.core.blockchain.SupplyStamp;
 import rhizome.core.blockchain.TestNodeStores;
 import rhizome.crypto.PowAlgorithm;
 import rhizome.crypto.SHA256Hash;
@@ -56,7 +57,8 @@ class HardeningTest {
         long h = e.height() + 1;
         var b = (BlockImpl) BlockImpl.builder().id((int) h)
             .timestamp(clock.addAndGet(90_000)).difficulty(e.difficulty())
-            .lastBlockHash(e.tipHash()).build();
+            .lastBlockHash(e.tipHash())
+            .supply(SupplyStamp.next(e, h, e.difficulty())).build();
         b.addTransaction(Transaction.of(PublicAddress.random(),
             new TransactionAmount(PARAMS.miningReward(h))));
         var tree = new MerkleTree();

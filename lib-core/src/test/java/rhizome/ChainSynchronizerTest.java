@@ -24,6 +24,7 @@ import rhizome.core.blockchain.LocalSaturationException;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
 import rhizome.core.blockchain.PeerSource;
+import rhizome.core.blockchain.SupplyStamp;
 import rhizome.core.blockchain.TestNodeStores;
 import rhizome.crypto.PowAlgorithm;
 import rhizome.crypto.SHA256Hash;
@@ -63,6 +64,7 @@ class ChainSynchronizerTest {
                 .timestamp(clock.addAndGet(90_000))
                 .difficulty(engine.difficulty())
                 .lastBlockHash(engine.tipHash())
+                .supply(SupplyStamp.next(engine, height, engine.difficulty()))
                 .build();
             b.addTransaction(Transaction.of(miner, new TransactionAmount(PARAMS.miningReward(height))));
             var tree = new MerkleTree();
@@ -158,7 +160,8 @@ class ChainSynchronizerTest {
         long height = engine.height() + 1;
         var b = (BlockImpl) BlockImpl.builder().id((int) height)
             .timestamp(clock.addAndGet(1000)).difficulty(engine.difficulty())
-            .lastBlockHash(engine.tipHash()).uncles(new ArrayList<>(uncles)).build();
+            .lastBlockHash(engine.tipHash()).uncles(new ArrayList<>(uncles))
+            .supply(SupplyStamp.next(engine, height, engine.difficulty(), uncles)).build();
         b.addTransaction(Transaction.of(PublicAddress.random(), new TransactionAmount(PARAMS.miningReward(height))));
         var tree = new MerkleTree();
         tree.setItems(b.transactions());
@@ -341,6 +344,7 @@ class ChainSynchronizerTest {
             .timestamp(clock.addAndGet(90_000))
             .difficulty(engine.difficulty())
             .lastBlockHash(engine.tipHash())
+            .supply(SupplyStamp.next(engine, height, engine.difficulty()))
             .build();
         b.addTransaction(Transaction.of(miner, new TransactionAmount(params.miningReward(height))));
         var tree = new MerkleTree();

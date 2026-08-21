@@ -2,6 +2,7 @@ package rhizome;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static rhizome.crypto.Crypto.generateKeyPair;
 
@@ -373,7 +374,7 @@ class JsonWriterEquivalenceTest {
     }
 
     private static BlockImpl block(SHA256Hash stateRoot, int vote, List<UncleRef> uncles,
-            List<Transaction> transactions) {
+            List<Transaction> transactions, long supply) {
         return (BlockImpl) BlockImpl.builder()
             .id(42)
             .timestamp(1_750_000_000_000L)
@@ -383,6 +384,7 @@ class JsonWriterEquivalenceTest {
             .nonce(filledHash(0xD3))
             .stateRoot(stateRoot)
             .vote(vote)
+            .supply(supply)
             .transactions(new ArrayList<>(transactions))
             .uncles(new ArrayList<>(uncles))
             .build();
@@ -390,19 +392,22 @@ class JsonWriterEquivalenceTest {
 
     /** Cross product: {@code stateRoot} absent/present x {@code vote} in {0, +1, -2} x
      *  {@code uncles} in {0, 1, {@link Constants#MAX_UNCLES_PER_BLOCK}} x the three transaction
-     *  variants above. */
+     *  variants above x {@code supply} absent/committed. */
     private static List<BlockImpl> blockMatrix() {
         List<SHA256Hash> stateRoots = List.of(SHA256Hash.empty(), filledHash(0xA5));
         int[] votes = {0, 1, -2};
         List<List<UncleRef>> uncleVariants = List.of(
             List.of(), unclesOfSize(1), unclesOfSize(Constants.MAX_UNCLES_PER_BLOCK));
+        long[] supplies = { -1L, 83_333_333_330_000L }; // absent, committed
 
         List<BlockImpl> blocks = new ArrayList<>();
         for (SHA256Hash stateRoot : stateRoots) {
             for (int vote : votes) {
                 for (List<UncleRef> uncles : uncleVariants) {
                     for (List<Transaction> transactions : transactionVariants()) {
-                        blocks.add(block(stateRoot, vote, uncles, transactions));
+                        for (long supply : supplies) {
+                            blocks.add(block(stateRoot, vote, uncles, transactions, supply));
+                        }
                     }
                 }
             }
@@ -413,11 +418,68 @@ class JsonWriterEquivalenceTest {
     @Test
     void blockMatrixEquivalence() {
         List<BlockImpl> blocks = blockMatrix();
-        assertTrue(blocks.size() >= 2 * 3 * 3 * 3, "matrix collapsed: " + blocks.size() + " cases");
+        assertTrue(blocks.size() >= 2 * 3 * 3 * 3 * 2, "matrix collapsed: " + blocks.size() + " cases");
         for (BlockImpl b : blocks) {
             byte[] written = write(b);
             assertSameJson(b.toJson(), written);
         }
+    }
+
+    /**
+     * The fourth optional header field (contracts/wire-format.md #3): {@code supply} is emitted
+     * as a decimal string ONLY when set (mirrors {@code timestamp}), never as a bare JSON number
+     * (dashboard precision safety) and never present at all when absent.
+     */
+    @Test
+    void supplyEmittedAsDecimalStringOnlyWhenSet() {
+        BlockImpl absent = block(SHA256Hash.empty(), 0, List.of(), List.of(), -1L);
+        JSONObject absentJson = absent.toJson();
+        assertFalse(absentJson.has("supply"), "supply key must be omitted when absent (-1)");
+        assertSameJson(absentJson, write(absent));
+
+        BlockImpl set = block(SHA256Hash.empty(), 0, List.of(), List.of(), 83_333_333_330_000L);
+        JSONObject setJson = set.toJson();
+        assertTrue(setJson.has("supply"));
+        assertEquals("83333333330000", setJson.get("supply"));
+        assertTrue(setJson.get("supply") instanceof String,
+            "supply must be a decimal string, not a bare number");
+        assertSameJson(setJson, write(set));
+    }
+
+    /** supply=0 (empty genesis) is a legal committed value, distinct from the absent sentinel. */
+    @Test
+    void supplyZeroIsCommittedNotTreatedAsAbsent() {
+        BlockImpl zero = block(SHA256Hash.empty(), 0, List.of(), List.of(), 0L);
+        JSONObject json = zero.toJson();
+        assertTrue(json.has("supply"), "supply=0 is a legal committed value, not absent");
+        assertEquals("0", json.get("supply"));
+        assertSameJson(json, write(zero));
+    }
+
+    @Test
+    void supplyRoundTripsThroughFromJsonToAnEqualHashBlock() {
+        BlockImpl set = block(SHA256Hash.empty(), 0, List.of(), List.of(), 999_999_999L);
+        Block roundTripped = Block.of(set.toJson());
+        assertEquals(set.hash(), roundTripped.hash());
+        assertEquals(999_999_999L, ((BlockImpl) roundTripped).supply());
+    }
+
+    @Test
+    void supplyFromJsonRejectsOutOfRangeValues() {
+        BlockImpl base = block(SHA256Hash.empty(), 0, List.of(), List.of(), 42L);
+        JSONObject json = base.toJson();
+
+        JSONObject negative = new JSONObject(json.toString());
+        negative.put("supply", "-2");
+        assertThrows(IllegalArgumentException.class, () -> Block.of(negative));
+
+        JSONObject overflow = new JSONObject(json.toString());
+        overflow.put("supply", "99999999999999999999999999");
+        assertThrows(IllegalArgumentException.class, () -> Block.of(overflow));
+
+        JSONObject notANumber = new JSONObject(json.toString());
+        notANumber.put("supply", "not-a-number");
+        assertThrows(IllegalArgumentException.class, () -> Block.of(notANumber));
     }
 
     /**

@@ -18,6 +18,7 @@ import rhizome.core.blockchain.ChainEngineTestAccess;
 import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
+import rhizome.core.blockchain.SupplyStamp;
 import rhizome.core.blockchain.TestNodeStores;
 import rhizome.crypto.PowAlgorithm;
 import rhizome.crypto.PrivateKey;
@@ -93,7 +94,8 @@ class TokenConsensusTest {
     private ExecutionStatus mine(List<Transaction> txs) {
         long height = engine.height() + 1;
         var b = (BlockImpl) BlockImpl.builder().id((int) height).timestamp(clock.addAndGet(1000))
-            .difficulty(engine.difficulty()).lastBlockHash(engine.tipHash()).build();
+            .difficulty(engine.difficulty()).lastBlockHash(engine.tipHash())
+            .supply(SupplyStamp.next(engine, height, engine.difficulty())).build();
         b.addTransaction(Transaction.of(miner, new TransactionAmount(params.miningReward(height))));
         txs.forEach(b::addTransaction);
         var tree = new MerkleTree();

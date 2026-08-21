@@ -84,7 +84,11 @@ final class PushStrikeTable {
         ExecutionStatus.INVALID_TRANSACTION_AMOUNT,
         ExecutionStatus.TRANSACTION_FEE_TOO_LOW,
         ExecutionStatus.INVALID_VOTE,
-        ExecutionStatus.HEADER_HASH_INVALID);
+        ExecutionStatus.HEADER_HASH_INVALID,
+        // § supply header commitment: a wrong accounting delta, a mid-chain start or a dropped
+        // commitment are all deterministic structural violations no valid block produces — the
+        // same provable-junk bar as every other entry here.
+        ExecutionStatus.INVALID_SUPPLY);
 
     /**
      * True when {@code clientKey} has pushed more than {@link #STRIKE_LIMIT} faults inside the

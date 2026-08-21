@@ -51,7 +51,8 @@ class UnclePowCacheTest {
     private BlockImpl mine(long height, SHA256Hash parent, int salt) {
         var b = (BlockImpl) BlockImpl.builder().id((int) height)
             .timestamp(clock.addAndGet(1000L + salt)).difficulty(engine.difficulty())
-            .lastBlockHash(parent).build();
+            .lastBlockHash(parent)
+            .supply(SupplyStamp.next(engine, height, engine.difficulty())).build();
         b.addTransaction(Transaction.of(PublicAddress.random(),
             new TransactionAmount(params.miningReward(height))));
         var tree = new MerkleTree();
@@ -100,7 +101,8 @@ class UnclePowCacheTest {
         long h = engine.height() + 1;
         var nephew = (BlockImpl) BlockImpl.builder().id((int) h)
             .timestamp(clock.addAndGet(1000L)).difficulty(engine.difficulty())
-            .lastBlockHash(engine.tipHash()).uncles(new java.util.ArrayList<>(picked)).build();
+            .lastBlockHash(engine.tipHash()).uncles(new java.util.ArrayList<>(picked))
+            .supply(SupplyStamp.next(engine, h, engine.difficulty(), picked)).build();
         nephew.addTransaction(Transaction.of(PublicAddress.random(),
             new TransactionAmount(params.miningReward(h))));
         var tree = new MerkleTree();

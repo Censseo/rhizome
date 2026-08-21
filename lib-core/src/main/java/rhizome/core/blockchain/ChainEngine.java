@@ -590,6 +590,14 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
             if (b.difficulty() != currentDifficulty) {
                 return INVALID_DIFFICULTY;
             }
+            // Supply accounting (§ supply header commitment, FR-003/FR-004/FR-006): cheap,
+            // header-only integer arithmetic reading only `parent` (never ledger state), so it
+            // sits with the other structural checks -- after difficulty, well before
+            // merkle/nonces/PoW (DoS armor ordering, WHITEPAPER §3.5).
+            ExecutionStatus supplyStatus = checkSupply(b, parent);
+            if (supplyStatus != SUCCESS) {
+                return supplyStatus;
+            }
             if (!computeMerkleRoot(block).equals(b.merkleRoot())) {
                 return INVALID_MERKLE_ROOT;
             }
@@ -1634,6 +1642,45 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
         } finally {
             lock.unlock();
         }
+    }
+
+    // ---- supply accounting ----
+
+    /**
+     * Supply accounting gate (§ supply header commitment, FR-003/FR-004): prefix-closed and
+     * exact. Reads {@code parent} ONLY -- never ledger state -- so it stays in the cheap
+     * structural pass, before merkle/nonces/PoW.
+     *
+     * <ul>
+     *   <li>Parent supply-less (FR-004 prefix closure): the block must ALSO be supply-less --
+     *       a mid-chain start is rejected exactly like a dropped commitment.</li>
+     *   <li>Parent committed: the block MUST commit too, and must equal EXACTLY
+     *       {@code parent.supply + Issuance.minted(this block)} (FR-003), the single formula
+     *       shared with {@link HeaderChain} and {@link BlockAssembler} (FR-007).</li>
+     * </ul>
+     *
+     * <p>The accounting sum uses {@link Math#addExact}: an overflowing identity can never be
+     * satisfied by any legal {@code long}, so it is rejected rather than crashing {@link #addBlock}
+     * (FR-014 -- checked arithmetic never wraps).
+     */
+    private ExecutionStatus checkSupply(Block b, BlockHeader parent) {
+        long parentSupply = parent.supply();
+        long blockSupply = b.supply();
+        if (parentSupply == BlockImpl.SUPPLY_ABSENT) {
+            return blockSupply == BlockImpl.SUPPLY_ABSENT ? SUCCESS : INVALID_SUPPLY;
+        }
+        if (blockSupply < 0) {
+            // Parent committed: dropping the commitment (or any value below the absent sentinel,
+            // which decode-time bounds already reject on every wire ingress path) is invalid too.
+            return INVALID_SUPPLY;
+        }
+        long expected;
+        try {
+            expected = Math.addExact(parentSupply, Issuance.minted(params, b.id(), b.difficulty(), b.uncles()));
+        } catch (ArithmeticException overflow) {
+            return INVALID_SUPPLY;
+        }
+        return blockSupply == expected ? SUCCESS : INVALID_SUPPLY;
     }
 
     // ---- account nonces ----
