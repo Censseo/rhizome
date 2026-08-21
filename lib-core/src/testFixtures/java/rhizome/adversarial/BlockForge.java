@@ -7,6 +7,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import rhizome.core.block.Block;
 import rhizome.core.block.BlockImpl;
 import rhizome.core.block.UncleRef;
+import rhizome.core.blockchain.Issuance;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
 import rhizome.core.ledger.PublicAddress;
@@ -46,6 +47,7 @@ public final class BlockForge {
     private final NetworkParameters params;
     private final BlockImpl block;
     private final List<Transaction> transactions = new ArrayList<>();
+    private final long parentSupply;
 
     private boolean coinbaseSuppressed;
     private Transaction coinbase;
@@ -53,6 +55,7 @@ public final class BlockForge {
     BlockForge(AdversarialChain chain, NetworkParameters params,
                long height, int difficulty, SHA256Hash parentHash, AtomicLong clock) {
         this.params = params;
+        this.parentSupply = chain.parentSupply();
         long timestamp = clock.addAndGet(params.desiredBlockTimeSec() * 1000L);
         this.coinbase = coinbaseFor(chain.miner(), params.miningReward(height), timestamp);
         this.block = BlockImpl.builder()
@@ -176,6 +179,16 @@ public final class BlockForge {
         body.addAll(transactions);
         block.transactions(body);
         block.merkleRoot(merkleRootOf(body));
+        // Supply is in the PoW preimage (§ supply header commitment), so it is stamped here,
+        // last, from whatever the forge's content says AT THIS POINT — after every mutator
+        // (uncles(), coinbaseTo(), ...) has run. Computed the same way BlockAssembler stamps an
+        // honest candidate, so an unmutated forge() keeps satisfying addBlock's check, and a
+        // scenario that mutates the uncle list still commits a value consistent with its OWN
+        // (possibly forged) declared uncles — the point being to fail on the rule under attack,
+        // not to be rejected earlier as an accounting mismatch that proves nothing.
+        block.supply(parentSupply == BlockImpl.SUPPLY_ABSENT
+            ? BlockImpl.SUPPLY_ABSENT
+            : Math.addExact(parentSupply, Issuance.minted(params, block.id(), block.difficulty(), block.uncles())));
     }
 
     /** The Merkle root of {@code transactions} as consensus computes it. */

@@ -67,5 +67,12 @@ public enum ExecutionStatus {
      *  node restarts into boot recovery. Not a validity verdict — never a push fault (audit
      *  17th pass: degraded must be a hard barrier, not just an observable flag). */
     NODE_DEGRADED,
+    /** A block's committed {@code supply} header field breaks the accounting identity
+     *  (§ supply header commitment): the delta from the parent's committed supply does not equal
+     *  {@code Issuance.minted(...)} (wrong delta), the block commits a value while its parent does
+     *  not (a mid-chain start — FR-004 prefix closure forbids opting in partway through a chain),
+     *  or the block omits supply under a supply-committed parent (a dropped commitment, which
+     *  would let one omitting miner permanently kill the feature for the chain). */
+    INVALID_SUPPLY,
     SUCCESS
 }

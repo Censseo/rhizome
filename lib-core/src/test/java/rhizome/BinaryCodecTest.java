@@ -11,7 +11,10 @@ import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters;
 import org.junit.jupiter.api.Test;
 
 import rhizome.core.block.Block;
+import rhizome.core.block.BlockCodec;
+import rhizome.core.block.BlockHeader;
 import rhizome.core.block.BlockImpl;
+import rhizome.core.block.HeaderCodec;
 import rhizome.core.block.dto.BlockDto;
 import rhizome.crypto.PrivateKey;
 import rhizome.crypto.PublicKey;
@@ -33,7 +36,7 @@ class BinaryCodecTest {
     void fixedBufferSizes() {
         // scheme(1) + signature(64) + signingKey(32) + the scheme-independent common fields.
         assertEquals(1 + 64 + 32 + 8 + 25 + 8 + 8 + 1 + 4 + 8, TransactionDto.FIXED_SIZE);
-        assertEquals(4 + 8 + 4 + 4 + 32 + 32 + 32 + 32 + 4, BlockDto.BUFFER_SIZE); // + stateRoot(32) + vote(4)
+        assertEquals(4 + 8 + 4 + 4 + 32 + 32 + 32 + 32 + 4 + 8, BlockDto.BUFFER_SIZE); // + stateRoot(32) + vote(4) + supply(8)
     }
 
     /**
@@ -156,6 +159,43 @@ class BinaryCodecTest {
         assertEquals(22, restored.difficulty());
         assertEquals(1, restored.numTransactions());
         assertArrayEquals(bytes, restored.toBuffer());
+    }
+
+    /**
+     * The fourth optional header field (contracts/wire-format.md #1): {@code supply} rides the
+     * fixed prefix always, and every binary ingress path (block DTO, header codec, block codec)
+     * must decode it losslessly, set AND absent, to a block whose hash is unchanged.
+     */
+    @Test
+    void supplyRoundTripsThroughEveryBinaryIngressPath() {
+        for (long supply : new long[] { -1L, 0L, 12_345_678_901_234L, Long.MAX_VALUE }) {
+            var block = (BlockImpl) BlockImpl.builder()
+                .id(4242).timestamp(1234567890L).difficulty(22)
+                .merkleRoot(SHA256Hash.random())
+                .lastBlockHash(SHA256Hash.random())
+                .nonce(SHA256Hash.random())
+                .supply(supply)
+                .build();
+            block.addTransaction(Transaction.of(PublicAddress.random(), new TransactionAmount(1)));
+
+            // BlockDto path (storage / /submit).
+            BlockDto dto = block.serialize();
+            BlockDto restoredDto = BlockDto.fromBuffer(dto.toBuffer());
+            assertEquals(supply, restoredDto.supply(), "supply=" + supply + " must survive BlockDto");
+            Block viaDto = Block.of(restoredDto, block.transactions());
+            assertEquals(block.hash(), viaDto.hash(), "supply=" + supply + ": BlockDto round trip hash");
+
+            // HeaderCodec path (/headers).
+            BlockHeader header = BlockHeader.of(block);
+            BlockHeader decodedHeader = HeaderCodec.decode(HeaderCodec.encode(header));
+            assertEquals(supply, decodedHeader.supply(), "supply=" + supply + " must survive HeaderCodec");
+            assertEquals(block.hash(), decodedHeader.hash(), "supply=" + supply + ": HeaderCodec round trip hash");
+
+            // BlockCodec path (/sync, RocksDB storage).
+            Block viaBlockCodec = BlockCodec.decode(BlockCodec.encode(block));
+            assertEquals(block.hash(), viaBlockCodec.hash(), "supply=" + supply + ": BlockCodec round trip hash");
+            assertEquals(supply, ((BlockImpl) viaBlockCodec).supply());
+        }
     }
 
     @Test

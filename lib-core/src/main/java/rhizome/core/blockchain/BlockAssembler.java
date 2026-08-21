@@ -39,7 +39,7 @@ public final class BlockAssembler {
         // lock: the established lock order is mempool→engine, never engine→mempool.
         record TipView(long height, long timestamp, int difficulty, SHA256Hash tipHash,
                        java.util.List<rhizome.core.block.UncleRef> uncles,
-                       java.util.List<byte[]> collectableBoxIds) {}
+                       java.util.List<byte[]> collectableBoxIds, long parentSupply) {}
         TipView view = engine.withConsistentView(() -> {
             long h = engine.height() + 1;
             // Conservative collect budget: selected.size() >= what the size-capped inclusion
@@ -50,9 +50,19 @@ public final class BlockAssembler {
                 Math.max(0, params.maxTransactionsPerBlock() - 1 - selected.size()));
             return new TipView(h, engine.nextBlockTimestamp(preferredTimestamp), engine.difficulty(),
                 engine.tipHash(), engine.selectUncles(),
-                collectBudget > 0 ? engine.collectableBoxIds(h, collectBudget) : java.util.List.of());
+                collectBudget > 0 ? engine.collectableBoxIds(h, collectBudget) : java.util.List.of(),
+                engine.headerAt(engine.height()).supply());
         });
         long height = view.height();
+
+        // Stamp supply from the parent header alone (§ supply header commitment, FR-008): the
+        // SAME Issuance.minted formula ChainEngine.addBlock and HeaderChain.validate enforce, so
+        // an honestly-assembled candidate always satisfies the check it will be re-validated
+        // against. A supply-less parent (legacy all-absent chain) leaves the field absent too --
+        // FR-004 prefix closure forbids opting in partway through a chain.
+        long supply = view.parentSupply() == BlockImpl.SUPPLY_ABSENT
+            ? BlockImpl.SUPPLY_ABSENT
+            : Math.addExact(view.parentSupply(), Issuance.minted(params, height, view.difficulty(), view.uncles()));
 
         var block = (BlockImpl) BlockImpl.builder()
             .id((int) height)
@@ -64,6 +74,7 @@ public final class BlockAssembler {
             // toward the true majority of work when blocks are produced faster than
             // they propagate.
             .uncles(view.uncles())
+            .supply(supply)
             .build();
 
         Transaction coinbase = Transaction.of(miner, new TransactionAmount(params.miningReward(height)));

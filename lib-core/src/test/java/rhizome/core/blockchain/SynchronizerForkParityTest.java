@@ -52,6 +52,7 @@ class SynchronizerForkParityTest {
                 .timestamp(clock.addAndGet(90_000))
                 .difficulty(engine.difficulty())
                 .lastBlockHash(engine.tipHash())
+                .supply(SupplyStamp.next(engine, height, engine.difficulty()))
                 .build();
             b.addTransaction(Transaction.of(miner, new TransactionAmount(PARAMS.miningReward(height))));
             var tree = new MerkleTree();

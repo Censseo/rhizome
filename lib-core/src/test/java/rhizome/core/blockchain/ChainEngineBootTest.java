@@ -83,7 +83,8 @@ class ChainEngineBootTest {
     private ExecutionStatus mine(ChainEngine engine, Transaction payload) {
         long height = engine.height() + 1;
         var b = (BlockImpl) BlockImpl.builder().id((int) height).timestamp(clock.addAndGet(1000))
-            .difficulty(engine.difficulty()).lastBlockHash(engine.tipHash()).build();
+            .difficulty(engine.difficulty()).lastBlockHash(engine.tipHash())
+            .supply(SupplyStamp.next(engine, height, engine.difficulty())).build();
         b.addTransaction(Transaction.of(miner, new TransactionAmount(params.miningReward(height))));
         b.addTransaction(payload);
         var tree = new MerkleTree();

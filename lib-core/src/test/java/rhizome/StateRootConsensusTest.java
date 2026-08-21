@@ -22,6 +22,7 @@ import rhizome.core.blockchain.ChainEngineTestAccess;
 import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
+import rhizome.core.blockchain.SupplyStamp;
 import rhizome.core.blockchain.TestNodeStores;
 import rhizome.core.box.BoxPayload;
 import rhizome.core.box.BoxRegister;
@@ -136,7 +137,8 @@ class StateRootConsensusTest {
     private BlockImpl mine(List<Transaction> txs) {
         long height = engine.height() + 1;
         var b = (BlockImpl) BlockImpl.builder().id((int) height).timestamp(clock.addAndGet(1000))
-            .difficulty(engine.difficulty()).lastBlockHash(engine.tipHash()).build();
+            .difficulty(engine.difficulty()).lastBlockHash(engine.tipHash())
+            .supply(SupplyStamp.next(engine, height, engine.difficulty())).build();
         b.addTransaction(Transaction.of(miner, new TransactionAmount(params.miningReward(height))));
         txs.forEach(b::addTransaction);
         var tree = new MerkleTree();
@@ -173,7 +175,8 @@ class StateRootConsensusTest {
             .build();
         // A real coinbase-only block 2: chain and accumulator commit at height 2.
         var b = (BlockImpl) BlockImpl.builder().id(2).timestamp(clock.addAndGet(1000))
-            .difficulty(e1.difficulty()).lastBlockHash(e1.tipHash()).build();
+            .difficulty(e1.difficulty()).lastBlockHash(e1.tipHash())
+            .supply(SupplyStamp.next(e1, 2, e1.difficulty())).build();
         b.addTransaction(Transaction.of(miner, new TransactionAmount(params.miningReward(2))));
         var tree = new MerkleTree();
         tree.setItems(b.transactions());
@@ -273,7 +276,8 @@ class StateRootConsensusTest {
         long height = engine.height() + 1;
         var candidate = (BlockImpl) BlockImpl.builder().id((int) height)
             .timestamp(clock.addAndGet(1000)).difficulty(engine.difficulty())
-            .lastBlockHash(engine.tipHash()).build();
+            .lastBlockHash(engine.tipHash())
+            .supply(SupplyStamp.next(engine, height, engine.difficulty())).build();
         candidate.addTransaction(
             Transaction.of(miner, new TransactionAmount(params.miningReward(height))));
         candidate.addTransaction(transfer(2_000, 3));

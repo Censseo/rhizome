@@ -12,6 +12,7 @@ import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 import rhizome.core.block.Block;
+import rhizome.core.block.BlockImpl;
 import rhizome.core.blockchain.GenesisBlock;
 import rhizome.core.blockchain.NetworkParameters;
 import rhizome.core.ledger.Ledger;
@@ -122,5 +123,30 @@ class GenesisBlockTest {
         tampered.put(addr(1), new TransactionAmount(999L));
         assertThrows(IllegalStateException.class,
             () -> GenesisBlock.initChain(new MapLedger(), params, tampered, genesis.hash()));
+    }
+
+    @Test
+    void genesisCommitsSnapshotTotalSupply() {
+        NetworkParameters params = NetworkParameters.testnet();
+
+        // The empty snapshot commits supply 0 -- a legal value, not the SUPPLY_ABSENT sentinel.
+        LedgerSnapshot empty = new LedgerSnapshot("pandanite", 536000, params.chainId());
+        assertEquals(0L, empty.totalSupply());
+        Block emptyGenesis = GenesisBlock.build(params, empty);
+        assertEquals(0L, emptyGenesis.supply());
+        assertNotEquals(BlockImpl.SUPPLY_ABSENT, emptyGenesis.supply());
+
+        // A funded snapshot commits exactly its total.
+        LedgerSnapshot funded = snapshot(params.chainId());
+        Block genesis = GenesisBlock.build(params, funded);
+        assertEquals(funded.totalSupply(), genesis.supply());
+
+        // A snapshot whose UNSIGNED sum exceeds Long.MAX_VALUE must fail loud at chain init
+        // rather than silently wrapping into a bogus S0 (research.md Decision 6, FR-005/FR-013).
+        LedgerSnapshot overflow = new LedgerSnapshot("pandanite", 536000, params.chainId());
+        overflow.put(addr(1), new TransactionAmount(Long.MAX_VALUE));
+        overflow.put(addr(2), new TransactionAmount(2L));
+        assertTrue(overflow.totalSupply() < 0, "the unsigned sum wraps the signed field negative");
+        assertThrows(IllegalArgumentException.class, () -> GenesisBlock.build(params, overflow));
     }
 }

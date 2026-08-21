@@ -29,6 +29,7 @@ import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
 import rhizome.core.blockchain.NonceStore;
 import rhizome.core.blockchain.NonceStoreContract;
+import rhizome.core.blockchain.SupplyStamp;
 import rhizome.core.blockchain.TestNodeStores;
 import rhizome.crypto.PowAlgorithm;
 import rhizome.crypto.PrivateKey;
@@ -760,6 +761,7 @@ class RocksDbNodeStoreTest implements ChainStoreContract, NonceStoreContract, Le
             .timestamp(clock.addAndGet(params.desiredBlockTimeSec() * 1000L))
             .difficulty(engine.difficulty())
             .lastBlockHash(engine.tipHash())
+            .supply(SupplyStamp.next(engine, height, engine.difficulty()))
             .build();
         b.addTransaction(Transaction.of(miner, new TransactionAmount(params.miningReward(height))));
         transactions.forEach(b::addTransaction);

@@ -25,6 +25,7 @@ import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
 import rhizome.core.blockchain.PeerSource;
 import rhizome.core.blockchain.PeerUnavailableException;
+import rhizome.core.blockchain.SupplyStamp;
 import rhizome.core.blockchain.TestNodeStores;
 import rhizome.core.common.Constants;
 import rhizome.core.ledger.LedgerSnapshot;
@@ -173,7 +174,8 @@ class ChainSynchronizerPipelineTest {
             long height = engine.height() + 1;
             var b = (BlockImpl) BlockImpl.builder().id((int) height)
                 .timestamp(clock.addAndGet(90_000)).difficulty(engine.difficulty())
-                .lastBlockHash(engine.tipHash()).build();
+                .lastBlockHash(engine.tipHash())
+                .supply(SupplyStamp.next(engine, height, engine.difficulty())).build();
             b.addTransaction(Transaction.of(miner, new TransactionAmount(PARAMS.miningReward(height))));
             var tree = new MerkleTree();
             tree.setItems(b.transactions());
@@ -265,7 +267,7 @@ class ChainSynchronizerPipelineTest {
                     // Same header, different nonce: the PoW no longer verifies.
                     var broken = (BlockImpl) BlockImpl.builder().id(block.id())
                         .timestamp(block.timestamp()).difficulty(block.difficulty())
-                        .lastBlockHash(block.lastBlockHash()).build();
+                        .lastBlockHash(block.lastBlockHash()).supply(block.supply()).build();
                     block.transactions().forEach(broken::addTransaction);
                     broken.merkleRoot(block.merkleRoot());
                     broken.nonce(failingNonce(broken));

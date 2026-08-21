@@ -95,6 +95,13 @@ public final class AdversarialChain {
         return engine.height();
     }
 
+    /** The current tip header's committed supply (§ supply header commitment), or
+     *  {@code BlockImpl.SUPPLY_ABSENT} on a legacy all-absent chain — what {@link #forge()} stamps
+     *  the next candidate's supply from. */
+    long parentSupply() {
+        return engine.headerAt(engine.height()).supply();
+    }
+
     public long balanceOf(PublicAddress address) {
         return ledger.balanceOrZero(address);
     }

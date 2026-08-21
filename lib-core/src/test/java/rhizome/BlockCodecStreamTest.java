@@ -126,4 +126,21 @@ class BlockCodecStreamTest {
             assertEquals(b.hash(), decoded.hash(), "voted block hash must round-trip");
         }
     }
+
+    /**
+     * Twin of {@link #preservesNonZeroVoteThroughBinaryRoundTrip()} for the fourth optional
+     * header field (contracts/wire-format.md #1): {@code supply} is folded into the PoW preimage
+     * iff {@code >= 0}, so a decoder that drops it would also produce a body whose hash no longer
+     * matches the mined header.
+     */
+    @Test
+    void preservesSupplyThroughBinaryRoundTrip() {
+        for (long supply : new long[] { -1L, 0L, 42L, Long.MAX_VALUE }) {
+            var b = block(7);
+            b.supply(supply);
+            Block decoded = BlockCodec.decode(BlockCodec.encode(b));
+            assertEquals(supply, ((BlockImpl) decoded).supply(), "supply must survive binary decode");
+            assertEquals(b.hash(), decoded.hash(), "supply-committing block hash must round-trip");
+        }
+    }
 }

@@ -20,6 +20,14 @@ import rhizome.core.transaction.Transaction;
 public final class BlockImpl implements Block {
 
     /**
+     * Sentinel for "supply not committed" (§ supply header commitment). {@code 0} is a legal
+     * supply (empty genesis), so unlike {@code vote}'s {@code 0} = abstain, the sentinel must sit
+     * outside the consensus range {@code [0, Long.MAX_VALUE]} — {@code -1} is the first value
+     * below it.
+     */
+    public static final long SUPPLY_ABSENT = -1L;
+
+    /**
      * Variable Definitions
      */
     @Builder.Default
@@ -70,6 +78,17 @@ public final class BlockImpl implements Block {
     private List<UncleRef> uncles = new ArrayList<>();
 
     /**
+     * Circulating native supply committed AFTER this block's own issuance (§ supply header
+     * commitment): {@link #SUPPLY_ABSENT} (-1) when not committed, so a chain that never opts in
+     * hashes exactly as it did before this field existed. When set it must equal
+     * {@code parent.supply + minted(this block) - burned(this block)} (see
+     * {@code rhizome.core.blockchain.Issuance}); {@code 0} is a legal committed value (empty
+     * genesis), not absent. Committed in the header hash only when {@code >= 0}.
+     */
+    @Builder.Default
+    private long supply = SUPPLY_ABSENT;
+
+    /**
      * Serialization
      */
     public BlockDto serialize() {
@@ -113,6 +132,7 @@ public final class BlockImpl implements Block {
     public BlockImpl stateRoot(SHA256Hash stateRoot) { this.stateRoot = stateRoot; invalidateHash(); return this; }
     public BlockImpl vote(int vote) { this.vote = vote; invalidateHash(); return this; }
     public BlockImpl uncles(List<UncleRef> uncles) { this.uncles = uncles; invalidateHash(); return this; }
+    public BlockImpl supply(long supply) { this.supply = supply; invalidateHash(); return this; }
 
     /**
      * Block header hash.
@@ -169,12 +189,12 @@ public final class BlockImpl implements Block {
         return id == block.id && difficulty == block.difficulty && timestamp == block.timestamp &&
             nonce.equals(block.nonce) && merkleRoot.equals(block.merkleRoot) &&
             lastBlockHash.equals(block.lastBlockHash) && transactions.equals(block.transactions) &&
-            Objects.equals(stateRoot, block.stateRoot) && vote == block.vote;
+            Objects.equals(stateRoot, block.stateRoot) && vote == block.vote && supply == block.supply;
     }
 
     @Override
     public int hashCode() {
         return Objects.hash(nonce, id, difficulty, timestamp, merkleRoot, lastBlockHash, transactions,
-            stateRoot, vote);
+            stateRoot, vote, supply);
     }
 }

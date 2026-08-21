@@ -77,7 +77,8 @@ class BlockUnclesTest {
                            int salt, PublicAddress coinbaseTo) {
         var b = (BlockImpl) BlockImpl.builder().id((int) height)
             .timestamp(clock.addAndGet(1000L + salt)).difficulty(e.difficulty())
-            .lastBlockHash(parent).uncles(new java.util.ArrayList<>(uncles)).build();
+            .lastBlockHash(parent).uncles(new java.util.ArrayList<>(uncles))
+            .supply(SupplyStamp.next(e, height, e.difficulty(), uncles)).build();
         b.addTransaction(Transaction.of(coinbaseTo, new TransactionAmount(params.miningReward(height))));
         var tree = new MerkleTree();
         tree.setItems(b.transactions());
@@ -363,11 +364,13 @@ class BlockUnclesTest {
     }
 
     /** A mined block at an explicit difficulty (so an orphan can fall below the nephew's). */
-    private static BlockImpl mineAt(NetworkParameters p, AtomicLong clk, long height, SHA256Hash parent,
-                                    List<UncleRef> uncles, int salt, PublicAddress coinbaseTo, int difficulty) {
+    private static BlockImpl mineAt(ChainEngine e, NetworkParameters p, AtomicLong clk, long height,
+                                    SHA256Hash parent, List<UncleRef> uncles, int salt,
+                                    PublicAddress coinbaseTo, int difficulty) {
         var b = (BlockImpl) BlockImpl.builder().id((int) height)
             .timestamp(clk.addAndGet(1000L + salt)).difficulty(difficulty)
-            .lastBlockHash(parent).uncles(new java.util.ArrayList<>(uncles)).build();
+            .lastBlockHash(parent).uncles(new java.util.ArrayList<>(uncles))
+            .supply(SupplyStamp.next(e, height, difficulty, uncles)).build();
         b.addTransaction(Transaction.of(coinbaseTo, new TransactionAmount(p.miningReward(height))));
         var tree = new MerkleTree();
         tree.setItems(b.transactions());
@@ -377,11 +380,12 @@ class BlockUnclesTest {
     }
 
     /** A mined block with an explicit timestamp (sub-second gaps, for fast retargets). */
-    private static BlockImpl mineAtTs(NetworkParameters p, long height, SHA256Hash parent,
+    private static BlockImpl mineAtTs(ChainEngine e, NetworkParameters p, long height, SHA256Hash parent,
                                       List<UncleRef> uncles, PublicAddress coinbaseTo,
                                       int difficulty, long ts) {
         var b = (BlockImpl) BlockImpl.builder().id((int) height).timestamp(ts).difficulty(difficulty)
-            .lastBlockHash(parent).uncles(new java.util.ArrayList<>(uncles)).build();
+            .lastBlockHash(parent).uncles(new java.util.ArrayList<>(uncles))
+            .supply(SupplyStamp.next(e, height, difficulty, uncles)).build();
         b.addTransaction(Transaction.of(coinbaseTo, new TransactionAmount(p.miningReward(height))));
         var tree = new MerkleTree();
         tree.setItems(b.transactions());
@@ -414,13 +418,13 @@ class BlockUnclesTest {
         // Fill the first window fast (1 ms apart) but stop one block short of the boundary:
         // difficulty is still the genesis 4.
         for (long ts = 1; eng.height() < 9; ts++) {
-            assertEquals(ExecutionStatus.SUCCESS, eng.addBlock(mineAtTs(p, eng.height() + 1,
+            assertEquals(ExecutionStatus.SUCCESS, eng.addBlock(mineAtTs(eng, p, eng.height() + 1,
                 eng.tipHash(), List.of(), PublicAddress.random(), eng.difficulty(), ts)));
         }
         assertEquals(4, eng.difficulty());
 
         // An orphan one bit harder than the tip is NOT offerable while the tip sits at 4...
-        BlockImpl tooHard = mineAt(p, clk, 9, eng.blockAt(8).hash(), List.of(), 500,
+        BlockImpl tooHard = mineAt(eng, p, clk, 9, eng.blockAt(8).hash(), List.of(), 500,
             PublicAddress.random(), 5);
         eng.registerOrphan(tooHard);
         assertTrue(eng.selectUncles().isEmpty(),
@@ -428,13 +432,13 @@ class BlockUnclesTest {
 
         // ...and the block closing the first retarget window raises the tip's difficulty past
         // it, so the SAME orphan becomes offerable without re-registration.
-        assertEquals(ExecutionStatus.SUCCESS, eng.addBlock(mineAtTs(p, 10, eng.tipHash(),
+        assertEquals(ExecutionStatus.SUCCESS, eng.addBlock(mineAtTs(eng, p, 10, eng.tipHash(),
             List.of(), PublicAddress.random(), eng.difficulty(), 10)));
         assertTrue(eng.difficulty() > 5, "the fast window must have raised difficulty past the orphan");
 
         // One bit above the RAISED tip difficulty stays excluded: the upper bound tracks the
         // same moment-of-call value.
-        BlockImpl stillTooHard = mineAt(p, clk, 10, eng.blockAt(9).hash(), List.of(), 600,
+        BlockImpl stillTooHard = mineAt(eng, p, clk, 10, eng.blockAt(9).hash(), List.of(), 600,
             PublicAddress.random(), eng.difficulty() + 1);
         eng.registerOrphan(stillTooHard);
 
@@ -464,13 +468,13 @@ class BlockUnclesTest {
             .build();
 
         // height 2 at difficulty 5
-        eng.addBlock(mineAt(p, clk, eng.height() + 1, eng.tipHash(), List.of(), 7,
+        eng.addBlock(mineAt(eng, p, clk, eng.height() + 1, eng.tipHash(), List.of(), 7,
             PublicAddress.random(), eng.difficulty()));
 
         // A sub-difficulty (3) orphan sibling of the tip: deficit vs the difficulty-5 nephew.
         PublicAddress uncleMiner = PublicAddress.random();
         SHA256Hash grandparent = eng.blockAt(eng.height() - 1).hash();
-        BlockImpl orphan = mineAt(p, clk, eng.height(), grandparent, List.of(), 500, uncleMiner, 3);
+        BlockImpl orphan = mineAt(eng, p, clk, eng.height(), grandparent, List.of(), 500, uncleMiner, 3);
         eng.registerOrphan(orphan);
 
         long nephewHeight = eng.height() + 1;
@@ -483,7 +487,7 @@ class BlockUnclesTest {
         long uncleBefore = balanceOf(led, uncleMiner);
         UncleRef uref = new UncleRef(orphan.hash(), orphan.difficulty(), uncleMiner);
         PublicAddress nephewMiner = PublicAddress.random();
-        assertEquals(ExecutionStatus.SUCCESS, eng.addBlock(mineAt(p, clk, nephewHeight, eng.tipHash(),
+        assertEquals(ExecutionStatus.SUCCESS, eng.addBlock(mineAt(eng, p, clk, nephewHeight, eng.tipHash(),
             List.of(uref), 7, nephewMiner, eng.difficulty())));
         assertEquals(uncleBefore + scaledUncle, balanceOf(led, uncleMiner));
         assertEquals(p.miningReward(nephewHeight) + scaledNephew, balanceOf(led, nephewMiner));

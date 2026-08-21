@@ -14,7 +14,7 @@ import rhizome.core.serialization.BinaryIO;
  *
  * <pre>
  * id(4) ‖ timestamp(8) ‖ difficulty(4) ‖ numTransactions(4)
- *   ‖ lastBlockHash(32) ‖ merkleRoot(32) ‖ nonce(32) ‖ stateRoot(32) ‖ vote(4)
+ *   ‖ lastBlockHash(32) ‖ merkleRoot(32) ‖ nonce(32) ‖ stateRoot(32) ‖ vote(4) ‖ supply(8)
  *   ‖ uncleCount(4) ‖ [uncleHash(32) ‖ uncleDifficulty(4) ‖ uncleMiner(25)]*
  * </pre>
  *
@@ -47,7 +47,7 @@ public final class HeaderCodec {
         HeaderWire.writePrefix(buffer, new HeaderWire.Prefix(
             header.id(), header.timestamp(), header.difficulty(), header.numTransactions(),
             header.lastBlockHash(), header.merkleRoot(), header.nonce(), header.stateRoot(),
-            header.vote()));
+            header.vote(), header.supply()));
         List<UncleRef> uncles = header.uncles();
         buffer.putInt(uncles.size());
         for (UncleRef uncle : uncles) {
@@ -74,7 +74,8 @@ public final class HeaderCodec {
             uncles.add(HeaderWire.readUncle(buffer));
         }
         return new BlockHeader(p.id(), p.timestamp(), p.difficulty(), p.numTransactions(),
-            p.lastBlockHash(), p.merkleRoot(), p.nonce(), p.stateRoot(), p.vote(), uncles);
+            p.lastBlockHash(), p.merkleRoot(), p.nonce(), p.stateRoot(), p.vote(), p.supply(),
+            uncles);
     }
 
     /** Decodes a self-framing concatenation of headers (as served by {@code /headers}). */

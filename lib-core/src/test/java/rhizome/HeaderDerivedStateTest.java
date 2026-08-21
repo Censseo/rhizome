@@ -18,6 +18,7 @@ import rhizome.core.blockchain.ChainStore;
 import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
+import rhizome.core.blockchain.SupplyStamp;
 import rhizome.core.blockchain.TestNodeStores;
 import rhizome.crypto.PowAlgorithm;
 import rhizome.crypto.SHA256Hash;
@@ -76,7 +77,8 @@ class HeaderDerivedStateTest {
         long h = engine.height() + 1;
         var b = (BlockImpl) BlockImpl.builder().id((int) h).timestamp(timestampMs)
             .difficulty(engine.difficulty()).lastBlockHash(engine.tipHash())
-            .vote(vote).uncles(new java.util.ArrayList<>(uncles)).build();
+            .vote(vote).uncles(new java.util.ArrayList<>(uncles))
+            .supply(SupplyStamp.next(engine, h, engine.difficulty(), uncles)).build();
         b.addTransaction(Transaction.of(miner, new TransactionAmount(params.miningReward(h))));
         var tree = new MerkleTree();
         tree.setItems(b.transactions());

@@ -45,6 +45,7 @@ public interface Block {
                 .nonce(block.nonce())
                 .stateRoot(block.stateRoot())
                 .vote(block.vote())
+                .supply(block.supply())
                 .transactions(block.transactions())
                 .uncles(block.uncles())
                 .build();
@@ -64,6 +65,7 @@ public interface Block {
                 .nonce(blockDto.nonce())
                 .stateRoot(blockDto.stateRoot())
                 .vote(blockDto.vote())
+                .supply(blockDto.supply())
                 .transactions(transactions)
                 .uncles(new java.util.ArrayList<>(uncles))
                 .build();
@@ -148,6 +150,9 @@ public interface Block {
     public SHA256Hash nonce();
     public SHA256Hash stateRoot();
     public int vote();
+    /** Circulating native supply committed after this block (§ supply header commitment);
+     *  {@code -1} (the {@code BlockImpl.SUPPLY_ABSENT} sentinel) when not committed. */
+    public long supply();
 
     /**
      * Get instance of the serializer
@@ -169,6 +174,7 @@ public interface Block {
         static final String NONCE = "nonce";
         static final String STATE_ROOT = "stateRoot";
         static final String VOTE = "vote";
+        static final String SUPPLY = "supply";
         static final String MERKLE_ROOT = "merkleRoot";
         static final String LAST_BLOCK_HASH = "lastBlockHash";
         static final String TRANSACTIONS = "transactions";
@@ -184,6 +190,7 @@ public interface Block {
         static final Key K_NONCE = Key.of(NONCE);
         static final Key K_STATE_ROOT = Key.of(STATE_ROOT);
         static final Key K_VOTE = Key.of(VOTE);
+        static final Key K_SUPPLY = Key.of(SUPPLY);
         static final Key K_MERKLE_ROOT = Key.of(MERKLE_ROOT);
         static final Key K_LAST_BLOCK_HASH = Key.of(LAST_BLOCK_HASH);
         static final Key K_TRANSACTIONS = Key.of(TRANSACTIONS);
@@ -202,7 +209,8 @@ public interface Block {
                 block.merkleRoot(),
                 block.nonce(),
                 block.stateRoot(),
-                block.vote()
+                block.vote(),
+                block.supply()
             );
         }
     
@@ -226,6 +234,11 @@ public interface Block {
             }
             if (block.vote() != 0) {
                 result.put(VOTE, block.vote());
+            }
+            // Committed only when set (>= 0), like stateRoot/vote above; decimal-string form
+            // (JS-precision-safe) mirrors timestamp, since supply can exceed 2^53.
+            if (block.supply() >= 0) {
+                result.put(SUPPLY, Long.toString(block.supply()));
             }
             JSONArray transactionsArray = new JSONArray();
             for (Transaction transaction : block.transactions()) {
@@ -268,6 +281,10 @@ public interface Block {
             if (block.vote() != 0) {
                 sink.field(K_VOTE, block.vote());
             }
+            // Committed only when set (>= 0); decimal-string form mirrors timestamp above.
+            if (block.supply() >= 0) {
+                sink.fieldLongAsString(K_SUPPLY, block.supply());
+            }
             sink.name(K_TRANSACTIONS);
             sink.beginArray();
             for (Transaction transaction : block.transactions()) {
@@ -303,6 +320,26 @@ public interface Block {
             if (Math.abs((long) vote) > 2) {
                 throw new IllegalArgumentException("vote out of range: " + vote);
             }
+            // Absent key -> BlockImpl.SUPPLY_ABSENT (-1); present -> parsed decimal string, bounded
+            // to the consensus range [0, Long.MAX_VALUE] (the same bound HeaderWire.readPrefix
+            // enforces on the wire) so a JSON-sourced block cannot carry a value a binary peer
+            // would never accept.
+            long supply = BlockImpl.SUPPLY_ABSENT;
+            if (json.has(SUPPLY)) {
+                Object rawSupply = json.get(SUPPLY);
+                long parsed;
+                try {
+                    // String.valueOf tolerates either the canonical decimal-string form this
+                    // writer emits or a bare JSON number a lenient peer might send.
+                    parsed = Long.parseLong(String.valueOf(rawSupply));
+                } catch (NumberFormatException e) {
+                    throw new IllegalArgumentException("supply out of range: " + rawSupply);
+                }
+                if (parsed < 0) {
+                    throw new IllegalArgumentException("supply out of range: " + parsed);
+                }
+                supply = parsed;
+            }
             JSONArray transactionsJson = json.getJSONArray(TRANSACTIONS);
             if (transactionsJson.length() > rhizome.core.common.Constants.MAX_TRANSACTIONS_PER_BLOCK) {
                 throw new IllegalArgumentException(
@@ -337,6 +374,7 @@ public interface Block {
                 .nonce(SHA256Hash.of(json.getString(NONCE)))
                 .stateRoot(json.has(STATE_ROOT) ? SHA256Hash.of(json.getString(STATE_ROOT)) : SHA256Hash.empty())
                 .vote(vote)
+                .supply(supply)
                 .transactions(
                     IntStream.range(0, transactionsJson.length())
                         .mapToObj(i -> Transaction.of(transactionsJson.getJSONObject(i)))

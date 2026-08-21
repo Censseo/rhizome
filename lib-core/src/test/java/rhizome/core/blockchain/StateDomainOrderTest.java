@@ -90,7 +90,8 @@ class StateDomainOrderTest {
     private BlockImpl mine() {
         long height = engine.height() + 1;
         var b = (BlockImpl) BlockImpl.builder().id((int) height).timestamp(clock.addAndGet(1000))
-            .difficulty(engine.difficulty()).lastBlockHash(engine.tipHash()).build();
+            .difficulty(engine.difficulty()).lastBlockHash(engine.tipHash())
+            .supply(SupplyStamp.next(engine, height, engine.difficulty())).build();
         b.addTransaction(Transaction.of(miner, new TransactionAmount(params.miningReward(height))));
         var tree = new MerkleTree();
         tree.setItems(b.transactions());
@@ -149,7 +150,8 @@ class StateDomainOrderTest {
         long height = engine.height() + 1;
         var candidate = (BlockImpl) BlockImpl.builder().id((int) height)
             .timestamp(clock.addAndGet(1000)).difficulty(engine.difficulty())
-            .lastBlockHash(engine.tipHash()).build();
+            .lastBlockHash(engine.tipHash())
+            .supply(SupplyStamp.next(engine, height, engine.difficulty())).build();
         candidate.addTransaction(
             Transaction.of(miner, new TransactionAmount(params.miningReward(height))));
         var tree = new MerkleTree();

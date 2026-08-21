@@ -42,6 +42,7 @@ class CodecBoundsTest {
         b.put(new byte[32]);         // nonce
         b.put(new byte[32]);         // stateRoot
         b.putInt(0);                 // vote
+        b.putLong(-1L);              // supply (absent)
         b.putInt(uncleCountField);   // uncleCount
         if (singleUncleDifficulty != null) {
             b.put(new byte[32]);            // uncle hash
@@ -135,6 +136,41 @@ class CodecBoundsTest {
         assertDoesNotThrow(() -> HeaderCodec.decode(headerWithVote(-2)));
         assertThrows(IllegalArgumentException.class, () -> HeaderCodec.decode(headerWithVote(3)));
         assertThrows(IllegalArgumentException.class, () -> HeaderCodec.decode(headerWithVote(Integer.MIN_VALUE)));
+    }
+
+    private static byte[] headerWithSupply(long supply) {
+        byte[] h = header(0, 0, null);
+        // supply field: right after vote (offset 148, 4 bytes) -> offset 152, 8 bytes.
+        ByteBuffer.wrap(h).putLong(152, supply);
+        return h;
+    }
+
+    @Test
+    void rejectsOutOfRangeSupply() {
+        // -1 (absent) and any non-negative value round-trip; anything below the sentinel must be
+        // rejected before it can reach consensus arithmetic (contracts/wire-format.md #1).
+        assertDoesNotThrow(() -> HeaderCodec.decode(headerWithSupply(-1L)));
+        assertDoesNotThrow(() -> HeaderCodec.decode(headerWithSupply(0L)));
+        assertDoesNotThrow(() -> HeaderCodec.decode(headerWithSupply(Long.MAX_VALUE)));
+        assertThrows(IllegalArgumentException.class, () -> HeaderCodec.decode(headerWithSupply(-2L)));
+        assertThrows(IllegalArgumentException.class, () -> HeaderCodec.decode(headerWithSupply(Long.MIN_VALUE)));
+    }
+
+    @Test
+    void everyDecoderRejectsOutOfRangeSupply() {
+        // One malformed field, three binary ingress paths, one verdict — the same parity as
+        // everyDecoderRejectsTheSameMalformedPrefix, extended to the new field.
+        for (long supply : new long[] { -2L, Long.MIN_VALUE }) {
+            byte[] bytes = headerWithSupply(supply);
+            String what = "supply = " + supply;
+            assertThrows(IllegalArgumentException.class, () -> HeaderCodec.decode(bytes),
+                "HeaderCodec must reject " + what);
+            assertThrows(IllegalArgumentException.class, () -> BlockCodec.decode(bytes),
+                "BlockCodec must reject " + what);
+            assertThrows(IllegalArgumentException.class,
+                () -> BlockDto.readFrom(ByteBuffer.wrap(bytes)),
+                "BlockDto must reject " + what);
+        }
     }
 
     @Test

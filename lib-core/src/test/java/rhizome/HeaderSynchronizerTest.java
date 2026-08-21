@@ -20,6 +20,7 @@ import rhizome.core.blockchain.LocalSaturationException;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
 import rhizome.core.blockchain.PeerSource;
+import rhizome.core.blockchain.SupplyStamp;
 import rhizome.core.blockchain.TestNodeStores;
 import rhizome.crypto.PowAlgorithm;
 import rhizome.crypto.SHA256Hash;
@@ -55,7 +56,8 @@ class HeaderSynchronizerTest {
             long h = engine.height() + 1;
             var b = (BlockImpl) BlockImpl.builder().id((int) h)
                 .timestamp(clock.addAndGet(90_000)).difficulty(engine.difficulty())
-                .lastBlockHash(engine.tipHash()).build();
+                .lastBlockHash(engine.tipHash())
+                .supply(SupplyStamp.next(engine, h, engine.difficulty())).build();
             b.addTransaction(Transaction.of(miner, new TransactionAmount(PARAMS.miningReward(h))));
             var tree = new MerkleTree();
             tree.setItems(b.transactions());
@@ -112,7 +114,8 @@ class HeaderSynchronizerTest {
             ((rhizome.core.transaction.TransactionImpl) orphan.transactions().get(0)).to());
         var b = (BlockImpl) BlockImpl.builder().id((int) height)
             .timestamp(clock.addAndGet(1000)).difficulty(engine.difficulty())
-            .lastBlockHash(engine.tipHash()).uncles(new ArrayList<>(List.of(ref))).build();
+            .lastBlockHash(engine.tipHash()).uncles(new ArrayList<>(List.of(ref)))
+            .supply(SupplyStamp.next(engine, height, engine.difficulty(), List.of(ref))).build();
         b.addTransaction(Transaction.of(PublicAddress.random(),
             new TransactionAmount(PARAMS.miningReward(height))));
         var tree = new MerkleTree();
@@ -486,5 +489,48 @@ class HeaderSynchronizerTest {
         assertEquals(ChainSynchronizer.Result.NO_CHANGE,
             new HeaderSynchronizer(local).syncFrom(saturated));
         assertEquals(1, local.height());
+    }
+
+    @Test
+    void peerServingAForgedEmissionHeaderIsRejectedBeforeAnyBodyFetch() {
+        // US3/SC-004: a peer whose header branch commits a wrong supply delta must be caught by
+        // the stateless header gate -- PEER_INVALID -- without ever fetching a block body. The
+        // forged header keeps everything else self-consistent (same id/timestamp/difficulty/
+        // lastBlockHash, freshly re-mined PoW) so the ONLY thing wrong with it is the committed
+        // supply -- an unrelated check (broken chain, bad PoW) must not be what catches it.
+        ChainEngine peer = newEngine();
+        mine(peer, PublicAddress.random(), new AtomicLong(0), 5); // peer height 6
+
+        BlockHeader realTip = peer.headerAt(peer.height());
+        BlockHeader realParent = peer.headerAt(peer.height() - 1);
+        long forgedSupply = Math.addExact(realTip.supply(), 1); // over-committed by one base unit
+
+        var forgedTip = (BlockImpl) BlockImpl.builder().id((int) realTip.id())
+            .timestamp(realTip.timestamp()).difficulty(realTip.difficulty())
+            .lastBlockHash(realParent.hash()).merkleRoot(realTip.merkleRoot())
+            .supply(forgedSupply).build();
+        forgedTip.nonce(Miner.mineNonce(forgedTip.hash(), forgedTip.difficulty(), PARAMS.powAlgorithm()));
+        BlockHeader forgedHeader = BlockHeader.of(forgedTip);
+
+        EnginePeer forger = new EnginePeer(peer) {
+            @Override public List<BlockHeader> headers(long start, long end) {
+                List<BlockHeader> out = new ArrayList<>(super.headers(start, end));
+                for (int i = 0; i < out.size(); i++) {
+                    if (out.get(i).id() == forgedHeader.id()) {
+                        out.set(i, forgedHeader); // only the tip header is forged
+                    }
+                }
+                return out;
+            }
+        };
+
+        ChainEngine local = newEngine();
+        ChainSynchronizer.Result r = new HeaderSynchronizer(local).syncFrom(forger);
+
+        assertEquals(ChainSynchronizer.Result.PEER_INVALID, r,
+            "a forged emission delta must be scored exactly like any other structural header fault");
+        assertEquals(1, local.height(), "nothing was applied");
+        assertEquals(0, forger.blockFetches,
+            "the header gate must reject before a single body is downloaded");
     }
 }
