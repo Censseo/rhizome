@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "source": "test-fixture:high-bit-balance",
+  "sourceHeight": 0,
+  "chainId": 1,
+  "walletCount": 1,
+  "totalSupply": "18446744073709551615",
+  "balances": {
+    "00000000000000000000000000000000000000000000000000": "18446744073709551615"
+  }
+}

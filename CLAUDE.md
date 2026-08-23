@@ -126,3 +126,8 @@ template, the corresponding checked-in `.wasm` must be rebuilt to match.
   gossip, wallet-against-real-node) live in `app-node`/`app-wallet` test sources.
 - The dashboard is dependency-free static HTML/JS served from resources — no npm, no bundler;
   wallet keys are generated and kept in the browser, the node never sees a private key.
+
+## Recent Changes
+- 003-genesis-allocation: pinned per-network genesis supply constant (`NetworkParameters`), a
+  shipped mainnet allocation artifact, and a boot-time check that refuses a mismatched snapshot
+  total. No new dependency or module; JDK 25 throughout (constitution v1.0.1 restatement).

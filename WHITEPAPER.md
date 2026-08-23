@@ -11,9 +11,11 @@ Contracts are **WebAssembly**, executed deterministically on the pure-Java
 [Chicory](https://github.com/dylibso/chicory) runtime (no JNI), so any language that
 compiles to WASM can target the chain and the node stays GraalVM-native-friendly.
 
-It starts a **clean chain** — new genesis, corrected rules — whose **initial state is a
-sanitised snapshot of the balances** of the existing Pandanite chain, so holders keep
-their balance while the network restarts on sound rules.
+It starts a **clean chain** — new genesis, corrected rules — whose **initial state is an
+explicit, pinned allocation**: a fixed total `S₀`, verified against the loaded genesis
+snapshot at every boot, currently backed by a small **provisional** artifact pending a
+recorded governance decision on its final composition (§8) — not an import of the
+existing Pandanite chain's balances.
 
 Four goals drive the design:
 
@@ -52,9 +54,12 @@ network inputs, and inconsistent locking between the mempool and the blockchain.
 Faithfully replaying that chain would mean replaying those bugs.
 
 Rhizome makes the opposite choice: **start from a fresh genesis**. Because history need
-not be replayed, none of those defects has to be reproduced. The only tie to the
-existing chain is economic — **balances** are imported from a snapshot, sanitised of the
-wallets produced by the inflation incidents.
+not be replayed, none of those defects has to be reproduced — and genesis owes the
+existing chain nothing economically either. Genesis is an **explicit, pinned
+allocation**: each network profile fixes a genesis supply `S₀` as a consensus constant,
+checked exactly against the loaded snapshot's total at every boot, with no balances
+imported from Pandanite. The allocation mainnet ships today is **provisional**, pending a
+recorded governance decision on its final recipients and amounts (§8).
 
 ---
 
@@ -381,8 +386,10 @@ scheduled `miningReward(h)` at that height plus, for each referenced uncle, its 
 uncle and nephew reward (§3.7's `>>>`-shift scaling) — one formula (`Issuance.minted`), checked
 both in the structural pass of `addBlock` (§3.5) and, header-only, in `HeaderChain.validate`
 before a single byte of the block body is downloaded. Genesis commits
-`supply = LedgerSnapshot.totalSupply()`, the sum of seeded balances (0 for the default empty
-snapshot). The commitment is prefix-closed (§7.1): a chain commits supply at every height from
+`supply = LedgerSnapshot.totalSupply()`, the sum of seeded balances — 0 for testnet/devnet's
+default empty snapshot; on mainnet, the pinned, non-zero `S₀` of the shipped allocation (§8),
+checked against the loaded snapshot before this figure is ever committed. The commitment is
+prefix-closed (§7.1): a chain commits supply at every height from
 genesis or at none, so there is no mid-chain opt-in and no silently dropped commitment. Because
 the figure lives entirely in the header, a reorg needs no supply-specific rollback of its own —
 the popped-to header's committed value already is the correct supply at that height.
@@ -1221,11 +1228,36 @@ RocksDB use-after-free that had been aborting the JVM in integration tests).
 
 ## 8. Snapshot seeding
 
-The genesis state is a snapshot of the Pandanite balances, **sanitised** (wallets from
-the inflation incidents excluded). The `genesisCommitment` hashes
-`chainId || snapshotCommitment`, so two different networks never share a genesis even
-with an empty snapshot. The real snapshot is produced by a dump tool reading the LevelDB
-ledger of a synchronised Pandanite node.
+Mainnet's genesis is an **explicit, pinned allocation**, not a Pandanite ledger import. Each
+network profile carries a fixed genesis supply `S₀` (`NetworkParameters.genesisSupply`, a
+consensus constant like `chainId` — never miner-voted, never environment-configured, never
+derived from the snapshot) which genesis construction checks exactly against the loaded
+snapshot's total: mismatch refuses the boot, before any balance is seeded, naming both the
+pinned and the actual total. The check runs on every path that builds or re-verifies genesis —
+fresh initialisation and an existing data directory's reboot alike — from the one place genesis
+is built, so no call site can drift from another.
+
+Mainnet pins `S₀` **non-zero**, because the planned logarithmic emission curve (a future
+feature) is undefined at `S₀ = 0`. It ships a checked-in, classpath-loaded allocation artifact
+(`genesis/rhizome-mainnet.json`, existing `LedgerSnapshot` JSON format) as its default boot
+input — no `RHIZOME_SNAPSHOT` override required — recomputable and auditable by anyone from the
+published JSON alone (parse, sum, recompute the commitment, compare). **The shipped allocation
+is provisional**: a single balance at the unspendable empty address, `S₀ = 100M PDN` — about
+33.4% of the parent idea's target supply `S* = 299 792 458 PDN` — chosen as the calibration
+anchor whose launch emission lands closest to today's rate, pending a recorded governance
+decision on the real recipients and amounts. Governance ratification replaces the artifact and
+the pin together, in lockstep; a regression test recomputes the shipped artifact's total on
+every build and fails if it no longer equals the pin.
+
+Testnet and devnet leave `S₀` **unpinned** — a distinguished sentinel outside the consensus
+range, not a network-id special case — so their existing empty-by-default genesis and the many
+test suites that boot a funded snapshot under a borrowed profile are unaffected: the equality
+check runs only where a profile actually pins something.
+
+The `genesisCommitment` hashes `chainId || snapshotCommitment`, so two different networks never
+share a genesis even with an equal (or empty) snapshot total. `PandaniteLedgerDumper` remains in
+the tree, unused, as a tool for reading a foreign Pandanite LevelDB ledger; mainnet's genesis
+does not use it.
 
 ---
 
@@ -1323,8 +1355,11 @@ pays the output leg on two real token contracts atomically — an unauthorised s
 unwinds both legs.
 
 **Environment-dependent** — GraalVM native build (`native-image` not installed in the
-current dev environment); production of the real Pandanite snapshot (a synchronised C++
-node is required); a public multi-node testnet.
+current dev environment); a public multi-node testnet.
+
+**Pending governance** — the mainnet genesis allocation (§8) ships today as a provisional,
+placeholder artifact; its final recipients and amounts are a recorded, still-open governance
+decision, ratified before launch by replacing the artifact and its pinned total together.
 
 **Later** — DeFi use cases, cross-chain protocols and a bridge; optional sharding
 (parallel chains) if per-chain throughput becomes the limit.

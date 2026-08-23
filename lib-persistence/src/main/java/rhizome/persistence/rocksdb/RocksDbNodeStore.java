@@ -93,15 +93,27 @@ public final class RocksDbNodeStore extends RocksDbStore implements rhizome.core
     private static final int BOOTSTRAP_BATCH_CHUNK = 10_000;
 
     /**
+     * Wallets per WriteBatch when flushing a {@link RocksLedger#endBulkLoad()} — same rationale
+     * as {@link #BOOTSTRAP_BATCH_CHUNK}: a single unbounded batch for a multi-million-wallet
+     * genesis allocation would pin its whole encoded size in the native batch buffer at once.
+     * Chunking bounds that to one chunk's worth while still cutting a per-wallet synced write
+     * down to one synced write per {@link #BULK_LOAD_BATCH_CHUNK} wallets.
+     */
+    private static final int BULK_LOAD_BATCH_CHUNK = 10_000;
+
+    /**
      * Ledger writes staged for the current block, so they commit in the SAME atomic {@link WriteBatch}
      * as the block body and chain height (audit S3). The ledger lives in this DB but was written
      * per-wallet during executeBlock, before the separate height append — a crash between the two left
      * the ledger a block ahead of the height with no journal to rewind it, an unrecoverable tear. While
      * a block commit is open ({@code pendingLedger != null}, set under the engine's single write lock)
      * ledger writes buffer here and reads see them (read-your-writes within the block); {@code append}/
-     * {@code pop} flush them into their batch. Null outside a block commit, so genesis/snapshot seeding
-     * and every read fall straight through to the column family, unchanged. Concurrent so a reader that
-     * (like today) observes mid-block ledger state never corrupts the map.
+     * {@code pop} flush them into their batch. The SAME map (and the same read-your-writes) is reused
+     * by {@link RocksLedger#beginBulkLoad()} for genesis seeding — see its javadoc — where {@link
+     * RocksLedger#endBulkLoad()} flushes it in chunks instead of a block's single batch. Null when
+     * neither a block commit nor a bulk load is open, so every other read falls straight through to
+     * the column family, unchanged. Concurrent so a reader that (like today) observes mid-block
+     * ledger state never corrupts the map.
      */
     private volatile java.util.concurrent.ConcurrentHashMap<rhizome.core.ledger.PublicAddress, Long> pendingLedger;
     /**
@@ -816,6 +828,58 @@ public final class RocksDbNodeStore extends RocksDbStore implements rhizome.core
                 db.deleteRange(ledgerJournalCf, writeOptions, longToBytes(0), longToBytes(minHeight));
             } catch (RocksDBException e) {
                 throw new LedgerException("failed to prune ledger journals", e);
+            }
+        }
+
+        @Override
+        public void beginBulkLoad() {
+            // Reuses the SAME staging map a block commit buffers into (see pendingLedger's
+            // javadoc), so every write below (createWallet/deposit/hasWallet/getWalletValue,
+            // including read-your-writes) is the exact per-call logic already used elsewhere in
+            // this class — only WHERE the write lands changes, from an immediate synced db.put
+            // to an in-memory map entry, with the actual RocksDB write deferred to endBulkLoad.
+            if (pendingLedger != null) {
+                throw new IllegalStateException("a bulk load or block commit is already open");
+            }
+            pendingLedger = new java.util.concurrent.ConcurrentHashMap<>();
+        }
+
+        @Override
+        public void endBulkLoad() {
+            var pending = pendingLedger;
+            pendingLedger = null;
+            if (pending == null || pending.isEmpty()) {
+                return;
+            }
+            // Chunked WriteBatch, same bound as bootstrapHeaders (audit: unbounded batch): one
+            // synced fsync per BULK_LOAD_BATCH_CHUNK wallets instead of one per wallet -- the fix
+            // for the ~3.3-3.6 ms/wallet cost of the old straight-through path (E2E-58).
+            //
+            // The chunks commit as INDEPENDENT synced writes: this flush is deliberately NOT
+            // crash-atomic (a crash after chunk N leaves a durable partial seed, exactly what
+            // the bootstrap marker exists for on the snap-sync path). Genesis seeding gets the
+            // same "never run on half-seeded data" safety from a different place instead:
+            // GenesisBlock.initChain refuses to seed over a non-empty ledger at height 0, which
+            // is the only shape a torn flush here can take -- so the next boot fails loud with a
+            // wipe-and-reseed instruction rather than double-depositing the durable wallets
+            // (GenesisLedger.seed tops existing wallets up) under a header that commits the
+            // snapshot's own, correct total.
+            try (WriteBatch batch = new WriteBatch()) {
+                int inBatch = 0;
+                for (var e : pending.entrySet()) {
+                    batch.put(ledgerCf, e.getKey().toBytes(),
+                        ByteBuffer.allocate(8).putLong(e.getValue()).array());
+                    if (++inBatch >= BULK_LOAD_BATCH_CHUNK) {
+                        db.write(writeOptions, batch);
+                        batch.clear();
+                        inBatch = 0;
+                    }
+                }
+                if (inBatch > 0) {
+                    db.write(writeOptions, batch);
+                }
+            } catch (RocksDBException e) {
+                throw new LedgerException("Failed to flush bulk-loaded ledger writes", e);
             }
         }
     }

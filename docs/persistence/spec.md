@@ -14,8 +14,9 @@ One durable backend implements the store interfaces declared in `lib-core`/`lib-
   iq80 LevelDB (pure-Java, slower) and LMDB for its write throughput and atomic batches.
 
 The second real implementation of those ports is the `InMemory*` family in `lib-core`, which the
-tests run against. (The `org.iq80.leveldb` dependency remains only for `PandaniteLedgerDumper`,
-which iterates a *foreign* Pandanite ledger to seed genesis — it stores nothing.)
+tests run against. (The `org.iq80.leveldb` dependency remains only for `PandaniteLedgerDumper`, an
+**unused tool** that iterates a *foreign* Pandanite ledger — it stores nothing and seeds no
+network. Genesis is an explicit authored allocation; see [state](../state/spec.md) S-7.)
 
 The load-bearing property is that **peripheral state moves atomically with the block and reverses
 exactly on reorg**, including across a restart.
@@ -102,6 +103,28 @@ use-after-free that had been aborting the JVM in integration tests. Node shutdow
 listener **first**, then closes the stores under the engine lock, because the newly fsynced writes
 had widened a close-time race that could abort the JVM.
 
+### D-4b — Genesis seeding bulk-load window *(implemented)*
+
+`Ledger` carries a `beginBulkLoad()` / `endBulkLoad()` pair — default no-op, so the in-memory
+ledger and every other implementation are unaffected — that genesis seeding opens around its
+per-wallet loop. `RocksLedger` buffers the same `hasWallet`/`createWallet`/`deposit` calls in
+memory and flushes them on close in chunked `WriteBatch`es of `BULK_LOAD_BATCH_CHUNK` (10 000)
+wallets, so the cost is one synced write per chunk instead of two per wallet.
+
+This is a **pure batching change**: the resulting balances are byte-identical, and the contract is
+pinned for both ledger implementations by `LedgerContract`'s bulk-load test. It exists because the
+naive path was a measured startup DoS — ~3.3–3.6 ms per wallet against a real node process (an
+8 000-wallet allocation alone cost ~28 s of boot beyond baseline, a seven-figure one hours) from
+an otherwise perfectly valid genesis file. Re-measured at ~0.08 ms per wallet, a ~40–45× reduction.
+
+The chunks commit as **independent synced writes** — this flush is deliberately *not* crash-atomic,
+unlike a block's single batch, and it does not use the snap-sync bootstrap marker. Genesis takes
+its "never run on half-seeded data" guarantee from elsewhere: `GenesisBlock.initChain` refuses to
+seed over a non-empty ledger at height 0, which is the only shape a torn flush can leave, so the
+next boot fails loud with a wipe-and-reseed instruction instead of double-depositing the durable
+wallets (`GenesisLedger.seed` tops existing wallets up) under a header committing the snapshot's
+own correct total.
+
 ### D-5 — Body pruning *(implemented)*
 
 `RHIZOME_PRUNE=N` discards each body as it falls out of the window — an **amortised O(1) delete in
@@ -132,6 +155,10 @@ deterministic, fast, and native-friendly. See
 - Height-advancing writes are fsynced; the only unsynced path is the marker-guarded snap-sync
   seeding window (D-4), bracketed by the synced bootstrap marker and its closing barrier.
 - Boot reconciliation rewinds any peripheral store found ahead of the chain height.
+- The genesis bulk-load window (D-4b) is a batching optimisation only — the seeded balances must be
+  byte-identical to the per-wallet path (pinned by `LedgerContract` for every ledger
+  implementation), and a torn flush must surface as a loud refusal at the next boot, never as a
+  double deposit.
 - Undo journals and receipts for boxes and contracts are **persisted**, so reorg-after-restart works.
 - Secondary indexes are always derived locally, never imported.
 - Shutdown order: HTTP listener first, then stores under the engine lock, after the network

@@ -192,6 +192,37 @@ ratio (×18 = 90/5) so the **real-time schedule is preserved**: `rewardEpochBloc
 (`emissionScheduleIsCalibratedForTheBlockCadence`) that recomputes the span from
 `desiredBlockTimeSec`, so changing block time forces the epoch to be revisited.
 
+### C-11 — Pinned genesis supply *(implemented)*
+
+`NetworkParameters.genesisSupply` is a fixed per-network consensus constant, set per profile
+exactly like `chainId`: never miner-voted, never configurable by environment variable, never
+derived from the snapshot at runtime (the check direction is always snapshot → constant). The
+distinguished sentinel `GENESIS_SUPPLY_UNPINNED` (`-1`, outside the non-negative consensus
+range) means "this profile pins nothing" — a pinned `0` remains a distinct, meaningful value
+("this network mandates an empty genesis"), so `0` cannot double as the sentinel.
+
+`GenesisBlock.build` composes the pin check with its existing guards in a fixed order, all
+integer-only, all fail-loud, before any wallet is seeded:
+
+1. `snapshot.chainId() == params.chainId()` (existing)
+2. `snapshot.totalSupply() >= 0` in the signed 64-bit range (existing overflow guard)
+3. **if `params.genesisSupply() != GENESIS_SUPPLY_UNPINNED`**, `snapshot.totalSupply() ==
+   params.genesisSupply()` exactly — mismatch throws, naming both totals unsigned-aware
+   (`Long.toUnsignedString`) and the network name
+4. construct genesis and seed the ledger, per-balance negative guard (existing)
+
+This one check covers every boot path from a single home: fresh initialisation
+(`GenesisBlock.initChain`) and an existing data directory's reboot (`GenesisBlock.matches`)
+both call `build`, so the pin runs before the stored-genesis re-verification and the operator
+sees the more actionable message first.
+
+Mainnet pins `S₀` non-zero and ships a checked-in classpath resource
+(`genesis/rhizome-mainnet.json`) as its default boot input when `RHIZOME_SNAPSHOT` is unset
+(`SnapshotLoader.forBoot`); testnet and devnet leave the pin **unset** by explicit per-profile
+choice, not by a network-id branch in the check itself — the equality check is gated solely by
+whether a pin is present, so funded genesis snapshots booted under a borrowed testnet/devnet
+profile in ~20 existing suites are unaffected.
+
 ## Invariants (must never regress)
 
 - Validation is ordered cheapest-first, PoW last, uncle PoW **after** the block's own PoW.
@@ -223,6 +254,11 @@ ratio (×18 = 90/5) so the **real-time schedule is preserved**: `rewardEpochBloc
   GHOST rewards scale by `>>>` shifts.
 - Difficulty, median-time, uncle work and vote tallies read **only** `headerAt(h)`, never bodies
   (this is what makes pruning and snap-sync possible).
+- **Pinned genesis supply.** A network profile that pins a genesis supply (`genesisSupply !=
+  GENESIS_SUPPLY_UNPINNED`) MUST refuse to build or re-verify genesis against a snapshot whose
+  total differs, on every boot path, before any balance is seeded. The check is gated solely by
+  the presence of a pin, never by network id — an unpinned profile (testnet/devnet by explicit
+  choice) behaves exactly as it did before this check existed.
 
 ## Key parameters
 

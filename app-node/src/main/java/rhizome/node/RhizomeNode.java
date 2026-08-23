@@ -143,9 +143,11 @@ public final class RhizomeNode implements AutoCloseable {
             }
         }
 
-        LedgerSnapshot snapshot = config.snapshotPath().isPresent()
-            ? SnapshotLoader.fromFile(Path.of(config.snapshotPath().get()))
-            : SnapshotLoader.empty(config.params().chainId());
+        // Selection order (contracts/genesis-allocation-format.md §3): RHIZOME_SNAPSHOT override
+        // wins; else the network profile's shipped default resource (mainnet); else an empty
+        // snapshot. Homed in SnapshotLoader so the selection is unit-testable without a node, and
+        // so this call site carries no network-id special-casing.
+        LedgerSnapshot snapshot = SnapshotLoader.forBoot(config.snapshotPath(), config.params());
 
         // Opened one at a time and unwound in reverse on any failure below (see the javadoc).
         java.util.Deque<AutoCloseable> opened = new java.util.ArrayDeque<>();

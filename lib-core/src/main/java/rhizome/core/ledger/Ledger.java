@@ -43,7 +43,9 @@ public interface Ledger {
 
     /**
      * Visits every stored {@code (wallet, balance)} pair — the state-snapshot export path.
-     * Optional: stores that never serve snapshots may leave the unsupported default.
+     * Optional: stores that never serve snapshots may leave the unsupported default. Note the
+     * fresh-chain guard in {@code GenesisBlock.initChain} also probes emptiness through this
+     * method, so a ledger that cannot enumerate cannot boot a chain.
      */
     default void forEachBalance(java.util.function.ObjLongConsumer<PublicAddress> consumer) {
         throw new UnsupportedOperationException("this ledger does not support enumeration");
@@ -83,4 +85,36 @@ public interface Ledger {
     default void pruneJournals(long minHeight) {
         // nothing kept — see the class javadoc
     }
+
+    /**
+     * Opens a bulk-load window: until the matching {@link #endBulkLoad()}, an implementation MAY
+     * buffer {@link #createWallet}/{@link #deposit}/{@link #withdraw} writes in memory and commit
+     * them with far fewer fsyncs than one per call — {@link GenesisLedger#seed} is the only
+     * caller, and a large genesis allocation was paying one synchronous, synced write PER WALLET
+     * (measured ~3.3-3.6 ms each — a multi-hour startup DoS at a large-but-valid wallet count).
+     * Reads made inside the window still see every write made so far (read-your-writes), so the
+     * result is byte-identical to running the same calls with no window open at all — this is
+     * purely a durability/batching optimization, never a behavior change. Not safe to call while
+     * a block commit ({@link #applyBlock}/{@link #revertBlock}) is open.
+     *
+     * <p>One honesty caveat on "byte-identical": that holds for a window that RUNS TO
+     * COMPLETION. A durable implementation commits its buffered writes in more than one batch
+     * (chunking an unbounded window into bounded ones), so a crash MID-FLUSH can leave a strict
+     * prefix of the writes durable with nothing recording how far it got — a state an unbatched
+     * run, which pays one synced write per call, could also produce but at much finer grain.
+     * Crash recovery is therefore NOT the window's job: {@code GenesisBlock.initChain} refuses
+     * to seed over a non-empty ledger at height 0 (the only shape a torn genesis seed can
+     * take), turning a silent double-deposit into a loud boot refusal — see its javadoc.
+     *
+     * <p>The default is a no-op: an implementation with nothing to batch (or an in-memory
+     * reference implementation, which already pays no I/O per call) needs no override.
+     */
+    default void beginBulkLoad() {}
+
+    /**
+     * Closes a bulk-load window opened by {@link #beginBulkLoad()}, durably committing every
+     * buffered write. MUST be called — in a {@code finally} — after every {@link #beginBulkLoad()};
+     * an implementation that buffers writes has nothing else that flushes them.
+     */
+    default void endBulkLoad() {}
 }

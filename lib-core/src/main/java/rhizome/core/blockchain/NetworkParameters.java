@@ -10,10 +10,10 @@ import rhizome.crypto.PowCosts;
 /**
  * Consensus configuration for a Rhizome chain.
  *
- * <p>Rhizome starts a <em>clean</em> chain (fresh genesis, corrected rules) whose
- * genesis ledger is seeded from a snapshot of the existing Pandanite chain. The
- * parameters here deliberately fix the design flaws found in the Pandanite C++
- * implementation:
+ * <p>Rhizome starts a <em>clean</em> chain (fresh genesis, corrected rules) whose genesis
+ * ledger is seeded from a {@code LedgerSnapshot} — for mainnet, an explicit, pinned allocation
+ * (see {@link #genesisSupply}), not an import of the Pandanite chain. The parameters here
+ * deliberately fix the design flaws found in the Pandanite C++ implementation:
  * <ul>
  *   <li><b>chainId</b> — a network identifier that belongs in the signed
  *       transaction preimage, so signatures cannot be replayed across networks
@@ -298,6 +298,45 @@ public final class NetworkParameters {
     @lombok.Builder.Default
     private final long minValuePerByteMax = 1_000;
 
+    // --- Genesis allocation (pinned supply) ---
+    /**
+     * Sentinel meaning "no pin is in force" for {@link #genesisSupply} — the boot-time
+     * equality check ({@code GenesisBlock.build}) does not run. Sits outside the
+     * non-negative consensus range so it can never collide with a real pinned total,
+     * exactly like {@code BlockImpl.SUPPLY_ABSENT} (feature 01's sentinel discipline). A
+     * pinned {@code 0} remains a distinct, meaningful value ("this network mandates an
+     * empty genesis"), which is why {@code 0} cannot double as the sentinel.
+     */
+    public static final long GENESIS_SUPPLY_UNPINNED = -1;
+
+    /**
+     * Pinned genesis ledger total S₀, in base units — a fixed per-network consensus
+     * constant, set per profile exactly like {@link #chainId}: it MUST NOT be
+     * miner-voted (supply is expressly non-votable — {@code VoteableParams} is a
+     * separate, disjoint set of knobs), MUST NOT be configurable by environment
+     * variable, and MUST NOT be derived from the snapshot at runtime (the direction of
+     * the check is always snapshot → constant, never the reverse). {@link
+     * #GENESIS_SUPPLY_UNPINNED} means this profile pins nothing and the genesis-supply
+     * equality check is skipped for it.
+     */
+    @lombok.Builder.Default
+    private final long genesisSupply = GENESIS_SUPPLY_UNPINNED;
+
+    /**
+     * Classpath resource path of this network's default genesis allocation artifact
+     * (network metadata, like {@link #networkName} — not itself a consensus value: it
+     * only selects which snapshot a default boot loads, and is never committed to the
+     * chain). {@code null} means no shipped default for this profile. Exposed as {@link
+     * #genesisSnapshotResource()} returning an {@link java.util.Optional}.
+     */
+    @lombok.Getter(lombok.AccessLevel.NONE)
+    private final String genesisSnapshotResource;
+
+    /** See {@link #genesisSnapshotResource}. */
+    public java.util.Optional<String> genesisSnapshotResource() {
+        return java.util.Optional.ofNullable(genesisSnapshotResource);
+    }
+
     /**
      * All-args constructor used by the Lombok builder. Validates the PoW-cost schedule at
      * build time: the "after" costs may only be set together with a positive
@@ -322,7 +361,7 @@ public final class NetworkParameters {
                       int maxTokenSymbolBytes, int maxTokenNameBytes, int maxTokenDecimals,
                       long votingEpochLength, long storageFeeFactorStep, long storageFeeFactorMin,
                       long storageFeeFactorMax, long minValuePerByteStep, long minValuePerByteMin,
-                      long minValuePerByteMax) {
+                      long minValuePerByteMax, long genesisSupply, String genesisSnapshotResource) {
         new PowCosts(powCostT, powCostM); // genesis costs must be valid
         boolean afterSet = powCostTAfter != -1 || powCostMAfter != -1;
         if (powUpgradeHeight <= 0 && afterSet) {
@@ -426,6 +465,8 @@ public final class NetworkParameters {
         this.minValuePerByteStep = minValuePerByteStep;
         this.minValuePerByteMin = minValuePerByteMin;
         this.minValuePerByteMax = minValuePerByteMax;
+        this.genesisSupply = genesisSupply;
+        this.genesisSnapshotResource = genesisSnapshotResource;
     }
 
     /**
@@ -523,9 +564,10 @@ public final class NetworkParameters {
     }
 
     /**
-     * The clean Rhizome mainnet: Pufferfish2 PoW from genesis, seeded from a
-     * Pandanite balance snapshot. Economics mirror Pandanite (50 PDN base,
-     * 2/3 decay) but are computed in integer arithmetic.
+     * The clean Rhizome mainnet: Pufferfish2 PoW from genesis, seeded from an explicit, pinned
+     * allocation (see {@link #genesisSupply}) — not a Pandanite balance snapshot. Reward
+     * economics mirror Pandanite's shape (50 PDN base, 2/3 decay) but are computed in integer
+     * arithmetic.
      */
     public static NetworkParameters cleanMainnet() {
         long scale = 10_000L;
@@ -600,6 +642,14 @@ public final class NetworkParameters {
             .rewardEpochBlocks(666_666L * 18L)     // ~12,000,000 blocks ≈ 1.9 years @ 5 s
             .rewardDecayNum(2L)
             .rewardDecayDen(3L)
+            // Pinned genesis supply S0 (see genesisSupply javadoc): PROVISIONAL 100M PDN
+            // (research.md Decision 4), the least-surprise calibration anchor for the
+            // feature-03 emission curve pending governance ratification of the final
+            // allocation. Must equal the shipped artifact's recomputed total exactly —
+            // LedgerSnapshotTest#theShippedAllocationMatchesThePinnedGenesisSupplyExactly
+            // fails the build on any drift between this constant and the artifact.
+            .genesisSupply(1_000_000_000_000L)
+            .genesisSnapshotResource("genesis/rhizome-mainnet.json")
             .build();
     }
 
@@ -628,6 +678,14 @@ public final class NetworkParameters {
             // No mempool fee floor on testnet (see cleanMainnet's minFee): local devnets and
             // tests transact with unfunded fees; the anti-spam floor is a mainnet property.
             .minFee(0)
+            // Explicitly un-pin (research.md Decision 7): this profile derives from
+            // cleanMainnet().toBuilder(), which would otherwise silently inherit the
+            // mainnet genesis-supply pin and its shipped-artifact resource. Testnet has no
+            // launch to protect (Clarifications Q2) — the equality check must not run here,
+            // and funded snapshots under this borrowed profile keep working via a builder
+            // override, exactly as before this feature (~20 existing suites rely on it).
+            .genesisSupply(GENESIS_SUPPLY_UNPINNED)
+            .genesisSnapshotResource(null)
             .build();
     }
 
@@ -667,6 +725,11 @@ public final class NetworkParameters {
             // Wide future bound like testnet: local clocks drift and nodes get suspended.
             .maxFutureBlockTimeSec(120)
             .minFee(0)
+            // Explicitly un-pin (research.md Decision 7) — same reasoning as testnet(): this
+            // profile also derives from cleanMainnet().toBuilder() and must not silently
+            // inherit the mainnet genesis-supply pin or its shipped-artifact resource.
+            .genesisSupply(GENESIS_SUPPLY_UNPINNED)
+            .genesisSnapshotResource(null)
             .build();
     }
 }

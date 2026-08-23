@@ -12,7 +12,7 @@ truth: what each area does, what it owns, and which invariants must never regres
 
 | Domain | Description | Modules | Status |
 |---|---|---|---|
-| [consensus](consensus/spec.md) | Block validation order, difficulty, cadence, GHOST fork choice, finality, emission | `lib-core/blockchain`, `lib-core/block` | Draft |
+| [consensus](consensus/spec.md) | Block validation order, difficulty, cadence, GHOST fork choice, finality, emission, pinned genesis supply | `lib-core/blockchain`, `lib-core/block` | Draft |
 | [transactions](transactions/spec.md) | Transaction envelope, nonces, ledger arithmetic, execution, mempool & fee market | `lib-core/transaction`, `ledger`, `mempool` | Draft |
 | [contracts](contracts/spec.md) | WASM VM determinism, host ABI, gas, sessions & undo journals, reference contracts | `lib-vm` | Draft |
 | [boxes](boxes/spec.md) | Data boxes — typed registers, anti-dust deposit, storage rent, scans | `lib-core/box` | Draft |
@@ -53,6 +53,11 @@ These span domains and are restated in each spec that carries part of them:
   route meters before it works.
 - **Single writer.** All public `ChainEngine` methods serialise on one lock; reorg phases are
   individually atomic.
+- **Pinned genesis.** Genesis is an explicit authored allocation, never an import. A network profile
+  that pins a genesis supply refuses to build or re-verify genesis against a snapshot whose total
+  differs — on every boot path, before any balance is seeded and before the port is bound. The pin
+  guards the *total*, the genesis commitment guards the *distribution*; see
+  [consensus](consensus/spec.md) C-11 and [state](state/spec.md) S-7.
 - **Explicit wiring.** No DI container, no reflection-based wiring, no runtime codegen anywhere —
   the node is assembled with plain constructors. This is what keeps the GraalVM native image
   buildable and the dependency graph readable; it is an architectural constraint, not a style
