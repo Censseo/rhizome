@@ -236,6 +236,83 @@ public interface LedgerContract {
         assertEquals(30L, ledger.getWalletValue(wallet).amount(), "a refused revert must not partially apply");
     }
 
+    /**
+     * {@link Ledger#beginBulkLoad()}/{@link Ledger#endBulkLoad()} is a pure batching
+     * optimization ({@link GenesisLedger#seed} is the only caller): reads inside the window see
+     * every write made so far (read-your-writes), and the state after {@code endBulkLoad()} must
+     * be byte-identical to running the same calls with no window open at all — BOTH halves of
+     * that claim are asserted below, against two fresh ledgers.
+     */
+    @Test
+    default void bulkLoadWindowIsReadYourWritesAndMatchesUnbatchedWrites() throws Exception {
+        PublicAddress alice = PublicAddress.random();
+        PublicAddress bob = PublicAddress.random();
+
+        Ledger batched = newLedger();
+        batched.beginBulkLoad();
+        try {
+            batched.createWallet(alice);
+            batched.deposit(alice, new TransactionAmount(1_000));
+            batched.createWallet(bob);
+            batched.deposit(bob, new TransactionAmount(500));
+            // Read-your-writes: staged entries are visible before the window closes.
+            assertEquals(1_000L, batched.getWalletValue(alice).amount());
+            assertEquals(500L, batched.getWalletValue(bob).amount());
+        } finally {
+            batched.endBulkLoad();
+        }
+
+        assertEquals(1_000L, batched.getWalletValue(alice).amount());
+        assertEquals(500L, batched.getWalletValue(bob).amount());
+        assertTrue(batched.hasWallet(alice));
+        assertTrue(batched.hasWallet(bob));
+
+        // The "matches unbatched writes" half: the identical call sequence with no window open
+        // must produce the identical WHOLE-ledger state — the window may change only the
+        // durability batching, never the result.
+        Ledger unbatched = newLedger();
+        unbatched.createWallet(alice);
+        unbatched.deposit(alice, new TransactionAmount(1_000));
+        unbatched.createWallet(bob);
+        unbatched.deposit(bob, new TransactionAmount(500));
+        assertEquals(wholeLedgerBytes(unbatched), wholeLedgerBytes(batched),
+            "a bulk-load window must leave the same state as the same calls unbatched");
+    }
+
+    /**
+     * The same contract at a scale that crosses the durable backend's internal flush chunking:
+     * {@code RocksDbNodeStore.RocksLedger} flushes a bulk window in chunks of 10,000 wallets per
+     * {@code WriteBatch}, so 10,001 entries force the chunk-rollover path (write, {@code clear()},
+     * continue, final partial write) that the small test above never reaches — previously only
+     * the periodic 50k/200k-wallet E2E-58 startup test crossed it, outside {@code ./gradlew
+     * build}. Addresses are derived, not randomly generated, so the cost here is the store's,
+     * not key generation's. (The in-memory backend has no chunks; for it this is simply the
+     * contract at scale.)
+     */
+    @Test
+    default void bulkLoadWindowSurvivesCrossingTheFlushChunkBoundary() throws Exception {
+        int walletCount = 10_001; // one past RocksDbNodeStore's 10,000-wallet flush chunk
+        java.util.List<PublicAddress> addresses = new java.util.ArrayList<>(walletCount);
+        Ledger ledger = newLedger();
+        ledger.beginBulkLoad();
+        try {
+            for (int i = 0; i < walletCount; i++) {
+                byte[] bytes = new byte[PublicAddress.SIZE];
+                java.nio.ByteBuffer.wrap(bytes).putLong(1, i);
+                PublicAddress address = PublicAddress.of(bytes);
+                addresses.add(address);
+                ledger.createWallet(address);
+                ledger.deposit(address, new TransactionAmount(i + 1L));
+            }
+        } finally {
+            ledger.endBulkLoad();
+        }
+        for (int i = 0; i < walletCount; i++) {
+            assertEquals(i + 1L, ledger.getWalletValue(addresses.get(i)).amount(),
+                "wallet " + i + " must survive the chunked flush with its exact balance");
+        }
+    }
+
     /** The ledger's entire content as a deterministic, order-independent byte string. */
     private static String wholeLedgerBytes(Ledger ledger) {
         java.util.List<String> parts = new java.util.ArrayList<>();

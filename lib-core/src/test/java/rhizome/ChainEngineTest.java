@@ -5,8 +5,10 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static rhizome.crypto.Crypto.generateKeyPairTyped;
 
+import java.io.IOException;
 import java.math.BigInteger;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicLong;
 
 import org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters;
@@ -17,6 +19,7 @@ import rhizome.core.block.Block;
 import rhizome.core.block.BlockImpl;
 import rhizome.core.blockchain.ChainEngine;
 import rhizome.core.blockchain.ChainEngineTestAccess;
+import rhizome.core.blockchain.GenesisBlock;
 import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
@@ -28,6 +31,7 @@ import rhizome.crypto.PublicKey;
 import rhizome.core.ledger.LedgerSnapshot;
 import rhizome.core.ledger.InMemoryLedger;
 import rhizome.core.ledger.PublicAddress;
+import rhizome.core.ledger.SnapshotLoader;
 import rhizome.core.mempool.ExecutionStatus;
 import rhizome.core.merkletree.MerkleTree;
 import rhizome.core.transaction.Transaction;
@@ -304,5 +308,64 @@ class ChainEngineTest {
         assertEquals(engine.difficulty(), rebooted.difficulty());
         assertEquals(engine.totalWork(), rebooted.totalWork());
         assertEquals(1, rebooted.nextNonce(sender));
+    }
+
+    /**
+     * FAMILY GENESIS-01 — a snapshot whose total diverges from the pinned genesis supply is
+     * refused by {@link ChainEngine#boot} on BOTH the fresh-store path (initChain) and the
+     * reopen-an-existing-store path (matches re-verification), so the guard is not bypassable by
+     * pointing a reopened node at a different, still-mismatched snapshot (SC-001).
+     */
+    @Test
+    void aMismatchedSnapshotIsRefusedOnFreshBootAndOnReopen() {
+        long s0 = 1_000_000L;
+        NetworkParameters pinned = NetworkParameters.testnet().toBuilder().genesisSupply(s0).build();
+
+        InMemoryLedger l = new InMemoryLedger();
+        InMemoryChainStore s = new InMemoryChainStore();
+
+        PublicAddress a = PublicAddress.random();
+        LedgerSnapshot mismatched = new LedgerSnapshot("test", 0, pinned.chainId());
+        mismatched.put(a, new TransactionAmount(s0 + 1));
+
+        // (a) Fresh/empty store: refused before any genesis is appended.
+        assertThrows(IllegalArgumentException.class,
+            () -> ChainEngine.boot(pinned, TestNodeStores.mixing(l, s), mismatched).build());
+        assertEquals(0, s.height(), "a refused fresh boot must not append a genesis block");
+
+        // A correct boot against the same store succeeds and persists a genesis.
+        LedgerSnapshot matching = new LedgerSnapshot("test", 0, pinned.chainId());
+        matching.put(a, new TransactionAmount(s0));
+        ChainEngine.boot(pinned, TestNodeStores.mixing(l, s), matching).build();
+        assertEquals(1, s.height());
+
+        // (b) Reopen the same (now non-empty) store with a mismatched snapshot: refused by the
+        // pin check inside GenesisBlock.matches's re-verification, before any hash comparison.
+        assertThrows(IllegalArgumentException.class,
+            () -> ChainEngine.boot(pinned, TestNodeStores.mixing(l, s), mismatched).build());
+    }
+
+    /**
+     * FR-012(d) — testnet and devnet are unpinned ({@code GENESIS_SUPPLY_UNPINNED}) and declare
+     * no {@code genesisSnapshotResource}, so {@link SnapshotLoader#forBoot} resolves both to an
+     * empty snapshot exactly as it did before feature 03 (genesis-allocation) existed: this
+     * regression test locks that their default boot still commits supply 0 and never throws,
+     * rather than relying only on the full-suite preservation sweep to catch a future profile
+     * edit that accidentally pins or seeds either network by default.
+     */
+    @Test
+    void testnetAndDevnetBootWithTheirEmptyDefaultUnchanged() throws IOException {
+        for (NetworkParameters netParams : List.of(NetworkParameters.testnet(), NetworkParameters.devnet())) {
+            LedgerSnapshot emptySnapshot = SnapshotLoader.forBoot(Optional.empty(), netParams);
+            assertEquals(0L, emptySnapshot.totalSupply());
+
+            ChainEngine bootedEngine = ChainEngine.boot(
+                    netParams,
+                    TestNodeStores.mixing(new InMemoryLedger(), new InMemoryChainStore()),
+                    emptySnapshot).clock(clock::get).build();
+
+            assertEquals(1, bootedEngine.height(), "boot must succeed and commit only the genesis block");
+            assertEquals(0L, bootedEngine.blockAt(GenesisBlock.GENESIS_ID).supply());
+        }
     }
 }

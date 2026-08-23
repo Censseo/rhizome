@@ -5,7 +5,9 @@ import java.net.ServerSocket;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 import rhizome.core.blockchain.NetworkParameters;
 import rhizome.core.ledger.PublicAddress;
@@ -53,6 +55,15 @@ final class TestNetwork implements AutoCloseable {
 
     private final Path root;
     private final List<RhizomeNode> started = new ArrayList<>();
+    /**
+     * The currently-live node under each declared name, so {@link #reopen} can stop and replace
+     * exactly one node without touching any other in the network. Kept alongside — not instead
+     * of — {@link #started}: that list is the full teardown order {@link #close()} iterates in
+     * reverse, and a name whose node has been replaced still needs its earlier incarnations gone
+     * from it too (removed by {@link #reopen} as it closes them), so teardown never double-closes
+     * a node this method has already stopped.
+     */
+    private final Map<String, RhizomeNode> byName = new LinkedHashMap<>();
 
     TestNetwork(Path root) {
         this.root = root;
@@ -61,6 +72,37 @@ final class TestNetwork implements AutoCloseable {
     /** Declares a node, reserving its port immediately so peers can name it before it starts. */
     Builder node(String name) {
         return new Builder(name);
+    }
+
+    /**
+     * Stops the node currently tracked under {@code name} (if one is running) and returns a fresh
+     * {@link Builder} pre-bound to the exact same {@link Builder#dataDir() data directory}, ready
+     * for {@code .params(...)}/{@code .snapshot(...)}/{@code .start()} — the in-JVM twin of an
+     * operator stopping a node, changing its configuration, and starting it again on the data it
+     * already wrote. Generalises the single-node restart pattern in
+     * {@code E2ENodeResilienceTest#aRestartOnTheSameDataDirectoryRestoresChainBalancesAndNonces}
+     * (construct a new {@code RhizomeNode} over the same {@code dataDir}/port after closing the
+     * old one) into a {@code TestNetwork}-level convenience that only touches the one named node.
+     *
+     * <p>{@code RhizomeNode.close()} is {@code public synchronized}, safe to call once and
+     * idempotent, so closing it here is unconditional. The closed node is removed from both
+     * {@link #started} and {@link #byName} <em>before</em> this method returns — not after the
+     * caller's {@code .start()} runs — so a {@code .start()} that throws (the refusal scenarios
+     * this exists for) leaves nothing dangling: {@link #close()} at test end has nothing left to
+     * double-close for this name, and a subsequent {@code reopen(name)} finds no stale entry to
+     * confuse it. The new {@link Builder} reuses the same node's freed port for restart realism;
+     * if no node is currently tracked under {@code name} (nothing has been reopened or started
+     * yet) a fresh port is allocated exactly as {@link #node(String)} would.
+     */
+    Builder reopen(String name) {
+        RhizomeNode existing = byName.remove(name);
+        if (existing == null) {
+            return new Builder(name);
+        }
+        int port = existing.apiPort();
+        started.remove(existing);
+        existing.close();
+        return new Builder(name, port);
     }
 
     static String urlOf(RhizomeNode node) {
@@ -151,6 +193,7 @@ final class TestNetwork implements AutoCloseable {
             }
         }
         started.clear();
+        byName.clear();
     }
 
     /** Fluent node declaration; the port is live from construction, the node from {@link #start()}. */
@@ -173,8 +216,13 @@ final class TestNetwork implements AutoCloseable {
         private java.util.function.UnaryOperator<NodeConfig> tweak = config -> config;
 
         private Builder(String name) {
+            this(name, freePort());
+        }
+
+        /** Used by {@link #reopen}, which already knows the port a prior incarnation freed. */
+        private Builder(String name, int port) {
             this.name = name;
-            this.port = freePort();
+            this.port = port;
         }
 
         String url() {
@@ -283,6 +331,7 @@ final class TestNetwork implements AutoCloseable {
             RhizomeNode node = new RhizomeNode(tweak.apply(config));
             node.start();
             started.add(node);
+            byName.put(name, node);
             return node;
         }
     }

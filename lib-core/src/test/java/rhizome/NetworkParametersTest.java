@@ -6,6 +6,8 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.Optional;
+
 import org.junit.jupiter.api.Test;
 
 import rhizome.core.blockchain.DifficultyAdjustment;
@@ -169,5 +171,26 @@ class NetworkParametersTest {
         assertTrue(params.tokenActiveForNextBlock(Long.MAX_VALUE));
         assertTrue(params.boxActiveAt(Long.MAX_VALUE));
         assertTrue(params.tokenActiveAt(Long.MAX_VALUE));
+    }
+
+    @Test
+    void mainnetPinsItsGenesisSupplyAndShipsAnAllocationArtifact() {
+        NetworkParameters mainnet = NetworkParameters.cleanMainnet();
+        assertEquals(1_000_000_000_000L, mainnet.genesisSupply());
+        assertEquals(Optional.of("genesis/rhizome-mainnet.json"), mainnet.genesisSnapshotResource());
+    }
+
+    @Test
+    void testnetAndDevnetLeaveTheGenesisSupplyUnpinned() {
+        // Decision 7 (research.md): testnet()/devnet() derive from cleanMainnet().toBuilder(),
+        // so a new field with a mainnet value must be EXPLICITLY reset in both or it silently
+        // inherits the mainnet pin and resource.
+        NetworkParameters testnet = NetworkParameters.testnet();
+        NetworkParameters devnet = NetworkParameters.devnet();
+
+        assertEquals(NetworkParameters.GENESIS_SUPPLY_UNPINNED, testnet.genesisSupply());
+        assertEquals(NetworkParameters.GENESIS_SUPPLY_UNPINNED, devnet.genesisSupply());
+        assertTrue(testnet.genesisSnapshotResource().isEmpty());
+        assertTrue(devnet.genesisSnapshotResource().isEmpty());
     }
 }

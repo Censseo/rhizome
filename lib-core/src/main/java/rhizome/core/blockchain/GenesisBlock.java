@@ -66,6 +66,23 @@ public final class GenesisBlock {
                 "Snapshot total supply " + Long.toUnsignedString(supply)
                     + " exceeds Long.MAX_VALUE -- outside the signed 64-bit consensus range");
         }
+        // Genesis-allocation pin (research.md Decision 2/6, contracts §2 check #3; FR-003, FR-004):
+        // when this network profile pins a genesis supply, the loaded snapshot's total MUST equal
+        // it EXACTLY, checked after the chain-id and signed-range guards and before any
+        // construction or seeding -- so a mismatch never seeds a wallet (FR-003). Unpinned
+        // profiles (GENESIS_SUPPLY_UNPINNED) skip this: their de-facto S0 stays whatever the
+        // snapshot says, exactly as before this feature (FR-007). Both totals are documented
+        // unsigned 64-bit quantities (research.md Decision 6), so the message renders them with
+        // Long.toUnsignedString rather than a signed decimal that would mislead for a
+        // high-bit total.
+        if (params.genesisSupply() != NetworkParameters.GENESIS_SUPPLY_UNPINNED
+                && supply != params.genesisSupply()) {
+            throw new IllegalArgumentException(
+                "Snapshot total supply " + Long.toUnsignedString(supply)
+                    + " does not match the pinned genesis supply S0 = "
+                    + Long.toUnsignedString(params.genesisSupply())
+                    + " for network '" + params.networkName() + "'");
+        }
         return BlockImpl.builder()
             .id(GENESIS_ID)
             .timestamp(params.genesisTimestamp())
@@ -90,6 +107,19 @@ public final class GenesisBlock {
      * expected genesis commitment, seeds the ledger, and returns the genesis
      * block. {@code expectedGenesisHash} may be null for a brand-new network
      * (the caller then publishes the resulting hash as the network's genesis).
+     *
+     * <p>A fresh chain means an EMPTY ledger, and this method refuses to seed over anything
+     * else. The only writer of ledger state below height 1 is the seed below (a block's ledger
+     * writes commit atomically with its height, and snap-sync's bootstrap never lands at
+     * height 0), so a non-empty ledger here is the durable partial flush of a genesis seed
+     * that crashed inside its bulk-load window — the chunked flush is a batching optimization,
+     * deliberately NOT crash-atomic. Re-seeding would top the already-durable wallets up a
+     * SECOND time ({@link GenesisLedger#seed} tops existing wallets up) while the header above
+     * commits the snapshot's own total — a silent supply inflation no commitment can see.
+     * Crash safety therefore comes from this refusal, in the shape of the bootstrap marker's
+     * rule (audit M8): never run on half-seeded data. The remedy is the same too — wipe the
+     * data directory and boot again; the node must not paper over it. The probe goes through
+     * {@link Ledger#forEachBalance}, so a ledger that cannot enumerate cannot boot a chain.
      */
     public static Block initChain(Ledger ledger, NetworkParameters params, LedgerSnapshot snapshot,
                                   SHA256Hash expectedGenesisHash) {
@@ -99,6 +129,15 @@ public final class GenesisBlock {
                 "Snapshot does not match the network's genesis commitment: expected "
                     + expectedGenesisHash.toHexString() + " but snapshot yields "
                     + genesis.hash().toHexString());
+        }
+        boolean[] anyWallet = {false};
+        ledger.forEachBalance((address, balance) -> anyWallet[0] = true);
+        if (anyWallet[0]) {
+            throw new IllegalStateException(
+                "Refusing to initialise a fresh chain over a non-empty ledger: the store holds "
+                    + "balances at height 0, so a previous genesis seed did not complete (the "
+                    + "bulk-load flush is not crash-atomic and this is its torn state). Wipe the "
+                    + "data directory and boot again to re-seed from scratch.");
         }
         GenesisLedger.seed(ledger, snapshot);
         return genesis;

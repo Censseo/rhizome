@@ -545,6 +545,9 @@
       "glob": "docs/*.md"
     },
     {
+      "glob": "genesis/*.json"
+    },
+    {
       "glob": "librocksdbjni-linux64.so"
     },
     {

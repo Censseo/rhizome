@@ -8,12 +8,15 @@ import org.json.JSONObject;
 import rhizome.core.transaction.TransactionAmount;
 
 /**
- * An address-to-balance snapshot of a ledger, used to seed the genesis state of
- * the clean Rhizome chain from the existing Pandanite chain.
+ * An address-to-balance snapshot of a ledger, used to seed the genesis state of a Rhizome
+ * network — an operator-supplied file (via {@code RHIZOME_SNAPSHOT}), a network's shipped
+ * default allocation artifact (see {@code NetworkParameters#genesisSnapshotResource()}), or the
+ * empty default. Not Pandanite-specific: mainnet's shipped genesis is an explicit, authored
+ * allocation, not a dump of an existing chain.
  *
- * <p>Balances are stored as unsigned 64-bit values (Pandanite uses {@code uint64}
- * amounts); the JSON form encodes each as an unsigned decimal string so values
- * above {@code Long.MAX_VALUE} round-trip losslessly.
+ * <p>Balances are stored as unsigned 64-bit values (a legacy {@code uint64} amount
+ * representation this format is compatible with, e.g. Pandanite's); the JSON form encodes each
+ * as an unsigned decimal string so values above {@code Long.MAX_VALUE} round-trip losslessly.
  */
 public final class LedgerSnapshot {
 
@@ -129,7 +132,20 @@ public final class LedgerSnapshot {
                 throw new IllegalArgumentException(
                     "snapshot balance out of range (high bit set) for " + addressHex);
             }
-            snapshot.put(PublicAddress.of(addressHex), new TransactionAmount(amount));
+            PublicAddress address = PublicAddress.of(addressHex);
+            // Hex parsing is case-insensitive on the way IN (java.util.HexFormat) even though
+            // toHexString renders uppercase on the way OUT, and org.json does not case-fold
+            // object keys — so "AB.." and "ab.." are two textually-distinct JSON keys that
+            // decode to the SAME PublicAddress (E2E-54). A plain put() would silently keep one
+            // entry's amount and discard the other's (which survives depends on HashMap
+            // iteration order, not the file), and for an unpinned profile nothing downstream
+            // ever catches the discard. Reject the duplicate here, like the range guard above.
+            if (snapshot.balances().containsKey(address)) {
+                throw new IllegalArgumentException(
+                    "duplicate address in snapshot balances (case-variant hex spellings decode "
+                        + "to the same address): " + addressHex);
+            }
+            snapshot.put(address, new TransactionAmount(amount));
         }
         return snapshot;
     }

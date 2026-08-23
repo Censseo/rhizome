@@ -59,13 +59,17 @@ class RocksDbNodeStoreTest implements ChainStoreContract, NonceStoreContract, Le
     @TempDir
     Path tempDir;
 
-    private RocksDbNodeStore opened;
+    private final java.util.List<RocksDbNodeStore> openedStores = new java.util.ArrayList<>();
 
     private RocksDbNodeStore openStore() throws IOException {
-        if (opened == null) {
-            opened = new RocksDbNodeStore(tempDir.resolve("contract-db").toString());
-        }
-        return opened;
+        // A genuinely FRESH store per call: the contracts specify "a fresh, empty ledger" per
+        // newX() invocation, and the bulk-load equivalence test calls newLedger() twice in one
+        // method -- a cached single store would hand back the SAME ledger both times, silently
+        // turning the batched-vs-unbatched comparison into a double-deposit.
+        RocksDbNodeStore store =
+            new RocksDbNodeStore(tempDir.resolve("contract-db-" + openedStores.size()).toString());
+        openedStores.add(store);
+        return store;
     }
 
     @Override
@@ -84,9 +88,9 @@ class RocksDbNodeStoreTest implements ChainStoreContract, NonceStoreContract, Le
     }
 
     @AfterEach
-    void closeContractStore() {
-        if (opened != null) {
-            opened.close();
+    void closeContractStores() {
+        for (RocksDbNodeStore store : openedStores) {
+            store.close();
         }
     }
 
@@ -129,6 +133,37 @@ class RocksDbNodeStoreTest implements ChainStoreContract, NonceStoreContract, Le
             assertEquals(100, store.ledger().getWalletValue(wallet).amount());
             assertEquals(3L, store.nonceStore().next(wallet));
             assertEquals(42L, store.nonceStore().syncedThroughHeight());
+        }
+    }
+
+    @Test
+    void aNonEmptyLedgerAtHeightZeroRefusesTheFreshChainBoot() throws IOException {
+        // The torn genesis seed: a bulk-load window's chunked flush is deliberately NOT
+        // crash-atomic (see RocksLedger.endBulkLoad's comment), so a crash mid-flush leaves a
+        // durable partial seed at height 0. The next boot must REFUSE to re-seed over it --
+        // GenesisLedger.seed tops existing wallets up, so a silent re-seed would double-deposit
+        // the durable wallets while the genesis header commits the snapshot's own, correct
+        // total. Simulated with straight-through ledger writes (durable on their own) and no
+        // chain append: exactly the on-disk shape the torn flush leaves behind.
+        NetworkParameters params = fastParams();
+        String path = tempDir.resolve("db").toString();
+        PublicAddress wallet = PublicAddress.random();
+        try (RocksDbNodeStore store = new RocksDbNodeStore(path)) {
+            store.ledger().createWallet(wallet);
+            store.ledger().deposit(wallet, new TransactionAmount(100));
+        }
+        try (RocksDbNodeStore store = new RocksDbNodeStore(path)) {
+            LedgerSnapshot snapshot = new LedgerSnapshot("test", 0, params.chainId());
+            snapshot.put(wallet, new TransactionAmount(100));
+            AtomicLong clock = new AtomicLong(0);
+            IllegalStateException ex = assertThrows(IllegalStateException.class,
+                () -> ChainEngine.boot(params, store, snapshot).clock(clock::get).build());
+            assertTrue(ex.getMessage().contains("non-empty ledger"),
+                "expected the torn-seed refusal, got: " + ex.getMessage());
+            assertEquals(100L, store.ledger().getWalletValue(wallet).amount(),
+                "a refused boot must not double-deposit the durable wallet");
+            assertEquals(0, store.chainStore().height(),
+                "a refused boot must not append a genesis either");
         }
     }
 

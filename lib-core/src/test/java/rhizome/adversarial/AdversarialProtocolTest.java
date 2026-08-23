@@ -49,8 +49,12 @@ class AdversarialProtocolTest {
      * A scenario id: a family prefix then a two-digit number. The family may contain digits after
      * its first character — {@code E2E} does — which a letters-only prefix silently excluded,
      * making that family's rows invisible to every check in this class rather than failing one.
+     * The prefix may run up to 7 characters — {@code GENESIS} does — one longer than every prior
+     * family; widened from a {@code {1,5}} bound that happened to fit every family through
+     * {@code SUPPLY}/{@code WALLET} but was never a stated limit, so a same-shape addition would
+     * have silently repeated the {@code E2E} lesson instead of failing loud.
      */
-    private static final String ID = "[A-Z][A-Z0-9]{1,5}-\\d{2}";
+    private static final String ID = "[A-Z][A-Z0-9]{1,6}-\\d{2}";
 
     /** {@code | ID | Scenario | Class | Verdict | Proof |} */
     private static final Pattern SCENARIO_ROW =
@@ -61,7 +65,7 @@ class AdversarialProtocolTest {
         Pattern.compile("`([a-z0-9\\-]+/src/[^`#]+\\.java)#(\\w+)`");
 
     /** A family prefix as the Families section declares it: a backticked code, then its gloss. */
-    private static final Pattern FAMILY_DECLARATION = Pattern.compile("`([A-Z][A-Z0-9]{1,5})`\\s+\\w");
+    private static final Pattern FAMILY_DECLARATION = Pattern.compile("`([A-Z][A-Z0-9]{1,6})`\\s+\\w");
 
     /** A javadoc block immediately preceding a {@code @Test} method — never spanning another. */
     private static final Pattern DOCUMENTED_TEST = Pattern.compile(

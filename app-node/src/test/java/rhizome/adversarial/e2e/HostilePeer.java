@@ -7,6 +7,7 @@ import java.io.UncheckedIOException;
 import java.math.BigInteger;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 
 import com.sun.net.httpserver.HttpExchange;
@@ -36,14 +37,26 @@ final class HostilePeer implements AutoCloseable {
 
     private final HttpServer server;
     private final String url;
+    private final Builder builder;
 
-    private HostilePeer(HttpServer server) {
+    private HostilePeer(HttpServer server, Builder builder) {
         this.server = server;
+        this.builder = builder;
         this.url = "http://127.0.0.1:" + server.getAddress().getPort();
     }
 
     String url() {
         return url;
+    }
+
+    /**
+     * Total HTTP requests this peer's handler has served, across every route (including the
+     * fixed 404s and the drip/fail-everything shortcuts). Lets a scenario assert that a
+     * banned/evicted peer receives no further requests AT ALL once the victim's sync driver has
+     * dropped it — a stronger claim than "its lies no longer matter".
+     */
+    int requestCount() {
+        return builder.requestCount.get();
     }
 
     @Override
@@ -80,11 +93,14 @@ final class HostilePeer implements AutoCloseable {
 
         private long blockCount = 5_000;
         private Supplier<String> totalWork = () -> BigInteger.TWO.pow(200).toString();
-        private RhizomeNode sharesGenesisWith;
+        private Supplier<Block> claimsGenesis;
         private Supplier<byte[]> syncBody = () -> unprovenWindow(2, 33, 30);
         private Supplier<byte[]> headersSupplier;
+        private Supplier<byte[]> blockSupplier;
         private int failEverythingWith;
         private boolean dripForever;
+        /** Every HTTP request this peer's handler has served — see {@link HostilePeer#requestCount}. */
+        private final AtomicInteger requestCount = new AtomicInteger();
 
         /** The chain length this peer claims to have. */
         Builder claimsHeight(long height) {
@@ -101,10 +117,23 @@ final class HostilePeer implements AutoCloseable {
         /**
          * Answers the fork-detection probe at height 1 with {@code node}'s real genesis, so the
          * victim sees a common ancestor and proceeds to ask for the branch. Without this the peer
-         * reads as a different network and never reaches the interesting code.
+         * reads as a different network and never reaches the interesting code. Expressed in terms
+         * of {@link #claimsGenesis}, the general primitive: a real node's real genesis is simply
+         * the common case.
          */
         Builder sharesGenesisWith(RhizomeNode node) {
-            this.sharesGenesisWith = node;
+            return claimsGenesis(() -> node.engine().blockAt(1));
+        }
+
+        /**
+         * Answers the fork-detection probe at height 1 with {@code block.get()}'s JSON — an
+         * arbitrary or tampered block, not necessarily any real node's actual genesis. Lets a
+         * scenario serve a near-perfect forgery (a real genesis with one field altered) as easily
+         * as a wholly fabricated one; {@link #sharesGenesisWith} is this primitive applied to a
+         * real node's own genesis. Evaluated once per {@code /block?blockId=1} request.
+         */
+        Builder claimsGenesis(Supplier<Block> block) {
+            this.claimsGenesis = block;
             return this;
         }
 
@@ -126,6 +155,20 @@ final class HostilePeer implements AutoCloseable {
             return this;
         }
 
+        /**
+         * Answers {@code /block} — any {@code blockId} — with a fixed byte stream instead of the
+         * normal JSON response, exactly as {@link #servesHeaders} does for {@code /headers}: no
+         * per-height slicing, one fixed answer for the whole encounter, verbatim (not re-encoded),
+         * so a scenario can serve bytes the real JSON parser rejects outright. {@code /block_count}
+         * and {@code /total_work} are untouched, so a scenario can keep those sane (e.g. via
+         * {@link #claimsHeight}/{@link #claimsWork}) while only {@code /block} lies. Unset by
+         * default, so every existing scenario keeps the normal {@link #blockJson} response.
+         */
+        Builder servesBlock(Supplier<byte[]> bytes) {
+            this.blockSupplier = bytes;
+            return this;
+        }
+
         /** Answers every request with {@code status} — the broken-peer, not lying-peer, shape. */
         Builder failsEverythingWith(int status) {
             this.failEverythingWith = status;
@@ -143,13 +186,14 @@ final class HostilePeer implements AutoCloseable {
                 HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
                 server.createContext("/", exchange -> handle(exchange));
                 server.start();
-                return new HostilePeer(server);
+                return new HostilePeer(server, this);
             } catch (IOException e) {
                 throw new UncheckedIOException("could not start the hostile peer", e);
             }
         }
 
         private void handle(HttpExchange exchange) throws IOException {
+            requestCount.incrementAndGet();
             String path = exchange.getRequestURI().getPath();
             try {
                 if (failEverythingWith != 0) {
@@ -165,7 +209,8 @@ final class HostilePeer implements AutoCloseable {
                         String.valueOf(blockCount).getBytes(StandardCharsets.UTF_8));
                     case "/total_work" -> respond(exchange, 200,
                         totalWork.get().getBytes(StandardCharsets.UTF_8));
-                    case "/block" -> respond(exchange, 200, blockJson(exchange));
+                    case "/block" -> respond(exchange, 200,
+                        blockSupplier != null ? blockSupplier.get() : blockJson(exchange));
                     case "/sync" -> respond(exchange, 200, syncBody.get());
                     case "/headers" -> {
                         if (headersSupplier != null) {
@@ -192,9 +237,8 @@ final class HostilePeer implements AutoCloseable {
                     // the victim asked for something unparseable; answer as if for height 1
                 }
             }
-            if (height == 1 && sharesGenesisWith != null) {
-                return sharesGenesisWith.engine().blockAt(1).toJson().toString()
-                    .getBytes(StandardCharsets.UTF_8);
+            if (height == 1 && claimsGenesis != null) {
+                return claimsGenesis.get().toJson().toString().getBytes(StandardCharsets.UTF_8);
             }
             return unprovenBlock(height, 30).toJson().toString().getBytes(StandardCharsets.UTF_8);
         }

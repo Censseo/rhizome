@@ -116,6 +116,7 @@ no network proof anywhere is a rule nobody has watched an assembled node apply.
 `INFL` issuance and ledger arithmetic ·
 `UNCLE` GHOST uncle rewards ·
 `SUPPLY` circulating supply header commitment ·
+`GENESIS` pinned genesis supply and allocation ·
 `REORG` fork choice, finality, synchronisation ·
 `POOL` mempool and relay policy ·
 `VM` contract sandbox and determinism ·
@@ -278,6 +279,25 @@ and a pre-feature-shaped header blob surviving truncated — are closed by
 | SUPPLY-09 | Abandon a reorg mid-apply so the victim falls back to its trusted-restore path, hoping the restored suffix's supply is skipped or re-validated to the wrong value rather than its exact pre-pop figure. | A2 | DEFENDED | `lib-core/src/test/java/rhizome/SupplyCommitmentTest.java#failedReorgRestoreRevalidatesIdenticalSupply` |
 | SUPPLY-10 | Forge a header chain's per-height supply delta so a headers-first sync client accepts a later header's proof of work before ever checking the emission chain beneath it. | A2 | DEFENDED | `lib-core/src/test/java/rhizome/HeaderChainTest.java#headerGateRejectsForgedSupplyBeforeProofOfWork` |
 | SUPPLY-11 | Get a syncing node to download even one block body from a branch whose emission chain is already forged at the header level, turning a free header lie into a paid-for body fetch. | A2 | DEFENDED | `lib-core/src/test/java/rhizome/HeaderSynchronizerTest.java#peerServingAForgedEmissionHeaderIsRejectedBeforeAnyBodyFetch` |
+
+## GENESIS — pinned genesis supply and allocation
+
+The per-network genesis supply `S₀` (`NetworkParameters.genesisSupply`, unpinned sentinel
+`GENESIS_SUPPLY_UNPINNED`) checked exactly against the loaded snapshot's total in
+`GenesisBlock.build`, on every boot path, before any balance is seeded. The pin guards the
+*total*; the existing genesis commitment (`SHA-256(chainId ‖ snapshotCommitment)`) separately
+guards the *distribution* — the two checks compose rather than duplicate each other. Proofs
+live alongside the existing genesis and snapshot suites
+(`lib-core/src/test/java/rhizome/GenesisBlockTest.java`,
+`lib-core/src/test/java/rhizome/LedgerSnapshotTest.java`,
+`lib-core/src/test/java/rhizome/ChainEngineTest.java`) rather than in a new attack suite: the
+check is a boot-time equality composed with guards those suites already exercise.
+
+| ID | Scenario | Class | Verdict | Proof |
+|----|----------|-------|---------|-------|
+| GENESIS-01 | Boot a pinned network from a snapshot whose total differs from `S₀` by one base unit — misconfiguration or a swapped/served file — hoping the divergence is accepted and only surfaces later as an opaque genesis-hash mismatch or a silent fork. | A6 | DEFENDED | `lib-core/src/test/java/rhizome/GenesisBlockTest.java#aSnapshotWhoseTotalDiffersFromThePinnedGenesisSupplyRefusesBoot` |
+| GENESIS-02 | Keep the snapshot's total equal to the pin but change its distribution between restarts, hoping the pinned-total check alone is mistaken for full genesis integrity and the commitment re-verification is skipped or ordered after it. | A6 | DEFENDED | `lib-core/src/test/java/rhizome/GenesisBlockTest.java#thePinChecksTheTotalAndTheCommitmentBindsTheDistribution` |
+| GENESIS-03 | Edit the shipped mainnet allocation artifact without updating the pinned constant (or vice versa), shipping a network definition whose own default genesis input disagrees with its own consensus constant. | A6 | DEFENDED | `lib-core/src/test/java/rhizome/LedgerSnapshotTest.java#theShippedAllocationMatchesThePinnedGenesisSupplyExactly` |
 
 ## REORG — fork choice, finality, synchronisation
 
@@ -462,6 +482,30 @@ work, real RocksDB. Fixtures live in `app-node/src/test/java/rhizome/adversarial
 | E2E-34 | Push a supply-forged block straight at a real node's `/submit` route, hoping the API boundary, the real consensus engine and the gossip fault table disagree about whether it is an accepted mutation or a rejected structural fault. | A3 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2ESupplyCommitmentTest.java#aSupplyForgedBlockPushedAtTheSubmitRouteIsRejectedAndTheNodeStaysHealthy` |
 | E2E-35 | Serve a real syncing node a headers-only response whose supply delta is forged partway through, over a real socket, hoping the lie survives real parsing, real caps and real deadlines long enough to cost the victim a single body fetch or a byte of local state. | A2 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2ESupplyCommitmentTest.java#aHostileHeadersResponseWithAForgedSupplyDeltaLeavesTheVictimsChainUntouched` |
 | E2E-36 | Fork two real mining nodes with divergent uncle inclusion so their per-block issuance genuinely diverges, let them reorg to the heavier branch over real HTTP sync, and see whether the two nodes' real, independently-read supply figures agree once they converge. | A3 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2ESupplyCommitmentTest.java#twoForkedMiningNodesThatConvergeAgreeOnSupplyAtTheSettledHeight` |
+| E2E-37 | Boot a real mainnet node with no `RHIZOME_SNAPSHOT` set at all, hoping the classpath-resource fallback is skipped or silently yields an empty ledger instead of the pinned allocation. | A0 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EGenesisIdentityTest.java#aRealMainnetNodeWithNoConfiguredSnapshotLoadsTheEmbeddedAllocationAndCommitsThePinnedSupply` |
+| E2E-38 | Boot three independent, real mainnet nodes with no shared file and no peering yet, hoping their genesis blocks disagree by even one bit before gossip gets a chance to paper over it. | A0 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EGenesisIdentityTest.java#threeIndependentMainnetNodesDeriveABitIdenticalGenesisBeforeAnyPeeringHappens` |
+| E2E-39 | Serve a victim a hostile peer's real genesis for a different, equal-total but differently-distributed chain while claiming a thousandfold height and work advantage, hoping cumulative work is compared before genesis identity. | A2 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EGenesisEclipseTest.java#aHostileGenesisWithMatchingTotalButADifferentDistributionNeverDisplacesTheVictims` |
+| E2E-40 | Eclipse a freshly-joining, snap-syncing node with a single hostile peer claiming a million-block chain and serving headers rooted in nothing real, hoping the node either crashes or borrows the attacker's chain identity. | A2 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EGenesisEclipseTest.java#aFreshlyJoiningSnapSyncingNodeEclipsedByOneHostilePeerNeverCrashesAndKeepsItsOwnGenesis` |
+| E2E-41 | Join a pruned node to the network purely through snap-sync against an honest archive peer, hoping the bootstrapped node ends up trusting that peer -- rather than its own locally-built genesis -- for chain identity. | A0 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EGenesisIdentityTest.java#aPrunedNodeJoiningViaSnapSyncDerivesItsGenesisLocallyNotFromItsSyncSource` |
+| E2E-42 | Boot an unmodified `testnet()` node from a snapshot with an arbitrary total, hoping the real end-to-end harness turns out to silently re-pin the sentinel the way every other testnet-based scenario conveniently does. | A0 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EGenesisIdentityTest.java#anUnmodifiedTestnetProfileAcceptsAnArbitraryGenesisTotalThroughTheRealHarness` |
+| E2E-43 | Sit as a peer with an incompatible genesis for ten real sync rounds, hoping the ban arithmetic drifts from the constants' own math and either evicts early, never evicts, or keeps drawing requests after eviction. | A2 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EGenesisBanScoreTest.java#anIncompatibleGenesisPeerIsBannedAtExactlyTheTenthStrikeAndThenReceivesNoFurtherRequests` |
+| E2E-44 | Serve a non-JSON `/block` body over a real socket, hoping the malformed-response penalty is confused with the cheaper genesis-mismatch penalty and either bans too early or never at all. | A2 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EGenesisBanScoreTest.java#aMalformedBlockResponseIsPeerInvalidNeverConfusedWithIncompatibleAndBansOnlyAtTheThirdStrike` |
+| E2E-45 | Sit an honestly misconfigured (same total, different distribution) real node in a fully-meshed three-node network for a bounded run of repeated sync rounds, hoping its steady stream of genesis mismatches poisons the two genuinely-agreeing peers' convergence or leaves growing per-round state behind. | A0 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EGenesisDivergenceTest.java#anHonestlyMisconfiguredPeerInAFullMeshNeverDestabilizesTheHonestPairOrAdoptsTheirChain` |
+| E2E-46 | Serve a hostile peer's near-perfect forgery of the victim's own real genesis -- one field altered by exactly one unit -- hoping a forgery this close is special-cased as "near enough" instead of refused by the same flat hash-divergence rule as a wildly different genesis. | A2 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EGenesisEclipseTest.java#aNearPerfectGenesisForgeryWithExactlyOneFieldAlteredIsRejectedLikeAnyOtherMismatch` |
+| E2E-47 | Boot a node twice from the same genesis-supply-mismatched snapshot -- once via an aborted snap-sync bootstrap against an honest peer, once via direct startup with no peer at all -- hoping the silent WARN-and-fall-through around a failed bootstrap attempt also softens or masks the pin-mismatch refusal that follows it. | A6 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EGenesisIdentityTest.java#aGenesisSupplyPinMismatchRefusesBootIdenticallyViaAnAbortedSnapSyncOrDirectBoot` |
+| E2E-48 | Configure a real, separate `java -cp ...` OS process's genesis snapshot selection (file override, shipped resource, empty) through the real shell environment, hoping the real `System.getenv()` path or the real classpath-resource load disagrees with what the injected-lookup-function unit tests already lock down. | A0 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EGenesisProcessBootTest.java#configPrecedenceHoldsAcrossFileResourceAndEmptyThroughRealOsProcesses` |
+| E2E-49 | Point `RHIZOME_SNAPSHOT` at a 600 MiB file, hoping a real process either binds its HTTP port before rejecting the oversize or never rejects it at all, turning a misconfiguration into a reachable-but-broken node instead of a clean refusal to start. | A6 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EGenesisProcessBootTest.java#anOversizedSnapshotFileFailsBeforeTheProcessEverBindsItsPort` |
+| E2E-50 | Point `RHIZOME_SNAPSHOT` at a path that does not exist, then immediately retry with a correct config at the exact same data directory, hoping the first aborted real process either fails late (port already open) or leaves a RocksDB lock/partial state that poisons the operator's very next attempt. | A6 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EGenesisProcessBootTest.java#aMissingSnapshotPathFailsCleanlyAndLeavesNoResidualLockForARetry` |
+| E2E-51 | Restart a real node on its own data directory with a "governance revision" allocation artifact that carries the SAME pinned total but a DIFFERENT balance distribution, hoping the boot-time pin check (which only compares totals) is the only gate and the restart silently rewrites who owns the genesis coins. | A6 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EGenesisRestartTest.java#redistributingThePinnedTotalOnARealRestartIsRefusedByCommitmentReVerification` |
+| E2E-52 | As above but against a genuinely non-trivial 9-block chain, hoping a refused restart truncates, silently re-derives, or partially overwrites even one of the blocks that were already real and buried. | A6 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EGenesisRestartTest.java#aNineBlockChainSurvivesARefusedRestartCompletelyUntouched` |
+| E2E-53 | Restart a real mainnet node's data directory under a testnet profile and a testnet-appropriate snapshot (the shape of flipping `RHIZOME_NETWORK` without realising the directory already holds a different network's chain), hoping the node comes up as if the directory were a fresh, empty testnet chain rather than refusing the mismatch. | A6 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EGenesisRestartTest.java#flippingTheNetworkProfileOnAnExistingDataDirectoryIsRefusedNotReinterpreted` |
+| E2E-54 | Seed a real node's genesis snapshot with the SAME 25-byte address spelled once in uppercase hex and once in lowercase hex, hoping the case-insensitive address parse silently merges the two entries into one wallet -- one amount discarded, the survivor chosen by map iteration order rather than the file -- and that nothing downstream notices, least of all on an unpinned profile with no supply pin to re-check the merged total. | A6 | DEFENDED | The two hex spellings decode to an EQUAL `PublicAddress` (`java.util.HexFormat` parses hex case-insensitively even though `Hex.bytesToHex` always renders uppercase, and `org.json` does not case-fold object keys). Confirmed RESIDUAL on 2026-08-22 (the second `put()` silently overwrote the first entry's amount; which survived was an artifact of `org.json`'s internal `HashMap` iteration order); fixed 2026-08-23: `LedgerSnapshot.fromJson` rejects the second key that decodes to an already-present address, the same fail-loud ingress rule as the high-bit balance guard one statement up (audit F3), so a case-collided file never reaches seeding, the supply-pin check, or the genesis commitment at all -- on ANY profile, pinned or not. Proven, through real separate-process boots on both a pinned (mainnet) and an unpinned (testnet) profile, each asserting a non-zero exit naming the duplicate before the port ever binds (and, on mainnet, that the refusal is the duplicate guard's message rather than the pin check's), by `app-node/src/test/java/rhizome/adversarial/e2e/E2EGenesisCaseCollisionTest.java#duplicateAddressUnderTwoHexCasesIsRefusedAtSnapshotLoadBeforeAnyPortBinds`; the decode-level rejection is unit-locked by `lib-core/src/test/java/rhizome/LedgerSnapshotTest.java#rejectsCaseVariantSpellingsOfTheSameAddress`. |
+| E2E-55 | Race a symlink named by `RHIZOME_SNAPSHOT` between `SnapshotLoader.fromFile`'s size check and its content read, hoping the two filesystem operations observe two different targets so a size cap enforced against the first is silently bypassed by whatever the second happens to read. | A6 | DEFENDED | `fromFile` now opens the path exactly once (a single `FileChannel`) and derives both the size check and the content read from that one handle, so a symlink retargeted after the open cannot affect the already-open descriptor on POSIX systems -- there is no longer a window between two independent filesystem calls for a race to land in. A background thread continuously re-pointing the symlink between a tiny valid snapshot and a ~513 MiB one (over the 512 MiB cap) across 1000 racing `fromFile` calls produced zero bypasses, where the pre-fix version reliably produced at least one within 300-600 attempts. Proven (in a forked process with an explicit `-Xmx`, since the ~513 MiB race target cannot safely round-trip through this module's fixed 512 MiB Gradle test-worker heap) by `app-node/src/test/java/rhizome/periodic/e2e/E2EGenesisExoticPathsTest.java#symlinkRetargetedBetweenTheSizeProbeAndTheReadNoLongerBypassesTheSizeCap` (manual/periodic bucket -- see the class javadoc). |
+| E2E-56 | Point `RHIZOME_SNAPSHOT` at a directory through a real child process, hoping the directory read surfaces as an unhandled or confusing exception, or that the process binds its port before the read is even attempted. | A6 | DEFENDED | `app-node/src/test/java/rhizome/periodic/e2e/E2EGenesisExoticPathsTest.java#aDirectoryAsTheSnapshotPathFailsCleanlyThroughARealProcessBoot` (manual/periodic bucket). |
+| E2E-57 | Point `RHIZOME_SNAPSHOT` at a FIFO with no writer through a real child process, hoping the boot either fails within a sane budget or hangs unnoticed forever, indistinguishable from a slow-but-eventually-successful start. | A6 | DEFENDED | `fromFile` now stats the resolved path's type (`Files.readAttributes`, which does not block on a FIFO -- verified empirically to return in under a millisecond) and refuses anything that is not a regular file before ever calling the open that could block. A real child process pointed at a writerless FIFO now exits almost immediately with a clean, typed error and never opens its port, where it previously neither exited nor opened its port within a 10 second observation budget. The one part NOT fully closed: if the resolved target's type changes in the narrow window between that stat and the subsequent open, `fromFile` falls back to a bounded open+read (a fixed, generous timeout) rather than a hang -- verified empirically that `Thread.interrupt()` does not unblock a thread already stuck inside `FileChannel.open()` on a writerless FIFO, so that specific race is bounded (the boot thread gives up; a daemon thread is abandoned) rather than eliminated. That narrower race is not what this test exercises. Proven by `app-node/src/test/java/rhizome/periodic/e2e/E2EGenesisExoticPathsTest.java#aFifoWithNoWriterNowFailsFastInsteadOfHangingTheBoot` (manual/periodic bucket). |
+| E2E-58 | Boot a real node process against a genesis snapshot with a large wallet count, hoping `GenesisLedger.seed`'s undocumented, uncapped per-wallet loop turns out to be free, or at least sublinear, so a large-but-otherwise-valid allocation file cannot be used to stall a node's own boot. | A6 | DEFENDED | First measured at ~3.3-3.6 ms per wallet against a real node process: one synchronous, fsync'd RocksDB write per wallet (two, actually -- `createWallet` then `deposit`), not the batched write the durability contract elsewhere in this module already uses for a block's own ledger writes. An 8,000-wallet snapshot alone cost ~28 s of boot time beyond baseline, and the rate implied a several-hundred-thousand-wallet file already cost multiple minutes, a several-million-wallet one multiple hours -- a confirmed startup DoS via an otherwise perfectly valid genesis allocation. Fixed with a `Ledger#beginBulkLoad()`/`#endBulkLoad()` window (default no-op; `RocksDbNodeStore.RocksLedger` buffers the SAME per-entry hasWallet/createWallet/deposit calls in memory and flushes them in chunked 10,000-wallet `WriteBatch`es) -- a pure batching change, so the resulting balances are byte-identical (`LedgerContract`'s bulk-load contract test covers both ledger implementations; `GenesisBlockTest`/`LedgerSnapshotTest` pass unmodified). Re-measured at ~0.08 ms (~80 microseconds) per wallet, a ~40-45x reduction: a raised, more representative 50,000/200,000-wallet pair now boots in ~3.5-3.6 s / ~15-18 s respectively, comfortably inside a 60 s ceiling, and a seven-figure wallet count is now on the order of a minute rather than hours. Proven by `app-node/src/test/java/rhizome/periodic/e2e/E2EGenesisLargeSnapshotStartupTest.java#startupTimeScalesRoughlyLinearlyWithWalletCountAndStaysBounded` (manual/periodic bucket -- kept there: still slower than this bucket's fast-gate peers, and the placement was never about this scenario's verdict). |
+| E2E-59 | Feed `SnapshotLoader.fromResource`'s size-unknown (`getContentLengthLong() == -1`) fallback branch a real, uninstrumented, ordinary-sized resource under a constrained heap, hoping the branch nobody could previously test (no injection seam on a bare-`String` method) turns out to break normal operation, not just an extreme case. | A6 | DEFENDED | An 8 MiB resource completes cleanly under a 64 MiB heap. Proven, via a forked process with a classloader that shadows only `SnapshotLoader` so a fabricated `URLConnection` can be attached without a JVM-global `URLStreamHandlerFactory`, by `app-node/src/test/java/rhizome/adversarial/e2e/E2EGenesisSnapshotFallbackTest.java#aResourceComfortablyUnderTheHeapCompletesWithoutOom`. |
+| E2E-60 | Feed the same fallback branch a resource well under the real 512 MiB pinned cap but larger than a small deployment's heap, hoping the branch streams or bounds its read against the CONSUMING process's own memory rather than buffering the whole declared-unknown-size body. | A6 | RESIDUAL | Investigated and partially closed, not eliminated: `readAtMost` was rewritten to read fixed-size (64 KiB) chunks merged once into a right-sized array, instead of a `ByteArrayOutputStream` whose doubling growth plus its own `toByteArray()` copy held two-to-three full-size copies of the content alive at once. Root-cause isolation found the OOM has two independent causes, not one -- `readAtMost`'s own buffering overhead (now reduced: a 64 MiB heap's practical full read+parse ceiling moved from ~10 MiB to ~25-29 MiB), AND `org.json`'s DOM parse independently roughly doubling-to-tripling peak memory over the raw byte count regardless of how the bytes were read. A 200 MiB resource (four times under the 512 MiB cap) still reliably `OutOfMemoryError`s under a 64 MiB heap after the fix, unchanged from before it -- closing this fully would mean parsing JSON from a bounded stream directly rather than ever materializing the whole decoded body, a materially larger change than this fix's scope. Proven, with the two-cause finding and the fix's measured (non-)effect both asserted, by `app-node/src/test/java/rhizome/adversarial/e2e/E2EGenesisSnapshotFallbackTest.java#aResourceWellUnderTheCapButOverTheHeapStillOomsInsteadOfStreaming`. |
 
 ---
 
@@ -471,10 +515,304 @@ Scenarios the protocol names but does not yet prove. Each entry here would be be
 needs work beyond writing a test — a fixture that does not exist, or a decision that has not been
 taken.
 
-_None — every catalogued scenario carries a proof._
+| ID | Scenario | Why |
+|----|----------|-----|
+| E2E-61 | A GraalVM native-image binary of the node resolving the embedded genesis resource identically to the JVM build, and failing cleanly (not crashing, not silently substituting a different genesis) if the reachability-metadata entry for that classpath resource is ever stripped from `app-node/src/main/resources/META-INF/native-image/`. | `native-image` is not installed in this development environment (confirmed in `WHITEPAPER.md`), so no test that actually builds and runs the native binary can execute here. This is future work once a GraalVM SDK is available on the box that runs this suite -- see `./gradlew :app-node:nativeImage`'s own guard for the same absence. Reserved id: the next new `E2E` scenario added to the table above should start at E2E-62, not reuse this one, since this row is intentionally excluded from the family's dense-numbering check. |
 
 ## Change log
 
+- **2026-08-23** — Post-implementation-review follow-ups: one RESIDUAL closed outright, and the
+  E2E-58 fix's crash-atomicity gap closed with a guard rather than a claimed atomicity:
+  - **E2E-54 (case-collision duplicate addresses) → DEFENDED.** `LedgerSnapshot.fromJson` now
+    rejects the second JSON key that decodes to an already-present `PublicAddress` — the same
+    fail-loud ingress rule as the high-bit balance guard one statement up (audit F3). The
+    RESIDUAL this replaces was real and empirically verified (the surviving amount was an
+    artifact of `org.json`'s internal `HashMap` iteration order, never of the file), and it was
+    sharpest on UNPINNED profiles (testnet/devnet), where no genesis-supply pin re-checks the
+    merged total downstream — the merged result was simply committed. The E2E proof is rewritten
+    accordingly: instead of pinning the merge, it now boots real, separate processes on BOTH a
+    pinned (mainnet) and an unpinned (testnet) profile and asserts each refuses at snapshot
+    load — non-zero exit, the duplicate named in stderr, no port ever bound, and on mainnet the
+    refusal carries the duplicate guard's message rather than the pin check's. The decode-level
+    rejection is unit-locked by
+    `lib-core/src/test/java/rhizome/LedgerSnapshotTest.java#rejectsCaseVariantSpellingsOfTheSameAddress`.
+  - **Torn genesis-seed double-deposit → refused at boot.** The E2E-58 bulk-load window flushes
+    in independent, synced 10,000-wallet chunks — deliberately NOT crash-atomic — so a crash
+    mid-flush left a durable partial seed at height 0, and the next boot's re-seed
+    (`GenesisLedger.seed` tops existing wallets up) would deposit those wallets' amounts a
+    SECOND time while the genesis header committed the snapshot's own, correct total: a silent
+    supply inflation. Rather than grow a second marker mechanism next to snap-sync's (audit M8),
+    crash safety now comes from the same RULE the marker implements — never run on half-seeded
+    data — enforced at the one place a torn seed is unambiguous: `GenesisBlock.initChain`
+    refuses to seed over a non-empty ledger, which at height 0 can only be a torn prior seed
+    (a block's ledger writes commit atomically with its height; snap-sync's bootstrap never
+    lands at height 0). The refusal names the remedy: wipe the data directory and re-seed.
+    Proven by `GenesisBlockTest#initChainRefusesToSeedOverANonEmptyLedger` (unit level, ledger
+    left untouched) and `RocksDbNodeStoreTest#aNonEmptyLedgerAtHeightZeroRefusesTheFreshChainBoot`
+    (the durable, across-reopen shape). `Ledger`'s bulk-load javadoc now states plainly that the
+    "byte-identical to an unbatched run" claim holds for a window that runs to completion, and
+    why crash recovery is not the window's job.
+  - **The bulk-load contract test now proves what its name claims.**
+    `LedgerContract#bulkLoadWindowIsReadYourWritesAndMatchesUnbatchedWrites` previously asserted
+    read-your-writes and final balances but never ran the unbatched comparison its name (and
+    the E2E-58 entry below) claimed; it now runs the identical call sequence on a second, fresh
+    ledger with no window open and asserts whole-ledger equality. Making that possible exposed
+    that `RocksDbNodeStoreTest`'s contract factory quietly returned the SAME store on a second
+    `newLedger()` call within one test method — against the contract's "a fresh, empty ledger"
+    — and now opens a fresh store per call. A second contract test crosses the 10,000-wallet
+    flush-chunk boundary with 10,001 wallets, a path nothing in `./gradlew build` previously
+    exercised (only the periodic E2E-58 scale test did).
+- **2026-08-23** — `GenesisLedger.seed` fixed against E2E-58 (the fourth RESIDUAL finding from
+  the 2026-08-22 build-out; the other three are the `SnapshotLoader` entry directly below):
+  - **E2E-58 (per-wallet genesis-seed fsync) → DEFENDED.** Root cause confirmed empirically, not
+    assumed: each snapshot entry paid TWO synchronous, fsync'd RocksDB writes
+    (`RocksDbNodeStore.RocksLedger`'s `createWallet` then `deposit`, each going straight to
+    `db.put` with `WriteOptions.setSync(true)`), instead of the atomic-`WriteBatch` pattern this
+    module already uses for a block's own ledger writes (`RocksChainStore.append`). Fixed with a
+    new `Ledger#beginBulkLoad()`/`#endBulkLoad()` window — default a no-op, so the in-memory
+    reference ledger and its existing callers are untouched — that `GenesisLedger.seed` now opens
+    around its loop; `RocksDbNodeStore.RocksLedger` overrides it to buffer the SAME
+    hasWallet/createWallet/deposit calls in the block-commit staging map it already had
+    (`pendingLedger`) and flush them on `endBulkLoad()` in chunked 10,000-wallet `WriteBatch`es
+    instead of a write per wallet. This is a pure batching change — `GenesisLedger.seed`'s loop
+    body, validation order and checked arithmetic are byte-for-byte unchanged, so the same
+    snapshot produces the identical resulting balances, genesis hash and state root as before
+    (`LedgerContract`'s new bulk-load contract test — read-your-writes inside the window, and the
+    post-window state matching an unbatched run — covers both the in-memory and RocksDB ledgers;
+    `GenesisBlockTest`, `LedgerSnapshotTest` and `NetworkParametersTest` pass unmodified).
+    Re-measured (same box, same methodology) at ~0.08 ms/wallet, down from ~3.3-3.6 ms/wallet — a
+    ~40-45x reduction in the marginal per-wallet cost. At the original 2,000/8,000-wallet pair the
+    fix makes seeding cheap enough to vanish into this test's own ~0.9-1.2 s of fixed per-process
+    overhead (JVM start, RocksDB open) — itself a sign the fix works, but too noise-dominated for
+    a clean scaling assertion — so the test's `SMALL`/`LARGE` were raised to 50,000/200,000 (still
+    `LARGE / 4`, the design's original N-vs-N/4 shape), which boot in ~3.5-3.6 s / ~15-18 s
+    respectively: a stronger proof (a seven-figure wallet count is now on the order of a minute,
+    not hours) that also finishes faster in total than the ~35 s the old 2,000/8,000 pair used to
+    cost. Stays in the `rhizome.periodic.e2e` manual bucket rather than moving into the fast
+    `./gradlew adversarial` gate: at ~19 s combined it would still fit, but the placement was
+    never about this scenario's verdict, only its cost relative to that gate's other, much
+    cheaper, scenarios — and it remains one of the more expensive in its own bucket.
+- **2026-08-23** — `SnapshotLoader` hardened against two of the three RESIDUAL findings the
+  previous entry's build-out discovered, and the third was investigated further without being
+  fully closed:
+  - **E2E-55 (symlink TOCTOU) → DEFENDED.** `fromFile` used to probe `Files.size(path)` and
+    later call `Files.readString(path)` as two independent filesystem operations; it now opens
+    one `FileChannel` and derives both the size check and the content read from that single
+    handle, so a symlink retargeted after the open cannot affect the already-open descriptor on
+    POSIX. Re-run of the same 1000-attempt race that reliably bypassed the cap before the fix now
+    produces zero bypasses.
+  - **E2E-57 (FIFO hang) → DEFENDED for the case tested.** `fromFile` now stats the resolved
+    path's type via `Files.readAttributes` (which does not block on a FIFO — verified empirically
+    to return in well under a millisecond) and refuses anything that is not a regular file before
+    ever calling the open that could block. A narrower residual remains and is stated plainly
+    rather than hidden: if the resolved target's type changes in the window between that stat and
+    the subsequent open, `fromFile` falls back to a bounded open+read (a fixed timeout) rather
+    than eliminating the race outright, because `Thread.interrupt()` was verified empirically NOT
+    to unblock a thread already stuck inside `FileChannel.open()` on a writerless FIFO (the
+    `open()` syscall itself is not wired into Java NIO's interruptible-channel machinery the way
+    `read()`/`write()` are). That race is bounded (the boot thread gives up after a timeout,
+    abandoning a daemon thread rather than hanging), not proven eliminated — it is not what
+    E2E-57's test exercises, which points a FIFO at the path directly with no race.
+  - **E2E-60 (`fromResource` fallback OOM) stays RESIDUAL, root-caused further.**
+    `SnapshotLoader.readAtMost` was rewritten from a `ByteArrayOutputStream` (whose doubling
+    growth plus its own `toByteArray()` copy held two-to-three full-size copies of the content
+    alive at once) to fixed-size (64 KiB) chunks merged once into a right-sized array. Root-cause
+    isolation (a standalone instrumented probe, not part of the checked-in suite) found the OOM
+    has two independent causes: the read path's own buffering overhead (now measurably reduced —
+    a 64 MiB heap's practical full read+parse ceiling moved from content around 10 MiB to roughly
+    25-29 MiB) and, independently, `org.json`'s DOM parse itself roughly doubling-to-tripling peak
+    memory over the raw byte count regardless of how carefully the bytes were read (confirmed:
+    content whose read and UTF-8 decode succeeded outright still `OutOfMemoryError`'d during
+    `JSONObject` construction alone). Neither cause, nor both together, comes close to fitting a
+    200 MiB body in a 64 MiB heap; E2E-60's test still asserts (and still observes) the OOM,
+    unchanged. Fully closing this would mean parsing JSON from a bounded stream directly instead
+    of ever materializing the whole decoded body — a materially larger change (a different
+    JSON-parsing strategy) than this fix's scope covers, so it is declared here rather than forced
+    or silently narrowed.
+  - None of the three fixes changed genesis hashing or any decode result for a well-formed,
+    within-cap snapshot: `fromFile`'s single-handle read decodes the identical bytes the old
+    probe-then-read pair did for any file that does not change between the two steps, and
+    `readAtMost`'s chunked merge produces byte-identical output to the old buffered read for any
+    input under the cap. `GenesisBlockTest`, `LedgerSnapshotTest`, `ChainEngineTest` and
+    `NetworkParametersTest` (`lib-core/src/test/java/rhizome/`) pass unmodified.
+- **2026-08-22** — Seven more `E2E` scenarios (E2E-54..60) close the gaps the design's Phase 5
+  build-out targeted, all under `contracts/genesis-allocation-format.md`'s snapshot-loading and
+  boot surface rather than the pin-check surface E2E-37..53 already covered. Two placement
+  decisions follow directly from measuring, not guessing, each scenario's real cost:
+  - E2E-54 (case-collision addresses) and E2E-59/60 (the `fromResource` size-unknown fallback,
+    forked with an explicit `-Xmx` per case) measured at a few seconds total and stayed in
+    `rhizome.adversarial.e2e`, inside the fast `./gradlew adversarial` gate.
+  - E2E-55..58 (the exotic-file-paths trio and the large-snapshot startup-cost scenario) measured
+    at ~20 s and ~35 s respectively -- disproportionate next to this package's few-second peers --
+    and moved to a new `rhizome.periodic.e2e` package (app-node test sources), which matches
+    neither of the `adversarialTest` Gradle task's `includeTestsMatching` filters
+    (`rhizome.adversarial.*`, or a class name ending `AttackTest`/`AdversarialTest`) and is
+    therefore invisible to both `./gradlew adversarial` and a routine `./gradlew build`/
+    `./gradlew test`. A new `:app-node:periodicAdversarial` Gradle task (not a dependency of
+    `test`, `check`, `build` or `adversarial`) is the only way to run them; `AdversarialProtocolTest`
+    still resolves their citations regardless of location; its reverse (tree-to-catalogue) check
+    does not, since that check is scoped to the same two Gradle filters by design. Two new,
+    package-local pieces of infrastructure support this without touching any Phase 1-4 file:
+    `rhizome.testsupport.SubprocessRunner` (public, cross-package: launches an arbitrary
+    `main(String[])` class as a real process with caller-chosen JVM flags -- `ProcessHarness`
+    cannot, being package-private inside `rhizome.adversarial.e2e` and hardcoded to
+    `RhizomeNode.main`) and `rhizome.periodic.e2e.MinimalNodeProcess` (a trimmed,
+    same-package copy of `ProcessHarness`'s node-launching technique, needed only because
+    `ProcessHarness` itself is off-limits to a class outside its package).
+  - Three of the seven are RESIDUAL, newly discovered rather than assumed: E2E-55 (a real,
+    reliably-reproduced TOCTOU bypass of `SnapshotLoader.fromFile`'s size cap via a raced
+    symlink), E2E-57 (a real, unbounded boot-thread hang reading a writerless FIFO, with no
+    timeout anywhere on the path), and E2E-58 (a real, roughly-linear-but-uncapped ~3.3-3.6 ms
+    per-wallet cost in `GenesisLedger.seed`, making a several-hundred-thousand-wallet snapshot a
+    multi-minute startup DoS on its own). E2E-60 is also RESIDUAL: the `fromResource` fallback
+    path buffers rather than streams, so a resource well under the documented 512 MiB cap can
+    still `OutOfMemoryError` a memory-constrained node. E2E-54, E2E-56 and E2E-59 confirmed the
+    less alarming outcome instead (a silent-but-harmless merge, a clean refusal, and normal
+    operation for an ordinary-sized resource, respectively) -- each was investigated empirically
+    before its assertion was written, per the design's explicit instruction not to assume either
+    outcome.
+  - E2E-61 (native-image genesis resolution) is recorded in Known gaps instead of proven: this
+    development environment has no `native-image` binary.
+- **2026-08-22** — Three more `E2E` scenarios (E2E-51..53) close the last gap in the genesis-
+  restart surface: every scenario above this one either boots a node cold or restarts it on an
+  UNCHANGED configuration (`E2ENodeResilienceTest`'s existing precedent); none restart a node whose
+  configuration silently changed underneath its own existing store. New `TestNetwork` capability:
+  `reopen(String name)`, which stops the node currently tracked under `name` (idempotent,
+  `public synchronized RhizomeNode.close()`) and returns a fresh `Builder` pre-bound to the exact
+  same data directory and the freed port, ready for `.params(...)`/`.snapshot(...)`/`.start()`
+  again -- generalising `E2ENodeResilienceTest`'s single-node "close, rebuild over the same
+  directory" pattern into a network-level convenience that only touches the one named node, and
+  replacing that name's bookkeeping entry so a `.start()` that throws (every scenario here) leaves
+  nothing for `TestNetwork.close()` to double-close. New suite `E2EGenesisRestartTest`, all three
+  scenarios driving `ChainEngine.Boot.build()`'s stored-genesis re-verification (the `else if`
+  branch guarding a non-empty store) through a real restart. E2E-51 restarts a real node with a
+  same-pinned-total, different-DISTRIBUTION allocation artifact (a future governance revision that
+  reallocates `S0` without touching the pinned constant) and proves the refusal, then proves a
+  THIRD reopen with the ORIGINAL distribution restores the exact pre-refusal chain, showing the
+  refused middle attempt never touched the on-disk store. E2E-52 is the same proof against a
+  genuinely non-trivial 9-block chain, checked block by block. E2E-53 flips the network profile
+  (mainnet data directory, testnet params + a testnet-appropriate snapshot -- the shape of changing
+  `RHIZOME_NETWORK` without realising the directory already holds a different chain) and proves the
+  restart is refused rather than the store being silently reinterpreted as a fresh, empty testnet
+  chain at height 0. All three were assumed, going in, to plausibly throw `IllegalArgumentException`
+  from `GenesisBlock.build`'s own guards (the pin-total check for E2E-51/52, the chainId-mismatch
+  check for E2E-53) -- empirically, none do: because each scenario's replacement snapshot is
+  internally consistent with the params it is paired with (same total for E2E-51/52; matching
+  testnet chainId for E2E-53), `GenesisBlock.build` itself succeeds every time, and the refusal
+  instead comes from `ChainEngine.Boot.build()`'s generic stored-genesis hash comparison against
+  what is already on disk -- one message, "Stored genesis does not match network parameters and
+  snapshot", identical `IllegalStateException` across all three, naming neither total nor chainId
+  (unlike the genuinely-mismatched-total case `E2EGenesisIdentityTest`'s E2E-47 asserts on). A
+  snapshot deliberately inconsistent with its own params (e.g. a testnet profile paired with a
+  leftover mainnet-chainId snapshot file) would instead hit `GenesisBlock.build`'s own
+  `IllegalArgumentException` before `matches()` is ever reached; this suite's three scenarios simply
+  do not construct that particular combination.
+- **2026-08-22** — Three more `E2E` scenarios (E2E-48..50) close a gap none of the network-level
+  proofs above could reach at all: every one of them, and every other suite in
+  `rhizome.adversarial.e2e`, runs `RhizomeNode` as a real Java object sharing the test JVM, so none
+  can observe "this process never opened a socket" or exercise the real `System.getenv()`-backed
+  `NodeConfig.fromEnv()` no-arg overload `RhizomeNode.main` actually calls -- every existing config
+  test, including `NodeConfigFromEnvTest`, goes through the injected-lookup-function overload
+  instead. New shared fixture, `ProcessHarness` (no `@Test` methods -- a fixture like
+  `HostilePeer`/`E2EFixtures`, scanned by the gate anyway since it lives in the same package):
+  launches `rhizome.node.RhizomeNode.main(String[])` as a genuine `java -cp ...` child process via
+  `ProcessBuilder`, resolving the launcher the same way the current JVM was started
+  (`ProcessHandle.current().info().command()`) rather than assuming `java` is on `PATH`, draining
+  stdout/stderr on two independent daemon threads so neither pipe's OS buffer can deadlock a
+  `waitFor()`, and polling a raw TCP connect for port liveness -- needed both to prove a port DID
+  open and, negated, that it NEVER did within a bounded window. The classpath passthrough
+  (`System.getProperty("java.class.path")` verbatim as the child's `-cp`) was verified empirically
+  before any scenario was written on top of it: on this toolchain the Gradle test worker's own
+  classpath is already an explicit, colon-separated list of real jar/directory paths, not a
+  manifest-jar wrapper, so passing it straight through resolves identically -- confirmed by
+  launching a real child and watching it bind a port and answer `/block?blockId=1` in under a
+  second. E2E-48 boots three real processes (testnet/no-override, mainnet/no-override,
+  mainnet/file-override with a same-total-different-distribution snapshot) and checks the reported
+  genesis over each one's real HTTP API, cross-checking the no-override mainnet case against
+  `GenesisBlock.build()` recomputed independently in the test JVM from the identical shipped
+  resource -- the same independent-recomputation shape E2E-38 already uses, now proven through a
+  real environment instead of an injected one. E2E-49 and E2E-50 both prove a fail-fast boot at the
+  socket level, not just via an absent Java exception: a sparse (no real disk burned) 600 MiB
+  `RHIZOME_SNAPSHOT` file, and a `RHIZOME_SNAPSHOT` naming a path that does not exist, each refuse
+  boot with the real `SnapshotLoader`/`Files.size` message in stderr, a non-zero exit, and -- the
+  decisive claim an in-JVM test cannot make -- zero successful TCP connects to the configured port
+  across a bounded poll window. E2E-50 adds the scenario's distinguishing check: a second,
+  correctly-configured real process pointed at the exact same data directory the first one aborted
+  in starts cleanly, with no `RocksDBException` in its stderr -- true today because
+  `RhizomeNode.assemble` loads the snapshot before opening any store, a structural fact this test
+  now pins so a future reordering would be caught the moment it started to matter, rather than
+  only if an operator's retry happened to hit it in production. The wall-clock cost of proving two
+  negatives (a port that never opens) is unavoidable but bounded deliberately tight: the poll
+  window is ten-plus times the empirically observed sub-200 ms fail-fast cost, not a round-number
+  guess, keeping the new suite's total added time to the `adversarial` gate under ten seconds.
+
+- **2026-08-22** — Five more `E2E` scenarios (E2E-43..47) close the network-level gaps a follow-up
+  review found in the previous entry's six: nothing had proven the sync driver's ban-score
+  arithmetic against a real genesis-incompatible peer down to the exact strike that bans it (not
+  the one before, not the one after), nor that a banned/evicted peer stops being contacted at all
+  rather than merely stops mattering; nothing had proven a malformed, non-JSON `/block` response
+  stays classified `PEER_INVALID` rather than drifting into the cheaper `INCOMPATIBLE` bucket
+  through real JSON parsing; nothing had proven that an honestly misconfigured (not hostile) peer's
+  steady stream of genesis mismatches in a real multi-node mesh leaves the genuinely-agreeing peers
+  converging and unharmed; nothing had proven that a near-perfect genesis forgery -- one field off
+  by one unit, not a wildly different block -- is refused by the same flat hash-divergence rule as
+  any other mismatch, with no special-casing for "close"; and nothing had driven the genesis-supply
+  pin-mismatch refusal through the ACTUAL silent-WARN-and-fall-through path around a failed
+  snap-sync bootstrap attempt, rather than only the direct-boot path the existing unit tests cover.
+  Two new suites (`E2EGenesisBanScoreTest` for E2E-43/44, class A2; `E2EGenesisDivergenceTest` for
+  E2E-45, class A0) plus one scenario added to each of the two existing genesis suites (E2E-46 in
+  `E2EGenesisEclipseTest`, class A2; E2E-47 in `E2EGenesisIdentityTest`, class A6). `HostilePeer`
+  gained three additive fixture primitives, none of which changed any existing test's behaviour:
+  `claimsGenesis(Supplier<Block>)` (a general primitive for the fork-detection probe's answer at
+  height 1, which `sharesGenesisWith` is now expressed in terms of, letting a scenario serve a
+  tampered near-forgery rather than only a real node's real genesis), `servesBlock(Supplier<byte[]>)`
+  (the `/block` analogue of the pre-existing `servesHeaders`, a fixed byte stream bypassing normal
+  JSON serialization), and a request counter (`requestCount()`) so a scenario can assert a banned
+  peer receives zero further requests, not merely that its lies stop mattering. Writing E2E-43/44
+  surfaced a latent fixture gap worth recording: `HostilePeer`'s default/`claimsWork` `/total_work`
+  body is a bare decimal string, but `HttpPeerSource.totalWork()` requires the real wire envelope
+  (`{"totalWork": "..."}`, mirroring `NodeApi`) -- every existing scenario using `claimsWork` had
+  therefore always been hitting an earlier, unrelated malformed-response classification rather than
+  the one its javadoc described, invisibly, because none of them asserted the specific ban-score
+  classification. Not fixed in the shared fixture (fixing the default would not change any existing
+  assertion, since none of those scenarios check classification, but the safer and already-precedented
+  fix -- matching `E2ESupplyCommitmentTest`'s own workaround -- is for a scenario that needs a
+  genuinely well-formed `/total_work` to pass the properly-wrapped JSON itself); both new scenarios
+  here do exactly that.
+
+- **2026-08-22** — Six new `E2E` scenarios (E2E-37..42) close network-level gaps a
+  post-implementation review flagged for the pinned genesis supply / shipped allocation feature
+  (branch `003-genesis-allocation`): the `GENESIS` family and the existing genesis/snapshot suites
+  prove the pin as a pure function in one JVM, but nothing had driven a real, assembled
+  `RhizomeNode` through the no-`RHIZOME_SNAPSHOT` classpath-resource fallback, proven that several
+  independently-booted real mainnet processes actually land on a bit-identical genesis before any
+  gossip runs (closing the substitution `plan.md` documented for spec SC-002), proven that a
+  hostile peer offering a real-but-differently-distributed equal-total genesis or a fabricated,
+  unrooted header stream cannot move a victim's or a freshly-joining node's chain identity, proven
+  that a pruned node joining via snap-sync derives its genesis locally rather than from its (even
+  honest) sync source, or exercised the unpinned `testnet()` sentinel through the real harness
+  unmodified (every existing testnet-based `E2E` scenario re-pins it via `TestNetwork.FAST` for
+  convenience). New suites: `E2EGenesisIdentityTest` (E2E-37, E2E-38, E2E-41, E2E-42; no adversary
+  — class A0 — the property holds or fails from each node's own configuration and determinism) and
+  `E2EGenesisEclipseTest` (E2E-39, E2E-40; class A2, a real hostile peer over a real socket). Zero
+  new shared test infrastructure: both suites are built entirely on the existing `TestNetwork`,
+  `HostilePeer` and `E2EFixtures`.
+- **2026-08-22** — A new `GENESIS` family (3 scenarios) added for the pinned genesis supply
+  (branch `003-genesis-allocation`): a per-network consensus constant `S₀`
+  (`NetworkParameters.genesisSupply`, unpinned sentinel `GENESIS_SUPPLY_UNPINNED`) checked
+  exactly against the loaded genesis snapshot's total in `GenesisBlock.build`, on every boot
+  path, before any balance is seeded. All three scenarios were satisfied by tests already
+  written for the feature (`GenesisBlockTest`, `LedgerSnapshotTest`) with zero new test code.
+  GENESIS-01 is the mismatched-total boot refusal; GENESIS-02 proves the pin and the existing
+  genesis commitment compose rather than duplicate — same total, different distribution passes
+  the pin and is then caught by commitment re-verification — and that the chain-id and
+  signed-range guards still run first; GENESIS-03 is the lockstep regression between the shipped
+  mainnet allocation artifact (`genesis/rhizome-mainnet.json`) and the pinned constant, so an
+  edit to one without the other fails the build rather than shipping a self-contradictory
+  network definition. This family's scenario id is one character longer than any prior family's
+  (`GENESIS` vs. `SUPPLY`/`WALLET`'s six), which `AdversarialProtocolTest`'s id pattern had never
+  been asked to admit — widened from an unstated `{1,5}` bound to `{1,6}` rather than truncating
+  the family name to fit an accidental limit.
 - **2026-08-21** — A new `SUPPLY` family (11 scenarios) and three `E2E` scenarios (E2E-34..36) added
   for the supply header commitment (branch `002-supply-header-commitment`): the optional eleventh
   header field, `block.supply == parent.supply + Issuance.minted(...)`, prefix-closed and enforced
