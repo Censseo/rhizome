@@ -131,12 +131,30 @@ state entries against the root like any other.
 
 ### S-7 — Genesis snapshot seeding *(implemented)*
 
-The genesis state is a snapshot of the Pandanite balances, **sanitised** (wallets from the inflation
-incidents excluded). The `genesisCommitment` hashes `chainId ‖ snapshotCommitment`, so **two
-different networks never share a genesis even with an empty snapshot**. The real snapshot is
-produced by a dump tool
-([PandaniteLedgerDumper.java](../../lib-persistence/src/main/java/rhizome/persistence/tools/PandaniteLedgerDumper.java))
-reading the LevelDB ledger of a synchronised Pandanite node. Configured via `RHIZOME_SNAPSHOT`.
+The genesis state is an **explicit, authored allocation** — not an import of the Pandanite chain.
+Mainnet ships its allocation as a checked-in classpath artifact
+([`genesis/rhizome-mainnet.json`](../../lib-core/src/main/resources/genesis/rhizome-mainnet.json))
+in the existing `LedgerSnapshot` JSON format (version 1), and that artifact is the default boot
+input when `RHIZOME_SNAPSHOT` is unset; testnet and devnet keep the empty default snapshot.
+`SnapshotLoader.forBoot(snapshotPath, params)` is the single entry point: operator override →
+per-network shipped resource (`NetworkParameters.genesisSnapshotResource()`) → empty. The
+classpath path carries the *same* decode-time bounds as the file path (512 MiB cap, depth-64 JSON
+nesting guard, per-amount high-bit rejection) — shipped-by-default is not a bypass around them.
+
+The `genesisCommitment` hashes `chainId ‖ snapshotCommitment` (unchanged), so **two different
+networks never share a genesis even with an empty snapshot**, and the commitment binds the
+*distribution*. Its **total** is separately pinned per network profile — see
+[consensus](../consensus/spec.md) C-11: a pinned profile refuses to build or re-verify genesis
+against a snapshot whose total differs. The two checks compose — the pin guards the total, the
+commitment guards the allocation — so a same-total, different-distribution swap between restarts
+is still caught by the stored-genesis re-verification.
+
+The auditor flow is therefore recomputable from the published artifact alone: parse it, sum the
+balances (must equal the pinned `S₀`), recompute `commitmentHash()`, build genesis, and check the
+genesis commitment and the header's committed `supply` both match.
+
+`PandaniteLedgerDumper` remains in the tree as an unused tool — it seeds nothing and is wired into
+no boot path.
 
 ## Invariants (must never regress)
 
@@ -158,14 +176,16 @@ reading the LevelDB ledger of a synchronised Pandanite node. Configured via `RHI
 
 | Variable | Purpose |
 |---|---|
-| `RHIZOME_SNAPSHOT` | snapshot file seeding the genesis |
+| `RHIZOME_SNAPSHOT` | snapshot file seeding the genesis; overrides the network's shipped default (mainnet: the classpath allocation artifact; testnet/devnet: empty). Subject to the same pinned-total check — there is no operator flag that weakens it |
 | `RHIZOME_SYNC=snap` | bootstrap from a peer's snapshot pivot |
 | `RHIZOME_SNAPSHOT_EVERY` | materialisation interval in blocks (server side) |
 
 ## Open items
 
-- Production of the **real Pandanite snapshot** is environment-dependent — it requires a synchronised
-  C++ node (§9).
+- The shipped mainnet allocation is **provisional**: one balance at the unspendable empty address,
+  total 100M PDN, chosen as a calibration anchor rather than as policy. The final recipients and
+  total are a recorded, still-open governance decision; ratification swaps the artifact and the
+  pinned constant in lockstep (a partial edit fails the build).
 
 ## References
 

@@ -116,6 +116,13 @@ plugin backwards.
 `./gradlew :app-node:nativeImage` produces a native node binary. Reachability metadata is checked in
 under `app-node/src/main/resources/META-INF/native-image/`.
 
+Any resource the node loads from the classpath at runtime needs a glob there or the native binary
+finds nothing at that path. Current entries cover the RocksDB JNI library, logback configurators,
+the dashboard assets, `docs/*.md`, and — since the genesis allocation shipped —
+**`genesis/*.json`**, the per-network default snapshot artifact
+(`NetworkParameters.genesisSnapshotResource()`). Adding a shipped resource means adding its glob in
+the same change.
+
 Because Gradle 9.6.1 runs on JDK 25, **one JDK now suffices** — the previous two-JDK dance (an older
 JDK to run Gradle, a GraalVM to run `native-image`) is gone. Use a GraalVM as the current SDK
 (e.g. `sdk use java 25.0.2-graal`) and `native-image` resolves from `PATH`.
@@ -154,8 +161,11 @@ JVM system properties whose name starts with `bench` are forwarded from the Grad
 the forked test JVM:
 
 ```bash
-./gradlew :lib-core:test -Dbench=true --tests "rhizome.ValidationBenchmark"
+./gradlew :lib-core:test -Dbench=on --tests "rhizome.ValidationBenchmark"
 ```
+
+The forwarding rule is "any property named `bench*`", but the guard each benchmark actually reads is
+`"on".equals(System.getProperty("bench"))` — `-Dbench=true` forwards fine and still no-ops.
 
 Benchmarks are ordinary JUnit classes that no-op unless the property is present, so they stay inside
 the normal suite without slowing it. `ValidationBenchmark` is the consensus throughput probe; the
@@ -163,6 +173,31 @@ the normal suite without slowing it. `ValidationBenchmark` is the consensus thro
 (lib-core) and `Pufferfish2Benchmark` (lib-crypto) probe signature scaling and PoW throughput.
 
 Benchmarks write `bench.txt` into the module directory; it is gitignored.
+
+### P-8 — Test task buckets *(implemented)*
+
+Three verification tasks, three budgets — a test's package and class name decide which bucket it
+lands in:
+
+| Task | Selects | Budget |
+|---|---|---|
+| `test` (and so `build`) | everything **except** `rhizome.periodic.*` (exclusion declared in `app-node/build.gradle`, where that bucket lives) | the routine loop |
+| `adversarial` | the protocol gate plus `rhizome.adversarial.*` / `*AttackTest` / `*AdversarialTest` | ~1 minute |
+| `periodicAdversarial` | `rhizome.periodic.*` only | manual, unbounded |
+
+`periodicAdversarial` (`:app-node`) holds scenarios that are genuinely slow or resource-heavy —
+multi-hundred-MiB snapshot fixtures, forked JVMs with non-default heaps, an intentionally observed
+process hang. It is deliberately **not** a dependency of `test`, `check`, `build` or `adversarial`;
+running it is an explicit act when validating that surface.
+
+The `excludeTestsMatching 'rhizome.periodic.*'` filter on `test` is load-bearing, not belt-and-braces:
+`adversarial`'s filter ignores those classes because of where they live, but plain `test` has **no
+filter at all** and runs every `@Test` in the source set regardless of package. Verified
+empirically — the first version of the task lacked the exclusion and a plain `./gradlew build`
+regenerated the periodic classes' test-result XML.
+
+A scenario parked in the periodic bucket still owes the adversarial catalogue an entry; placement is
+about runtime cost, never about a scenario's verdict.
 
 ## Verified state (as of feature 001-activej-v7-java25)
 

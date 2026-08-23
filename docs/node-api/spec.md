@@ -67,7 +67,7 @@ aggregate token-bucket gate that sheds with HTTP 429 *before* doing the work.
 | `RHIZOME_ALLOW_OPEN_API` | — | opt out of the operator-route gate |
 | `RHIZOME_ALLOW_PRIVATE_PEERS` | — | opt out of the SSRF/private-IP peer filter |
 | `RHIZOME_DATA` | `./data` | RocksDB data directory |
-| `RHIZOME_SNAPSHOT` | — | snapshot file seeding the genesis |
+| `RHIZOME_SNAPSHOT` | per-network shipped default | snapshot file seeding the genesis. Unset, the network's own default is used: mainnet loads its checked-in classpath allocation artifact, testnet/devnet an empty snapshot. Whatever the source, a network profile that pins a genesis supply refuses to boot on a total mismatch (see [consensus](../consensus/spec.md) C-11) — no flag weakens the check |
 | `RHIZOME_MINER` | — | reward address (enables block production) |
 | `RHIZOME_PEERS` | — | comma-separated initial peers |
 | `RHIZOME_ADVERTISE` | — | public URL advertised to peers; must be an `http(s)` URL with a host |
@@ -191,6 +191,21 @@ Consequences for the streaming routes, which are the timeout-sensitive ones — 
 Two long-standing workaround comments were re-verified against v7 and still hold: the interned-header
 lookup and the `Promise.ofBlocking` offload path (which swallows `RejectedExecutionException`) in
 `NodeApi.java`.
+
+### A-13 — Fail-fast genesis boot *(implemented)*
+
+Genesis validation happens **before the port is bound**, so a misconfigured node never reaches a
+half-serving state: the snapshot is resolved (`RHIZOME_SNAPSHOT` → the network's shipped default),
+parsed under the decode-time bounds, checked chain-id → signed-range → pinned total, and only then
+seeded. Any failure is an exception that ends the process with both totals named in the message;
+there is no degraded or "continue anyway" mode for a genesis mismatch.
+
+The refusal is identical on every boot path — fresh data directory, existing data directory
+(where it precedes the stored-genesis re-verification, so the operator sees the more actionable
+message first), and a boot whose snap-sync bootstrap attempt aborted and fell through. Verified at
+the process level, not just in-JVM: the `E2EGenesis*` suites boot real `RhizomeNode` processes and
+assert the port is never opened. Exotic snapshot paths (a directory, a writerless FIFO, a symlink
+retargeted mid-read) fail cleanly and promptly rather than hanging the boot.
 
 ## Known limits (accepted, not defects)
 
