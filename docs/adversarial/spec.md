@@ -444,6 +444,12 @@ Scenarios whose subject is the system rather than a rule: real nodes, real socke
 work, real RocksDB. Fixtures live in `app-node/src/test/java/rhizome/adversarial/e2e/`
 (`TestNetwork`, `E2EFixtures`, `HostilePeer`, `RawHttp`).
 
+A rule that no shipped profile activates still needs real-node proofs, so `TestNetwork` carries a
+`CURVE_ACTIVE` profile — the emission curve (see [consensus](../consensus/spec.md) C-10) scheduled
+at a real height on an otherwise ordinary test network — and `E2EFixtures.mintToSupply` drives a
+live chain to a chosen committed supply, including the bands around and above `supplyTarget` that
+only exist under an active curve. Everything in the E2E-61..86 range runs against those.
+
 | ID | Scenario | Class | Verdict | Proof |
 |----|----------|-------|---------|-------|
 | E2E-01 | A node that mined its own branch in isolation keeps it, refusing the heavier history its peers hold. | A3 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EForkConvergenceTest.java#aNodeOnALighterBranchAdoptsTheHeavierOneItLearnsOverHttp` |

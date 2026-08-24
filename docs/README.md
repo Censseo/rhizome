@@ -12,7 +12,7 @@ truth: what each area does, what it owns, and which invariants must never regres
 
 | Domain | Description | Modules | Status |
 |---|---|---|---|
-| [consensus](consensus/spec.md) | Block validation order, difficulty, cadence, GHOST fork choice, finality, emission, pinned genesis supply | `lib-core/blockchain`, `lib-core/block` | Draft |
+| [consensus](consensus/spec.md) | Block validation order, difficulty, cadence, GHOST fork choice, finality, supply-targeted emission curve, pinned genesis supply | `lib-core/blockchain`, `lib-core/block` | Draft |
 | [transactions](transactions/spec.md) | Transaction envelope, nonces, ledger arithmetic, execution, mempool & fee market | `lib-core/transaction`, `ledger`, `mempool` | Draft |
 | [contracts](contracts/spec.md) | WASM VM determinism, host ABI, gas, sessions & undo journals, reference contracts | `lib-vm` | Draft |
 | [boxes](boxes/spec.md) | Data boxes — typed registers, anti-dust deposit, storage rent, scans | `lib-core/box` | Draft |
@@ -43,12 +43,18 @@ These span domains and are restated in each spec that carries part of them:
   reverses exactly on reorg — persisted undo journals and receipts, atomic `WriteBatch` per store,
   boot reconciliation for anything left ahead of the chain height.
 - **Determinism.** No floating point on any consensus quantity; no host time or randomness in the
-  VM; all VM budgets are fixed network constants, not JVM-heap-dependent.
+  VM; all VM budgets are fixed network constants, not JVM-heap-dependent. Where a rule is naturally
+  continuous — the logarithmic emission curve — it is discretised into an integer table generated
+  from published constants and pinned bit-for-bit by a checked-in vector file, so an independent
+  implementation that disagrees fails a test instead of forking the chain. See
+  [consensus](consensus/spec.md) C-10.
 - **Derived, never cached.** Difficulty and the voted economic parameters are recomputed from
   header history after every add *and* pop.
-- **Header-only derived state.** Difficulty, median-time, uncle work and vote tallies read only
-  `headerAt(h)` — this is what makes pruning and snap-sync possible. Nonces are the one exception
-  and are persisted plus committed to the state root.
+- **Header-only derived state.** Difficulty, median-time, uncle work, vote tallies and the block
+  subsidy read only `headerAt(h)` — this is what makes pruning and snap-sync possible, and it is
+  why a supply-driven reward needs no accumulator and no rollback journal: the parent header
+  already carries its only input. Nonces are the one exception and are persisted plus committed to
+  the state root.
 - **Cheapest-first validation.** PoW last, uncle PoW after the block's own PoW. Every request-path
   route meters before it works.
 - **Single writer.** All public `ChainEngine` methods serialise on one lock; reorg phases are

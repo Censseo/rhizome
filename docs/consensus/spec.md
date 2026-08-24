@@ -30,6 +30,7 @@ window. It does **not** own what a transaction means once a block is accepted �
 | Uncles / orphan pool / GHOST weighting | [OrphanPool.java](../../lib-core/src/main/java/rhizome/core/blockchain/OrphanPool.java), [UncleRef.java](../../lib-core/src/main/java/rhizome/core/block/UncleRef.java) |
 | Block production & assembly | [BlockProducer.java](../../lib-core/src/main/java/rhizome/core/blockchain/BlockProducer.java), [BlockAssembler.java](../../lib-core/src/main/java/rhizome/core/blockchain/BlockAssembler.java), [Miner.java](../../lib-core/src/main/java/rhizome/core/blockchain/Miner.java) |
 | Network constants & miner-voted params | [NetworkParameters.java](../../lib-core/src/main/java/rhizome/core/blockchain/NetworkParameters.java), [VoteableParams.java](../../lib-core/src/main/java/rhizome/core/blockchain/VoteableParams.java) |
+| Emission schedule — curve generation & evaluation, per-block issuance | [EmissionCurve.java](../../lib-core/src/main/java/rhizome/core/blockchain/EmissionCurve.java), [Issuance.java](../../lib-core/src/main/java/rhizome/core/blockchain/Issuance.java) |
 | Genesis construction | [GenesisBlock.java](../../lib-core/src/main/java/rhizome/core/blockchain/GenesisBlock.java), [GenesisLedger.java](../../lib-core/src/main/java/rhizome/core/ledger/GenesisLedger.java) |
 | Header-chain stateless validation & fork-choice gate | [HeaderChain.java](../../lib-core/src/main/java/rhizome/core/blockchain/HeaderChain.java), [HeaderSynchronizer.java](../../lib-core/src/main/java/rhizome/core/blockchain/HeaderSynchronizer.java) |
 
@@ -142,6 +143,11 @@ difficulty pins near `minDifficulty` regardless of real hashrate, collapsing PoW
   bit** the uncle's difficulty falls short of the nephew's (`base × 2^(uncleDiff − nephewDiff)`, an
   exact integer shift). A flat reward would let a miner staple cheap min-difficulty orphans onto a
   real block and roughly double emission for negligible hashing.
+- Both bases derive from *this block's own* mining reward, so under the emission curve (C-10) they
+  are supply-aware too: `uncleReward(height, parentSupply)` and `nephewReward(height, parentSupply)`
+  are computed from the same dispatched base the coinbase used, never from a second, independently
+  dispatched one. One block, one parent supply, one emission decision — for the coinbase and every
+  uncle/nephew bonus alike.
 
 ### C-7 — Fork choice, finality, and the anti-lying-peer gate *(implemented)*
 
@@ -213,6 +219,35 @@ and the curve's `τ_blocks` from `desiredBlockTimeSec`, so changing block time f
 schedules to be revisited. A later feature schedules the real curve activation height once the
 genesis allocation (C-11) is ratified.
 
+**Plumbing.** The curve's sole input is the **parent's committed supply** — the C-1 header field,
+never a ledger query, so the reward is as reorg-structural as the supply commitment itself. That
+value is threaded to every site that mints or checks a reward: `Executor` (coinbase exactness and
+the uncle/nephew mint), `BlockAssembler` (producer-side stamping), `ChainEngine.addBlock` and the
+stateless `HeaderChain.validate` gate, all through `Issuance.minted(params, height, parentSupply,
+uncles)` — still the single formula the two gates and the producer share. Three consequences worth
+stating, because each is a place the plumbing could have gone wrong instead:
+
+- **`SUPPLY_ABSENT` is a refusal, not a fallback.** A curve-active height whose parent commits no
+  supply has no defined reward; the block is rejected rather than quietly paid the geometric value.
+  `BlockAssembler` guards its coinbase computation the same way its `supply` field already was, so
+  a misconfigured producer never mines a nonsense reward for the executor to reject afterwards.
+- **Rollback derives, it does not re-dispatch.** `Executor.rollbackBlock` takes no `parentSupply` —
+  under the curve `miningReward` is not a pure function of height, so re-deriving the uncle and
+  nephew bases from a fresh dispatch would need an input reorg does not have. It reads them from
+  the block's **own validated coinbase amount** instead, which pass 1 already pinned to the exact
+  value the forward path computed. Apply and rollback stay exact inverses without a new argument or
+  a new journal (`LedgerReversalExactnessTest`).
+- **The rule in force is the one at the block's real position.** A reward is never a decision cached
+  at assembly time: a reorg that moves a block across `emissionCurveHeight` pays whatever the height
+  it actually occupies on the winning branch mandates.
+
+**Profile inheritance.** `testnet()`/`devnet()` derive from `cleanMainnet().toBuilder()` and
+therefore **inherit** `supplyTarget`, `emissionCoefficient` and `emissionTableSteps` — deliberately,
+unlike the genesis-supply pin they explicitly reset (C-11). The calibration is shared because it is
+inert: `emissionCurveHeight` is `0` on all three, so no profile mints from the curve. Every profile
+still *generates* and validates its table at construction, so a degenerate `(S*, c, N)` triple fails
+loudly at `NetworkParameters` build time rather than at the first curve-active block.
+
 ### C-11 — Pinned genesis supply *(implemented)*
 
 `NetworkParameters.genesisSupply` is a fixed per-network consensus constant, set per profile
@@ -253,12 +288,21 @@ profile in ~20 existing suites are unaffected.
 - Optional header fields (uncles, state root, vote, supply) are folded into the hash **only when
   present**, so old blocks hash unchanged.
 - **Supply accounting.** Whenever a block commits a supply, it must equal exactly
-  `parent.supply + Issuance.minted(...)`: the scheduled mining reward at that height plus, for
-  each referenced uncle, its work-scaled uncle and nephew reward (the same `scaleRewardToWork`
-  shift `Executor` applies). The parent supply is read from the parent **header** only, never
-  from ledger state. `Issuance.minted` is the single formula — shared byte-for-byte by
-  `ChainEngine.addBlock`, the stateless `HeaderChain.validate` gate, and `BlockAssembler` — so an
-  honestly-assembled candidate always satisfies the check it is later re-validated against.
+  `parent.supply + Issuance.minted(...)`: the mining reward scheduled by the emission rule in
+  force at that height plus, for each referenced uncle, its work-scaled uncle and nephew reward
+  (the same `scaleRewardToWork` shift `Executor` applies). The parent supply is read from the
+  parent **header** only, never from ledger state. `Issuance.minted` is the single formula —
+  shared byte-for-byte by `ChainEngine.addBlock`, the stateless `HeaderChain.validate` gate, and
+  `BlockAssembler` — so an honestly-assembled candidate always satisfies the check it is later
+  re-validated against.
+- **One emission decision per block.** Every reward a block mints — its coinbase and each uncle and
+  nephew bonus — is dispatched against the *same* parent supply and the *same* activation verdict.
+  A block never mixes a curve-derived coinbase with height-only uncle divisors, in either gate.
+- **Absent supply is a refusal.** Under an active curve, a parent that commits no supply
+  (`SUPPLY_ABSENT`) yields no reward at all: the block is rejected, never paid a fallback value.
+- **Rewards reverse from what was validated, not from what is recomputed.** Rollback derives the
+  uncle and nephew bases from the block's own validated coinbase amount, so apply and rollback stay
+  exact inverses for a reward that is not a pure function of height.
 - **Supply prefix closure.** A block whose parent commits a supply MUST also commit one (dropping
   the commitment mid-chain is invalid); a block whose parent does not commit supply MUST NOT
   start one (no mid-chain opt-in). A chain therefore commits supply at every height from genesis,
@@ -271,10 +315,13 @@ profile in ~20 existing suites are unaffected.
   whose recomputed hash no longer matches the mined header (rejected network-wide) and hashes
   differently across wire forms (a latent split). Pinned by a `decode(encode(b)).hash()`
   round-trip test.
-- No consensus quantity is ever a floating-point comparison — reward is an integer table by height,
-  GHOST rewards scale by `>>>` shifts.
-- Difficulty, median-time, uncle work and vote tallies read **only** `headerAt(h)`, never bodies
-  (this is what makes pruning and snap-sync possible).
+- No consensus quantity is ever a floating-point comparison. The subsidy is an integer schedule —
+  a geometric step function of height, or (C-10) an integer stepped table indexed by the committed
+  supply, generated once and evaluated by `floorDiv` interpolation — and GHOST rewards scale by
+  `>>>` shifts. The curve's generated output is pinned bit-for-bit by a checked-in vector file, so
+  a re-implementation that disagrees fails a test rather than forking the chain.
+- Difficulty, median-time, uncle work, vote tallies and the block subsidy read **only**
+  `headerAt(h)`, never bodies (this is what makes pruning and snap-sync possible).
 - **Pinned genesis supply.** A network profile that pins a genesis supply (`genesisSupply !=
   GENESIS_SUPPLY_UNPINNED`) MUST refuse to build or re-verify genesis against a snapshot whose
   total differs, on every boot path, before any balance is seeded. The check is gated solely by
@@ -296,6 +343,13 @@ profile in ~20 existing suites are unaffected.
 | `maxTxGas` / `maxBlockGas` | 50 000 000 / 250 000 000 |
 | `uncleRewardNum/Den`, `nephewRewardDivisor` | 1/2, 32 |
 | `votingEpochLength` | 1024 |
+| `supplyTarget` (`S*`) | 2 997 924 580 000 base units (299 792 458 PDN) |
+| `emissionCoefficient` (`c`) | 23 750 base units |
+| `emissionTableSteps` (`N`) | 256 |
+| `emissionCurveHeight` | **0 — never**, on every shipped profile |
+
+The three curve constants are inherited unchanged by `testnet()`/`devnet()`; only the activation
+height decides whether they mint, and it is `0` everywhere today.
 
 ## Open items
 
@@ -303,6 +357,15 @@ profile in ~20 existing suites are unaffected.
   connections — the three upgrades that would make a sub-5 s target safe (§6.3).
 - Residual: the **51% attack** within the finality window is irreducible; the window bounds only
   its depth.
+- **Curve activation is unscheduled.** C-10 ships fully specified, vector-pinned and adversarially
+  proven, but `emissionCurveHeight = 0` on every profile, so no shipped network mints from it. A
+  later feature sets the height once the genesis allocation (C-11) is ratified — `S₀` and `c` are
+  two ends of the same calibration, and the coefficient is only meaningful against a final `S₀`.
+  Two known follow-ons ride on that feature: the dashboard's reward display still reads the
+  height-only overload (see [dashboard](../dashboard/spec.md) U-1), and
+  `NetworkParameters.emissionCurveActiveForNextBlock` — kept for symmetry with its
+  `boxActiveForNextBlock`/`tokenActiveForNextBlock` siblings — has no production caller until one
+  exists.
 
 ## References
 
