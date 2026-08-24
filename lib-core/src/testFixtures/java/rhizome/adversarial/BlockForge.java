@@ -29,10 +29,10 @@ import rhizome.crypto.SHA256Hash;
  *       nothing. Sealing recomputes the Merkle root and mines a fresh nonce, so the forged block
  *       reaches the gate under attack carrying real work, which is also what a real attacker with
  *       a miner would submit.</li>
- *   <li><b>Only what the scenario names changes.</b> The template is the honest next block for the
- *       engine's tip: correct id, difficulty from the engine's own recomputation, parent hash,
- *       coinbase paying the fixture's miner the exact reward for the height, and a timestamp one
- *       target interval past the parent.</li>
+   *   <li><b>Only what the scenario names changes.</b> The template is the honest next block for the
+   *       engine's tip: correct id, difficulty from the engine's own recomputation, parent hash,
+   *       coinbase paying the fixture's miner the exact reward for the height and parent supply,
+   *       and a timestamp one target interval past the parent.</li>
  * </ol>
  *
  * <p>{@link #sealWithoutPow()} is the deliberate exception, for the scenarios whose whole subject
@@ -57,7 +57,7 @@ public final class BlockForge {
         this.params = params;
         this.parentSupply = chain.parentSupply();
         long timestamp = clock.addAndGet(params.desiredBlockTimeSec() * 1000L);
-        this.coinbase = coinbaseFor(chain.miner(), params.miningReward(height), timestamp);
+        this.coinbase = coinbaseFor(chain.miner(), honestReward(height), timestamp);
         this.block = BlockImpl.builder()
             .id((int) height)
             .timestamp(timestamp)
@@ -105,8 +105,23 @@ public final class BlockForge {
      * revenue attribution, chiefly).
      */
     public BlockForge coinbaseTo(PublicAddress miner) {
-        this.coinbase = coinbaseFor(miner, params.miningReward(block.id()), block.timestamp());
+        this.coinbase = coinbaseFor(miner, honestReward(block.id()), block.timestamp());
         return this;
+    }
+
+    /**
+     * The honest reward for {@code height}, dispatched on the parent's committed supply exactly
+     * as {@code BlockAssembler} and {@code Executor} do: the coinbase must agree with the curve-
+     * aware supply stamp {@link #assemble()} commits (both read the SAME {@link #parentSupply}),
+     * or a curve-active profile forges a block whose coinbase contradicts its own header — which
+     * every scenario then proves is rejected as {@code INCORRECT_MINING_FEE} rather than on the
+     * rule under attack. Below activation the two-arg dispatch reduces to the geometric value,
+     * so curve-inactive users are unaffected.
+     */
+    private long honestReward(long height) {
+        return parentSupply == BlockImpl.SUPPLY_ABSENT
+            ? params.miningReward(height)
+            : params.miningReward(height, parentSupply);
     }
 
     /**
@@ -188,7 +203,7 @@ public final class BlockForge {
         // not to be rejected earlier as an accounting mismatch that proves nothing.
         block.supply(parentSupply == BlockImpl.SUPPLY_ABSENT
             ? BlockImpl.SUPPLY_ABSENT
-            : Math.addExact(parentSupply, Issuance.minted(params, block.id(), block.difficulty(), block.uncles())));
+            : Math.addExact(parentSupply, Issuance.minted(params, block.id(), parentSupply, block.difficulty(), block.uncles())));
     }
 
     /** The Merkle root of {@code transactions} as consensus computes it. */

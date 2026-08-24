@@ -655,7 +655,7 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
             try {
                 ExecutionStatus status = Executor.executeBlock(
                     block, ledger, store::hasTransaction, params, verifier,
-                    contractProcessor, boxProcessor, tokenProcessor, touched);
+                    contractProcessor, boxProcessor, tokenProcessor, touched, parent.supply());
                 if (status != SUCCESS) {
                     return status;
                 }
@@ -1464,8 +1464,9 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
             try {
                 var b = (BlockImpl) candidate;
                 java.util.Set<PublicAddress> touched = new java.util.HashSet<>();
+                long parentSupply = store.headerAt(store.height()).supply();
                 ExecutionStatus status = Executor.executeBlock(candidate, ledger, store::hasTransaction, params,
-                    verifier, contractProcessor, boxProcessor, tokenProcessor, touched);
+                    verifier, contractProcessor, boxProcessor, tokenProcessor, touched, parentSupply);
                 if (status != SUCCESS) {
                     return; // invalid block; leave the state root empty and let addBlock reject it
                 }
@@ -1676,7 +1677,8 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
         }
         long expected;
         try {
-            expected = Math.addExact(parentSupply, Issuance.minted(params, b.id(), b.difficulty(), b.uncles()));
+            expected = Math.addExact(parentSupply,
+                Issuance.minted(params, b.id(), parentSupply, b.difficulty(), b.uncles()));
         } catch (ArithmeticException overflow) {
             return INVALID_SUPPLY;
         }

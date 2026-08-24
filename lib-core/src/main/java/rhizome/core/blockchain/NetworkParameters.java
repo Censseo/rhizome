@@ -222,6 +222,45 @@ public final class NetworkParameters {
     @lombok.Builder.Default
     private final long nephewRewardDivisor = 32;
 
+    // --- Supply-driven logarithmic emission curve (004-integer-log-curve) ---
+    /**
+     * Monetary target {@code S*} the curve converges circulating supply toward, in base units.
+     * A fixed per-network consensus constant like {@link #chainId} — never voted, never
+     * environment-configurable. Must be strictly positive and, when this profile pins a genesis
+     * supply ({@link #genesisSupply}), strictly above it: the curve's target must lie ahead of
+     * where the chain starts. See {@link EmissionCurve}.
+     */
+    private final long supplyTarget;
+    /**
+     * Calibration constant {@code c} (base units) fixing the curve's convergence timescale: near
+     * equilibrium the relaxation time is {@code supplyTarget / emissionCoefficient} blocks. Must
+     * be strictly positive. See {@link EmissionCurve}.
+     */
+    private final long emissionCoefficient;
+    /**
+     * Number of uniform table steps the curve is generated at over {@code (0, supplyTarget]}
+     * ({@code >= 2}). See {@link EmissionCurve}.
+     */
+    private final int emissionTableSteps;
+    /**
+     * Height at which the supply-driven curve reward applies (0 = <em>never</em>, the
+     * {@link #powUpgradeHeight} polarity — NOT the {@link #boxActivationHeight}/
+     * {@link #tokenActivationHeight} "0 = from genesis" polarity). Below this height, or on a
+     * profile that never schedules it, {@link #miningReward(long, long)} returns exactly the
+     * geometric reward. See {@link #emissionCurveActiveAt} / {@link #emissionCurveActiveForNextBlock}.
+     */
+    @lombok.Builder.Default
+    private final long emissionCurveHeight = 0;
+
+    /**
+     * The generated stepped table for {@code (supplyTarget, emissionCoefficient,
+     * emissionTableSteps)}, built once at construction time so a degenerate curve configuration
+     * fails fast at node startup rather than mid-chain on the first curve-active evaluation. Not
+     * builder-settable — purely derived from the three constants above.
+     */
+    @lombok.Getter(lombok.AccessLevel.NONE)
+    private final EmissionCurve emissionCurve;
+
     // --- Data boxes ---
     /**
      * Height at which box transactions become valid (0 = from genesis). Judged by the executor
@@ -355,6 +394,8 @@ public final class NetworkParameters {
                       long decimalScaleFactor, long initialReward, long rewardEpochBlocks,
                       long rewardDecayNum, long rewardDecayDen,
                       long uncleRewardNum, long uncleRewardDen, long nephewRewardDivisor,
+                      long supplyTarget, long emissionCoefficient, int emissionTableSteps,
+                      long emissionCurveHeight, EmissionCurve ignoredBuilderEmissionCurve,
                       long boxActivationHeight, int maxBoxSizeBytes, int maxBoxRegisters,
                       long minValuePerByte, long storagePeriodBlocks, long storageFeeFactor,
                       int maxBoxCollectsPerBlock, long tokenActivationHeight,
@@ -412,6 +453,29 @@ public final class NetworkParameters {
         if (rewardDecayDen <= 0 || uncleRewardDen <= 0 || nephewRewardDivisor <= 0) {
             throw new IllegalArgumentException("reward denominators must be > 0");
         }
+        // A negative activation height would invert emissionCurveActiveAt for every height
+        // (including the Long.MAX_VALUE sentinel edge) — same fail-fast discipline as
+        // boxActivationHeight/tokenActivationHeight above.
+        if (emissionCurveHeight < 0) {
+            throw new IllegalArgumentException("emissionCurveHeight must be >= 0");
+        }
+        // supplyTarget must lie strictly ahead of a pinned genesis supply — a curve that starts
+        // at or above its own target is degenerate. Unpinned profiles (GENESIS_SUPPLY_UNPINNED)
+        // skip this check, mirroring how genesisSupply's equality check is skipped elsewhere.
+        if (genesisSupply != GENESIS_SUPPLY_UNPINNED && supplyTarget <= genesisSupply) {
+            throw new IllegalArgumentException(
+                "supplyTarget must be > genesisSupply when a genesis supply is pinned");
+        }
+        // EmissionCurve.build validates supplyTarget/coefficient/steps itself (IllegalArgumentException)
+        // and does the O(N) table generation eagerly, right here at construction time — a
+        // degenerate curve configuration must fail fast at node startup, never mid-chain on the
+        // first curve-active evaluation. `ignoredBuilderEmissionCurve` exists only so this
+        // constructor's parameter list has one entry per class field (Lombok's class-level
+        // @Builder generates its build() call from the full field list, positionally) — the
+        // curve is ALWAYS derived fresh from supplyTarget/emissionCoefficient/emissionTableSteps
+        // below, never from a builder-supplied value, so a constructed instance's curve can
+        // never drift from its own constants.
+        this.emissionCurve = EmissionCurve.build(supplyTarget, emissionCoefficient, emissionTableSteps);
         this.chainId = chainId;
         this.networkName = networkName;
         this.powAlgorithm = powAlgorithm;
@@ -447,6 +511,10 @@ public final class NetworkParameters {
         this.uncleRewardNum = uncleRewardNum;
         this.uncleRewardDen = uncleRewardDen;
         this.nephewRewardDivisor = nephewRewardDivisor;
+        this.supplyTarget = supplyTarget;
+        this.emissionCoefficient = emissionCoefficient;
+        this.emissionTableSteps = emissionTableSteps;
+        this.emissionCurveHeight = emissionCurveHeight;
         this.boxActivationHeight = boxActivationHeight;
         this.maxBoxSizeBytes = maxBoxSizeBytes;
         this.maxBoxRegisters = maxBoxRegisters;
@@ -517,6 +585,33 @@ public final class NetworkParameters {
     }
 
     /**
+     * Whether the supply-driven curve reward (see {@link #emissionCurveHeight}) governs a block
+     * at {@code height}: active only when a height has actually been scheduled ({@code > 0}) and
+     * {@code height} has reached it. Unlike {@link #boxActiveAt}/{@link #tokenActiveAt}, 0 means
+     * <em>never</em> here (the {@link #powUpgradeHeight} polarity), not "from genesis".
+     */
+    public boolean emissionCurveActiveAt(long height) {
+        return emissionCurveHeight > 0 && height >= emissionCurveHeight;
+    }
+
+    /**
+     * The next-block mirror of {@link #emissionCurveActiveAt}, structurally parallel to
+     * {@link #boxActiveForNextBlock}/{@link #tokenActiveForNextBlock} (same sentinel-safe
+     * subtraction, so the {@code Long.MAX_VALUE} "past every activation" sentinel resolves true
+     * without overflow) — but unlike those two, it currently has no production caller. Box/token
+     * transactions sit in the mempool awaiting a not-yet-known future block, so admission
+     * ({@code TransactionAdmission}) must predict activation for a height it does not control;
+     * a coinbase is never mempool-pooled — {@code BlockAssembler} always knows the exact next
+     * height it is building for and reaches the identical answer via {@link #emissionCurveActiveAt}
+     * inside {@link #miningReward(long, long)}'s own dispatch. Kept for pattern symmetry and in
+     * case a future mempool-side consumer needs it (e.g. previewing economics for a pooled
+     * transaction); exercised today only by its own unit test.
+     */
+    public boolean emissionCurveActiveForNextBlock(long confirmedHeight) {
+        return emissionCurveHeight > 0 && confirmedHeight >= emissionCurveHeight - 1;
+    }
+
+    /**
      * The Pufferfish2 cost parameters in force for a block at {@code height}: the genesis
      * costs below {@link #powUpgradeHeight} (or always, when no upgrade is scheduled), the
      * "after" costs from the upgrade height on.
@@ -561,6 +656,34 @@ public final class NetworkParameters {
             reward = Math.multiplyExact(reward, rewardDecayNum) / rewardDecayDen;
         }
         return reward;
+    }
+
+    /**
+     * Deterministic, integer-only mining reward for a block at {@code height}, given the
+     * parent's committed circulating supply — the supply-driven twin of {@link #miningReward(long)}.
+     *
+     * <p>Dispatches on {@link #emissionCurveActiveAt}: below activation (or on a profile that
+     * never schedules the curve) this returns exactly {@link #miningReward(long)}'s geometric
+     * result, ignoring {@code parentSupply} entirely. At or above activation it returns the
+     * curve's raw value at {@code parentSupply}, clamped to zero — the single clamp site
+     * (contracts/emission-curve.md §4): the curve's negative branch (supply at/above
+     * {@link #supplyTarget}) must never mint a negative reward.
+     */
+    public long miningReward(long height, long parentSupply) {
+        if (emissionCurveActiveAt(height)) {
+            return Math.max(0L, emissionCurve.raw(parentSupply));
+        }
+        return miningReward(height);
+    }
+
+    /** The supply-driven twin of {@link #uncleReward(long)}, deriving from the dispatched base. */
+    public long uncleReward(long height, long parentSupply) {
+        return Math.multiplyExact(miningReward(height, parentSupply), uncleRewardNum) / uncleRewardDen;
+    }
+
+    /** The supply-driven twin of {@link #nephewReward(long)}, deriving from the dispatched base. */
+    public long nephewReward(long height, long parentSupply) {
+        return miningReward(height, parentSupply) / nephewRewardDivisor;
     }
 
     /**
@@ -650,6 +773,13 @@ public final class NetworkParameters {
             // fails the build on any drift between this constant and the artifact.
             .genesisSupply(1_000_000_000_000L)
             .genesisSnapshotResource("genesis/rhizome-mainnet.json")
+            // Supply-driven logarithmic emission curve constants (004-integer-log-curve;
+            // WHITEPAPER.md §5.3; research.md Decision 6): calibrated for tau ~= 20 years at
+            // this 5-second cadence, targeting the speed-of-light supply S* (299,792,458 PDN).
+            .supplyTarget(2_997_924_580_000L)
+            .emissionCoefficient(23_750L)
+            .emissionTableSteps(256)
+            // emissionCurveHeight stays 0 (never) in this feature — feature 05 schedules activation.
             .build();
     }
 

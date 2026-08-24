@@ -339,17 +339,130 @@ pinned to the height's reward.
 
 ### 5.3 Economics
 
-The block subsidy decays geometrically (×2/3) once per epoch, in integer arithmetic, so
-issuance is bounded and deterministic. Total issuance is the geometric series
-`epochBlocks × initialReward × 3 ≈ 100M PDN`.
+**The supply-targeted logarithmic curve.** The block subsidy is a function of the chain's own
+header-committed circulating supply, not of height: `R(S) = c · ln(S*/S)`, evaluated in
+integer-only arithmetic so independent implementations cannot disagree and fork the chain (the
+fix for Pandanite's `double`-based reward). `S*` is a fixed monetary target (mainnet:
+`2 997 924 580 000` base units — 299 792 458 PDN, the speed of light in km/s as an exact SI
+integer); `c` is a calibration coefficient fixing the convergence timescale. As circulating
+supply `S` rises toward `S*` the reward falls logarithmically and reaches exactly zero once
+`⌊c · ln(S*/S)⌋` truncates to `0` — supply asymptotically approaches `S*` and issuance halts
+entirely, rather than the geometric schedule's indefinite (if vanishingly small) long tail.
 
-**Calibration for fast blocks.** The decay epoch is denominated in *blocks*, so its
-real-time length depends on the block rate. Pandanite's 666 666-block epoch spans about
-1.9 years at 90 s/block — but only **38 days at 5 s/block**. Left unchanged, the whole
-subsidy would drain in a few years, with the first epoch alone (a third of all coins)
-emitted in ~5 weeks — a launch-fairness and mining-incentive collapse, even though the
-*total* supply is unaffected. Rhizome therefore rescales both knobs by the cadence ratio
-(×18 = 90/5) so the **real-time schedule is preserved** regardless of block rate:
+This corrects a second Pandanite-class risk beyond floating point: a purely height-based decay
+schedule is blind to the chain's actual monetary state — a schedule tuned for one launch
+allocation keeps minting on the same clock even if the real circulating supply ends up far from
+what the schedule assumed. A supply-targeted rule self-corrects: it always measures distance from
+the real target, read from the header the chain already carries (feature 01's committed `supply`
+field), never from an assumption baked in at genesis.
+
+**Generation (build time, integer-only).** The curve is a stepped table of `N` uniform positions
+over `(0, S*]`, generated once when a network's parameters are constructed, from three published
+constants — `S*`, `c`, `N` — never shipped as data, never voted, never derived at runtime. For
+step `i ∈ [1, N]`: position `S_i = i · ⌊S*/N⌋`, value `table[i] = ⌊c · ln(S*/S_i)⌋`.
+
+`ln` of the ratio `S*/S_i` is computed by a fixed-point successive-squaring algorithm, entirely in
+arbitrary-precision integer arithmetic (`BigInteger`), never floating point:
+
+1. Scale the ratio to a 64-bit fixed-point mantissa (`⌊ratio · 2^64⌋`) and read its integer
+   `log2` directly off the scaled value's bit length — the mantissa now sits in `[1, 2)`.
+2. Extract 63 fractional bits of `log2` by repeated squaring: square the mantissa and floor back
+   to the 64-bit scale; if it overflows back into `[2, 4)`, emit a `1` fractional bit and halve
+   the mantissa back into `[1, 2)`, else emit `0`. Every truncation in this loop floors — the one
+   place a naive port most often disagrees bit-for-bit.
+3. Convert `log2 → ln` by multiplying the accumulated fixed-point `log2` value by the published
+   constant `LN2_Q62 = ⌊ln 2 · 2^62⌋ = 3 196 577 161 300 663 914` (since `ln x = log2 x · ln 2`),
+   then multiply by `c` and floor-shift back to an integer.
+
+The final value is asserted to fit in a `long` (throws otherwise — a misconfigured profile fails
+at construction, never mints garbage). Below the first step (`S < S_1`, including `0`) the curve
+holds `table[1]` (a monotone extension, unreachable on a well-formed chain since supply never
+falls below the pinned genesis supply `S₀`).
+
+**Evaluation (per block, O(1), no `BigInteger`).** One implicit point beyond the table,
+`S_(N+1) = S*` with `table[N+1] = 0` (exact — `ln(S*/S*) = 0`), is what the last real segment
+`[S_N, S*)` interpolates against. This closes a gap a literal step-only reading leaves open
+whenever `N` does not divide `S*` evenly (the mainnet case — `S*/256` has a remainder): without
+it, the curve is undefined on the stretch between the last generated step and the target itself.
+With it, the curve is continuous and reaches exactly zero at `S*` by construction, not special
+case:
+
+- `S < S_1` → `table[1]` (below-floor extension).
+- `S_i ≤ S < S_{i+1}` (using the implicit point above for `i = N`) → linear interpolation with an
+  explicit floor toward negative infinity (the table is non-increasing, so a segment's slope can
+  be negative — truncation-toward-zero division rounds the wrong way here):
+  `raw(S) = table[i] + ⌊(table[i+1] − table[i]) · (S − S_i) / (S_{i+1} − S_i)⌋`.
+- `S ≥ S*` → the negative branch, by ratio mirroring on the same table:
+  `raw(S) = −(interp(U) + 1)`, where `U = ⌊S* · S* / S⌋` (a 128-bit-safe intermediate — `S*`
+  squared overflows a 64-bit `long`) — **except** exactly at `S = S*`, where `U = S*` and
+  `raw(S*) = 0` exactly (`ln(1) = 0` is an exact integer; nothing was truncated away, so no
+  correction is needed). The `+ 1` correction elsewhere is not decorative: `interp(U)` is already
+  the *floor* of a magnitude the table truncated at generation and/or interpolation time, and
+  negating that floor as-is would recreate the same "floors to zero" stretch the positive side
+  truncates across — collapsing the negative branch to exactly `0` across a wide band immediately
+  above `S*`, rather than the strictly negative, total function the design requires. `raw()`
+  wants `⌊−trueValue⌋` (the *ceiling* of the truncated magnitude), which is `interp(U) + 1` in
+  every case but the one exact-integer point above. `U < S*` always holds, so `interp(U)` is
+  always in range, and the function is total and monotone non-increasing over the entire `long`
+  domain.
+
+**Clamping and dispatch.** Consensus never pays a negative reward — a single clamp site applies
+`max(0, raw(S))` where the reward enters the block/uncle/nephew computation. The raw, unclamped
+value stays observable for tests (and a later feature's burn accounting); only the clamped value
+is ever minted. Height gates *which* rule governs: below a per-network activation height (`0` =
+never scheduled — the same polarity as the Pufferfish2 cost-upgrade height, §3.2) the legacy
+geometric rule below applies unchanged; at or above it, the curve applies. On every network
+Rhizome ships today the activation height is `0` — the curve exists, is fully specified and
+vector-pinned, but does not yet govern a single minted block. A later feature schedules the real
+activation height once the genesis allocation is ratified.
+
+**Calibration record (mainnet).** Calibrated for a `τ ≈ 20`-year convergence timescale against
+the provisional genesis supply `S₀ = 1 000 000 000 000` base units (100M PDN, feature 02):
+
+| Quantity | Value |
+|---|---|
+| Supply target `S*` | `2 997 924 580 000` base units (299 792 458 PDN) |
+| Coefficient `c` | `23 750` base units |
+| Table steps `N` | `256` |
+| Relaxation time `τ_blocks = S*/c` | `126 228 403` blocks ≈ 20.0003 years |
+| Launch reward `R₀ = c · ln(S*/S₀)` | `26 075` base units ≈ 2.6075 PDN/block — ≈6.1% below the geometric schedule's 2.7777 PDN/block launch reward, inside the 10% least-surprise band (SC-004) |
+| Terminal supply | `S* − 127 289 756` base units (≈ `S* −` 12 729 PDN) — the first supply at which `⌊c · ln(S*/S)⌋` truncates to exactly `0`; found by exhaustive search over the generated table, not a closed form (the continuous first-order estimate `S*(1 − e^(−1/c))` only approximates it) |
+| Reorg continuity | Two chain tips whose committed supply diverged within a 120-block reorg window (the maximum reorg depth, §3.7) mint rewards that differ by **at most one base unit** — never a large jump. The continuous first-order estimate (`(c/S₀) · ΔS`, negligible) undercounts the discrete implementation slightly: two evaluations landing in different interpolation segments each carry independent floor rounding, which can compound to exactly one base unit — never more, exhaustively verified — even where the continuous estimate rounds to zero |
+
+`N = 256` uniform steps keep interpolation fidelity comfortably under one base unit across the
+economically reachable domain `[S₀, S*]`, at 2 KiB of generated constants — the table *is* the
+consensus definition (there is no separate "true" continuous curve at consensus to approximate;
+the interpolation error bound is an economics-fidelity figure, not a tolerance against some other
+ground truth).
+
+**Cadence coupling (retained warning).** Like the geometric schedule's decay epoch below, `τ` is
+denominated in *blocks*, not wall-clock time: `τ_blocks` is derived from `τ` years and
+`desiredBlockTimeSec`, never hardcoded, so a future cadence change forces `c` to be recalibrated
+alongside it — the same class of bug the geometric schedule's cadence-relative calibration test
+(`emissionScheduleIsCalibratedForTheBlockCadence`) has always guarded against, now guarding the
+curve too.
+
+**Reproducibility.** The generation and evaluation algorithm above is the complete, normative
+specification — an independent implementation that follows it exactly reproduces every value
+bit-for-bit. `lib-core/src/test/resources/emission/curve-vectors.json` is the published
+implementer-facing artifact: the header constants plus 327 `(supply → rawReward)` pairs — every
+step boundary, both domain edges, a dense sweep of `[S₀, S*]`, the truncation region, and
+negative-branch samples, all 64-bit quantities as decimal strings (never bare JSON numbers, which
+lose precision above 2^53 for a JS consumer). An implementation passes iff every vector matches
+exactly.
+
+**The legacy geometric rule (below activation).** Until the curve's activation height is
+scheduled, and permanently on any block below it, the subsidy decays geometrically (×2/3) once
+per epoch, in integer arithmetic, so issuance stays bounded and deterministic. Total issuance is
+the geometric series `epochBlocks × initialReward × 3 ≈ 100M PDN`.
+
+The decay epoch is denominated in *blocks*, so its real-time length depends on the block rate.
+Pandanite's 666 666-block epoch spans about 1.9 years at 90 s/block — but only **38 days at
+5 s/block**. Left unchanged, the whole subsidy would drain in a few years, with the first epoch
+alone (a third of all coins) emitted in ~5 weeks — a launch-fairness and mining-incentive
+collapse, even though the *total* supply is unaffected. Rhizome therefore rescales both knobs by
+the cadence ratio (×18 = 90/5) so the **real-time schedule is preserved** regardless of block
+rate:
 
 | | Original (90 s) | Naïve at 5 s | **Rhizome (5 s)** |
 |---|---|---|---|
@@ -361,10 +474,7 @@ emitted in ~5 weeks — a launch-fairness and mining-incentive collapse, even th
 | Total issuance | ~100M PDN | ~100M PDN | **~100M PDN** |
 
 Per-block rewards are small because there are 17 280 blocks per day; daily and total
-emission match the intended economics. The invariant is enforced by a cadence-relative
-test (`emissionScheduleIsCalibratedForTheBlockCadence`): it recomputes the epoch's
-real-time span and total issuance from `desiredBlockTimeSec`, so changing the block time
-forces the epoch to be revisited with it.
+emission match the intended economics.
 
 **Fees and mempool policy.** Fees are consensus-*optional* — a block may include a zero-fee
 transaction and still be valid — but relaying and block-building enforce a mempool policy that
@@ -376,15 +486,14 @@ fronting each sender's ready nonce run, with deterministic tie-breaks — rather
 address order, so a fee market forms under contention instead of first-come ordering.
 
 **Committed circulating supply.** A header may additionally commit the circulating supply as of
-that block — the running total of everything minted so far. This changes **no emission rule**:
-the geometric ×2/3 decay schedule above, the per-height reward table and the
-`coinbase == miningReward(h)` exactness check the `Executor` already enforces are all untouched.
+that block — the running total of everything minted so far, and the curve's sole input (above).
 What changes is that the running total becomes an observable, verifiable fact carried in the
-header itself, rather than a quantity only obtainable by replaying every block from genesis.
-Each block commits `supply = parent.supply + minted(block)`, where `minted(block)` is the
-scheduled `miningReward(h)` at that height plus, for each referenced uncle, its work-scaled
-uncle and nephew reward (§3.7's `>>>`-shift scaling) — one formula (`Issuance.minted`), checked
-both in the structural pass of `addBlock` (§3.5) and, header-only, in `HeaderChain.validate`
+header itself, rather than a quantity only obtainable by replaying every block from genesis. Each
+block commits `supply = parent.supply + minted(block)`, where `minted(block)` is the dispatched
+`miningReward(h, parentSupply)` — geometric below activation, curve value at or above it — plus,
+for each referenced uncle, its work-scaled uncle and nephew reward (§3.7's `>>>`-shift scaling) — one
+formula (`Issuance.minted`), checked both in the structural pass of `addBlock` (§3.5) and,
+header-only, in `HeaderChain.validate`
 before a single byte of the block body is downloaded. Genesis commits
 `supply = LedgerSnapshot.totalSupply()`, the sum of seeded balances — 0 for testnet/devnet's
 default empty snapshot; on mainnet, the pinned, non-zero `S₀` of the shipped allocation (§8),

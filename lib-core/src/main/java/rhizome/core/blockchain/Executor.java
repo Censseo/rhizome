@@ -117,6 +117,37 @@ public final class Executor {
                                                BoxProcessor boxProcessor,
                                                TokenProcessor tokenProcessor,
                                                Set<PublicAddress> touchedLedger) {
+        return executeBlock(block, ledger, alreadyExecuted, params, verifier,
+            processor, boxProcessor, tokenProcessor, touchedLedger, BlockImpl.SUPPLY_ABSENT);
+    }
+
+    /**
+     * As above, with a caller-supplied convenience form that skips straight to the
+     * supply-aware coinbase check (research.md Decision 4): {@code parentSupply} is the
+     * parent block's committed circulating supply, or {@link BlockImpl#SUPPLY_ABSENT} when
+     * unknown/uncommitted.
+     */
+    public static ExecutionStatus executeBlock(Block block, Ledger ledger,
+                                               Predicate<SHA256Hash> alreadyExecuted,
+                                               NetworkParameters params, long parentSupply) {
+        return executeBlock(block, ledger, alreadyExecuted, params, null, null, null, null, null,
+            parentSupply);
+    }
+
+    /**
+     * As above, with the parent block's committed circulating supply ({@code parentSupply}, or
+     * {@link BlockImpl#SUPPLY_ABSENT} when unknown/uncommitted) threaded through to the
+     * supply-aware coinbase check (research.md Decision 4).
+     */
+    public static ExecutionStatus executeBlock(Block block, Ledger ledger,
+                                               Predicate<SHA256Hash> alreadyExecuted,
+                                               NetworkParameters params,
+                                               SignatureVerifier verifier,
+                                               ContractProcessor processor,
+                                               BoxProcessor boxProcessor,
+                                               TokenProcessor tokenProcessor,
+                                               Set<PublicAddress> touchedLedger,
+                                               long parentSupply) {
         // A null processor means "this node has no such domain". Normalize here so the body below
         // talks to a processor rather than guarding against a null one; absence is then expressed
         // by available(), and the pass-1 rejections keep their exact semantics.
@@ -124,7 +155,7 @@ public final class Executor {
             processor == null ? ContractProcessor.NONE : processor,
             boxProcessor == null ? BoxProcessor.NONE : boxProcessor,
             tokenProcessor == null ? TokenProcessor.NONE : tokenProcessor,
-            touchedLedger);
+            touchedLedger, parentSupply);
     }
 
     /** As {@link #executeBlock}, with the three domains guaranteed non-null. */
@@ -135,12 +166,21 @@ public final class Executor {
                                             ContractProcessor processor,
                                             BoxProcessor boxProcessor,
                                             TokenProcessor tokenProcessor,
-                                            Set<PublicAddress> touchedLedger) {
+                                            Set<PublicAddress> touchedLedger,
+                                            long parentSupply) {
         List<BlockStateProcessor> domains =
             BlockStateProcessor.inCommitOrder(processor, boxProcessor, tokenProcessor);
         Block blockImpl = block;
         long height = blockImpl.id();
-        long expectedReward = params.miningReward(height);
+        long expectedReward;
+        if (params.emissionCurveActiveAt(height)) {
+            if (parentSupply == BlockImpl.SUPPLY_ABSENT) {
+                return INCORRECT_MINING_FEE;
+            }
+            expectedReward = params.miningReward(height, parentSupply);
+        } else {
+            expectedReward = params.miningReward(height);
+        }
         // Consensus-V2 gate (see NetworkParameters.consensusV2Height): below the activation
         // height the legacy rules apply — no consensus fee floor, and a zero deposit still
         // creates the recipient wallet — so pre-existing history re-verifies unchanged.
@@ -364,7 +404,7 @@ public final class Executor {
             // nephew bonus to this block's miner. Every uncle is a real PoW block, so no
             // reward is minted without matching work. Uncle validity (miner address, depth,
             // no double-crediting) was already enforced by the engine.
-            payUncleRewards(blockImpl, ledger, applied, miner, params);
+            payUncleRewards(blockImpl, ledger, applied, miner, params, parentSupply);
             for (BlockStateProcessor domain : domains) {
                 domain.commit(blockImpl.id());
             }
@@ -405,16 +445,22 @@ public final class Executor {
         }
     }
 
-    /** Mints the GHOST uncle and nephew rewards for a block's referenced uncles. */
+    /**
+     * Mints the GHOST uncle and nephew rewards for a block's referenced uncles. {@code parentSupply}
+     * must be the exact value the caller already used to compute this block's own coinbase reward
+     * (see {@link NetworkParameters#miningReward(long, long)}) — so every reward this block mints,
+     * its own coinbase and every uncle/nephew bonus alike, is dispatched against the identical curve
+     * evaluation rather than risking a second, possibly-different one.
+     */
     private static void payUncleRewards(Block block, Ledger ledger, List<AppliedOp> applied,
-                                        PublicAddress miner, NetworkParameters params) {
+                                        PublicAddress miner, NetworkParameters params, long parentSupply) {
         List<rhizome.core.block.UncleRef> uncles = block.uncles();
         if (uncles.isEmpty()) {
             return;
         }
         long height = block.id();
-        long baseUncleReward = params.uncleReward(height);
-        long baseNephewReward = params.nephewReward(height);
+        long baseUncleReward = params.uncleReward(height, parentSupply);
+        long baseNephewReward = params.nephewReward(height, parentSupply);
         int nephewDifficulty = block.difficulty();
         for (rhizome.core.block.UncleRef ref : uncles) {
             // Scale each reward to the uncle's PROVEN work relative to the nephew's difficulty
@@ -795,6 +841,8 @@ public final class Executor {
                 height, expectedBox, boxReceipts.size(), expectedBox);
         }
 
+        long coinbaseAmount = coinbase.amount().amount();
+
         // Exact inverse of payUncleRewards. That path scales each reward to the uncle's PROVEN
         // work — base >>> (nephewDifficulty - ref.difficulty()) via scaleRewardToWork (audit C1) —
         // so the revert MUST recompute the identical per-uncle deficit and scale the same way.
@@ -802,10 +850,21 @@ public final class Executor {
         // per sub-difficulty uncle on every reorg/pop, which either throws LedgerException mid-revert
         // (leaving a partially reverted, corrupted ledger) or silently destroys coins and forks the
         // state root from nodes that only ever applied the block. Guards mirror the apply side's >0.
+        //
+        // The base amounts here are derived from coinbaseAmount rather than re-derived via a fresh
+        // params.uncleReward(height, ...) call, because this method takes no parentSupply (research.md
+        // Decision 4 — rollbackBlock needs no new input) and under the curve miningReward is not a pure
+        // function of height alone. coinbaseAmount is exactly what miningReward(height[, parentSupply])
+        // computed at apply time — pass 1's coinbase.amount() != expectedReward check already enforced
+        // that equality before the block was ever accepted, under either rule. uncleReward/nephewReward
+        // are themselves defined as exactly miningReward(...) * uncleRewardNum/uncleRewardDen and
+        // miningReward(...) / nephewRewardDivisor, so substituting the block's own already-validated
+        // coinbaseAmount for a fresh miningReward(...) call reproduces the identical base in both the
+        // geometric and curve regimes, with no dispatch logic needed here at all.
         List<rhizome.core.block.UncleRef> uncles = block.uncles();
         if (!uncles.isEmpty()) {
-            long baseUncleReward = params.uncleReward(height);
-            long baseNephewReward = params.nephewReward(height);
+            long baseUncleReward = Math.multiplyExact(coinbaseAmount, params.uncleRewardNum()) / params.uncleRewardDen();
+            long baseNephewReward = coinbaseAmount / params.nephewRewardDivisor();
             int nephewDifficulty = block.difficulty();
             for (rhizome.core.block.UncleRef ref : uncles) {
                 int deficit = nephewDifficulty - ref.difficulty();
@@ -819,7 +878,6 @@ public final class Executor {
                 }
             }
         }
-        long coinbaseAmount = coinbase.amount().amount();
         if (coinbaseAmount > 0) { // > 0 guard mirrors deposit's zero-credit no-op (exact inverse)
             ledger.revertDeposit(miner, coinbase.amount());
         }

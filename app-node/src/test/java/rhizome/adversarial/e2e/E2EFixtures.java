@@ -111,6 +111,7 @@ final class E2EFixtures {
     static Block build(RhizomeNode node, PublicAddress miner, Transaction... transactions) {
         NetworkParameters params = node.engine().params();
         long height = node.engine().height() + 1;
+        long parentSupply = node.engine().headerAt(node.engine().height()).supply();
 
         BlockImpl block = (BlockImpl) BlockImpl.builder()
             .id((int) height)
@@ -119,7 +120,14 @@ final class E2EFixtures {
             .lastBlockHash(node.engine().tipHash())
             .supply(SupplyStamp.next(node.engine(), height, node.engine().difficulty()))
             .build();
-        block.addTransaction(Transaction.of(miner, new TransactionAmount(params.miningReward(height))));
+        // Curve-aware, mirroring BlockAssembler.assemble's own dispatch exactly: the coinbase must
+        // agree with the supply stamp above (both read from the SAME parentSupply), or a curve-
+        // active profile mints a coinbase that contradicts its own committed supply header and
+        // Executor.runBlock rejects it (INCORRECT_MINING_FEE) on every block this fixture builds.
+        long rewardAmount = parentSupply == BlockImpl.SUPPLY_ABSENT
+            ? params.miningReward(height)
+            : params.miningReward(height, parentSupply);
+        block.addTransaction(Transaction.of(miner, new TransactionAmount(rewardAmount)));
         for (Transaction transaction : transactions) {
             block.addTransaction(transaction);
         }
@@ -142,5 +150,31 @@ final class E2EFixtures {
         for (int i = 0; i < count; i++) {
             mint(node, miner);
         }
+    }
+
+    /**
+     * Mines single empty blocks onto {@code node} until its committed supply reaches
+     * {@code targetSupply}, or honest mining stalls first — the curve's zero-reward plateau
+     * (contracts/emission-curve.md §4: a band of strictly-positive width, immediately below
+     * {@code supplyTarget}, where {@code EmissionCurve.raw} floors to exactly 0). Neither
+     * {@code TestNetwork} nor {@code E2EFixtures} previously offered a way to aim for a precise
+     * parent supply rather than "mine N blocks" — needed to land a real chain at (or within a
+     * table step of) a specific {@code EmissionCurve} position.
+     *
+     * @return the final committed supply, which callers must compare against {@code targetSupply}
+     *         themselves: landing inside the plateau band means the target is never reached by
+     *         honest mining alone, which is the scenario, not a bug in this helper
+     */
+    static long mintToSupply(RhizomeNode node, PublicAddress miner, long targetSupply) {
+        long supply = node.engine().headerAt(node.engine().height()).supply();
+        while (supply < targetSupply) {
+            mint(node, miner);
+            long next = node.engine().headerAt(node.engine().height()).supply();
+            if (next == supply) {
+                break;
+            }
+            supply = next;
+        }
+        return supply;
     }
 }

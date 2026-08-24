@@ -207,6 +207,58 @@ class SupplyCommitmentTest {
         assertEquals(expected, engine.headerAt(3).supply());
     }
 
+    /**
+     * Regression guard (FR-001, FR-010): on the shipped {@code testnet()} profile, where
+     * {@code emissionCurveHeight == 0} means the supply-driven curve never activates, the new
+     * two-arg {@code miningReward(height, parentSupply)} dispatch must be a true no-op — it must
+     * equal the pre-feature one-arg geometric form exactly, for the real supply values a live
+     * chain actually produces, and the committed {@code supply} field after {@code addBlock} must
+     * still equal {@code parentSupply + miningReward(height)} exactly, just as before this
+     * feature existed. This is a guard, not a red-then-green TDD test: it is expected to already
+     * pass, since the curve-dispatch plumbing added by earlier tasks in this feature preserves
+     * pre-activation behavior exactly.
+     */
+    @Test
+    void belowActivationTheGeometricRewardAndSupplyIdentityAreUnchanged() {
+        NetworkParameters params = NetworkParameters.testnet();
+        AtomicLong clock = new AtomicLong(0L);
+        InMemoryLedger ledger = new InMemoryLedger();
+        InMemoryChainStore store = new InMemoryChainStore();
+        LedgerSnapshot snapshot = new LedgerSnapshot("t", 0, params.chainId());
+        ChainEngine engine = ChainEngine.boot(params, TestNodeStores.mixing(ledger, store), snapshot)
+            .clock(clock::get)
+            .build();
+
+        PublicAddress miner = PublicAddress.random();
+        long supply = engine.headerAt(1).supply();
+        assertEquals(0L, supply, "the empty snapshot commits genesis supply 0");
+        assertTrue(!params.emissionCurveActiveAt(1),
+            "sanity: the curve must be inactive at genesis on the shipped testnet profile");
+
+        for (long height = 2; height <= 5; height++) {
+            assertTrue(!params.emissionCurveActiveAt(height),
+                "sanity: the curve must remain inactive at height " + height
+                    + " on the shipped testnet profile (emissionCurveHeight == 0)");
+
+            // The two-arg supply-aware dispatch must be a true no-op below activation, for the
+            // ACTUAL supply value a real chain carries at this height (not an arbitrary probe).
+            assertEquals(params.miningReward(height), params.miningReward(height, supply),
+                "below activation, the supply-aware reward must equal the geometric reward "
+                    + "at height " + height + " for the real chain supply " + supply);
+
+            long expected = supply + params.miningReward(height);
+            long ts = clock.addAndGet(params.desiredBlockTimeSec() * 1000L);
+            Block block = mineOnto(params, height, engine.tipHash(), engine.difficulty(), ts, miner,
+                expected, List.of());
+            assertEquals(ExecutionStatus.SUCCESS, engine.addBlock(block));
+            assertEquals(height, engine.height());
+
+            // The pre-feature identity: committed supply == parent supply + geometric reward.
+            assertEquals(expected, engine.headerAt(height).supply());
+            supply = expected;
+        }
+    }
+
     private static SHA256Hash genesisHash(ChainEngine engine) {
         return engine.blockAt(1).hash();
     }
@@ -368,7 +420,7 @@ class SupplyCommitmentTest {
         long running = forkSupply;
         for (long h = forkHeight + 1; h <= local.height(); h++) {
             Block block = local.blockAt(h);
-            running = Math.addExact(running, Issuance.minted(params, h, block.difficulty(), block.uncles()));
+            running = Math.addExact(running, Issuance.minted(params, h, running, block.difficulty(), block.uncles()));
             assertEquals(running, local.headerAt(h).supply(),
                 "height " + h + " committed supply must equal the independently recomputed issuance sum");
         }

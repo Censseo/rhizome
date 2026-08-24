@@ -183,14 +183,35 @@ the same hash could be accepted or rejected depending on receive order, splittin
 Second-preimage is neutralised by 0x00/0x01 domain separation, a committed `numTransactions`, and
 the Executor's in-block content-hash dedup (CVE-2012-2459 shape).
 
-### C-10 — Integer-only emission schedule *(implemented)*
+### C-10 — Supply-targeted logarithmic emission curve *(implemented, inactive on shipped networks)*
 
-The subsidy decays geometrically (×2/3) once per `rewardEpochBlocks`, in integer arithmetic. Total
+The block subsidy is a function of the chain's own header-committed circulating supply, not of
+height: `R(S) = c · ln(S*/S)`, evaluated entirely in integer arithmetic (a fixed-point
+successive-squaring log, `BigInteger` at build time, `long` at evaluation time — never floating
+point) so independent implementations cannot disagree and fork the chain. `S*` (mainnet:
+`2 997 924 580 000` base units) is a fixed monetary target; `c` (mainnet: `23 750` base units) is
+a calibration coefficient. The curve is a stepped table of `N = 256` uniform positions over
+`(0, S*]`, generated once per `NetworkParameters` construction from the published `(S*, c, N)`
+triple, evaluated in O(1) with linear interpolation; above `S*` the reward mirrors negative by
+ratio (`raw(S) = −(interp(⌊S*²/S⌋) + 1)`, an exact `0` only at `S = S*`); consensus clamps the
+mined reward to `max(0, raw(S))` at a single site. The full generation/evaluation algorithm and
+its calibration record (`τ ≈ 20 y`, launch reward ≈2.61 PDN/block, terminal supply, reorg
+continuity ≤1 base unit) are the normative WHITEPAPER §5.3; the checked-in
+`lib-core/src/test/resources/emission/curve-vectors.json` pins the generated output bit-for-bit
+for independent implementers.
+
+`NetworkParameters.emissionCurveHeight` gates *which* rule governs a block: `0` (the polarity of
+`powUpgradeHeight`, not `boxActivationHeight`) means **never** — the curve exists, is fully
+specified and vector-pinned, but mints nothing. Every network Rhizome ships today sets it to `0`;
+below activation (i.e. always, at present) the **legacy geometric rule** governs unchanged: the
+subsidy decays geometrically (×2/3) once per `rewardEpochBlocks`, in integer arithmetic. Total
 issuance = `epochBlocks × initialReward × 3 ≈ 100M PDN`. Both knobs are rescaled by the cadence
 ratio (×18 = 90/5) so the **real-time schedule is preserved**: `rewardEpochBlocks ≈ 12 000 000`,
 `initialReward = 2.7777 PDN`, epoch ≈ 1.9 yr, 48 000 PDN/day. Locked by a cadence-relative test
-(`emissionScheduleIsCalibratedForTheBlockCadence`) that recomputes the span from
-`desiredBlockTimeSec`, so changing block time forces the epoch to be revisited.
+(`emissionScheduleIsCalibratedForTheBlockCadence`) that recomputes both the geometric epoch span
+and the curve's `τ_blocks` from `desiredBlockTimeSec`, so changing block time forces both
+schedules to be revisited. A later feature schedules the real curve activation height once the
+genesis allocation (C-11) is ratified.
 
 ### C-11 — Pinned genesis supply *(implemented)*
 
