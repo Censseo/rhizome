@@ -34,6 +34,6 @@ public final class SupplyStamp {
         if (parentSupply == BlockImpl.SUPPLY_ABSENT) {
             return BlockImpl.SUPPLY_ABSENT;
         }
-        return Math.addExact(parentSupply, Issuance.minted(engine.params(), height, difficulty, uncles));
+        return Math.addExact(parentSupply, Issuance.minted(engine.params(), height, parentSupply, difficulty, uncles));
     }
 }

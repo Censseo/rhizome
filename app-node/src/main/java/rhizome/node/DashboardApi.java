@@ -125,6 +125,11 @@ final class DashboardApi {
         sink.field(K_PEERS, node.knownPeers().size());
         sink.field(K_DESIRED_BLOCK_TIME_SEC, params.desiredBlockTimeSec());
         sink.field(K_DECIMAL_SCALE_FACTOR, params.decimalScaleFactor());
+        // Height-only (geometric) reward: exact on every shipped network, where
+        // emissionCurveHeight == 0 (never active). On the first curve-active network this must
+        // become the supply-aware dispatch miningReward(height, tipParentSupply) — which needs
+        // the tip's committed supply, a surface NodeService does not expose yet. Display-only;
+        // tracked as part of feature 05 (curve activation), which schedules the height.
         sink.field(K_MINING_REWARD, params.miningReward(height));
         sink.field(K_MAX_REORG_DEPTH, params.maxReorgDepth());
         sink.field(K_LAST_BLOCK_TIMESTAMP, lastTs);

@@ -50,6 +50,21 @@ final class TestNetwork implements AutoCloseable {
         .maxDifficulty(16)
         .build();
 
+    /**
+     * {@link #FAST} with the supply-driven emission curve active from height 1 — the fast-PoW twin
+     * {@code CurveActiveNetwork.curveActiveTestnet()} does not provide, since that helper derives
+     * from the "slow", real-PoW {@code NetworkParameters.testnet()} rather than this class's
+     * instant-mining profile. Same test-scale {@code (S*, c, N)} triple as
+     * {@code CurveActiveNetwork}, chosen only for a small, well-populated table — not calibrated to
+     * any real-world timescale (see {@code NetworkParameters.cleanMainnet()} for that).
+     */
+    static final NetworkParameters CURVE_ACTIVE = FAST.toBuilder()
+        .supplyTarget(1_000_000L)
+        .emissionCoefficient(10_000L)
+        .emissionTableSteps(16)
+        .emissionCurveHeight(1)
+        .build();
+
     /** How long a scenario waits for a network-wide condition before calling it a failure. */
     static final long PATIENCE_MS = 30_000;
 

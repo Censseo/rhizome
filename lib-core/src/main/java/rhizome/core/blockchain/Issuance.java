@@ -22,8 +22,8 @@ import rhizome.core.block.UncleRef;
  * scheduled form is the only one that can run from headers alone in {@link HeaderChain}, before
  * any block body is downloaded.
  *
- * <p>Delegates every term to the existing reward math ({@link NetworkParameters#miningReward},
- * {@link NetworkParameters#uncleReward}, {@link NetworkParameters#nephewReward},
+ * <p>Delegates every term to the existing reward math ({@link NetworkParameters#miningReward(long, long)},
+ * {@link NetworkParameters#uncleReward(long, long)}, {@link NetworkParameters#nephewReward(long, long)},
  * {@link Executor#scaleRewardToWork}) rather than reimplementing it, and sums with
  * {@link Math#addExact} so a misconfigured or adversarial input fails loud instead of wrapping
  * silently (the project's checked-arithmetic convention — see {@code NetworkParameters}'
@@ -44,17 +44,20 @@ public final class Issuance {
      *
      * @param params           network parameters (reward schedule)
      * @param height           the minting block's height
+     * @param parentSupply     the parent block's committed circulating supply — the curve's sole
+     *                         input when active; ignored by the dispatch when the curve is
+     *                         inactive at {@code height}
      * @param nephewDifficulty the minting (nephew) block's own difficulty
      * @param uncles           the block's referenced uncles (empty or {@code null} ⇒ no uncle terms)
      */
-    public static long minted(NetworkParameters params, long height, int nephewDifficulty,
-            List<UncleRef> uncles) {
-        long total = params.miningReward(height);
+    public static long minted(NetworkParameters params, long height, long parentSupply,
+            int nephewDifficulty, List<UncleRef> uncles) {
+        long total = params.miningReward(height, parentSupply);
         if (uncles == null || uncles.isEmpty()) {
             return total;
         }
-        long baseUncleReward = params.uncleReward(height);
-        long baseNephewReward = params.nephewReward(height);
+        long baseUncleReward = params.uncleReward(height, parentSupply);
+        long baseNephewReward = params.nephewReward(height, parentSupply);
         for (UncleRef uncle : uncles) {
             int deficit = nephewDifficulty - uncle.difficulty();
             total = Math.addExact(total, Executor.scaleRewardToWork(baseUncleReward, deficit));

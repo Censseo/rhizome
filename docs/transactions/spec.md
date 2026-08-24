@@ -69,7 +69,11 @@ unbounded `(address, nonce)` seen-set.
 ### T-3 — Two-pass transactional execution *(implemented)*
 
 1. **Structural pass** (no state touched): exactly one coinbase whose amount equals the expected
-   reward at that height (integer, never a floating-point compare); every other transaction targets
+   reward for that block (integer, never a floating-point compare) — the emission rule in force
+   decides what "expected" means, and once the supply curve is active
+   ([consensus](../consensus/spec.md) C-10) that is a function of the **parent header's committed
+   supply**, not of height alone. A parent that commits no supply under an active curve is a
+   rejection, not a fallback to the geometric value. Every other transaction targets
    this chain, has a valid signature whose key matches the sender address, is not a duplicate
    (in-block or already executed), and has amount/fee ≥ 0. Gas ceilings (`maxTxGas`,
    `maxBlockGas`) are checked here, **before any instruction runs**.
@@ -79,7 +83,7 @@ unbounded `(address, nonce)` seen-set.
    `invalid.json` incident (§4.1).
 
 Money is conserved: each transaction is debited then credited, and the coinbase is pinned to the
-height's reward.
+block's scheduled reward.
 
 ### T-4 — Persisted account nonces *(implemented)*
 
@@ -141,7 +145,10 @@ memoised on the validation path and hashing reuses a `ThreadLocal` digest.
   make a zero-cost transaction valid on one node and invalid on another.
 - **Checked ledger arithmetic** — every credit uses `Math.addExact`, every debit guards `>= 0`;
   negative amount/fee rejected at admission *and* consensus; apply/rollback are exact inverses for
-  transfers, contracts, boxes, tokens, and scaled GHOST uncle rewards.
+  transfers, contracts, boxes, tokens, and scaled GHOST uncle rewards. Reward reversal derives its
+  uncle and nephew bases from the block's **own validated coinbase amount**, never from a fresh
+  schedule lookup — the only formulation that stays exact once the subsidy is a function of the
+  parent's committed supply rather than of height (`LedgerReversalExactnessTest`).
 - Amounts and fees are integers; no floating-point anywhere on the value path.
 - Transaction order within a block is committed by the Merkle root and is load-bearing for nonce
   validation — see [consensus](../consensus/spec.md) C-9.

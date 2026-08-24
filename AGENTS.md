@@ -57,3 +57,12 @@ No CI is active — `.github/ci-workflow.yml.example` must be copied into
 Always finish with `./gradlew build` (it is the lint + typecheck + test step combined).
 For focused iteration, run a single module's tests (`./gradlew :lib-vm:test`) instead of the
 full suite.
+
+## Active Technologies
+- Java 25 (Gradle toolchain + `options.release = 25`), no new dependencies; JDK 25 standard
+  library only (`java.math.BigInteger` for build-time table generation)
+
+## Recent Changes
+- 004-integer-log-curve: supply-driven logarithmic emission curve (`EmissionCurve` in lib-core),
+  integer-only stepped-table evaluation against the header-committed supply; no new persisted
+  state, no new dependency

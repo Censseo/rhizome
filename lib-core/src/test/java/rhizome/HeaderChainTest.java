@@ -1,6 +1,7 @@
 package rhizome;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.math.BigInteger;
@@ -15,6 +16,7 @@ import rhizome.core.block.BlockHeader;
 import rhizome.core.block.BlockImpl;
 import rhizome.core.block.UncleRef;
 import rhizome.core.blockchain.ChainEngine;
+import rhizome.core.blockchain.CurveActiveNetwork;
 import rhizome.core.blockchain.HeaderChain;
 import rhizome.core.blockchain.Issuance;
 import rhizome.core.blockchain.Miner;
@@ -82,7 +84,7 @@ class HeaderChainTest {
         long parentSupply = engine.headerAt(id - 1).supply();
         long supply = parentSupply == BlockImpl.SUPPLY_ABSENT
             ? BlockImpl.SUPPLY_ABSENT
-            : Math.addExact(parentSupply, Issuance.minted(params, id, difficulty, uncles));
+            : Math.addExact(parentSupply, Issuance.minted(params, id, parentSupply, difficulty, uncles));
         var b = (BlockImpl) BlockImpl.builder().id((int) id).timestamp(ts).difficulty(difficulty)
             .lastBlockHash(parent).merkleRoot(SHA256Hash.random())
             .supply(supply)
@@ -328,7 +330,8 @@ class HeaderChainTest {
         BlockHeader honest7 = engine.headerAt(7);
         BlockHeader honest8 = engine.headerAt(8);
         int diff = honest7.difficulty();
-        long correctSupply = Math.addExact(parent6.supply(), Issuance.minted(params, 7, diff, List.of()));
+        long correctSupply = Math.addExact(parent6.supply(),
+            Issuance.minted(params, 7, parent6.supply(), diff, List.of()));
         assertEquals(honest7.supply(), correctSupply,
             "sanity: the honestly-mined header already matches the shared formula");
 
@@ -390,5 +393,49 @@ class HeaderChainTest {
         assertTrue(legacyResult.valid(),
             "an all-absent chain must keep validating exactly as before this feature, got "
                 + legacyResult.rejection() + " @" + legacyResult.rejectedHeight());
+    }
+
+    @Test
+    void theHeaderOnlyGateRevalidatesTheSupplyIdentityUnderTheCurve() {
+        // FR-008/FR-009: the header-only gate must re-derive the SAME curve-aware supply identity
+        // ChainEngine/Issuance will enforce once migrated (T012) -- a separate curve-active engine,
+        // since the shared params/engine fixture above never activates the curve.
+        NetworkParameters curveParams = CurveActiveNetwork.curveActiveTestnet();
+        AtomicLong clk = new AtomicLong(1_000_000L);
+        ChainEngine curveEngine = ChainEngine.boot(
+                curveParams,
+                TestNodeStores.inMemory(),
+                new LedgerSnapshot("t", 0, curveParams.chainId()))
+            .clock(clk::get)
+            .build();
+
+        BlockHeader genesis = curveEngine.headerAt(curveEngine.height());
+        long parentSupply = genesis.supply();
+        assertNotEquals(BlockImpl.SUPPLY_ABSENT, parentSupply,
+            "curve activation needs a real committed parent supply");
+        assertTrue(parentSupply >= 0, "sanity: a committed supply is never negative");
+
+        // First block after genesis; the curve is active there under curveActiveTestnet()'s
+        // emissionCurveHeight(1).
+        long height = curveEngine.height() + 1;
+        long expectedReward = curveParams.miningReward(height, parentSupply);
+        long expectedSupply = Math.addExact(parentSupply, expectedReward);
+
+        int difficulty = curveEngine.difficulty();
+        var b = (BlockImpl) BlockImpl.builder().id((int) height).timestamp(clk.get())
+            .difficulty(difficulty).lastBlockHash(genesis.hash()).merkleRoot(SHA256Hash.random())
+            .supply(expectedSupply).build();
+        b.nonce(Miner.mineNonce(b.hash(), difficulty, curveParams.powAlgorithm()));
+        BlockHeader candidateHeader = BlockHeader.of(b);
+
+        HeaderChain.Result result = HeaderChain.validate(curveParams, curveEngine::headerAt,
+            curveEngine.height(), List.of(candidateHeader), clk.get() + 60_000L);
+
+        // The header-only gate must re-derive the curve-aware formula (checkSupply threads
+        // parentSupply into Issuance.minted), not the one-arg geometric form -- a header stamped
+        // with the correct curve supply must validate.
+        assertTrue(result.valid(), "expected the curve-correct supply to validate, got "
+            + result.rejection() + " @" + result.rejectedHeight());
+        assertEquals(HeaderChain.Rejection.NONE, result.rejection());
     }
 }

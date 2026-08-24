@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 
 import rhizome.core.block.Block;
 import rhizome.core.block.BlockImpl;
+import rhizome.core.blockchain.CurveActiveNetwork;
 import rhizome.core.blockchain.Executor;
 import rhizome.core.blockchain.NetworkParameters;
 import rhizome.crypto.PrivateKey;
@@ -58,6 +59,12 @@ class ExecutorTest {
 
     private Transaction coinbase(long height) {
         return Transaction.of(miner, new TransactionAmount(params.miningReward(height)));
+    }
+
+    /** Like {@link #coinbase(long)}, but for an explicit amount -- for the curve-driven reward,
+     *  which is a function of parent supply rather than height alone. */
+    private Transaction coinbaseOf(long amount) {
+        return Transaction.of(miner, new TransactionAmount(amount));
     }
 
     private Block block(long height, Transaction... transactions) {
@@ -340,5 +347,70 @@ class ExecutorTest {
         assertEquals(minerBefore, clean.getWalletValue(miner).amount(),
             "miner balance must be exactly restored after rollback");
         assertFalse(clean.hasWallet(w), "rollback must not create the walletless sender");
+    }
+
+    @Test
+    void theCoinbaseMustPayExactlyTheCurveRewardForTheParentSupply() {
+        // FR-008/FR-009 (research.md Decision 4): once the supply-driven curve is active, the
+        // coinbase must pay exactly params.miningReward(height, parentSupply) -- the supply-aware
+        // twin of the legacy height-only check exercised by rejectsWrongReward above -- not a
+        // height-only guess, and not off by even one base unit in either direction.
+        NetworkParameters curveParams = CurveActiveNetwork.curveActiveTestnet();
+        long height = 1; // curve active from height 1 per CurveActiveNetwork
+        long parentSupply = 0L; // in-domain: EmissionCurve extends flat below its first step
+        long expectedReward = curveParams.miningReward(height, parentSupply);
+
+        assertEquals(ExecutionStatus.SUCCESS,
+            Executor.executeBlock(block(height, coinbaseOf(expectedReward)), ledger, h -> false,
+                curveParams, parentSupply),
+            "exactly the curve reward must be accepted");
+        assertEquals(ExecutionStatus.INCORRECT_MINING_FEE,
+            Executor.executeBlock(block(height, coinbaseOf(expectedReward + 1)), ledger, h -> false,
+                curveParams, parentSupply),
+            "one base unit over the curve reward must be rejected");
+        assertEquals(ExecutionStatus.INCORRECT_MINING_FEE,
+            Executor.executeBlock(block(height, coinbaseOf(expectedReward - 1)), ledger, h -> false,
+                curveParams, parentSupply),
+            "one base unit under the curve reward must be rejected");
+    }
+
+    @Test
+    void theCurveRewardCheckRunsBeforeProofOfWork() {
+        // Executor.executeBlock never verifies PoW at all -- that gate belongs to
+        // ChainEngine.addBlock, ordered PoW-last (WHITEPAPER SS3.5). This test's block keeps
+        // BlockImpl.builder()'s default nonce -- garbage nobody has run PoW verification
+        // against -- to demonstrate the coinbase-amount check is a pure structural rejection
+        // that fires unconditionally, independent of and without needing any valid
+        // proof-of-work, exactly like the poisoned-coinbase-kind rejections in
+        // rejectsCoinbaseWithNonTransferKind above reject on structure alone.
+        NetworkParameters curveParams = CurveActiveNetwork.curveActiveTestnet();
+        long height = 1;
+        long parentSupply = 0L;
+        long expectedReward = curveParams.miningReward(height, parentSupply);
+
+        Block wrong = block(height, coinbaseOf(expectedReward + 1));
+        assertEquals(ExecutionStatus.INCORRECT_MINING_FEE,
+            Executor.executeBlock(wrong, ledger, h -> false, curveParams, parentSupply),
+            "wrong coinbase amount must be rejected regardless of the block's (unverified) PoW");
+    }
+
+    @Test
+    void aCurveActiveBlockWhoseParentCommitsNoSupplyIsRejected() {
+        // Decision 4 (research.md): at a curve-active height, an absent parentSupply
+        // (BlockImpl.SUPPLY_ABSENT) can never validate a coinbase -- the executor must fail
+        // loud rather than silently falling back to the geometric per-height formula or any
+        // other height-based guess. Unreachable on a well-formed chain (ChainEngine.checkSupply's
+        // prefix closure rejects the absent-supply parent first), but the executor's own gate
+        // must hold independently. The coinbase amount here is what a real parent supply of 0
+        // would justify -- plausible-looking, not an obviously-wrong amount -- to prove the
+        // rejection is about the missing parentSupply, not the coinbase value.
+        NetworkParameters curveParams = CurveActiveNetwork.curveActiveTestnet();
+        long height = 1;
+        long plausibleReward = curveParams.miningReward(height, 0L);
+
+        Block b = block(height, coinbaseOf(plausibleReward));
+        assertEquals(ExecutionStatus.INCORRECT_MINING_FEE,
+            Executor.executeBlock(b, ledger, h -> false, curveParams, BlockImpl.SUPPLY_ABSENT),
+            "a curve-active height with no committed parent supply must fail loud");
     }
 }

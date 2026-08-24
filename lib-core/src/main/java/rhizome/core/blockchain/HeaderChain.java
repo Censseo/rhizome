@@ -276,7 +276,7 @@ public final class HeaderChain {
         long expected;
         try {
             expected = Math.addExact(parentSupply,
-                Issuance.minted(params, header.id(), header.difficulty(), header.uncles()));
+                Issuance.minted(params, header.id(), parentSupply, header.difficulty(), header.uncles()));
         } catch (ArithmeticException overflow) {
             return Rejection.INVALID_SUPPLY;
         }

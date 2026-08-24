@@ -264,7 +264,7 @@ class E2ESupplyCommitmentTest {
             for (long h = 2; h <= settled; h++) {
                 BlockHeader header = left.engine().headerAt(h);
                 recomputed = Math.addExact(recomputed, Issuance.minted(
-                    left.engine().params(), header.id(), header.difficulty(), header.uncles()));
+                    left.engine().params(), header.id(), recomputed, header.difficulty(), header.uncles()));
             }
             assertEquals(recomputed, leftSupply,
                 "the committed supply must equal the sum of every block's own issuance since genesis");

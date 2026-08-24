@@ -128,6 +128,13 @@ template, the corresponding checked-in `.wasm` must be rebuilt to match.
   wallet keys are generated and kept in the browser, the node never sees a private key.
 
 ## Recent Changes
+- 004-integer-log-curve: supply-driven logarithmic emission curve (`EmissionCurve` in lib-core),
+  integer-only stepped-table evaluation against the header-committed supply; no new persisted
+  state, no new dependency
 - 003-genesis-allocation: pinned per-network genesis supply constant (`NetworkParameters`), a
   shipped mainnet allocation artifact, and a boot-time check that refuses a mismatched snapshot
   total. No new dependency or module; JDK 25 throughout (constitution v1.0.1 restatement).
+
+## Active Technologies
+- Java 25 (Gradle toolchain + `options.release = 25`), no new dependencies; JDK 25 standard
+  library only (`java.math.BigInteger` for build-time table generation)

@@ -53,6 +53,13 @@ Nav entries are `data-page` attributes on the shell; `app.js` swaps `#view`.
 | **Boxes** | browse, create, update, spend and rent-collect data boxes with typed registers |
 | **Docs** | the node's own documentation — see U-8 |
 
+The Dashboard page's **reward** figure comes from `GET /stats`, which reads the height-only
+`miningReward(height)` overload. That is exact on every network shipped today, all of which leave
+the supply-driven emission curve inactive ([consensus](../consensus/spec.md) C-10). It is a
+display-only value — no consensus path reads it — and the first network to schedule a non-zero
+`emissionCurveHeight` must switch it to the supply-aware dispatch, which needs the tip's committed
+supply, a quantity `NodeService` does not expose yet. Tracked in Open items.
+
 ### U-2 — Browser-custodied keys *(implemented)*
 
 Keys are generated and stored **in the browser** (localStorage) and transactions signed locally in
@@ -130,6 +137,10 @@ loads them at startup and `GET /docs/*` serves them with the dashboard's securit
 
 ## Open items
 
+- The Dashboard's **reward** stat reads the height-only emission overload (see U-1). Correct while
+  every profile leaves the curve inactive; it must become the supply-aware dispatch — and `/stats`
+  must gain the tip's committed supply to feed it — in the same change that first schedules a
+  non-zero `emissionCurveHeight`.
 - UI copy is **mixed French and English** (`Contrats`, `Agents IA` in nav; French template
   descriptions in `manifest.json`; English elsewhere). No i18n layer exists — pick one language or
   add one.

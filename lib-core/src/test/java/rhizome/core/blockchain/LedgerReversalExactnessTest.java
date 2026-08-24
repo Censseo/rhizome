@@ -35,6 +35,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static rhizome.crypto.Crypto.generateKeyPairTyped;
 
 /**
@@ -70,6 +71,17 @@ class LedgerReversalExactnessTest {
     private PublicAddress bob;
     private PublicAddress miner;
     private PublicAddress uncleMiner;
+
+    /**
+     * Curve-active twin of {@link #params}, used only by the US3 uncle/nephew tests below.
+     * Derived from {@link CurveActiveNetwork#curveActiveTestnet()} (curve active from height 1,
+     * small test-scale table) with {@code genesisDifficulty}/{@code minDifficulty} widened to 8/4
+     * — the same gap {@link #params} uses elsewhere in this file — so a block built at
+     * {@code genesisDifficulty} and an uncle referencing {@code minDifficulty} exercise a real
+     * {@code scaleRewardToWork} deficit, not the identity case.
+     */
+    private final NetworkParameters curveParams = CurveActiveNetwork.curveActiveTestnet().toBuilder()
+        .genesisDifficulty(8).minDifficulty(4).build();
 
     @BeforeEach
     void setUp() {
@@ -178,6 +190,64 @@ class LedgerReversalExactnessTest {
             what + ": rollbackBlock must restore every balance executeBlock touched");
     }
 
+    /**
+     * Curve-aware twin of {@link #block(long, List, Transaction...)}: the coinbase is stamped via
+     * the two-arg {@link NetworkParameters#miningReward(long, long)} against {@code curveParams}
+     * and an explicit {@code parentSupply}, instead of {@link #block}'s one-arg, curve-unaware
+     * form. Uses {@link #curveParams} exclusively — never {@link #params} — so the curve is
+     * actually active at {@code height}.
+     */
+    private BlockImpl blockAt(long height, long parentSupply, List<UncleRef> uncles, Transaction... txs) {
+        var b = (BlockImpl) BlockImpl.builder().id((int) height).timestamp(5000)
+            .difficulty(curveParams.genesisDifficulty()).lastBlockHash(SHA256Hash.empty())
+            .uncles(new ArrayList<>(uncles)).build();
+        b.addTransaction(Transaction.of(miner, new TransactionAmount(curveParams.miningReward(height, parentSupply))));
+        for (Transaction t : txs) {
+            b.addTransaction(t);
+        }
+        var tree = new MerkleTree();
+        tree.setItems(b.transactions());
+        b.merkleRoot(tree.getRootHash());
+        return b;
+    }
+
+    /**
+     * Curve-aware twin of {@link #assertRoundTripIsExact(BlockImpl, String)}: applies {@code b}
+     * via the 10-arg {@link Executor#executeBlock} overload with an explicit {@code parentSupply}
+     * against {@link #curveParams}, then rolls it back, and demands the ledger is byte-identical.
+     *
+     * <p>Unlike {@link #assertRoundTripIsExact(BlockImpl, String)}, this prunes {@code ledger}'s
+     * undo journal for {@code b}'s height before rolling back. {@link InMemoryLedger#revertBlock}
+     * replays that journal — the exact inverse of whatever was applied, right or wrong — so with
+     * it intact a round trip is trivially exact regardless of whether the uncle/nephew amounts
+     * {@code payUncleRewards} paid were curve-aware at all; verified empirically (temporarily
+     * reverting the recompute mirror to the pre-fix flat-base bug left every round-trip test in
+     * this file green). Pruning forces {@code undoBlock} onto its receipts-and-formula
+     * recomputation fallback — the same path a reorg takes once a block's journal has aged past
+     * {@code maxReorgDepth} — which is the path that must be curve-aware for this test to mean
+     * anything (FR-005; spec US3 scenario 3).
+     */
+    private void assertRoundTripIsExact(BlockImpl b, long parentSupply, String what) {
+        Map<String, Long> before = balances();
+
+        boxes.begin();
+        tokens.begin();
+        assertEquals(ExecutionStatus.SUCCESS,
+            Executor.executeBlock(b, ledger, (SHA256Hash h) -> false, curveParams, null, null, boxes, tokens,
+                null, parentSupply),
+            what + ": the block must apply, or the reversal is not what is under test");
+        boxes.commit(b.id());
+        tokens.commit(b.id());
+        ledger.pruneJournals(b.id() + 1); // force undoBlock's recompute-mirror fallback, not the journal replay
+
+        Executor.rollbackBlock(b, ledger, null, boxes, b.id(), curveParams);
+        boxes.revertBlock(b.id());
+        tokens.revertBlock(b.id());
+
+        assertEquals(before, balances(),
+            what + ": rollbackBlock must restore every balance executeBlock touched");
+    }
+
     @Test
     void aPlainTransferReversesExactly() {
         assertRoundTripIsExact(block(2, List.of(), transfer(1_000, 7, 0)), "transfer with a fee");
@@ -237,6 +307,176 @@ class LedgerReversalExactnessTest {
             new UncleRef(SHA256Hash.of(new byte[32]), params.minDifficulty(), uncleMiner),
             new UncleRef(SHA256Hash.of(hashOf(1)), params.minDifficulty(), uncleMiner));
         assertRoundTripIsExact(block(2, uncles, transfer(1_000, 7, 0)), "two under-difficulty uncles");
+    }
+
+    /**
+     * FR-005 / spec US3 scenario 1: uncle and nephew issuance must derive from the
+     * <em>supply-aware</em> base reward under a curve-active profile, not the geometric
+     * height-only base — {@code Executor.payUncleRewards} takes {@code parentSupply} exactly
+     * like the coinbase check already does. An equal-difficulty uncle makes
+     * {@code scaleRewardToWork} the identity, so the paid amounts are exactly
+     * {@code curveParams.uncleReward(height, parentSupply)} /
+     * {@code curveParams.nephewReward(height, parentSupply)} with no scaling to obscure a wrong
+     * base.
+     */
+    @Test
+    void uncleAndNephewRewardsDeriveFromTheSupplyAwareBaseReward() {
+        long height = 1; // curveParams activates the curve at height 1
+        long parentSupply = 0L; // in-domain via EmissionCurve's below-floor extension
+        var uncles = List.of(
+            new UncleRef(SHA256Hash.of(hashOf(30)), curveParams.genesisDifficulty(), uncleMiner));
+        BlockImpl b = blockAt(height, parentSupply, uncles);
+
+        Map<String, Long> before = balances();
+        boxes.begin();
+        tokens.begin();
+        assertEquals(ExecutionStatus.SUCCESS,
+            Executor.executeBlock(b, ledger, (SHA256Hash h) -> false, curveParams, null, null, boxes, tokens,
+                null, parentSupply),
+            "the block must apply for its paid uncle/nephew amounts to be observable");
+        boxes.commit(b.id());
+        tokens.commit(b.id());
+        Map<String, Long> after = balances();
+
+        long expectedUncleReward = curveParams.uncleReward(height, parentSupply);
+        long expectedNephewBonus = curveParams.nephewReward(height, parentSupply);
+        assertEquals(before.getOrDefault(uncleMiner.toHexString(), 0L) + expectedUncleReward,
+            after.get(uncleMiner.toHexString()),
+            "an equal-difficulty uncle must be paid exactly the curve-aware uncle reward");
+        assertEquals(before.getOrDefault(miner.toHexString(), 0L)
+                + curveParams.miningReward(height, parentSupply) + expectedNephewBonus,
+            after.get(miner.toHexString()),
+            "the nephew (including block) miner must be paid the coinbase plus the curve-aware "
+                + "nephew bonus");
+    }
+
+    /**
+     * FR-005 / spec US3 scenario 1: work scaling composes on top of the curve-aware base exactly
+     * as it already does on top of the geometric base — a difficulty deficit still halves the
+     * reward once per missing bit ({@code base >>> deficit}), it just starts from
+     * {@code curveParams.uncleReward(height, parentSupply)} instead of the one-arg form.
+     */
+    @Test
+    void uncleWorkScalingIsUnchangedUnderTheCurve() {
+        long height = 1;
+        long parentSupply = 0L;
+        int deficit = curveParams.genesisDifficulty() - curveParams.minDifficulty();
+        assertTrue(deficit > 0, "the profile must carry a real difficulty gap for this test to mean anything");
+        var uncles = List.of(
+            new UncleRef(SHA256Hash.of(hashOf(31)), curveParams.minDifficulty(), uncleMiner));
+        BlockImpl b = blockAt(height, parentSupply, uncles);
+
+        Map<String, Long> before = balances();
+        boxes.begin();
+        tokens.begin();
+        assertEquals(ExecutionStatus.SUCCESS,
+            Executor.executeBlock(b, ledger, (SHA256Hash h) -> false, curveParams, null, null, boxes, tokens,
+                null, parentSupply),
+            "the block must apply for its paid uncle/nephew amounts to be observable");
+        boxes.commit(b.id());
+        tokens.commit(b.id());
+        Map<String, Long> after = balances();
+
+        long expectedUncleReward =
+            Executor.scaleRewardToWork(curveParams.uncleReward(height, parentSupply), deficit);
+        long expectedNephewBonus =
+            Executor.scaleRewardToWork(curveParams.nephewReward(height, parentSupply), deficit);
+        assertEquals(before.getOrDefault(uncleMiner.toHexString(), 0L) + expectedUncleReward,
+            after.get(uncleMiner.toHexString()),
+            "a sub-difficulty uncle's curve-aware base must still be scaled by scaleRewardToWork");
+        assertEquals(before.getOrDefault(miner.toHexString(), 0L)
+                + curveParams.miningReward(height, parentSupply) + expectedNephewBonus,
+            after.get(miner.toHexString()),
+            "the nephew bonus must be the curve-aware base, scaled by the same work deficit");
+    }
+
+    /**
+     * FR-005 / spec US3 scenario 2: in the curve's truncation region the base reward is zero, and
+     * no off-curve fallback issuance may mint uncle or nephew rewards anyway — a block that would
+     * pay something here is minting outside the supply accounting the curve defines.
+     */
+    @Test
+    void aZeroBaseRewardMintsZeroUncleAndNephewRewards() {
+        long height = 1;
+        long parentSupply = curveParams.supplyTarget() * 2; // strictly above S* -> clamped to 0
+        assertEquals(0L, curveParams.miningReward(height, parentSupply),
+            "sanity: the curve-aware base reward must actually be zero at this parentSupply");
+        var uncles = List.of(
+            new UncleRef(SHA256Hash.of(hashOf(32)), curveParams.genesisDifficulty(), uncleMiner));
+        BlockImpl b = blockAt(height, parentSupply, uncles);
+
+        Map<String, Long> before = balances();
+        boxes.begin();
+        tokens.begin();
+        assertEquals(ExecutionStatus.SUCCESS,
+            Executor.executeBlock(b, ledger, (SHA256Hash h) -> false, curveParams, null, null, boxes, tokens,
+                null, parentSupply),
+            "a valid block may legitimately carry a zero-value coinbase");
+        boxes.commit(b.id());
+        tokens.commit(b.id());
+        Map<String, Long> after = balances();
+
+        assertEquals(before.getOrDefault(uncleMiner.toHexString(), 0L),
+            after.getOrDefault(uncleMiner.toHexString(), 0L),
+            "a zero curve base must mint nothing to the uncle miner -- no off-curve fallback issuance");
+        assertEquals(before.getOrDefault(miner.toHexString(), 0L),
+            after.getOrDefault(miner.toHexString(), 0L),
+            "a zero curve base must mint nothing extra (coinbase + nephew bonus) to the block miner");
+    }
+
+    /**
+     * FR-005 / spec US3 scenario 3: reorg reversal of curve-era uncle/nephew issuance must be
+     * exact, mirroring {@link #uncleRewardsReverseAtTheirWorkScaledAmount()} under
+     * {@link #curveParams} — two uncles, one strictly below the nephew's difficulty and one equal
+     * to it, so {@code scaleRewardToWork} is actually exercised on the curve-aware base.
+     *
+     * <p>A pure round trip cannot fail on its own here: today {@code payUncleRewards} and
+     * {@code undoBlock}'s rollback mirror share the identical curve-<em>unaware</em> one-arg
+     * formula, so a wrong-but-symmetric payout still cancels out to an exact round trip (verified
+     * empirically — temporarily reverting the mirror to the pre-fix flat-base bug this file's
+     * class Javadoc documents left every round-trip test in this file green, this one included).
+     * So this test first pins the amounts actually paid against the curve-aware two-arg formula
+     * — the assertion that must fail before T018 — at a height applied and reverted once so it
+     * cannot pollute the round-trip height below, then separately exercises
+     * {@link #assertRoundTripIsExact(BlockImpl, long, String)} for its own protective value
+     * (forcing {@code undoBlock}'s receipts-and-formula fallback via {@code pruneJournals}, the
+     * path a real reorg takes once a block's journal has aged past {@code maxReorgDepth}).
+     */
+    @Test
+    void reorgReversesCurveEraUncleRewardsExactly() {
+        long parentSupply = 0L;
+        var uncles = List.of(
+            new UncleRef(SHA256Hash.of(hashOf(33)), curveParams.minDifficulty(), uncleMiner),
+            new UncleRef(SHA256Hash.of(hashOf(34)), curveParams.genesisDifficulty(), uncleMiner));
+
+        long amountCheckHeight = 1;
+        BlockImpl amountCheckBlock = blockAt(amountCheckHeight, parentSupply, uncles);
+        Map<String, Long> beforeAmountCheck = balances();
+        boxes.begin();
+        tokens.begin();
+        assertEquals(ExecutionStatus.SUCCESS,
+            Executor.executeBlock(amountCheckBlock, ledger, (SHA256Hash h) -> false, curveParams, null, null,
+                boxes, tokens, null, parentSupply),
+            "the block must apply for its paid uncle/nephew amounts to be observable");
+        boxes.commit(amountCheckBlock.id());
+        tokens.commit(amountCheckBlock.id());
+
+        int deficit = curveParams.genesisDifficulty() - curveParams.minDifficulty();
+        long expectedUncleCredit =
+            Executor.scaleRewardToWork(curveParams.uncleReward(amountCheckHeight, parentSupply), deficit)
+                + curveParams.uncleReward(amountCheckHeight, parentSupply); // 2nd uncle: nephew's own difficulty
+        assertEquals(beforeAmountCheck.getOrDefault(uncleMiner.toHexString(), 0L) + expectedUncleCredit,
+            balances().get(uncleMiner.toHexString()),
+            "both uncles' credits must derive from the curve-aware base, one of them work-scaled");
+
+        Executor.rollbackBlock(amountCheckBlock, ledger, null, boxes, amountCheckBlock.id(), curveParams);
+        boxes.revertBlock(amountCheckBlock.id());
+        tokens.revertBlock(amountCheckBlock.id());
+        assertEquals(beforeAmountCheck, balances(), "the amount check itself must leave no residue behind");
+
+        long roundTripHeight = 2;
+        assertRoundTripIsExact(blockAt(roundTripHeight, parentSupply, uncles), parentSupply,
+            "curve-era uncles, one strictly under-difficulty, reverted via the pruned-journal fallback");
     }
 
     @Test

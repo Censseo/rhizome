@@ -62,7 +62,8 @@ public final class BlockAssembler {
         // FR-004 prefix closure forbids opting in partway through a chain.
         long supply = view.parentSupply() == BlockImpl.SUPPLY_ABSENT
             ? BlockImpl.SUPPLY_ABSENT
-            : Math.addExact(view.parentSupply(), Issuance.minted(params, height, view.difficulty(), view.uncles()));
+            : Math.addExact(view.parentSupply(),
+                Issuance.minted(params, height, view.parentSupply(), view.difficulty(), view.uncles()));
 
         var block = (BlockImpl) BlockImpl.builder()
             .id((int) height)
@@ -77,7 +78,16 @@ public final class BlockAssembler {
             .supply(supply)
             .build();
 
-        Transaction coinbase = Transaction.of(miner, new TransactionAmount(params.miningReward(height)));
+        // Same SUPPLY_ABSENT guard as the supply stamp above: the curve's sole input is the
+        // parent's committed supply, so a supply-less parent falls back to the geometric form
+        // rather than feeding EmissionCurve.raw() the -1 sentinel, which it would silently accept
+        // as an (wrong) in-domain value. Executor's own INCORRECT_MINING_FEE guard still rejects
+        // a curve-active height with an absent parent supply regardless of this value, but a
+        // sensible fallback here avoids mining a block doomed by a nonsense reward amount.
+        long rewardAmount = view.parentSupply() == BlockImpl.SUPPLY_ABSENT
+            ? params.miningReward(height)
+            : params.miningReward(height, view.parentSupply());
+        Transaction coinbase = Transaction.of(miner, new TransactionAmount(rewardAmount));
         block.addTransaction(coinbase);
 
         // Include transactions only while the block stays under the consensus size cap
