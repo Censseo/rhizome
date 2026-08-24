@@ -222,10 +222,16 @@ class E2ECurveBoundaryTest {
             // for the first time exactly at the activation-adjacent boundary this proof cares about.
             RhizomeNode restarted = network.reopen("a").params(params).mining(miner)
                 .blockInterval(150).start();
-            assertEquals(heightBeforeRestart, restarted.engine().height(),
+            // Anchored at heightBeforeRestart, never at the live tip: the producer starts inside
+            // start(), so by the time these read, the restarted node may legitimately have mined
+            // the activation-height block already. The invariant is that a restart LOSES nothing
+            // and reloads its history byte-identically -- not that it has not yet produced. An
+            // equality against height()/tipHash() here asserts the latter and fails on a fast or
+            // loaded box, which is a flaky gate, not a stricter proof.
+            assertTrue(restarted.engine().height() >= heightBeforeRestart,
                 "a restart must not lose any already-mined height");
-            assertEquals(tipBeforeRestart, restarted.engine().tipHash(),
-                "a restart must reload the exact same tip");
+            assertEquals(tipBeforeRestart, restarted.engine().blockAt(heightBeforeRestart).hash(),
+                "a restart must reload the exact same block at its pre-restart tip height");
             assertEquals(supplyBeforeRestart, restarted.engine().headerAt(heightBeforeRestart).supply(),
                 "a restart must recompute the exact same historical committed supply");
             assertTrue(params.emissionCurveActiveAt(3),
@@ -243,7 +249,11 @@ class E2ECurveBoundaryTest {
             TestNetwork.syncUntil(neverRestarted,
                 () -> neverRestarted.engine().tipHash().equals(restarted.engine().tipHash()));
 
-            long settled = restarted.engine().height();
+            // Read the settled height from the PEER, not from the still-mining source: the source
+            // can advance again between syncUntil returning and this line, and headerAt(settled)
+            // would then be null on the peer. The peer only ever holds heights the source also
+            // holds, so its own height is the highest both provably carry.
+            long settled = neverRestarted.engine().height();
             assertEquals(restarted.engine().headerAt(settled).supply(),
                 neverRestarted.engine().headerAt(settled).supply(),
                 "the restarted node and its never-restarted peer must agree exactly on committed "
