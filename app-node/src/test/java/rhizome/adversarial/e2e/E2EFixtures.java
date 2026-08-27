@@ -154,24 +154,32 @@ final class E2EFixtures {
 
     /**
      * Mines single empty blocks onto {@code node} until its committed supply reaches
-     * {@code targetSupply}, or honest mining stalls first — the curve's zero-reward plateau
-     * (contracts/emission-curve.md §4: a band of strictly-positive width, immediately below
-     * {@code supplyTarget}, where {@code EmissionCurve.raw} floors to exactly 0). Neither
-     * {@code TestNetwork} nor {@code E2EFixtures} previously offered a way to aim for a precise
-     * parent supply rather than "mine N blocks" — needed to land a real chain at (or within a
-     * table step of) a specific {@code EmissionCurve} position.
+     * {@code targetSupply}. Under the revenue floor (contracts/miner-revenue-floor.md §2), honest
+     * mining never stalls: the scheduled reward is {@code max(R_min, raw(S)) >= R_min > 0} at
+     * every supply, so a block always adds at least {@code R_min} — the helper keeps minting
+     * through the former zero-reward plateau, crosses {@code supplyTarget} paying {@code R_min}
+     * per block, and stops as soon as {@code supply >= targetSupply}. (Pre-floor, the same helper
+     * stopped at the plateau where {@code raw} floored to exactly 0 and {@code next == supply} —
+     * that stall assumption is inverted here.)
      *
-     * @return the final committed supply, which callers must compare against {@code targetSupply}
-     *         themselves: landing inside the plateau band means the target is never reached by
-     *         honest mining alone, which is the scenario, not a bug in this helper
+     * @return the final committed supply, which callers compare against {@code targetSupply}
+     *         themselves: the loop exits as soon as supply meets the target, which under the floor
+     *         is genuinely reached (never a stall), possibly slightly overshooting it
      */
     static long mintToSupply(RhizomeNode node, PublicAddress miner, long targetSupply) {
         long supply = node.engine().headerAt(node.engine().height()).supply();
         while (supply < targetSupply) {
             mint(node, miner);
             long next = node.engine().headerAt(node.engine().height()).supply();
-            if (next == supply) {
-                break;
+            // "A block always adds at least R_min" is a PROPERTY OF THE CALLER'S PROFILE, not of
+            // this helper: it holds only under an active curve. On a curve-inactive profile the
+            // geometric reward decays to 0, and a supply-less (SUPPLY_ABSENT) header never moves at
+            // all -- both would spin here forever, mining blocks until the suite is killed. Fail
+            // loudly on the first block that makes no progress instead of hanging the build.
+            if (next <= supply) {
+                throw new IllegalStateException("mintToSupply made no progress at supply " + supply
+                    + " (target " + targetSupply + "): this profile's reward does not grow supply, "
+                    + "so the target is unreachable by honest mining");
             }
             supply = next;
         }

@@ -41,19 +41,26 @@ class E2ECurveReorgTest {
     /**
      * A profile tuned so a real chain CAN cross {@code supplyTarget} through ordinary honest
      * mining within a couple of blocks — {@code TestNetwork.CURVE_ACTIVE}'s real (16-step,
-     * moderate-coefficient) table cannot do this at all (Groupe A/{@code
-     * theRealNodeKeepsProducingThroughAGenuineZeroRewardBlock...} proved the honest reward floors
-     * to exactly 0 in a band strictly below the target, so mining alone approaches but never
-     * reaches it). A coarse 2-step table with a large-enough coefficient makes the LAST segment's
-     * linear interpolation overshoot the true logarithmic decay before it reaches zero, so a
-     * single block CAN carry the parent supply past the target. Tuned so the FIRST block (from
-     * supply 0) stays comfortably below the target (leaving room for a real, un-crossed 1-block
-     * branch to fork against), while a SECOND block from there crosses it.
+     * moderate-coefficient) table crosses it too now (under the revenue floor honest mining pays
+     * {@code R_min} per block from the crossover on and keeps going past the target), but this
+     * coarse 2-step table with a large-enough coefficient makes the crossing happen
+     * deterministically within two blocks. Tuned so the FIRST block (from supply 0) pays a genuine,
+     * interpolated curve value that stays below the target (leaving room for a real, un-crossed
+     * 1-block branch to fork against), while a SECOND block from there crosses it.
+     *
+     * <p>The coefficient must keep {@code table[1] = floor(c * ln 2)} STRICTLY ABOVE
+     * {@link NetworkParameters#minerRevenueFloor} (800 base units, inherited from mainnet through
+     * {@code testnet()}), or the whole two-entry table sits under the floor and every block on this
+     * profile pays a constant {@code R_min} — which would make this file's crossing and
+     * repeated-reorg proofs vacuous: with a flat reward, reusing the losing block's own coinbase
+     * and re-deriving {@code miningReward} are indistinguishable, so the very drift E2E-74 exists
+     * to catch could not show up. {@code c = 1300} gives {@code table[1] = 901}: above the floor,
+     * and below {@code supplyTarget} so the first block still leaves the branch un-crossed.
      */
     private static NetworkParameters crossableProfile() {
         return TestNetwork.FAST.toBuilder()
             .supplyTarget(1000L)
-            .emissionCoefficient(800L)
+            .emissionCoefficient(1300L)
             .emissionTableSteps(2)
             .emissionCurveHeight(1)
             .build();
@@ -75,6 +82,7 @@ class E2ECurveReorgTest {
             throws Exception {
         try (TestNetwork network = new TestNetwork(tempDir)) {
             NetworkParameters params = crossableProfile();
+            assertCurveNotSwallowedByTheFloor(params);
 
             // No live producers: both branches are built deterministically and single-threaded, so
             // this test controls exactly how many blocks each side has before they ever meet --
@@ -121,6 +129,24 @@ class E2ECurveReorgTest {
     }
 
     /**
+     * Guards the premise every crossing proof in this file rests on: the profile's curve must
+     * still pay a genuine, above-floor value on the pre-crossing side. If the miner revenue floor
+     * ever rises past {@code table[1]} (or the coefficient falls below it), every block on this
+     * profile pays a constant {@code R_min} and the crossing/reorg assertions below all still
+     * pass while proving nothing — the silent kind of coverage loss this must fail loudly on.
+     */
+    private static void assertCurveNotSwallowedByTheFloor(NetworkParameters params) {
+        long preCrossingReward = params.miningReward(2, 0L);
+        assertTrue(preCrossingReward > params.minerRevenueFloor(),
+            "the pre-crossing reward " + preCrossingReward + " is not above the revenue floor "
+                + params.minerRevenueFloor() + " -- this profile's whole table sits under the floor, "
+                + "so every block pays a constant R_min and the crossing proofs are vacuous");
+        assertTrue(preCrossingReward < params.supplyTarget(),
+            "the first block must leave the branch un-crossed: reward " + preCrossingReward
+                + " >= supplyTarget " + params.supplyTarget());
+    }
+
+    /**
      * As {@code E2EEmissionCurveTest}/{@code E2ECurveBoundaryTest}'s own private helper: a
      * fully-mined block whose header {@code supply} is the honest curve-aware stamp but whose
      * coinbase pays {@code forgedReward}.
@@ -164,6 +190,7 @@ class E2ECurveReorgTest {
     void repeatedReorgsAcrossTheSupplyTargetFrontierDoNotCompoundTheBoundaryDiscontinuity() throws Exception {
         try (TestNetwork network = new TestNetwork(tempDir)) {
             NetworkParameters params = crossableProfile();
+            assertCurveNotSwallowedByTheFloor(params);
 
             RhizomeNode shortBranch = network.node("short").params(params).start();
             RhizomeNode longBranch = network.node("long").params(params).start();
@@ -434,9 +461,9 @@ class E2ECurveReorgTest {
             long height2Reward = params.miningReward(2, fundedTotal);
             EmissionCurve standalone = EmissionCurve.build(
                 params.supplyTarget(), params.emissionCoefficient(), params.emissionTableSteps());
-            assertEquals(Math.max(0L, standalone.raw(fundedTotal)), height2Reward,
+            assertEquals(Math.max(params.minerRevenueFloor(), standalone.raw(fundedTotal)), height2Reward,
                 "the NetworkParameters dispatch must pay exactly what a standalone EmissionCurve "
-                    + "instance built from the same three constants computes");
+                    + "instance built from the same three constants computes, floored at R_min");
             assertEquals(height2Reward, left.engine().blockAt(2).transactions().get(0).amount().amount(),
                 "the real height-2 block must have paid exactly the standalone curve value, with zero "
                     + "drift -- well within, not merely bounded by, the documented ≤1-unit tolerance");

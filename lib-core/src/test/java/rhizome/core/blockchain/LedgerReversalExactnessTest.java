@@ -391,16 +391,20 @@ class LedgerReversalExactnessTest {
     }
 
     /**
-     * FR-005 / spec US3 scenario 2: in the curve's truncation region the base reward is zero, and
-     * no off-curve fallback issuance may mint uncle or nephew rewards anyway — a block that would
-     * pay something here is minting outside the supply accounting the curve defines.
+     * FR-005 / spec US3 scenario 2, re-premised to the floored regime (research.md Decision 6,
+     * feature 05): in what was the curve's truncation region the base reward is no longer zero —
+     * the floor holds it at exactly R_min, and the uncle/nephew rewards are that floored base's
+     * fractions derived through the single clamp site (contracts/miner-revenue-floor.md §3). No
+     * second clamp, and no off-curve fallback issuance: the amounts are exactly the floored
+     * base's derived fractions.
      */
     @Test
-    void aZeroBaseRewardMintsZeroUncleAndNephewRewards() {
+    void aFlooredBaseRewardMintsTheFlooredUncleAndNephewRewards() {
         long height = 1;
-        long parentSupply = curveParams.supplyTarget() * 2; // strictly above S* -> clamped to 0
-        assertEquals(0L, curveParams.miningReward(height, parentSupply),
-            "sanity: the curve-aware base reward must actually be zero at this parentSupply");
+        long parentSupply = curveParams.supplyTarget() * 2; // strictly above S* -> floored to R_min
+        long floor = curveParams.minerRevenueFloor();
+        assertEquals(floor, curveParams.miningReward(height, parentSupply),
+            "sanity: the curve-aware base reward must be exactly R_min at this parentSupply");
         var uncles = List.of(
             new UncleRef(SHA256Hash.of(hashOf(32)), curveParams.genesisDifficulty(), uncleMiner));
         BlockImpl b = blockAt(height, parentSupply, uncles);
@@ -411,17 +415,25 @@ class LedgerReversalExactnessTest {
         assertEquals(ExecutionStatus.SUCCESS,
             Executor.executeBlock(b, ledger, (SHA256Hash h) -> false, curveParams, null, null, boxes, tokens,
                 null, parentSupply),
-            "a valid block may legitimately carry a zero-value coinbase");
+            "a valid block may legitimately carry a floored coinbase");
         boxes.commit(b.id());
         tokens.commit(b.id());
         Map<String, Long> after = balances();
 
-        assertEquals(before.getOrDefault(uncleMiner.toHexString(), 0L),
+        // The uncle references the nephew's own difficulty (deficit 0), so scaleRewardToWork is
+        // the identity here — the floored base's fractions in full: uncle R_min/2, nephew R_min/32.
+        long expectedUncleReward = curveParams.uncleReward(height, parentSupply);
+        long expectedNephewBonus = curveParams.nephewReward(height, parentSupply);
+        // getOrDefault on BOTH sides: balances() omits zero balances, so a regression that minted
+        // nothing here must fail as "expected 400 but was 0", not as an unboxing NPE that hides
+        // which side of the identity broke.
+        assertEquals(before.getOrDefault(uncleMiner.toHexString(), 0L) + expectedUncleReward,
             after.getOrDefault(uncleMiner.toHexString(), 0L),
-            "a zero curve base must mint nothing to the uncle miner -- no off-curve fallback issuance");
-        assertEquals(before.getOrDefault(miner.toHexString(), 0L),
+            "above S* an uncle must earn the floored base's uncle fraction -- no second clamp, no zero");
+        assertEquals(before.getOrDefault(miner.toHexString(), 0L)
+                + curveParams.miningReward(height, parentSupply) + expectedNephewBonus,
             after.getOrDefault(miner.toHexString(), 0L),
-            "a zero curve base must mint nothing extra (coinbase + nephew bonus) to the block miner");
+            "above S* the miner must earn the floored base plus the floored nephew bonus -- no off-curve fallback");
     }
 
     /**

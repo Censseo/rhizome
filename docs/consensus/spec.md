@@ -200,11 +200,26 @@ a calibration coefficient. The curve is a stepped table of `N = 256` uniform pos
 `(0, S*]`, generated once per `NetworkParameters` construction from the published `(S*, c, N)`
 triple, evaluated in O(1) with linear interpolation; above `S*` the reward mirrors negative by
 ratio (`raw(S) = −(interp(⌊S*²/S⌋) + 1)`, an exact `0` only at `S = S*`); consensus clamps the
-mined reward to `max(0, raw(S))` at a single site. The full generation/evaluation algorithm and
-its calibration record (`τ ≈ 20 y`, launch reward ≈2.61 PDN/block, terminal supply, reorg
-continuity ≤1 base unit) are the normative WHITEPAPER §5.3; the checked-in
+mined reward to `max(R_min, raw(S))` at a single site — the miner revenue floor (feature 05),
+`R_min = 800` base units on mainnet, the consensus-guaranteed minimum subsidy at every
+curve-active height and every supply. The full generation/evaluation algorithm and
+its calibration record (`τ ≈ 20 y`, launch reward ≈2.61 PDN/block, terminal supply, `R_min`,
+reorg continuity ≤1 base unit) are the normative WHITEPAPER §5.3; the checked-in
 `lib-core/src/test/resources/emission/curve-vectors.json` pins the generated output bit-for-bit
 for independent implementers.
+
+**`S*` is a target, not a cap.** Above the target the raw value mirrors negative and consensus
+floors to `R_min`, so supply does not stop at `S*` — under the floor it drifts deliberately: from
+`S ≈ 0.9669 × S*` onward the schedule is a flat `R_min`, supply crosses `S*`, and keeps growing
+until feature 08's burn counterbalances it. An **uncle-free** block mints exactly `R_min`
+(≈ 0.168 % of `S*` per year at the shipped calibration) — the floor of the tail rate, not a cap:
+uncle and nephew rewards derive from the same floored base (C-6), so a block carrying the maximum
+`maxUnclesPerBlock = 2` uncles at zero difficulty deficit mints `2.0625 × R_min`, bounding the tail
+at ≈ 0.347 % of `S*` per year. Under feature 03's zero clamp every one of those terms was zero
+above `S*`; the floor is what makes uncle issuance persist there too. This tail emission is the
+deliberate, rate-bounded trade the floor makes for permanent security funding (research.md
+Decision 3/5); the uncle-free rate is pinned by the calibration test
+(`emissionScheduleIsCalibratedForTheBlockCadence`).
 
 `NetworkParameters.emissionCurveHeight` gates *which* rule governs a block: `0` (the polarity of
 `powUpgradeHeight`, not `boxActivationHeight`) means **never** — the curve exists, is fully
