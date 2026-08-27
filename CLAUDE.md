@@ -128,6 +128,12 @@ template, the corresponding checked-in `.wasm` must be rebuilt to match.
   wallet keys are generated and kept in the browser, the node never sees a private key.
 
 ## Recent Changes
+- 005-miner-revenue-floor: miner revenue floor `R_min` (`NetworkParameters.minerRevenueFloor`,
+  800 base units on mainnet, build-refused if non-positive). The emission curve's single clamp
+  site becomes `max(R_min, raw(S))` instead of `max(0, raw(S))`, so a curve-active block's
+  scheduled base reward is always strictly positive and uncle/nephew rewards floor through it.
+  Consequence: issuance no longer terminates at `S*` (tail emission — WHITEPAPER §5.3). No new
+  persisted state, no wire change, no new dependency.
 - 004-integer-log-curve: supply-driven logarithmic emission curve (`EmissionCurve` in lib-core),
   integer-only stepped-table evaluation against the header-committed supply; no new persisted
   state, no new dependency
@@ -137,4 +143,4 @@ template, the corresponding checked-in `.wasm` must be rebuilt to match.
 
 ## Active Technologies
 - Java 25 (Gradle toolchain + `options.release = 25`), no new dependencies; JDK 25 standard
-  library only (`java.math.BigInteger` for build-time table generation)
+  library only (`java.math.BigInteger` for build-time emission-table generation)

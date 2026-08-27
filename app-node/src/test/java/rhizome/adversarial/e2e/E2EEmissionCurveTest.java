@@ -293,16 +293,18 @@ class E2EEmissionCurveTest {
     /**
      * E2E-64 — Boot a node from a genesis snapshot already funded at twice {@code supplyTarget},
      * so the very first curve-active block's parent supply sits deep in the curve's negative
-     * (mirrored) branch, where the honest reward is clamped to exactly 0
-     * ({@code Math.max(0L, emissionCurve.raw(parentSupply))}, the single clamp site in
-     * {@code NetworkParameters.miningReward(long, long)}). Claiming any positive amount there must
-     * still be rejected — this exercises the clamp site directly through a real node, which no
-     * unit test that calls {@code EmissionCurve} in isolation reaches.
+     * (mirrored) branch, where the honest reward is now the floor, exactly {@code R_min}
+     * ({@code Math.max(minerRevenueFloor, emissionCurve.raw(parentSupply))}, the single clamp
+     * site in {@code NetworkParameters.miningReward(long, long)} — the floored successor of
+     * feature 03's zero clamp). Claiming any amount OFF the floor there — {@code R_min + 1}, or
+     * {@code 0} (feature 03's interim value) — must still be rejected, and a block paying exactly
+     * {@code R_min} accepted; this exercises the clamp site directly through a real node.
      */
     @Test
-    void aPositiveRewardClaimedAboveTheSupplyTargetIsRejectedAndTheNodeStaysHealthy() throws Exception {
+    void aRewardOffTheFloorClaimedAboveTheSupplyTargetIsRejectedAndTheNodeStaysHealthy() throws Exception {
         try (TestNetwork network = new TestNetwork(tempDir)) {
             NetworkParameters params = TestNetwork.CURVE_ACTIVE;
+            long floor = params.minerRevenueFloor();
             long fundedTotal = Math.multiplyExact(params.supplyTarget(), 2L);
             E2EFixtures.Identity funded = E2EFixtures.Identity.generate();
             Path snapshot = E2EFixtures.premine(tempDir.resolve("genesis-above-target.json"), params,
@@ -314,60 +316,74 @@ class E2EEmissionCurveTest {
             assertEquals(fundedTotal, parentSupply, "genesis must commit the funded snapshot's total exactly");
 
             long height = heightBefore + 1;
-            assertEquals(0L, params.miningReward(height, parentSupply),
-                "honest reward this far past supplyTarget must clamp to exactly 0");
+            assertEquals(floor, params.miningReward(height, parentSupply),
+                "honest reward this far past supplyTarget must be exactly R_min (the floor)");
 
-            BlockImpl poison = mineWithForgedCoinbase(node, PublicAddress.random(), 1L);
-            ExecutionStatus status = node.service().submitBlock(poison);
-            assertEquals(ExecutionStatus.INCORRECT_MINING_FEE, status,
-                "any positive reward claimed above supplyTarget must be rejected by the clamp's own gate");
-            assertEquals(heightBefore, node.engine().height());
-            assertFalse(node.engine().isDegraded());
+            for (long offFloor : new long[] {floor + 1, 0L}) {
+                BlockImpl poison = mineWithForgedCoinbase(node, PublicAddress.random(), offFloor);
+                ExecutionStatus status = node.service().submitBlock(poison);
+                assertEquals(ExecutionStatus.INCORRECT_MINING_FEE, status,
+                    "a reward of " + offFloor + " claimed above supplyTarget must be rejected by the "
+                        + "floor's own exactness gate -- only exactly R_min is legal");
+                assertEquals(heightBefore, node.engine().height());
+                assertFalse(node.engine().isDegraded());
+            }
 
             Block honest = E2EFixtures.mint(node, PublicAddress.random());
             assertEquals(heightBefore + 1, node.engine().height());
-            assertEquals(0L, honest.transactions().get(0).amount().amount());
+            assertEquals(floor, honest.transactions().get(0).amount().amount(),
+                "the honest reward this far past supplyTarget is exactly R_min");
         }
     }
 
     /**
-     * E2E-65 — Mine a real chain up to the band, immediately below {@code supplyTarget}, where the
-     * honest reward genuinely floors to exactly 0 (a real, positive-width stretch the stepped
-     * table's interpolation truncates to zero before reaching {@code supplyTarget} itself — see
-     * {@code EmissionCurve}'s class javadoc) — the terminal state every curve-active chain
-     * eventually reaches. Verifies both directions at once: a rival block claiming one extra unit
-     * at that exact parent supply is rejected, and the node then keeps producing through several
-     * consecutive genuinely-zero-reward blocks rather than confusing "expected reward is zero" with
-     * "no check ran".
+     * E2E-65 — Mine a real chain through the floor crossover band — the stretch, immediately
+     * below {@code supplyTarget}, where {@code EmissionCurve.raw} first drops below {@code R_min}
+     * (the terminal state every curve-active chain eventually reaches; under feature 03 the same
+     * band paid exactly 0, under the floor it pays exactly {@code R_min} forever). Verifies both
+     * directions at once: a rival block claiming one extra unit at that exact parent supply is
+     * rejected, and the node then keeps producing through several consecutive floored blocks
+     * rather than confusing "expected reward is R_min" with "no check ran".
      */
     @Test
-    void theRealNodeKeepsProducingThroughAGenuineZeroRewardBlockAndRejectsAnyExtraUnitClaimedThere()
+    void theRealNodeKeepsProducingThroughTheFloorCrossoverBandAndRejectsAnyExtraUnitClaimedThere()
             throws Exception {
         try (TestNetwork network = new TestNetwork(tempDir)) {
             RhizomeNode node = network.node("victim").params(TestNetwork.CURVE_ACTIVE).start();
             NetworkParameters params = node.engine().params();
+            long floor = params.minerRevenueFloor();
 
-            E2EFixtures.mintToSupply(node, PublicAddress.random(), params.supplyTarget());
+            // Land the chain INSIDE the crossover band -- past the supply where raw(S) first drops
+            // below R_min (S ~= S*/exp(R_min/c)) but still strictly BELOW supplyTarget, which is the
+            // regime this scenario owns. Mining past supplyTarget instead would only re-run E2E-64's
+            // above-target regime; the band below the target is the one the floor newly changed
+            // (feature 03 paid exactly 0 here) and the one nothing else covers.
+            long crossover = (long) (params.supplyTarget() / Math.exp((double) floor / params.emissionCoefficient()));
+            long insideBand = crossover + (params.supplyTarget() - crossover) / 2;
+            E2EFixtures.mintToSupply(node, PublicAddress.random(), insideBand);
             long heightBefore = node.engine().height();
             long height = heightBefore + 1;
             long parentSupply = node.engine().headerAt(heightBefore).supply();
-            assertTrue(parentSupply < params.supplyTarget(),
-                "honest mining alone must never cross supplyTarget -- the zero-reward plateau stops it first");
-            assertEquals(0L, params.miningReward(height, parentSupply),
-                "mintToSupply must have stalled exactly because the honest reward here is genuinely zero");
+            assertTrue(parentSupply >= crossover && parentSupply < params.supplyTarget(),
+                "the chain must sit inside the floored crossover band -- at/above the crossover "
+                    + crossover + " and still below supplyTarget " + params.supplyTarget()
+                    + ", was " + parentSupply);
+            assertEquals(floor, params.miningReward(height, parentSupply),
+                "the honest reward inside the crossover band must be exactly R_min, never 0");
 
             // The rival, submitted while this parent is still the tip, so both blocks genuinely
             // compete for the same next height rather than one being a stale sibling of the other.
-            BlockImpl poison = mineWithForgedCoinbase(node, PublicAddress.random(), 1L);
+            BlockImpl poison = mineWithForgedCoinbase(node, PublicAddress.random(), floor + 1);
             ExecutionStatus status = node.service().submitBlock(poison);
-            assertEquals(ExecutionStatus.INCORRECT_MINING_FEE, status);
+            assertEquals(ExecutionStatus.INCORRECT_MINING_FEE, status,
+                "an extra unit claimed through the floored crossover band must still be rejected");
             assertEquals(heightBefore, node.engine().height());
             assertFalse(node.engine().isDegraded());
 
             for (int i = 0; i < 3; i++) {
                 Block block = E2EFixtures.mint(node, PublicAddress.random());
-                assertEquals(0L, block.transactions().get(0).amount().amount(),
-                    "block " + (i + 1) + " past the plateau boundary must still pay exactly 0");
+                assertEquals(floor, block.transactions().get(0).amount().amount(),
+                    "block " + (i + 1) + " past the floored crossover must still pay exactly R_min");
             }
             assertEquals(heightBefore + 3, node.engine().height());
             assertFalse(node.engine().isDegraded());
@@ -434,16 +450,18 @@ class E2EEmissionCurveTest {
     /**
      * E2E-75 — Mine a real node, with a genuine live {@code BlockProducer} (not manually driven),
      * far past {@code supplyTarget} into the sustained region where the honest reward is pinned to
-     * exactly 0 for many consecutive real blocks — the terminal state every curve-active chain
-     * eventually reaches. Checks sustained liveness specifically: no confusion with the unrelated
-     * {@code NO_MINING_FEE}/{@code EXTRA_MINING_FEE} statuses, a correct balance read through the
-     * real HTTP {@code /wallet} route for the (never-paid) miner, and that nothing downstream
-     * assumes a non-zero coinbase amount.
+     * exactly {@code R_min} for many consecutive real blocks — the terminal state every
+     * curve-active chain eventually reaches, which under the floor mints a permanent tail
+     * emission (research.md Decisions 3/5). Checks sustained liveness specifically: no confusion
+     * with the unrelated {@code NO_MINING_FEE}/{@code EXTRA_MINING_FEE} statuses, and a correct
+     * balance read through the real HTTP {@code /wallet} route for the miner, who is paid exactly
+     * {@code R_min} per block.
      */
     @Test
-    void aRealNodeMinedDeepPastTheSupplyTargetProducesManyZeroRewardBlocksAndStaysHealthy() throws Exception {
+    void aRealNodeMinedDeepPastTheSupplyTargetProducesManyFloorRewardBlocksAndStaysHealthy() throws Exception {
         try (TestNetwork network = new TestNetwork(tempDir)) {
             NetworkParameters params = TestNetwork.CURVE_ACTIVE;
+            long floor = params.minerRevenueFloor();
             long fundedTotal = Math.multiplyExact(params.supplyTarget(), 5L);
             E2EFixtures.Identity funded = E2EFixtures.Identity.generate();
             Path snapshot = E2EFixtures.premine(tempDir.resolve("genesis-deep-past-target.json"), params,
@@ -455,21 +473,37 @@ class E2EEmissionCurveTest {
 
             TestNetwork.awaitHeight(node, 10);
             for (long h = 2; h <= node.engine().height(); h++) {
-                assertEquals(0L, node.engine().blockAt(h).transactions().get(0).amount().amount(),
-                    "block " + h + " deep past supplyTarget must still pay exactly 0, never confused "
-                        + "with NO_MINING_FEE/EXTRA_MINING_FEE");
+                assertEquals(floor, node.engine().blockAt(h).transactions().get(0).amount().amount(),
+                    "block " + h + " deep past supplyTarget must pay exactly R_min, never confused "
+                        + "with NO_MINING_FEE/EXTRA_MINING_FEE and never 0");
             }
             assertFalse(node.engine().isDegraded());
-            assertEquals(0L, node.service().balance(miner),
-                "the miner must genuinely never be paid this deep past supplyTarget");
 
+            // The miner is paid exactly R_min per mined block. The live producer keeps appending
+            // between every read (WI-14), and an HTTP round trip can straddle more than one block
+            // interval, so bracket ALL the reads between a height taken before and a height taken
+            // after: any sample must be R_min per block for SOME height inside that bracket. The
+            // "exactly R_min per block" claim is then carried by the divisibility check, which no
+            // amount of producer skew can satisfy accidentally.
+            long heightAtStart = node.engine().height();
+            long b = node.service().balance(miner);
             int port = node.apiPort();
             var response = RawHttp.get(port, "/wallet?address=" + miner.toHexString(), Map.of());
             assertEquals(200, response.status());
-            assertEquals("0", new JSONObject(response.body()).get("balance").toString(),
-                "the real /wallet route must also read exactly 0 for the never-paid miner");
+            long overWire = Long.parseLong(new JSONObject(response.body()).get("balance").toString());
+            long heightAtEnd = node.engine().height();
+            long lowerBound = floor * (heightAtStart - 1);
+            long upperBound = floor * (heightAtEnd - 1);
+            for (var sample : Map.of("engine balance", b, "/wallet balance", overWire).entrySet()) {
+                long value = sample.getValue();
+                assertTrue(value >= lowerBound && value <= upperBound,
+                    sample.getKey() + " " + value + " is outside R_min-per-block for heights "
+                        + heightAtStart + ".." + heightAtEnd + " (" + lowerBound + ".." + upperBound + ")");
+                assertEquals(0L, value % floor,
+                    sample.getKey() + " " + value + " is not an exact multiple of R_min " + floor);
+            }
 
-            // Sustained, not a one-off: many MORE zero-reward blocks past the first ten.
+            // Sustained, not a one-off: many MORE floored blocks past the first ten.
             long heightBefore = node.engine().height();
             TestNetwork.awaitHeight(node, heightBefore + 5);
             assertFalse(node.engine().isDegraded());
@@ -496,9 +530,13 @@ class E2EEmissionCurveTest {
     void syncingALongRealCurveCrossingChainStaysWithinPatienceAndTheVictimStaysResponsiveThroughout()
             throws Exception {
         try (TestNetwork network = new TestNetwork(tempDir)) {
+            // Same shape as E2ECurveReorgTest.crossableProfile(), coefficient included: 1300 keeps
+            // table[1] = 901 strictly above the inherited 800-base-unit revenue floor, so the run
+            // genuinely traverses the curve's interpolated branch before crossing rather than
+            // paying a constant R_min from the first block on.
             NetworkParameters params = TestNetwork.FAST.toBuilder()
                 .supplyTarget(1000L)
-                .emissionCoefficient(800L)
+                .emissionCoefficient(1300L)
                 .emissionTableSteps(2)
                 .emissionCurveHeight(1)
                 .build();
@@ -588,7 +626,7 @@ class E2EEmissionCurveTest {
      * E2E-84 — Flood a curve-active node's real {@code /submit} route with PoW-INVALID blocks,
      * each built on the real current tip whose parent supply is already {@code >= supplyTarget}
      * (the same "above the target" setup as {@code
-     * aPositiveRewardClaimedAboveTheSupplyTargetIsRejectedAndTheNodeStaysHealthy} above). Verified
+     * aRewardOffTheFloorClaimedAboveTheSupplyTargetIsRejectedAndTheNodeStaysHealthy} above). Verified
      * in the code: {@code ChainEngine.addBlock}'s {@code checkSupply} -- and, through it, {@code
      * Issuance.minted}'s call into {@code EmissionCurve.raw}'s negative branch -- runs before
      * merkle/nonces/PoW (WHITEPAPER §3.5's DoS-armor ordering), so every one of these invalid-PoW
@@ -637,8 +675,8 @@ class E2EEmissionCurveTest {
             // Positive control: the node still does real, honest work after the flood.
             Block honest = E2EFixtures.mint(node, PublicAddress.random());
             assertEquals(heightBefore + 1, node.engine().height());
-            assertEquals(0L, honest.transactions().get(0).amount().amount(),
-                "the honest reward this far past supplyTarget is still the clamped zero value");
+            assertEquals(params.minerRevenueFloor(), honest.transactions().get(0).amount().amount(),
+                "the honest reward this far past supplyTarget is exactly R_min (the floor), never 0");
             assertFalse(node.engine().isDegraded());
         }
     }
@@ -647,8 +685,8 @@ class E2EEmissionCurveTest {
      * E2E-85 — Submit several individually-valid (real PoW), CONCURRENTLY competing blocks for the
      * same next height on a real curve-active node whose parent supply is already
      * {@code >= supplyTarget} (so every one of them shares the same negative/mirrored-branch
-     * evaluation) -- some honest (paying the real clamped-to-zero reward) and some forged (claiming
-     * a positive amount the clamp forbids) -- fired from real Java threads at the real
+     * evaluation) -- some honest (paying the real exactly-R_min reward) and some forged (claiming
+     * an off-floor amount the floor forbids) -- fired from real Java threads at the real
      * {@code /submit} route simultaneously. Verifies {@code ChainEngine}'s single lock serializes
      * the curve evaluation and coinbase check correctly under real concurrency: exactly one
      * candidate is ever accepted, it is one of the honest ones (never a forged one, regardless of
@@ -672,18 +710,19 @@ class E2EEmissionCurveTest {
             assertTrue(parentSupply >= params.supplyTarget(),
                 "every competing block below must genuinely fall into the curve's negative/mirror "
                     + "branch, or this proof exercises nothing new");
-            assertEquals(0L, params.miningReward(heightBefore + 1, parentSupply),
-                "the honest reward at this parent supply must be the clamp's zero value, so a real "
+            long floor = params.minerRevenueFloor();
+            assertEquals(floor, params.miningReward(heightBefore + 1, parentSupply),
+                "the honest reward at this parent supply must be exactly R_min, so a real "
                     + "honest candidate can exist alongside the forged ones");
 
             // Built single-threaded, all on the SAME real current tip: the concurrency this test
             // exercises is in the SUBMIT step below, not in mining.
             List<BlockImpl> candidates = new ArrayList<>();
             for (int i = 0; i < 4; i++) {
-                candidates.add(mineWithForgedCoinbase(node, PublicAddress.random(), 0L)); // honest
+                candidates.add(mineWithForgedCoinbase(node, PublicAddress.random(), floor)); // honest
             }
             for (int i = 0; i < 4; i++) {
-                candidates.add(mineWithForgedCoinbase(node, PublicAddress.random(), 1L)); // forged
+                candidates.add(mineWithForgedCoinbase(node, PublicAddress.random(), floor + 1)); // forged
             }
 
             ExecutorService pool = Executors.newFixedThreadPool(candidates.size());
@@ -708,9 +747,9 @@ class E2EEmissionCurveTest {
                     + "statuses " + statuses);
             assertEquals(heightBefore + 1, node.engine().height(),
                 "the chain must have advanced by exactly one block, not zero and not more than one");
-            assertEquals(0L, node.engine().blockAt(heightBefore + 1).transactions().get(0).amount().amount(),
+            assertEquals(floor, node.engine().blockAt(heightBefore + 1).transactions().get(0).amount().amount(),
                 "the single accepted block among the concurrent competitors must be one of the "
-                    + "honest, clamped-to-zero-reward candidates -- never a forged one");
+                    + "honest, exactly-R_min-reward candidates -- never a forged one");
             assertFalse(node.engine().isDegraded(),
                 "concurrent competing submissions must never corrupt or degrade the node");
 

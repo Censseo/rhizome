@@ -406,10 +406,15 @@ case:
   always in range, and the function is total and monotone non-increasing over the entire `long`
   domain.
 
-**Clamping and dispatch.** Consensus never pays a negative reward — a single clamp site applies
-`max(0, raw(S))` where the reward enters the block/uncle/nephew computation. The raw, unclamped
-value stays observable for tests (and a later feature's burn accounting); only the clamped value
-is ever minted. Height gates *which* rule governs: below a per-network activation height (`0` =
+**Clamping and dispatch.** Consensus never pays below the miner revenue floor — a single clamp site
+applies `max(R_min, raw(S))` where the reward enters the block/uncle/nephew computation. `R_min`
+(800 base units on mainnet, see the calibration record) is the consensus-guaranteed minimum subsidy:
+at every curve-active height and every supply the scheduled base reward is `≥ R_min > 0`, and from
+`S ≈ 0.9669 × S*` onward — the last ~3.3 % of the approach and everything beyond it — the schedule
+is a flat `R_min` (the floor is not an edge case, it is the endgame regime). The raw, unclamped
+value stays observable for tests (and a later feature's burn accounting); only the clamped value is
+ever minted, and uncle/nephew rewards floor *through* this base — there is no second clamp site.
+Height gates *which* rule governs: below a per-network activation height (`0` =
 never scheduled — the same polarity as the Pufferfish2 cost-upgrade height, §3.2) the legacy
 geometric rule below applies unchanged; at or above it, the curve applies. On every network
 Rhizome ships today the activation height is `0` — the curve exists, is fully specified and
@@ -426,7 +431,9 @@ the provisional genesis supply `S₀ = 1 000 000 000 000` base units (100M PDN, 
 | Table steps `N` | `256` |
 | Relaxation time `τ_blocks = S*/c` | `126 228 403` blocks ≈ 20.0003 years |
 | Launch reward `R₀ = c · ln(S*/S₀)` | `26 075` base units ≈ 2.6075 PDN/block — ≈6.1% below the geometric schedule's 2.7777 PDN/block launch reward, inside the 10% least-surprise band (SC-004) |
-| Terminal supply | `S* − 127 289 756` base units (≈ `S* −` 12 729 PDN) — the first supply at which `⌊c · ln(S*/S)⌋` truncates to exactly `0`; found by exhaustive search over the generated table, not a closed form (the continuous first-order estimate `S*(1 − e^(−1/c))` only approximates it) |
+| Miner revenue floor `R_min` | `800` base units (0.08 PDN) ≈ `R₀/32.6` — from the low-subsidy security analysis (feature 05): rewriting the `maxReorgDepth = 120`-block finality window at `minDifficulty = 16` costs `120 × 2^16 = 7 864 320` hashes, so under feature 03's zero clamp the subsidy reaching the truncation band collapses honest hashrate's revenue reason to zero exactly when the chain carries the most value. The floor keeps the protocol-guaranteed security budget `≥ 800` base units/block (≈ 1 382 PDN/day) forever. Crossover at `S ≈ 0.9669 × S*` (`ln(S*/S) = R_min/c ≈ 0.0337`); from there on the schedule is a flat `R_min` |
+| Tail emission (consequence, deliberate) | Under the floor issuance never terminates: supply crosses `S*` and keeps growing until feature 08's burn counterbalances it. An **uncle-free** block mints exactly `R_min` ≈ 504 576 PDN/year ≈ **0.168 % of `S*` per year**; that is the floor of the rate, not a cap. Uncle and nephew rewards derive from the floored base (§3.6), so a block carrying the maximum `maxUnclesPerBlock = 2` uncles at zero difficulty deficit mints `R_min · (1 + 2 · (1/2 + 1/32)) = 2.0625 · R_min`, and the tail rate is bounded by **0.347 % of `S*` per year** in the worst case. Below `S*` this uncle contribution was always part of issuance; what the floor changes is that it no longer vanishes above `S*` (feature 03's zero clamp made every term zero there). The cap becomes a soft attractor supply slowly drifts above — permanent, rate-bounded security funding in exchange (research.md Decision 3/5) |
+| Terminal supply (raw curve only) | `S* − 127 289 756` base units (≈ `S* −` 12 729 PDN) — the first supply at which `⌊c · ln(S*/S)⌋` truncates to exactly `0`; found by exhaustive search over the generated table, not a closed form (the continuous first-order estimate `S*(1 − e^(−1/c))` only approximates it). Under the floor this is a property of `raw()` alone and no longer a supply the chain stops at: the *minted* reward is `R_min` long before this point (from the crossover above) and stays there. |
 | Reorg continuity | Two chain tips whose committed supply diverged within a 120-block reorg window (the maximum reorg depth, §3.7) mint rewards that differ by **at most one base unit** — never a large jump. The continuous first-order estimate (`(c/S₀) · ΔS`, negligible) undercounts the discrete implementation slightly: two evaluations landing in different interpolation segments each carry independent floor rounding, which can compound to exactly one base unit — never more, exhaustively verified — even where the continuous estimate rounds to zero |
 
 `N = 256` uniform steps keep interpolation fidelity comfortably under one base unit across the

@@ -253,6 +253,36 @@ public final class NetworkParameters {
     private final long emissionCurveHeight = 0;
 
     /**
+     * The miner revenue floor {@code R_min}, in base units — the consensus-guaranteed minimum
+     * scheduled base reward for a block mined under an active curve
+     * ({@code miningReward(height, parentSupply) >= R_min > 0} at every curve-active height and
+     * every supply; contracts/miner-revenue-floor.md). A plain strictly-positive long — there is
+     * deliberately no "unset" sentinel: the floor applies at every curve-active height, and a
+     * profile that never schedules the curve (emissionCurveHeight == 0) never reaches this code
+     * path, so the value is inert there, exactly like the feature-03 calibration constants.
+     *
+     * <p>Per-profile consensus constant set like {@link #chainId}. {@code testnet()} and
+     * {@code devnet()} derive from {@code cleanMainnet().toBuilder()} and deliberately inherit the
+     * mainnet value (WI-9 audit decision): both are curve-inactive <em>as shipped</em>, so the
+     * inherited value is inert while {@code emissionCurveHeight == 0} — resetting it would be
+     * ceremony that only risks a stale divergence when a later feature schedules the curve.
+     *
+     * <p><b>Not inert for a profile that turns the curve on.</b> Any {@code toBuilder()} profile
+     * that sets a positive {@code emissionCurveHeight} (every curve test does) inherits this
+     * mainnet-scale constant against a possibly test-scale {@code supplyTarget}. When
+     * {@code R_min} exceeds the curve's own first table entry the floor swallows the entire
+     * schedule and every block pays a constant {@code R_min} — set an explicit, profile-scaled
+     * floor there rather than assuming the mainnet value stays out of the way.
+     *
+     * <p>Calibration: {@code 800} base units (0.08 PDN) on mainnet ≈ {@code R₀/32.6} at the
+     * provisional genesis allocation — research.md Decision 3 (the low-subsidy regime against
+     * {@code minDifficulty}/{@code maxReorgDepth}, crossover at {@code S ≈ 0.9669 × S*}, tail
+     * emission ≈ 0.168 % of {@code S*} per year).
+     */
+    @lombok.Builder.Default
+    private final long minerRevenueFloor = 800L;
+
+    /**
      * The generated stepped table for {@code (supplyTarget, emissionCoefficient,
      * emissionTableSteps)}, built once at construction time so a degenerate curve configuration
      * fails fast at node startup rather than mid-chain on the first curve-active evaluation. Not
@@ -395,7 +425,8 @@ public final class NetworkParameters {
                       long rewardDecayNum, long rewardDecayDen,
                       long uncleRewardNum, long uncleRewardDen, long nephewRewardDivisor,
                       long supplyTarget, long emissionCoefficient, int emissionTableSteps,
-                      long emissionCurveHeight, EmissionCurve ignoredBuilderEmissionCurve,
+                      long emissionCurveHeight, long minerRevenueFloor,
+                      EmissionCurve ignoredBuilderEmissionCurve,
                       long boxActivationHeight, int maxBoxSizeBytes, int maxBoxRegisters,
                       long minValuePerByte, long storagePeriodBlocks, long storageFeeFactor,
                       int maxBoxCollectsPerBlock, long tokenActivationHeight,
@@ -459,6 +490,12 @@ public final class NetworkParameters {
         if (emissionCurveHeight < 0) {
             throw new IllegalArgumentException("emissionCurveHeight must be >= 0");
         }
+        // The floor's whole job is a strictly positive subsidy; a non-positive floor silently
+        // restores the zero-clamp cliff the feature exists to remove (research.md Decision 2) -- a
+        // misconfiguration must fail fast at node startup, not mid-chain under the engine lock.
+        if (minerRevenueFloor <= 0) {
+            throw new IllegalArgumentException("minerRevenueFloor must be > 0");
+        }
         // supplyTarget must lie strictly ahead of a pinned genesis supply — a curve that starts
         // at or above its own target is degenerate. Unpinned profiles (GENESIS_SUPPLY_UNPINNED)
         // skip this check, mirroring how genesisSupply's equality check is skipped elsewhere.
@@ -515,6 +552,7 @@ public final class NetworkParameters {
         this.emissionCoefficient = emissionCoefficient;
         this.emissionTableSteps = emissionTableSteps;
         this.emissionCurveHeight = emissionCurveHeight;
+        this.minerRevenueFloor = minerRevenueFloor;
         this.boxActivationHeight = boxActivationHeight;
         this.maxBoxSizeBytes = maxBoxSizeBytes;
         this.maxBoxRegisters = maxBoxRegisters;
@@ -665,13 +703,16 @@ public final class NetworkParameters {
      * <p>Dispatches on {@link #emissionCurveActiveAt}: below activation (or on a profile that
      * never schedules the curve) this returns exactly {@link #miningReward(long)}'s geometric
      * result, ignoring {@code parentSupply} entirely. At or above activation it returns the
-     * curve's raw value at {@code parentSupply}, clamped to zero — the single clamp site
-     * (contracts/emission-curve.md §4): the curve's negative branch (supply at/above
-     * {@link #supplyTarget}) must never mint a negative reward.
+     * curve's raw value at {@code parentSupply}, floored to {@link #minerRevenueFloor} — the
+     * single clamp site (contracts/miner-revenue-floor.md §2): the curve's negative branch
+     * (supply at/above {@link #supplyTarget}) and every supply whose raw value drops below the
+     * floor must never mint a reward below {@code R_min}. {@code EmissionCurve.raw} itself stays
+     * signed — this {@code max} is the only clamp, so the floored base is what every derivation
+     * (uncle, nephew, {@code Issuance.minted}) sees.
      */
     public long miningReward(long height, long parentSupply) {
         if (emissionCurveActiveAt(height)) {
-            return Math.max(0L, emissionCurve.raw(parentSupply));
+            return Math.max(minerRevenueFloor, emissionCurve.raw(parentSupply));
         }
         return miningReward(height);
     }
@@ -780,6 +821,12 @@ public final class NetworkParameters {
             .emissionCoefficient(23_750L)
             .emissionTableSteps(256)
             // emissionCurveHeight stays 0 (never) in this feature — feature 05 schedules activation.
+            // Miner revenue floor R_min (research.md Decision 3): 800 base units = 0.08 PDN, the
+            // consensus-guaranteed minimum subsidy under an active curve (≈ R₀/32.6 at the
+            // provisional allocation; crossover at S ≈ 0.9669 × S*; tail emission ≈ 0.168 % of
+            // S* per year until feature 08's burn counterbalances it). Inert while
+            // emissionCurveHeight == 0; testnet()/devnet() inherit it deliberately (WI-9).
+            .minerRevenueFloor(800L)
             .build();
     }
 

@@ -147,7 +147,11 @@ difficulty pins near `minDifficulty` regardless of real hashrate, collapsing PoW
   are supply-aware too: `uncleReward(height, parentSupply)` and `nephewReward(height, parentSupply)`
   are computed from the same dispatched base the coinbase used, never from a second, independently
   dispatched one. One block, one parent supply, one emission decision — for the coinbase and every
-  uncle/nephew bonus alike.
+  uncle/nephew bonus alike. That base is the *floored* one, so uncle and nephew rewards floor
+  **through** it and never clamp independently: there is no second floor site to audit, the
+  fractions and the per-bit work scaling are unchanged, and work scaling below the floored
+  fraction stays intact — the guarantee `R_min` makes is about the miner's own block subsidy,
+  not a promised uncle payout.
 
 ### C-7 — Fork choice, finality, and the anti-lying-peer gate *(implemented)*
 
@@ -200,11 +204,26 @@ a calibration coefficient. The curve is a stepped table of `N = 256` uniform pos
 `(0, S*]`, generated once per `NetworkParameters` construction from the published `(S*, c, N)`
 triple, evaluated in O(1) with linear interpolation; above `S*` the reward mirrors negative by
 ratio (`raw(S) = −(interp(⌊S*²/S⌋) + 1)`, an exact `0` only at `S = S*`); consensus clamps the
-mined reward to `max(0, raw(S))` at a single site. The full generation/evaluation algorithm and
-its calibration record (`τ ≈ 20 y`, launch reward ≈2.61 PDN/block, terminal supply, reorg
-continuity ≤1 base unit) are the normative WHITEPAPER §5.3; the checked-in
+mined reward to `max(R_min, raw(S))` at a single site — the miner revenue floor (feature 05),
+`R_min = 800` base units on mainnet, the consensus-guaranteed minimum subsidy at every
+curve-active height and every supply. The full generation/evaluation algorithm and
+its calibration record (`τ ≈ 20 y`, launch reward ≈2.61 PDN/block, terminal supply, `R_min`,
+reorg continuity ≤1 base unit) are the normative WHITEPAPER §5.3; the checked-in
 `lib-core/src/test/resources/emission/curve-vectors.json` pins the generated output bit-for-bit
 for independent implementers.
+
+**`S*` is a target, not a cap.** Above the target the raw value mirrors negative and consensus
+floors to `R_min`, so supply does not stop at `S*` — under the floor it drifts deliberately: from
+`S ≈ 0.9669 × S*` onward the schedule is a flat `R_min`, supply crosses `S*`, and keeps growing
+until feature 08's burn counterbalances it. An **uncle-free** block mints exactly `R_min`
+(≈ 0.168 % of `S*` per year at the shipped calibration) — the floor of the tail rate, not a cap:
+uncle and nephew rewards derive from the same floored base (C-6), so a block carrying the maximum
+`maxUnclesPerBlock = 2` uncles at zero difficulty deficit mints `2.0625 × R_min`, bounding the tail
+at ≈ 0.347 % of `S*` per year. Under feature 03's zero clamp every one of those terms was zero
+above `S*`; the floor is what makes uncle issuance persist there too. This tail emission is the
+deliberate, rate-bounded trade the floor makes for permanent security funding (research.md
+Decision 3/5); the uncle-free rate is pinned by the calibration test
+(`emissionScheduleIsCalibratedForTheBlockCadence`).
 
 `NetworkParameters.emissionCurveHeight` gates *which* rule governs a block: `0` (the polarity of
 `powUpgradeHeight`, not `boxActivationHeight`) means **never** — the curve exists, is fully
@@ -346,10 +365,16 @@ profile in ~20 existing suites are unaffected.
 | `supplyTarget` (`S*`) | 2 997 924 580 000 base units (299 792 458 PDN) |
 | `emissionCoefficient` (`c`) | 23 750 base units |
 | `emissionTableSteps` (`N`) | 256 |
+| `minerRevenueFloor` (`R_min`) | 800 base units (0.08 PDN) — ≈ `R₀/32.6`, **must be > 0** |
 | `emissionCurveHeight` | **0 — never**, on every shipped profile |
 
-The three curve constants are inherited unchanged by `testnet()`/`devnet()`; only the activation
-height decides whether they mint, and it is `0` everywhere today.
+The four curve constants are inherited unchanged by `testnet()`/`devnet()`; only the activation
+height decides whether they mint, and it is `0` everywhere today. `R_min` is the one that is
+**not** inert for a derived profile that turns the curve on: a `toBuilder()` profile with a
+test-scale `supplyTarget` inherits the mainnet-scale floor, and where `R_min` exceeds the curve's
+own first table entry the floor swallows the whole schedule and every block pays a flat `R_min`.
+Curve-active profiles must set a profile-scaled floor rather than assume the mainnet value stays
+out of the way.
 
 ## Open items
 

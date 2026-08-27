@@ -6,12 +6,14 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 
 import java.util.Optional;
 
 import org.junit.jupiter.api.Test;
 
 import rhizome.core.blockchain.DifficultyAdjustment;
+import rhizome.core.blockchain.EmissionCurve;
 import rhizome.core.blockchain.NetworkParameters;
 import rhizome.crypto.PowAlgorithm;
 
@@ -99,13 +101,24 @@ class NetworkParametersTest {
         // slow for the routine suite one block at a time, so advance k*f(S) per stride, with
         // k = max(1, S/(1000*c)) keeping each stride's relative supply change <= 0.1%. This
         // collapses the run to a few thousand iterations.
+        //
+        // Termination (research.md Decision 6 item 2, rewritten for the floor): the reward NEVER
+        // reaches 0 under the floor -- once raw(S) drops below R_min the clamp holds it at exactly
+        // R_min forever, so the recursion terminates on `reward == R_min` sustained, never on
+        // `reward > 0` failing (that loop would never exit -- a suite-wide hang, not a test
+        // failure). A hard iteration cap remains as a belt-and-braces hang guard.
+        long floor = p.minerRevenueFloor();
         long supply = s0;
         long height = activationHeight;
         long reward = p.miningReward(height, supply);
         long previousReward = Long.MAX_VALUE;
         long supplyAtTau = -1;
-        long lastPositiveSupply = s0;
-        while (reward > 0) {
+        long lastSupplyAboveFloor = s0;
+        int iterations = 0;
+        while (reward > floor) {
+            if (++iterations > 5_000_000) {
+                fail("calibration recursion did not terminate at the floor -- hang guard");
+            }
             // Hard invariant, asserted every iteration: reward is monotone non-increasing across
             // the entire run. The curve must never re-inflate as supply climbs toward S* --
             // WHITEPAPER.md determinism/no-surprise-inflation property for the emission rule.
@@ -113,7 +126,7 @@ class NetworkParametersTest {
                 "reward must be monotone non-increasing across the run: " + reward
                     + " > previous " + previousReward + " at supply=" + supply);
             previousReward = reward;
-            lastPositiveSupply = supply;
+            lastSupplyAboveFloor = supply;
 
             long k = Math.max(1, supply / (1000 * c));
             supply += k * reward;
@@ -124,7 +137,10 @@ class NetworkParametersTest {
                 supplyAtTau = supply;
             }
         }
-        long firstZeroSupply = supply; // miningReward(height, firstZeroSupply) == 0, by striding
+        // The loop exited with reward == R_min (never 0 under the floor); the coarse stride above
+        // BRACKETED the exact supply at which raw(S) first drops below R_min -- the floored
+        // crossover -- but overshot it.
+        long firstFloorSupply = supply; // miningReward(height, firstFloorSupply) == R_min
 
         // Supply at tau must have moved a substantial majority of the way from S0 toward S* --
         // a generous, empirically-verified band (measured ~71.7% at the shipped calibration; the
@@ -136,33 +152,87 @@ class NetworkParametersTest {
             "supply at tau should have covered a substantial majority of the S0->S* gap, was "
                 + (fractionOfGapCovered * 100) + "%");
 
-        // Terminal supply: the coarse stride above BRACKETS the true boundary but overshoots it
-        // -- near S*, k grows to ~S/(1000c) (hundreds of thousands of blocks) while the reward
-        // itself has shrunk to a handful of base units, so a single stride can leap tens of
-        // millions of base units past the point the reward first truncates to 0. Refine with a
-        // binary search on the same monotone function to land on the EXACT smallest supply at
-        // which the curve's reward is 0 -- still running the real curve, never hand-derived.
-        long lo = lastPositiveSupply; // miningReward(height, lo) > 0
-        long hi = firstZeroSupply;    // miningReward(height, hi) == 0
+        // Floored crossover: the coarse stride above lands a single stride past the point where
+        // the reward first clamps to exactly R_min (near S*, k grows to ~S/(1000c) while the
+        // reward has shrunk to a few hundred base units, so one stride can leap tens of millions
+        // of base units). Refine with a binary search on the same monotone function to land on
+        // the EXACT smallest supply at which the floored reward is exactly R_min -- still running
+        // the real curve, never hand-derived.
+        long lo = lastSupplyAboveFloor; // miningReward(height, lo) > floor
+        long hi = firstFloorSupply;     // miningReward(height, hi) == floor
         while (hi - lo > 1) {
             long mid = lo + (hi - lo) / 2;
-            if (p.miningReward(height, mid) > 0) {
+            if (p.miningReward(height, mid) > floor) {
                 lo = mid;
             } else {
                 hi = mid;
             }
         }
-        // Pinned EXACT terminal supply at the shipped mainnet calibration (S*=2_997_924_580_000,
-        // c=23_750, N=256) -- a REGRESSION GUARD, not a derived constant. If a future change to
-        // any of those three curve constants shifts where the reward truncates to zero, this
-        // assertion is what catches it: update it deliberately, alongside the constants, should
-        // that ever happen. (Note: research.md Decision 6 estimates this gap from S* at "~126
-        // 000 base units"; the value actually measured here, ~127.29M base units below S*, is
-        // three orders of magnitude larger and matches the S*/c ~= 126_228_403 scale of tau_blocks
-        // itself -- the documented estimate looks like a units slip in the write-up, not a bug
-        // in the curve. This assertion pins what the code actually does, per T019.)
-        assertEquals(2_997_797_290_244L, hi,
-            "pinned terminal supply drifted -- update deliberately if the curve constants changed");
+        // Pinned EXACT floored crossover at the shipped mainnet calibration (S*=2_997_924_580_000,
+        // c=23_750, N=256, R_min=800) -- a REGRESSION GUARD, not a derived constant. The
+        // continuous estimate ln(S*/S) = R_min/c gives S ≈ 0.9669 × S* (research.md Decision 3);
+        // this is the exact value the integer stepped table interpolates to. If a future change
+        // to any curve constant or the floor shifts where raw crosses R_min, this assertion is
+        // what catches it: update it deliberately, alongside the constants, should that ever
+        // happen.
+        assertEquals(2_898_445_750_238L, hi,
+            "pinned floored crossover drifted -- update deliberately if the curve constants changed");
+
+        // The RAW curve's terminal supply -- the first supply at which floor(c * ln(S*/S))
+        // truncates to exactly 0 -- is no longer a consensus quantity under the floor (the MINTED
+        // reward never reaches 0), but WHITEPAPER §5.3 still publishes the exact constant as
+        // exhaustively verified. Keep it pinned here, against the raw curve, rather than letting
+        // the floor silently retire the only guard the published number ever had. Same binary
+        // search over the same monotone function, one branch further along.
+        EmissionCurve rawCurve = EmissionCurve.build(sStar, c, p.emissionTableSteps());
+        long rawLo = hi;     // raw(rawLo) > 0 (it is just under R_min, not yet truncated)
+        long rawHi = sStar;  // raw(sStar) == 0 exactly (ln(S*/S*) == 0)
+        assertTrue(rawCurve.raw(rawLo) > 0 && rawCurve.raw(rawHi) == 0,
+            "the terminal-supply search must genuinely bracket the truncation point");
+        while (rawHi - rawLo > 1) {
+            long mid = rawLo + (rawHi - rawLo) / 2;
+            if (rawCurve.raw(mid) > 0) {
+                rawLo = mid;
+            } else {
+                rawHi = mid;
+            }
+        }
+        assertEquals(2_997_797_290_244L, rawHi,
+            "pinned terminal supply of the RAW curve drifted -- update deliberately, alongside "
+                + "WHITEPAPER §5.3's calibration record, if the curve constants changed");
+
+        // Post-target tail (research.md Decisions 3 & 5; contracts/miner-revenue-floor.md §5):
+        // from the floored crossover onward the schedule is flat R_min, so supply crosses S* and
+        // grows at exactly R_min per block forever (until feature 08's burn counterbalances it).
+        // The reward is constant over the whole [crossover, ∞) span, so a stride of k blocks is
+        // EXACT -- no approximation.
+        long heightAtCrossover = height;
+        long blocksToTarget = (sStar - hi) / floor;
+        long heightPastTarget = heightAtCrossover + blocksToTarget + 1_000L; // clearly past S*
+        long supplyPastTarget = hi + (heightPastTarget - heightAtCrossover) * floor;
+        assertEquals(floor, p.miningReward(heightPastTarget, supplyPastTarget),
+            "reward must be exactly R_min past the target at supply=" + supplyPastTarget);
+        // Per-block growth is exactly R_min -- literal, no striding.
+        long s = supplyPastTarget;
+        long h = heightPastTarget;
+        for (int i = 0; i < 10_000; i++) {
+            long r = p.miningReward(h, s);
+            assertEquals(floor, r, "reward must be exactly R_min per block past S* at supply=" + s);
+            s += r;
+            h++;
+        }
+
+        // R_min sits in the stated fraction band of R₀ (research.md Decision 3: 800 ≈ R₀/32.6 at
+        // the provisional calibration). Decision 3 CONSIDERED [R₀/256 ≈ 102, R₀/16 ≈ 1 630] and
+        // rejected both ends (R₀/256 is a symbolic budget, R₀/16 over-taxes holders); what it
+        // SHIPPED sits in the middle, so the assertion pins the tighter [R₀/64, R₀/16] band the
+        // shipped value actually lives in -- deliberately narrower than the range surveyed, or a
+        // drift back toward either rejected end would pass. Checked on the pinned mainnet profile,
+        // where R₀ is defined.
+        double floorFractionOfR0 = (double) floor / launchReward;
+        assertTrue(floorFractionOfR0 > 1.0 / 64.0 && floorFractionOfR0 < 1.0 / 16.0,
+            "R_min/R₀ = " + floorFractionOfR0 + " outside the shipped [1/64, 1/16] band "
+                + "(research.md Decision 3 surveyed [1/256, 1/16] and rejected both ends)");
 
         // Literal per-block segment (research.md Decision 7): validates the stride method
         // against ground truth over a real, if partial, span -- 100,000 single-block steps, no
@@ -337,6 +407,7 @@ class NetworkParametersTest {
     private static final long CURVE_SUPPLY_TARGET = 1_000_000L;
     private static final long CURVE_EMISSION_COEFFICIENT = 10_000L;
     private static final int CURVE_EMISSION_TABLE_STEPS = 4;
+    private static final long CURVE_MINER_REVENUE_FLOOR = 800L;
 
     /** Testnet base (unpinned genesisSupply) with small curve constants and a chosen activation height. */
     private static NetworkParameters curveParams(long activationHeight) {
@@ -344,6 +415,7 @@ class NetworkParametersTest {
             .supplyTarget(CURVE_SUPPLY_TARGET)
             .emissionCoefficient(CURVE_EMISSION_COEFFICIENT)
             .emissionTableSteps(CURVE_EMISSION_TABLE_STEPS)
+            .minerRevenueFloor(CURVE_MINER_REVENUE_FLOOR)
             .emissionCurveHeight(activationHeight)
             .build();
     }
@@ -454,16 +526,28 @@ class NetworkParametersTest {
     }
 
     @Test
-    void theConsensusRewardClampsTheNegativeBranchToZero() {
-        // Locks contracts/emission-curve.md §4's single clamp site: at the NetworkParameters
-        // dispatch level, a parentSupply at/above supplyTarget (raw curve value negative or zero)
-        // must never mint a negative reward. EmissionCurveTest separately allows raw() itself to
-        // return negative -- that clamp belongs here, at the one consensus-facing call site.
+    void theConsensusRewardFloorsTheNegativeBranchAtRMin() {
+        // Locks contracts/miner-revenue-floor.md §2's single clamp site (research.md Decision 6
+        // item 1): at the NetworkParameters dispatch level, a parentSupply at/above supplyTarget
+        // (raw curve value negative or zero) must never mint below R_min -- never zero, never
+        // negative. EmissionCurveTest separately allows raw() itself to return negative -- that
+        // clamp belongs here, at the one consensus-facing call site.
         NetworkParameters active = curveParams(1);
+        long floor = active.minerRevenueFloor();
         long parentSupply = CURVE_SUPPLY_TARGET * 2; // strictly above S* -> raw curve value < 0
 
-        assertEquals(0L, active.miningReward(1, parentSupply));
-        assertEquals(0L, active.miningReward(50, parentSupply));
+        // Exact equality at both heights; the ">= floor" form the invariant is stated in is
+        // subsumed by it, so it is not asserted twice.
+        assertEquals(floor, active.miningReward(1, parentSupply));
+        assertEquals(floor, active.miningReward(50, parentSupply));
+
+        // raw() itself stays signed (observability for feature 08): the table value above S* is a
+        // negative number -- the floor lives at the clamp site, not inside the curve.
+        EmissionCurve curve = EmissionCurve.build(
+            CURVE_SUPPLY_TARGET, CURVE_EMISSION_COEFFICIENT, CURVE_EMISSION_TABLE_STEPS);
+        assertTrue(curve.raw(parentSupply) < 0,
+            "raw must stay signed (negative) above S*, was " + curve.raw(parentSupply));
+        assertTrue(curve.raw(CURVE_SUPPLY_TARGET * 10) < 0);
     }
 
     @Test
@@ -482,5 +566,81 @@ class NetworkParametersTest {
             assertFalse(NetworkParameters.devnet().emissionCurveActiveAt(height),
                 "devnet must never activate the curve in this feature, height=" + height);
         }
+    }
+
+    @Test
+    void minerRevenueNeverFallsBelowTheFloor() {
+        // Invariant-locking (constitution §Invariant-Locking Tests; research.md Decision 6 item 3):
+        // on a curve-active profile, the scheduled base reward is >= R_min across the whole reachable
+        // domain -- every table-step boundary, the crossover band where raw(S) first drops below
+        // R_min (S ≈ 0.9669 × S* at the shipped calibration), S* itself, and the deep ratio-mirror
+        // branch above it -- and equals R_min exactly where raw(S) < R_min (contracts/
+        // miner-revenue-floor.md §2).
+        long activationHeight = 1;
+        NetworkParameters p = NetworkParameters.cleanMainnet().toBuilder()
+            .emissionCurveHeight(activationHeight)
+            .build();
+        long floor = p.minerRevenueFloor();
+        long sStar = p.supplyTarget();
+        long stepWidth = sStar / p.emissionTableSteps();
+        // raw() stays signed and is not exposed through NetworkParameters; rebuild the same table
+        // (pure function of the published triple -- DI-11) so the test can read the raw value.
+        EmissionCurve curve = EmissionCurve.build(sStar, p.emissionCoefficient(), p.emissionTableSteps());
+
+        // Every table-step boundary, a unit either side (boundary effects), and segment midpoints.
+        for (int i = 1; i <= p.emissionTableSteps(); i++) {
+            long s = Math.multiplyExact((long) i, stepWidth);
+            assertFlooredReward(p, curve, activationHeight, floor, s);
+            assertFlooredReward(p, curve, activationHeight, floor, s - 1);
+            assertFlooredReward(p, curve, activationHeight, floor, s + 1);
+            assertFlooredReward(p, curve, activationHeight, floor, s - stepWidth / 2);
+        }
+
+        // The crossover band: raw(S) crosses R_min near S ≈ S*/exp(R_min/c) (0.9669 × S* at the
+        // shipped calibration). Probe a window wide enough to bracket the crossing on both sides.
+        long crossoverEstimate = (long) (sStar / Math.exp((double) floor / p.emissionCoefficient()));
+        for (long delta = -200_000; delta <= 200_000; delta += 50) {
+            assertFlooredReward(p, curve, activationHeight, floor,
+                Math.addExact(crossoverEstimate, delta));
+        }
+
+        // S* itself (raw exactly 0) and just above it.
+        assertFlooredReward(p, curve, activationHeight, floor, sStar);
+        assertFlooredReward(p, curve, activationHeight, floor, sStar + 1);
+        assertFlooredReward(p, curve, activationHeight, floor, sStar + 1_000);
+
+        // Deep ratio-mirror branch: supplies far above S* mirror back toward the table head, where
+        // raw is a large negative value -- the floor must hold there too, including wire-legal
+        // extremes (SI-5: checked arithmetic fails loud rather than wrapping).
+        for (long k : new long[] {2L, 3L, 10L, 100L}) {
+            assertFlooredReward(p, curve, activationHeight, floor, Math.multiplyExact(sStar, k));
+        }
+        assertFlooredReward(p, curve, activationHeight, floor, Long.MAX_VALUE / 2);
+    }
+
+    /** Asserts the floor invariant at a single supply: reward >= R_min and reward == max(R_min, raw). */
+    private static void assertFlooredReward(NetworkParameters p, EmissionCurve curve,
+            long height, long floor, long supply) {
+        long raw = curve.raw(supply);
+        long reward = p.miningReward(height, supply);
+        assertTrue(reward >= floor,
+            "reward " + reward + " fell below the floor " + floor + " at supply=" + supply
+                + " (raw=" + raw + ")");
+        assertEquals(Math.max(floor, raw), reward,
+            "reward at supply=" + supply + " must be exactly max(R_min, raw)=" + Math.max(floor, raw)
+                + " (raw=" + raw + ")");
+    }
+
+    @Test
+    void aNonPositiveMinerRevenueFloorRefusesToBuild() {
+        // The floor is a consensus constant whose job is to guarantee a strictly positive subsidy;
+        // a non-positive floor silently restores the zero-clamp cliff (research.md Decision 2) -- a
+        // misconfiguration must fail fast at build time, not mid-chain.
+        assertThrows(IllegalArgumentException.class,
+            () -> NetworkParameters.testnet().toBuilder().minerRevenueFloor(0).build());
+        assertThrows(IllegalArgumentException.class,
+            () -> NetworkParameters.testnet().toBuilder().minerRevenueFloor(-1).build());
+        // A positive floor is accepted.
+        assertDoesNotThrow(() -> NetworkParameters.testnet().toBuilder().minerRevenueFloor(1).build());
     }
 }
