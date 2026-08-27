@@ -147,7 +147,11 @@ difficulty pins near `minDifficulty` regardless of real hashrate, collapsing PoW
   are supply-aware too: `uncleReward(height, parentSupply)` and `nephewReward(height, parentSupply)`
   are computed from the same dispatched base the coinbase used, never from a second, independently
   dispatched one. One block, one parent supply, one emission decision — for the coinbase and every
-  uncle/nephew bonus alike.
+  uncle/nephew bonus alike. That base is the *floored* one, so uncle and nephew rewards floor
+  **through** it and never clamp independently: there is no second floor site to audit, the
+  fractions and the per-bit work scaling are unchanged, and work scaling below the floored
+  fraction stays intact — the guarantee `R_min` makes is about the miner's own block subsidy,
+  not a promised uncle payout.
 
 ### C-7 — Fork choice, finality, and the anti-lying-peer gate *(implemented)*
 
@@ -361,10 +365,16 @@ profile in ~20 existing suites are unaffected.
 | `supplyTarget` (`S*`) | 2 997 924 580 000 base units (299 792 458 PDN) |
 | `emissionCoefficient` (`c`) | 23 750 base units |
 | `emissionTableSteps` (`N`) | 256 |
+| `minerRevenueFloor` (`R_min`) | 800 base units (0.08 PDN) — ≈ `R₀/32.6`, **must be > 0** |
 | `emissionCurveHeight` | **0 — never**, on every shipped profile |
 
-The three curve constants are inherited unchanged by `testnet()`/`devnet()`; only the activation
-height decides whether they mint, and it is `0` everywhere today.
+The four curve constants are inherited unchanged by `testnet()`/`devnet()`; only the activation
+height decides whether they mint, and it is `0` everywhere today. `R_min` is the one that is
+**not** inert for a derived profile that turns the curve on: a `toBuilder()` profile with a
+test-scale `supplyTarget` inherits the mainnet-scale floor, and where `R_min` exceeds the curve's
+own first table entry the floor swallows the whole schedule and every block pays a flat `R_min`.
+Curve-active profiles must set a profile-scaled floor rather than assume the mainnet value stays
+out of the way.
 
 ## Open items
 
