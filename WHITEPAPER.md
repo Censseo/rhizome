@@ -416,10 +416,17 @@ value stays observable for tests (and a later feature's burn accounting); only t
 ever minted, and uncle/nephew rewards floor *through* this base — there is no second clamp site.
 Height gates *which* rule governs: below a per-network activation height (`0` =
 never scheduled — the same polarity as the Pufferfish2 cost-upgrade height, §3.2) the legacy
-geometric rule below applies unchanged; at or above it, the curve applies. On every network
-Rhizome ships today the activation height is `0` — the curve exists, is fully specified and
-vector-pinned, but does not yet govern a single minted block. A later feature schedules the real
-activation height once the genesis allocation is ratified.
+geometric rule below applies unchanged; at or above it, the curve applies. The shipped schedule:
+**mainnet activates at height 1** — heights are 1-based and genesis (height 1, `GenesisBlock.
+GENESIS_ID`) pays no coinbase at all, so height 2 is the first block that pays any coinbase, and
+activation at height 1 means the curve already governs by the time that first coinbase is paid: it
+pays the calibrated curve value rather than a geometric leftover; mainnet is pre-launch, so nothing
+already-mined is being reinterpreted. **devnet activates at height 1** too —
+`scripts/local-testnet/start.sh` runs devnet, and a local network an operator actually watches must
+mint under the same rule mainnet mints under to be representative. **testnet never activates**
+(`0`) — it is the test-shaped profile, not a deployed network with operators to notify, and keeping
+it inactive exercises the retained geometric rule below and keeps the existing test suite's reward
+baseline deterministic.
 
 **Calibration record (mainnet).** Calibrated for a `τ ≈ 20`-year convergence timescale against
 the provisional genesis supply `S₀ = 1 000 000 000 000` base units (100M PDN, feature 02):
@@ -458,9 +465,10 @@ negative-branch samples, all 64-bit quantities as decimal strings (never bare JS
 lose precision above 2^53 for a JS consumer). An implementation passes iff every vector matches
 exactly.
 
-**The legacy geometric rule (below activation).** Until the curve's activation height is
-scheduled, and permanently on any block below it, the subsidy decays geometrically (×2/3) once
-per epoch, in integer arithmetic, so issuance stays bounded and deterministic. Total issuance is
+**The legacy geometric rule (below activation).** Retained for every block below an activation
+height, and permanently on a profile that never schedules one (testnet), the subsidy decays
+geometrically (×2/3) once per epoch, in integer arithmetic, so issuance stays bounded and
+deterministic. Total issuance is
 the geometric series `epochBlocks × initialReward × 3 ≈ 100M PDN`.
 
 The decay epoch is denominated in *blocks*, so its real-time length depends on the block rate.

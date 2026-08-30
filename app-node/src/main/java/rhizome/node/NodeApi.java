@@ -283,7 +283,12 @@ public final class NodeApi {
                 return a == null ? notFound("no such document") : DashboardApi.asset(a);
             }))
             // ---- dashboard/explorer API ----
-            .with(GET, "/stats", req -> offload(blocking, () -> DashboardApi.stats(node)))
+            // Guarded like /blocks, /block, /block_count and /total_work below: stats() reads
+            // the tip height and then, separately, the tip's parent header (006-emission-fork-
+            // activation's supply-aware reward dispatch) -- two independent lock acquisitions a
+            // reorg can land between, so an in-progress reorg must 503 rather than let a stale
+            // height's parent lookup throw (testnet campaign S5's failure mode, applied here).
+            .with(GET, "/stats", req -> offload(blocking, () -> whenNotReorging(node, () -> DashboardApi.stats(node))))
             .with(GET, "/features", req -> guarded(() -> DashboardApi.features(node, sse)))
             .with(GET, "/blocks", req -> offload(blocking, () -> whenNotReorging(node, () -> ExplorerApi.blocks(node, req))))
             .with(GET, "/block", req -> offload(blocking, () -> whenNotReorging(node, () -> ExplorerApi.block(node, req))))

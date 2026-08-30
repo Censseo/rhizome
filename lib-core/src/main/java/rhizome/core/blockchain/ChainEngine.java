@@ -364,6 +364,7 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
             } else if (!GenesisBlock.matches(store.blockAt(GenesisBlock.GENESIS_ID), params, snapshot)) {
                 throw new IllegalStateException("Stored genesis does not match network parameters and snapshot");
             }
+            checkEmissionScheduleConsistency(params, store);
             // Under the lock even though nothing else can see the engine yet: these three are tier-1
             // methods, and "except at boot" is an exception every future reader would have to
             // rediscover. One uncontended acquisition, once per process.
@@ -373,6 +374,102 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
                 engine.seedGenesisStateRoot();
             });
             return engine;
+        }
+
+        /**
+         * Boot-time consistency check (006-emission-fork-activation, data-model.md's boot-time
+         * consistency verdict table): a stored tip minted under a DIFFERENT emission schedule
+         * than the one now in force must refuse to boot rather than silently extend into a chain
+         * no fresh peer can sync. Reads headers only — no body, no ledger state — before the
+         * engine's exclusive lock is ever taken. Seven ordered verdicts, first match wins:
+         *
+         * <ol>
+         *   <li>Tip is genesis — nothing minted yet, SKIP.</li>
+         *   <li>Tip or parent header unavailable (snapshot bootstrap, pruned prefix) — an
+         *       unverifiable tip is not a wrong tip, SKIP.</li>
+         *   <li>Parent supply absent AND the curve is scheduled ({@code emissionCurveHeight > 0})
+         *       — a prefix-closed supply-less chain can never begin committing under a scheduled
+         *       curve, so the schedule is unsatisfiable, REFUSE. Evaluated before rule 4, which
+         *       it would otherwise fall through.</li>
+         *   <li>Parent AND tip supply both absent, curve never scheduled — a legitimately
+         *       supply-less chain, SKIP.</li>
+         *   <li>Parent supply absent but the tip commits one anyway (curve never scheduled) —
+         *       the same mid-chain-opt-in {@code checkSupply} rejects at add-time
+         *       (FR-004 prefix closure), REFUSE. {@code SUPPLY_ABSENT} (-1) is a sentinel, never a
+         *       real accounting quantity, so it must never reach rule 6's arithmetic below.</li>
+         *   <li>{@code tip.supply() != parent.supply() + Issuance.minted(...)} — the stored tip
+         *       was minted under a different rule than the one now in force, REFUSE.</li>
+         *   <li>Otherwise, PASS.</li>
+         * </ol>
+         */
+        private static void checkEmissionScheduleConsistency(NetworkParameters params, ChainStore store) {
+            long tipHeight = store.height();
+            if (tipHeight <= GenesisBlock.GENESIS_ID) {
+                return; // Rule 1.
+            }
+            BlockHeader tip;
+            BlockHeader parent;
+            try {
+                tip = store.headerAt(tipHeight);
+                parent = store.headerAt(tipHeight - 1);
+            } catch (IllegalArgumentException e) {
+                // ChainStore#blockAt's documented contract for a missing-or-pruned height —
+                // anything else is a real bug and must not be swallowed here.
+                return; // Rule 2: an unverifiable tip is not a wrong tip.
+            }
+            long parentSupply = parent.supply();
+            long tipSupply = tip.supply();
+            if (parentSupply == BlockImpl.SUPPLY_ABSENT) {
+                if (params.emissionCurveHeight() > 0) {
+                    throw new IllegalStateException(bootRefusalMessage(params, tipHeight,
+                        "no committed parent supply to schedule the curve against",
+                        "the chain can never satisfy the scheduled emission curve — recreate the "
+                            + "data directory under the current network parameters"));
+                }
+                if (tipSupply == BlockImpl.SUPPLY_ABSENT) {
+                    return; // Rule 4.
+                }
+                // Rule 5: a supply-less parent whose child commits a real supply anyway broke
+                // prefix closure somewhere the ordinary addBlock path never saw it happen (a
+                // manufactured or corrupted store) -- REFUSE here rather than falling through to
+                // rule 6, which would otherwise feed the SUPPLY_ABSENT sentinel (-1) into
+                // Math.addExact as if it were a real committed supply.
+                throw new IllegalStateException(bootRefusalMessage(params, tipHeight,
+                    "parent commits no supply but the tip commits " + tipSupply,
+                    "the stored tip broke supply prefix-closure — recreate the data directory "
+                        + "under the current network parameters"));
+            }
+            long expected;
+            try {
+                expected = Math.addExact(parentSupply,
+                    Issuance.minted(params, tipHeight, parentSupply, tip.difficulty(), tip.uncles()));
+            } catch (ArithmeticException overflow) {
+                // Mirrors checkSupply's own guard: an overflowing identity can never be satisfied
+                // by any legal long, so it is rejected rather than crashing boot (FR-014 -- checked
+                // arithmetic never wraps, and a boot refusal must never surface a raw stack trace).
+                throw new IllegalStateException(bootRefusalMessage(params, tipHeight,
+                    "the accounting identity overflows for the stored parent supply",
+                    "the stored tip cannot be verified against the emission schedule now in force "
+                        + "— recreate the data directory under the current network parameters"));
+            }
+            if (tipSupply != expected) { // Rule 6.
+                throw new IllegalStateException(bootRefusalMessage(params, tipHeight,
+                    "expected supply " + expected + ", found " + tipSupply,
+                    "the stored tip was minted under a different emission schedule than the one "
+                        + "now in force — recreate the data directory under the current network "
+                        + "parameters"));
+            }
+            // Rule 7: PASS.
+        }
+
+        /** Consensus quantities and the network name only — no data-directory path, no stack
+         *  trace text, no secret (FR-014). */
+        private static String bootRefusalMessage(NetworkParameters params, long tipHeight,
+                String detail, String remedy) {
+            return "Stored chain tip at height " + tipHeight + " on network '" + params.networkName()
+                + "' (emissionCurveHeight=" + params.emissionCurveHeight()
+                + ") is inconsistent with the emission rule now in force: " + detail + ". Remedy: "
+                + remedy + ".";
         }
     }
 

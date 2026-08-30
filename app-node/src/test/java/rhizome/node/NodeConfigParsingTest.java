@@ -82,4 +82,57 @@ class NodeConfigParsingTest {
         RhizomeNode.checkStateRetention(128, 64);
         assertThrows(IllegalStateException.class, () -> RhizomeNode.checkStateRetention(63, 64));
     }
+
+    @Test
+    void theActivationHeightIsNotReachableFromConfiguration() {
+        // 006-emission-fork-activation FR-001, §Security "configuration as an attack surface":
+        // emissionCurveHeight is a consensus constant per network, never environment-configurable.
+        // Sweep every RHIZOME_* variable NodeConfig.fromEnv reads and confirm none of them moves it.
+        String minerAddress = "00" + "DD".repeat(24); // 25-byte PublicAddress literal, test-only
+
+        java.util.Map<String, String> everyOtherVar = new java.util.HashMap<>();
+        everyOtherVar.put("RHIZOME_DATA", "/tmp/rhizome-config-sweep");
+        everyOtherVar.put("RHIZOME_PORT", "4000");
+        everyOtherVar.put("RHIZOME_SNAPSHOT", "/tmp/does-not-need-to-exist-for-parsing.json");
+        everyOtherVar.put("RHIZOME_MINER", minerAddress);
+        everyOtherVar.put("RHIZOME_BLOCK_INTERVAL_MS", "2000");
+        everyOtherVar.put("RHIZOME_PEERS", "https://peer-a.example,https://peer-b.example");
+        everyOtherVar.put("RHIZOME_ADVERTISE", "https://self.example:4000");
+        everyOtherVar.put("RHIZOME_BIND_ADDRESS", "0.0.0.0");
+        everyOtherVar.put("RHIZOME_API_TOKEN", "sweep-token");
+        everyOtherVar.put("RHIZOME_PEER_TOKEN", "sweep-peer-token");
+        everyOtherVar.put("RHIZOME_PRUNE", "1000");
+        everyOtherVar.put("RHIZOME_ALLOW_OPEN_API", "true");
+        everyOtherVar.put("RHIZOME_ALLOW_PRIVATE_PEERS", "true");
+        everyOtherVar.put("RHIZOME_SYNC", "snap");
+        everyOtherVar.put("RHIZOME_PROTECT_READS", "true");
+        everyOtherVar.put("RHIZOME_TRUST_XFF", "true");
+        everyOtherVar.put("RHIZOME_VOTE", "1");
+        everyOtherVar.put("RHIZOME_SNAPSHOT_EVERY", "500");
+        everyOtherVar.put("RHIZOME_ALLOWED_HOSTS", "self.example");
+
+        java.util.Map<String, rhizome.core.blockchain.NetworkParameters> networks = java.util.Map.of(
+            "", rhizome.core.blockchain.NetworkParameters.cleanMainnet(),
+            "testnet", rhizome.core.blockchain.NetworkParameters.testnet(),
+            "devnet", rhizome.core.blockchain.NetworkParameters.devnet());
+
+        for (var entry : networks.entrySet()) {
+            String networkName = entry.getKey();
+            long expectedHeight = entry.getValue().emissionCurveHeight();
+
+            java.util.Map<String, String> minimal = new java.util.HashMap<>();
+            minimal.put("RHIZOME_NETWORK", networkName);
+            long minimalHeight = NodeConfig.fromEnv(minimal::get).params().emissionCurveHeight();
+
+            java.util.Map<String, String> everything = new java.util.HashMap<>(everyOtherVar);
+            everything.put("RHIZOME_NETWORK", networkName);
+            long fullHeight = NodeConfig.fromEnv(everything::get).params().emissionCurveHeight();
+
+            assertEquals(expectedHeight, minimalHeight,
+                "network=" + networkName + " must ship its own emissionCurveHeight unmodified");
+            assertEquals(expectedHeight, fullHeight,
+                "network=" + networkName + ": setting every other RHIZOME_* variable must not move "
+                    + "emissionCurveHeight");
+        }
+    }
 }

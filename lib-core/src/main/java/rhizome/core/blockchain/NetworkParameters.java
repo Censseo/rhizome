@@ -262,14 +262,17 @@ public final class NetworkParameters {
      * path, so the value is inert there, exactly like the feature-03 calibration constants.
      *
      * <p>Per-profile consensus constant set like {@link #chainId}. {@code testnet()} and
-     * {@code devnet()} derive from {@code cleanMainnet().toBuilder()} and deliberately inherit the
-     * mainnet value (WI-9 audit decision): both are curve-inactive <em>as shipped</em>, so the
-     * inherited value is inert while {@code emissionCurveHeight == 0} — resetting it would be
-     * ceremony that only risks a stale divergence when a later feature schedules the curve.
+     * {@code devnet()} derive from {@code cleanMainnet().toBuilder()} and deliberately inherit
+     * this floor value unchanged (WI-9 audit decision) even though, since
+     * 006-emission-fork-activation, they no longer agree on {@link #emissionCurveHeight}:
+     * {@code devnet()} states its own positive height and is curve-active, so the floor is live
+     * there exactly as on mainnet; {@code testnet()} states {@code 0} (never) and the inherited
+     * floor value stays inert, exactly like the feature-004 calibration constants.
      *
      * <p><b>Not inert for a profile that turns the curve on.</b> Any {@code toBuilder()} profile
-     * that sets a positive {@code emissionCurveHeight} (every curve test does) inherits this
-     * mainnet-scale constant against a possibly test-scale {@code supplyTarget}. When
+     * that sets a positive {@code emissionCurveHeight} (every curve test does, and so does the
+     * shipped {@code devnet()}) inherits this mainnet-scale constant against a possibly
+     * test-scale {@code supplyTarget}. When
      * {@code R_min} exceeds the curve's own first table entry the floor swallows the entire
      * schedule and every block pays a constant {@code R_min} — set an explicit, profile-scaled
      * floor there rather than assuming the mainnet value stays out of the way.
@@ -820,12 +823,18 @@ public final class NetworkParameters {
             .supplyTarget(2_997_924_580_000L)
             .emissionCoefficient(23_750L)
             .emissionTableSteps(256)
-            // emissionCurveHeight stays 0 (never) in this feature — feature 05 schedules activation.
+            // Activation height (006-emission-fork-activation): 1, not 0. Heights are 1-based and
+            // genesis (height 0) pays no coinbase at all, so height 1 is the first block that pays
+            // any coinbase -- scheduling the curve there means the very first minted block pays the
+            // calibrated curve value rather than a geometric leftover. Mainnet is pre-launch, so
+            // nothing already-mined is being reinterpreted, and c/S* are calibrated against this
+            // profile's pinned S0 (genesisSupply above), which only exists once genesis is reached.
+            .emissionCurveHeight(1L)
             // Miner revenue floor R_min (research.md Decision 3): 800 base units = 0.08 PDN, the
             // consensus-guaranteed minimum subsidy under an active curve (≈ R₀/32.6 at the
             // provisional allocation; crossover at S ≈ 0.9669 × S*; tail emission ≈ 0.168 % of
-            // S* per year until feature 08's burn counterbalances it). Inert while
-            // emissionCurveHeight == 0; testnet()/devnet() inherit it deliberately (WI-9).
+            // S* per year until feature 08's burn counterbalances it). Live from height 1 on
+            // mainnet and devnet; inert only on testnet, which never schedules the curve.
             .minerRevenueFloor(800L)
             .build();
     }
@@ -863,6 +872,13 @@ public final class NetworkParameters {
             // override, exactly as before this feature (~20 existing suites rely on it).
             .genesisSupply(GENESIS_SUPPLY_UNPINNED)
             .genesisSnapshotResource(null)
+            // Explicitly never activate the curve (006-emission-fork-activation), rather than
+            // inherit cleanMainnet()'s now-scheduled height: testnet is the test-shaped profile,
+            // not a deployed network with operators to notify (Clarifications Q3). Keeping it at
+            // 0 keeps the retained geometric rule (FR-007) exercised and the ~20 existing suites'
+            // reward baseline deterministic — they assume the height-only miningReward(height)
+            // form stays the mainnet-baseline geometric value.
+            .emissionCurveHeight(0L)
             .build();
     }
 
@@ -907,6 +923,13 @@ public final class NetworkParameters {
             // inherit the mainnet genesis-supply pin or its shipped-artifact resource.
             .genesisSupply(GENESIS_SUPPLY_UNPINNED)
             .genesisSnapshotResource(null)
+            // Explicitly restate (006-emission-fork-activation) rather than rely on inheriting
+            // cleanMainnet()'s value: scripts/local-testnet/start.sh starts RHIZOME_NETWORK=devnet,
+            // so a local network must mint under the same rule mainnet mints under to be
+            // representative. Devnet's default empty genesis means these figures are uncalibrated
+            // unless RHIZOME_SNAPSHOT supplies the shipped mainnet allocation — a known, accepted
+            // limitation of running devnet without a funded snapshot.
+            .emissionCurveHeight(1L)
             .build();
     }
 }

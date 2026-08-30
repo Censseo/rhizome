@@ -6,8 +6,17 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.concurrent.atomic.AtomicLong;
 
+import rhizome.core.block.BlockImpl;
+import rhizome.core.blockchain.ChainEngine;
+import rhizome.core.blockchain.CurveActiveNetwork;
+import rhizome.core.blockchain.HonestBlockMiner;
 import rhizome.core.blockchain.NetworkParameters;
+import rhizome.core.ledger.PublicAddress;
+import rhizome.core.mempool.ExecutionStatus;
+import rhizome.core.transaction.Transaction;
+import rhizome.core.transaction.TransactionAmount;
 import rhizome.crypto.PowAlgorithm;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
@@ -116,5 +125,49 @@ class NodeAssemblyTest {
                 assertEquals(1, c.engine().height(), "the genesis block");
             }
         });
+    }
+
+    /** Mines and applies an honest next block, correct under either dispatch arity. */
+    private static void mineOnto(NetworkParameters params, ChainEngine engine, AtomicLong clock,
+            PublicAddress miner) {
+        long height = engine.height() + 1;
+        long parentSupply = engine.headerAt(engine.height()).supply();
+        long ts = clock.addAndGet(params.desiredBlockTimeSec() * 1000L);
+        Transaction coinbase = Transaction.of(miner,
+            new TransactionAmount(params.miningReward(height, parentSupply)));
+        BlockImpl b = HonestBlockMiner.mineNext(params, engine, ts, coinbase);
+        assertEquals(ExecutionStatus.SUCCESS, engine.addBlock(b));
+    }
+
+    @Test
+    void anEmissionScheduleInconsistentDataDirectoryRefusesToBootWithAReadableMessage() throws IOException {
+        // 006-emission-fork-activation US4/FR-014: a data directory minted under one emission
+        // schedule, reopened under a DIFFERENT one, must refuse assembly (before a port is ever
+        // bound -- assemble() itself never listens, see this class's javadoc) with a message
+        // naming the network and activation height, no data-directory path, no stack trace text.
+        NetworkParameters neverActivating = CurveActiveNetwork.curveActiveTestnet().toBuilder()
+            .powAlgorithm(PowAlgorithm.SHA256).genesisDifficulty(3).minDifficulty(3).maxDifficulty(16)
+            .emissionCurveHeight(0L).build();
+        NodeConfig neverConfig = NodeConfig.defaults(neverActivating,
+                tempDir.resolve("schedule").toString(), 3000)
+            .withAdvertisedUrl("http://localhost:3000");
+
+        try (NodeComponents c = RhizomeNode.assemble(neverConfig)) {
+            mineOnto(neverActivating, c.engine(), new AtomicLong(1_000_000L), PublicAddress.random());
+        }
+
+        NetworkParameters activated = neverActivating.toBuilder().emissionCurveHeight(1L).build();
+        NodeConfig activatedConfig = NodeConfig.defaults(activated,
+                tempDir.resolve("schedule").toString(), 3000)
+            .withAdvertisedUrl("http://localhost:3000");
+
+        IllegalStateException ex = assertThrows(IllegalStateException.class,
+            () -> RhizomeNode.assemble(activatedConfig));
+        String message = ex.getMessage();
+        assertTrue(message.contains(activated.networkName()), "message must name the network: " + message);
+        assertTrue(message.contains(Long.toString(activated.emissionCurveHeight())),
+            "message must name the activation height: " + message);
+        assertFalse(message.contains(tempDir.toString()),
+            "message must not contain the data-directory path: " + message);
     }
 }

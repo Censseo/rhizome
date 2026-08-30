@@ -123,6 +123,13 @@ class SupplyCommitmentTest {
         // dropped-commitment rule just proven above), so it is manufactured directly on the
         // store — the point of this half is the general, LOCAL parent/child rule the check
         // enforces at any height, not how a legacy all-absent chain historically came to be one.
+        //
+        // Two manufactured absent blocks (heights 2 and 3), not one, before the engine ever
+        // boots over this store: 006-emission-fork-activation's boot-time consistency check
+        // (data-model.md's verdict table) refuses a tip whose PARENT commits but which itself
+        // does not (rule 5 -- an unreachable-via-addBlock shape, exactly what this section's
+        // manufacturing bypasses addBlock to construct). Booting only once both the tip AND its
+        // parent are absent satisfies rule 4 (a legitimately supply-less chain) instead.
         AtomicLong clock = new AtomicLong(0L);
         InMemoryLedger ledger = new InMemoryLedger();
         InMemoryChainStore store = new InMemoryChainStore();
@@ -131,26 +138,31 @@ class SupplyCommitmentTest {
         store.append(genesis);
 
         long ts2 = clock.addAndGet(params.desiredBlockTimeSec() * 1000L);
-        Block absentParent = mineOnto(params, 2, genesis.hash(), params.genesisDifficulty(), ts2,
+        Block absentAt2 = mineOnto(params, 2, genesis.hash(), params.genesisDifficulty(), ts2,
             miner, BlockImpl.SUPPLY_ABSENT, List.of());
-        store.append(absentParent);
+        store.append(absentAt2);
+        long ts3 = clock.addAndGet(params.desiredBlockTimeSec() * 1000L);
+        Block absentAt3 = mineOnto(params, 3, absentAt2.hash(), params.genesisDifficulty(), ts3,
+            miner, BlockImpl.SUPPLY_ABSENT, List.of());
+        store.append(absentAt3);
 
         ChainEngine engine = ChainEngine.boot(params, TestNodeStores.mixing(ledger, store), snapshot)
             .clock(clock::get)
             .build();
         assertEquals(BlockImpl.SUPPLY_ABSENT, engine.headerAt(2).supply());
+        assertEquals(BlockImpl.SUPPLY_ABSENT, engine.headerAt(3).supply());
 
-        long ts3 = clock.addAndGet(params.desiredBlockTimeSec() * 1000L);
-        Block midChainStart = mineOnto(params, 3, absentParent.hash(), engine.difficulty(), ts3,
+        long ts4 = clock.addAndGet(params.desiredBlockTimeSec() * 1000L);
+        Block midChainStart = mineOnto(params, 4, absentAt3.hash(), engine.difficulty(), ts4,
             miner, 0L, List.of());
         assertEquals(ExecutionStatus.INVALID_SUPPLY, engine.addBlock(midChainStart));
-        assertEquals(2, engine.height(), "a mid-chain start must not extend the chain");
+        assertEquals(3, engine.height(), "a mid-chain start must not extend the chain");
 
-        Block stillAbsent = mineOnto(params, 3, absentParent.hash(), engine.difficulty(), ts3,
+        Block stillAbsent = mineOnto(params, 4, absentAt3.hash(), engine.difficulty(), ts4,
             miner, BlockImpl.SUPPLY_ABSENT, List.of());
         assertEquals(ExecutionStatus.SUCCESS, engine.addBlock(stillAbsent),
             "an all-absent chain must keep validating exactly as before this feature");
-        assertEquals(3, engine.height());
+        assertEquals(4, engine.height());
     }
 
     @Test
