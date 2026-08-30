@@ -31,7 +31,7 @@ aggregate token-bucket gate that sheds with HTTP 429 *before* doing the work.
 | Explorer handlers | [ExplorerApi.java](../../app-node/src/main/java/rhizome/node/ExplorerApi.java) |
 | Contract / log / SSE handlers | [ContractApi.java](../../app-node/src/main/java/rhizome/node/ContractApi.java), [SseLogHub.java](../../app-node/src/main/java/rhizome/node/SseLogHub.java) |
 | Box, token, state, sync handlers | [BoxApi.java](../../app-node/src/main/java/rhizome/node/BoxApi.java), [TokenApi.java](../../app-node/src/main/java/rhizome/node/TokenApi.java), [StateApi.java](../../app-node/src/main/java/rhizome/node/StateApi.java), [SyncApi.java](../../app-node/src/main/java/rhizome/node/SyncApi.java) |
-| Feature flags / stats / asset serving | [DashboardApi.java](../../app-node/src/main/java/rhizome/node/DashboardApi.java), [DashboardAssets.java](../../app-node/src/main/java/rhizome/node/DashboardAssets.java) |
+| Feature flags / stats / asset serving | [DashboardApi.java](../../app-node/src/main/java/rhizome/node/DashboardApi.java), [StatsWindowService.java](../../app-node/src/main/java/rhizome/node/StatsWindowService.java), [DashboardAssets.java](../../app-node/src/main/java/rhizome/node/DashboardAssets.java) |
 | Scan registry | [ScanRegistry.java](../../app-node/src/main/java/rhizome/node/ScanRegistry.java) |
 
 **Does not own**
@@ -207,6 +207,35 @@ the process level, not just in-JVM: the `E2EGenesis*` suites boot real `RhizomeN
 assert the port is never opened. Exotic snapshot paths (a directory, a writerless FIFO, a symlink
 retargeted mid-read) fail cleanly and promptly rather than hanging the boot.
 
+### A-14 — Reorg-window gate on chain-serving reads *(implemented)*
+
+While the engine sits inside a reorg window its canonical chain is truncated at the fork height,
+so a route that reads it would serve a view that is momentarily neither the old chain nor the new
+one. `/blocks`, `/block`, `/block_count`, `/total_work`, `/stats` (and `/sync`, `/headers` in
+`SyncApi`) therefore answer **503 during a reorg** rather than serve it — the read-side mirror of
+the write-side doctrine that already fails a new-tip `addBlock` with `IS_SYNCING`. A peer sees a
+transport failure it retries and never penalises, instead of a truncated view it could misread as
+a protocol violation and ban the node for (testnet campaign S5).
+
+The gate is what makes a **multi-read handler** safe. `/stats` joined the set with the supply-aware
+subsidy dispatch below: it takes the consensus lock once for the tip height and again for the tip's
+parent header, and a reorg landing between the two acquisitions would pair a stale height with a
+header from the other branch.
+
+### A-15 — Supply-aware `/stats` subsidy *(implemented)*
+
+`GET /stats` reports the subsidy the way consensus dispatches it ([consensus](../consensus/spec.md)
+C-10): the supply-aware `miningReward(height, parentSupply)` when the tip height is curve-active
+**and** the parent header commits a supply, the height-only geometric value otherwise — including
+at genesis, which has no parent header and pays no coinbase. The field stays a plain JSON number;
+no new route, no new field, no unit or format change across the activation boundary.
+
+The parent supply is captured in the **`StatsWindow` cache**, recomputed once per tip movement,
+not once per poll — so repeated dashboard polling at a stationary tip takes no extra lock for this
+field. The window normally already covers `tip - 1`; a window narrower than two blocks fetches that
+one block directly rather than assuming coverage. Display-only: no consensus path reads it (the
+rendering contract is [dashboard](../dashboard/spec.md) U-1).
+
 ## Known limits (accepted, not defects)
 
 Deployment-shaped gaps that no code change inside the node closes. Stated here so an operator can
@@ -236,6 +265,8 @@ decide rather than discover.
   are gated.
 - Consensus work must be offloaded off the event loop where it can block; sync runs on its own
   thread in blocking I/O.
+- A handler that acquires the consensus lock **more than once** per response must sit behind the
+  reorg-window gate (A-14); two independent acquisitions must never straddle a reorg.
 - `RHIZOME_PEER_TOKEN` is never logged; `/peers` withholds private seed URLs.
 - Shutdown closes the HTTP listener before the stores.
 - Bounded body sizes and bounded response sizes on every route.

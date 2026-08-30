@@ -364,6 +364,14 @@ profile in ~20 existing suites are unaffected.
   total differs, on every boot path, before any balance is seeded. The check is gated solely by
   the presence of a pin, never by network id — an unpinned profile (testnet/devnet by explicit
   choice) behaves exactly as it did before this check existed.
+- **A stored chain must agree with the schedule now in force.** At boot, the tip's supply
+  accounting identity is re-checked against the current parameters from **two headers only** (no
+  body, no ledger, before the engine's lock is ever taken). A tip minted under a different emission
+  schedule — or a supply-less chain opened under a scheduled curve, which can never begin
+  committing — refuses to start with a message naming the network, the activation height, the
+  expected and found supply, and the remedy. Absence of proof is not proof of fault: an
+  unverifiable tip (parent header pruned or snapshot-bootstrapped) is **skipped, not failed**, and
+  an identity that overflows refuses cleanly rather than surfacing a raw `ArithmeticException`.
 
 ## Key parameters
 

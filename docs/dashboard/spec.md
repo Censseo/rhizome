@@ -55,10 +55,13 @@ Nav entries are `data-page` attributes on the shell; `app.js` swaps `#view`.
 
 The Dashboard page's **reward** figure comes from `GET /stats`, which dispatches the way consensus
 dispatches ([consensus](../consensus/spec.md) C-10): when the tip height is curve-active and the
-parent header's supply is committed, it reads the two-arg `miningReward(height, parentSupply)`
-value through `NodeService.header(height - 1)`; otherwise it reads the height-only geometric
-overload. It is a display-only value — no consensus path reads it — and the field stays a plain
-JSON number with no unit, format or label change across activation.
+parent's committed supply is present, it reports the two-arg `miningReward(height, parentSupply)`
+value; otherwise the height-only geometric overload. The parent supply arrives with the rest of the
+stats window, recomputed once per tip movement rather than per poll, and `/stats` answers 503
+inside a reorg window so the height and the parent it is paired with always come from the same
+chain ([node-api](../node-api/spec.md) A-14, A-15). It is a display-only value — no consensus path
+reads it — and the field stays a plain JSON number with no unit, format or label change across
+activation.
 
 ### U-2 — Browser-custodied keys *(implemented)*
 
