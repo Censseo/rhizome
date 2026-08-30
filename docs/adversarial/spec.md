@@ -469,11 +469,14 @@ Scenarios whose subject is the system rather than a rule: real nodes, real socke
 work, real RocksDB. Fixtures live in `app-node/src/test/java/rhizome/adversarial/e2e/`
 (`TestNetwork`, `E2EFixtures`, `HostilePeer`, `RawHttp`).
 
-A rule that no shipped profile activates still needs real-node proofs, so `TestNetwork` carries a
-`CURVE_ACTIVE` profile — the emission curve (see [consensus](../consensus/spec.md) C-10) scheduled
-at a real height on an otherwise ordinary test network — and `E2EFixtures.mintToSupply` drives a
-live chain to a chosen committed supply, including the bands around and above `supplyTarget` that
-only exist under an active curve. Everything in the E2E-61..86 range runs against those.
+The emission curve is scheduled from height 1 on mainnet and devnet (see
+[consensus](../consensus/spec.md) C-10), so its boundary is not reachable on a shipped profile and
+its post-target bands are decades of real issuance away. `TestNetwork` therefore carries a
+`CURVE_ACTIVE` profile — the same rule scheduled at a *crossable* height on an otherwise ordinary
+test network — and `E2EFixtures.mintToSupply` drives a live chain to a chosen committed supply,
+including the bands around and above `supplyTarget`. Everything in the E2E-61..86 range runs
+against those; the shipped constants themselves are pinned in `NetworkParametersTest` and the
+activation dispatch in `EmissionActivationGateTest`.
 
 | ID | Scenario | Class | Verdict | Proof |
 |----|----------|-------|---------|-------|

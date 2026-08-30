@@ -58,20 +58,20 @@ class NetworkParametersTest {
         // Decisions 6-7). The OLD version of this test (still reproducible by reverting this
         // method) asserted the LEGACY x2/3-decay geometric schedule's own calibration -- an
         // epoch-years band, a geometric-series total-issuance band, a one-year subsidy-survival
-        // check -- entirely through the one-arg miningReward(height). That one-arg form is
-        // untouched by this feature (mainnet ships emissionCurveHeight == 0, so the curve is
-        // inactive), which is exactly why the old test still PASSES unmodified on this code: it
-        // never reaches the curve at all. As a calibration proof for the curve it asserts
-        // nothing, since the curve only exists behind the two-arg miningReward(height,
-        // parentSupply) dispatch. This rewrite pins the CURVE's calibration instead.
+        // check -- entirely through the one-arg miningReward(height). That one-arg form does not
+        // reach the curve at all (FR-007), which is exactly why the old test still PASSES
+        // unmodified on this code. As a calibration proof for the curve it asserts nothing, since
+        // the curve only exists behind the two-arg miningReward(height, parentSupply) dispatch.
+        // This rewrite pins the CURVE's calibration instead.
         NetworkParameters geometric = NetworkParameters.cleanMainnet();
 
-        // Mainnet ships emissionCurveHeight == 0 (feature 05 schedules the real activation
-        // height); build a curve-ACTIVATED variant of the real mainnet constants (S*, c, N
-        // unchanged) so this test can actually exercise the curve, independent of when the real
-        // chain eventually turns it on -- this test proves the CONSTANTS, not the schedule.
+        // 006-emission-fork-activation: mainnet ships emissionCurveHeight == 1 -- cleanMainnet()
+        // itself is curve-active, so no toBuilder() mutation is needed to exercise the curve.
+        // geometric and p are the same real shipped profile, read through two different accessor
+        // arities: geometric.miningReward(0) below (one-arg, pure legacy baseline, FR-007) and
+        // p.miningReward(height, supply) (two-arg, the real schedule).
         long activationHeight = 1;
-        NetworkParameters p = geometric.toBuilder().emissionCurveHeight(activationHeight).build();
+        NetworkParameters p = geometric;
 
         // Cadence-relative guard, retained from the old test: tau (the curve's ~20-year decay
         // target, research.md Decision 6) is denominated in BLOCKS, so its real-time length must
@@ -259,6 +259,29 @@ class NetworkParametersTest {
             "strided supply " + stridedSupply + " diverges " + (relativeDivergence * 100)
                 + "% from the literal per-block supply " + literalSupply + " over " + literalBlocks
                 + " blocks, exceeds the 0.1% per-stride design bound (research.md Decision 7)");
+    }
+
+    @Test
+    void theFirstPaidMainnetBlockPaysTheCalibratedCurveSubsidy() {
+        // 006-emission-fork-activation SC-001/FR-002/FR-017: on the real, unmodified shipped
+        // mainnet profile (no toBuilder() mutation), the first paid block's coinbase must equal
+        // the calibrated curve value, not a geometric leftover.
+        NetworkParameters mainnet = NetworkParameters.cleanMainnet();
+        EmissionCurve curve = EmissionCurve.build(mainnet.supplyTarget(), mainnet.emissionCoefficient(),
+            mainnet.emissionTableSteps());
+        long expected = Math.max(mainnet.minerRevenueFloor(), curve.raw(mainnet.genesisSupply()));
+
+        assertEquals(expected, mainnet.miningReward(2, mainnet.genesisSupply()),
+            "height 2's coinbase must equal max(minerRevenueFloor, curve.raw(genesisSupply))");
+        assertTrue(expected > 0, "the calibrated curve subsidy must be strictly positive");
+        assertNotEquals(mainnet.miningReward(2), expected,
+            "the geometric one-arg value must not be what height 2 pays under the curve");
+
+        // Calibration constants (feature-004/005) untouched by this feature.
+        assertEquals(2_997_924_580_000L, mainnet.supplyTarget());
+        assertEquals(23_750L, mainnet.emissionCoefficient());
+        assertEquals(256, mainnet.emissionTableSteps());
+        assertEquals(800L, mainnet.minerRevenueFloor());
     }
 
     /**
@@ -551,21 +574,44 @@ class NetworkParametersTest {
     }
 
     @Test
-    void shippedProfilesNeverActivateTheCurve() {
-        // Decision 3 (research.md)/WI-9-style toBuilder() inheritance guard: mainnet ships
-        // emissionCurveHeight == 0 (this feature only pins calibrated constants, feature 05
-        // schedules the real height), and testnet()/devnet() derive from cleanMainnet().toBuilder()
-        // without resetting it -- prove behaviourally, not just by reading the constant, that
-        // neither silently inherits or introduces a non-zero curve height.
-        long[] heights = {0L, 1L, 100L, 10_000_000L};
-        for (long height : heights) {
-            assertFalse(NetworkParameters.cleanMainnet().emissionCurveActiveAt(height),
-                "cleanMainnet must never activate the curve in this feature, height=" + height);
-            assertFalse(NetworkParameters.testnet().emissionCurveActiveAt(height),
-                "testnet must never activate the curve in this feature, height=" + height);
-            assertFalse(NetworkParameters.devnet().emissionCurveActiveAt(height),
-                "devnet must never activate the curve in this feature, height=" + height);
+    void shippedProfilesScheduleTheCurveExactlyAsPublished() {
+        // 006-emission-fork-activation: the curve is now scheduled on two of the three shipped
+        // profiles. Prove it behaviourally, through emissionCurveActiveAt, not by reading the
+        // emissionCurveHeight field directly -- a field read cannot distinguish "correctly wired"
+        // from "coincidentally equal".
+        // Long.MAX_VALUE probed on this side too (symmetric with the never-active side below): the
+        // "past every activation" sentinel must stay curve-active, not overflow-flip inactive.
+        long[] heightsAboveActivation = {1L, 2L, 100L, 10_000_000L, Long.MAX_VALUE};
+        for (long height : heightsAboveActivation) {
+            assertTrue(NetworkParameters.cleanMainnet().emissionCurveActiveAt(height),
+                "cleanMainnet must be curve-active at height=" + height);
+            assertTrue(NetworkParameters.devnet().emissionCurveActiveAt(height),
+                "devnet must be curve-active at height=" + height);
         }
+
+        // testnet() never activates -- it is the test-shaped profile, not a deployed network with
+        // operators to notify (Clarifications Q3) -- probed including the sentinel-safe extreme.
+        long[] heightsIncludingSentinel = {0L, 1L, 100L, 10_000_000L, Long.MAX_VALUE};
+        for (long height : heightsIncludingSentinel) {
+            assertFalse(NetworkParameters.testnet().emissionCurveActiveAt(height),
+                "testnet must never activate the curve, height=" + height);
+        }
+
+        // WI-9-style toBuilder() inheritance guard: testnet()'s value must be STATED, not
+        // inherited through shared construction with mainnet. Flip mainnet in a local toBuilder()
+        // copy and assert the real testnet() singleton is unmoved -- if testnet() ever regressed
+        // to inheriting cleanMainnet()'s value instead of stating its own 0, this still could not
+        // catch a coincidental match, but it does prove mutating a mainnet-derived copy cannot
+        // reach the independently-constructed testnet() instance.
+        long mutatedHeight = 999L;
+        NetworkParameters mutatedMainnetCopy = NetworkParameters.cleanMainnet().toBuilder()
+            .emissionCurveHeight(mutatedHeight)
+            .build();
+        assertTrue(mutatedMainnetCopy.emissionCurveActiveAt(mutatedHeight),
+            "sanity: the local toBuilder() copy itself must reflect the mutation");
+        assertFalse(NetworkParameters.testnet().emissionCurveActiveAt(mutatedHeight),
+            "testnet()'s activation height must be stated, not inherited -- mutating a "
+                + "toBuilder() copy derived from mainnet must not move the real testnet() profile");
     }
 
     @Test

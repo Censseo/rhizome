@@ -53,12 +53,15 @@ Nav entries are `data-page` attributes on the shell; `app.js` swaps `#view`.
 | **Boxes** | browse, create, update, spend and rent-collect data boxes with typed registers |
 | **Docs** | the node's own documentation — see U-8 |
 
-The Dashboard page's **reward** figure comes from `GET /stats`, which reads the height-only
-`miningReward(height)` overload. That is exact on every network shipped today, all of which leave
-the supply-driven emission curve inactive ([consensus](../consensus/spec.md) C-10). It is a
-display-only value — no consensus path reads it — and the first network to schedule a non-zero
-`emissionCurveHeight` must switch it to the supply-aware dispatch, which needs the tip's committed
-supply, a quantity `NodeService` does not expose yet. Tracked in Open items.
+The Dashboard page's **reward** figure comes from `GET /stats`, which dispatches the way consensus
+dispatches ([consensus](../consensus/spec.md) C-10): when the tip height is curve-active and the
+parent's committed supply is present, it reports the two-arg `miningReward(height, parentSupply)`
+value; otherwise the height-only geometric overload. The parent supply arrives with the rest of the
+stats window, recomputed once per tip movement rather than per poll, and `/stats` answers 503
+inside a reorg window so the height and the parent it is paired with always come from the same
+chain ([node-api](../node-api/spec.md) A-14, A-15). It is a display-only value — no consensus path
+reads it — and the field stays a plain JSON number with no unit, format or label change across
+activation.
 
 ### U-2 — Browser-custodied keys *(implemented)*
 
@@ -137,10 +140,6 @@ loads them at startup and `GET /docs/*` serves them with the dashboard's securit
 
 ## Open items
 
-- The Dashboard's **reward** stat reads the height-only emission overload (see U-1). Correct while
-  every profile leaves the curve inactive; it must become the supply-aware dispatch — and `/stats`
-  must gain the tip's committed supply to feed it — in the same change that first schedules a
-  non-zero `emissionCurveHeight`.
 - UI copy is **mixed French and English** (`Contrats`, `Agents IA` in nav; French template
   descriptions in `manifest.json`; English elsewhere). No i18n layer exists — pick one language or
   add one.

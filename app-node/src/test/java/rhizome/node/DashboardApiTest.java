@@ -24,8 +24,11 @@ import rhizome.core.block.Block;
 import rhizome.core.block.BlockImpl;
 import rhizome.core.blockchain.ChainEngine;
 import rhizome.core.blockchain.Contracts;
+import rhizome.core.blockchain.CurveActiveNetwork;
+import rhizome.core.blockchain.HonestBlockMiner;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
+import rhizome.core.blockchain.ReorgWindowTestAccess;
 import rhizome.core.blockchain.SignatureVerifier;
 import rhizome.core.blockchain.SupplyStamp;
 import rhizome.core.blockchain.TestNodeStores;
@@ -228,6 +231,112 @@ class DashboardApiTest {
         assertEquals(3, stats.getLong("windowTxCount"));
         assertTrue(stats.getLong("avgBlockIntervalMs") > 0);
         assertNotNull(stats.getString("totalWork"));
+    }
+
+    /** A self-contained engine/node/servlet triple for a NON-default {@link NetworkParameters}
+     *  profile -- the shared fixture's params/engine/node/servlet fields are testnet's default
+     *  (curve-inactive), so the curve-activation tests below build their own over the same
+     *  running {@link #eventloop}. */
+    private record Harness(ChainEngine engine, NodeService node, AsyncServlet servlet) {}
+
+    private Harness bootHarness(NetworkParameters p) {
+        LedgerSnapshot snapshot = new LedgerSnapshot("test", 0, p.chainId());
+        var verifier = new SignatureVerifier();
+        ChainEngine e = ChainEngine.boot(p, TestNodeStores.inMemory(), snapshot).clock(clock::get).build();
+        var mempool = new MemPool(p, verifier, e, 1000);
+        NodeService n = new NodeService(e, mempool, NodeSources.none());
+        return new Harness(e, n, NodeApi.servlet(eventloop, n));
+    }
+
+    private HttpResponse callOn(AsyncServlet s, HttpRequest request) throws Exception {
+        return eventloop.<HttpResponse>submit(() ->
+            s.serve(request).then(resp -> resp.loadBody().map($ -> resp))
+        ).get();
+    }
+
+    /** Mines and applies an honest next block on {@code e} under {@code p}, paying the reward
+     *  {@code p} actually dispatches (geometric or curve) for the height being built. */
+    private Block mineNextOn(ChainEngine e, NetworkParameters p) {
+        long height = e.height() + 1;
+        long parentSupply = e.headerAt(e.height()).supply();
+        long ts = clock.addAndGet(1000L);
+        Transaction coinbase = Transaction.of(PublicAddress.random(),
+            new TransactionAmount(p.miningReward(height, parentSupply)));
+        return HonestBlockMiner.mineNext(p, e, ts, coinbase);
+    }
+
+    @Test
+    void theReportedSubsidyEqualsTheCoinbaseActuallyPaid() throws Exception {
+        // Curve-active profile: parent supply committed, tip above activation.
+        NetworkParameters curveParams = CurveActiveNetwork.curveActiveTestnet().toBuilder()
+            .powAlgorithm(PowAlgorithm.SHA256).genesisDifficulty(4).emissionCurveHeight(2L).build();
+        Harness curve = bootHarness(curveParams);
+        Block curveTip = mineNextOn(curve.engine(), curveParams);
+        assertEquals(rhizome.core.mempool.ExecutionStatus.SUCCESS, curve.node().submitBlock(curveTip));
+        long curveTipHeight = curve.engine().height();
+        long curveParentSupply = curve.node().header(curveTipHeight - 1).supply();
+        assertTrue(curveParams.emissionCurveActiveAt(curveTipHeight), "sanity: tip must be curve-active");
+
+        JSONObject curveStats = new JSONObject(body(callOn(curve.servlet(), HttpRequest.get("http://x/stats").build())));
+        long reportedCurveReward = curveStats.getLong("miningReward");
+        long actualCurveCoinbase = curveTip.transactions().get(0).amount().amount();
+        assertEquals(actualCurveCoinbase, reportedCurveReward,
+            "the reported subsidy must equal the coinbase the tip actually paid (curve-active)");
+        assertEquals(curveParams.miningReward(curveTipHeight, curveParentSupply), reportedCurveReward);
+
+        // Geometric twin: a never-activating profile, same shape otherwise.
+        NetworkParameters geometricParams = curveParams.toBuilder().emissionCurveHeight(0L).build();
+        Harness geometric = bootHarness(geometricParams);
+        Block geometricTip = mineNextOn(geometric.engine(), geometricParams);
+        assertEquals(rhizome.core.mempool.ExecutionStatus.SUCCESS, geometric.node().submitBlock(geometricTip));
+        long geometricTipHeight = geometric.engine().height();
+        assertFalse(geometricParams.emissionCurveActiveAt(geometricTipHeight),
+            "sanity: the never-activating twin must stay curve-inactive");
+
+        JSONObject geometricStats = new JSONObject(
+            body(callOn(geometric.servlet(), HttpRequest.get("http://x/stats").build())));
+        long reportedGeometricReward = geometricStats.getLong("miningReward");
+        long actualGeometricCoinbase = geometricTip.transactions().get(0).amount().amount();
+        assertEquals(actualGeometricCoinbase, reportedGeometricReward,
+            "the reported subsidy must equal the coinbase the tip actually paid (geometric)");
+        assertEquals(geometricParams.miningReward(geometricTipHeight), reportedGeometricReward);
+    }
+
+    @Test
+    void aGenesisOnlyChainReportsADefinedSubsidy() throws Exception {
+        // Curve scheduled from height 1 -- genesis itself has no parent header to read, and pays
+        // no coinbase. /stats must not error and must not omit the field.
+        NetworkParameters curveParams = CurveActiveNetwork.curveActiveTestnet().toBuilder()
+            .powAlgorithm(PowAlgorithm.SHA256).genesisDifficulty(4).emissionCurveHeight(1L).build();
+        Harness curve = bootHarness(curveParams);
+        assertEquals(1, curve.engine().height(), "sanity: a fresh chain is genesis-only");
+
+        JSONObject stats = new JSONObject(body(callOn(curve.servlet(), HttpRequest.get("http://x/stats").build())));
+        assertTrue(stats.has("miningReward"), "a genesis-only chain must still report a defined subsidy");
+        assertEquals(curveParams.miningReward(1L), stats.getLong("miningReward"),
+            "with no parent header to read, the field must fall back to the geometric value, not error");
+    }
+
+    @Test
+    void statsDoesNotObserveAMixedHeightHeaderPairDuringAReorgWindow() throws Exception {
+        // 006-emission-fork-activation: /stats reads the tip height (node.blockCount()) and,
+        // separately, the tip's parent header (node.header(height - 1)) through two independent
+        // ChainEngine lock acquisitions -- a reorg can land between them. Guarded the same way
+        // /blocks, /block, /block_count and /total_work already are (testnet campaign S5): an
+        // in-progress reorg must answer 503, never let the second read observe a tip the first
+        // read no longer agrees with (which would otherwise surface as a raw
+        // IllegalArgumentException -> generic 400 on the whole payload).
+        apply(mineNext(List.of()));
+        apply(mineNext(List.of()));
+
+        assertTrue(ReorgWindowTestAccess.begin(engine), "reorg window opens");
+        try {
+            HttpResponse response = call(HttpRequest.get("http://x/stats").build());
+            assertEquals(503, response.getCode(),
+                "an in-progress reorg must 503 /stats, not risk a mixed height/header read");
+        } finally {
+            ReorgWindowTestAccess.end(engine); // never leave the window open for the next test
+        }
     }
 
     @Test

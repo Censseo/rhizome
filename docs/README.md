@@ -12,7 +12,7 @@ truth: what each area does, what it owns, and which invariants must never regres
 
 | Domain | Description | Modules | Status |
 |---|---|---|---|
-| [consensus](consensus/spec.md) | Block validation order, difficulty, cadence, GHOST fork choice, finality, supply-targeted emission curve, miner revenue floor, pinned genesis supply | `lib-core/blockchain`, `lib-core/block` | Draft |
+| [consensus](consensus/spec.md) | Block validation order, difficulty, cadence, GHOST fork choice, finality, supply-targeted emission curve (scheduled on mainnet and devnet), miner revenue floor, pinned genesis supply | `lib-core/blockchain`, `lib-core/block` | Draft |
 | [transactions](transactions/spec.md) | Transaction envelope, nonces, ledger arithmetic, execution, mempool & fee market | `lib-core/transaction`, `ledger`, `mempool` | Draft |
 | [contracts](contracts/spec.md) | WASM VM determinism, host ABI, gas, sessions & undo journals, reference contracts | `lib-vm` | Draft |
 | [boxes](boxes/spec.md) | Data boxes — typed registers, anti-dust deposit, storage rent, scans | `lib-core/box` | Draft |
@@ -54,18 +54,30 @@ These span domains and are restated in each spec that carries part of them:
   subsidy read only `headerAt(h)` — this is what makes pruning and snap-sync possible, and it is
   why a supply-driven reward needs no accumulator and no rollback journal: the parent header
   already carries its only input. Nonces are the one exception and are persisted plus committed to
-  the state root.
+  the state root. The same property is what lets a node re-check, from two headers at boot, that
+  its stored tip was minted under the emission schedule now in force.
 - **Cheapest-first validation.** PoW last, uncle PoW after the block's own PoW. Every request-path
   route meters before it works.
 - **Single writer.** All public `ChainEngine` methods serialise on one lock; reorg phases are
   individually atomic.
-- **A block always pays its miner.** Under an active emission curve the scheduled base subsidy is
+- **A block always pays its miner.** Under an active emission curve — scheduled from height 1 on
+  mainnet and devnet, never on testnet — the scheduled base subsidy is
   `max(R_min, raw(S))` at a single clamp site — strictly positive at every reachable supply, with
   uncle and nephew rewards derived from that same floored base rather than clamped again. A profile
   that configures a non-positive `minerRevenueFloor` refuses to build. The consequence is deliberate
   and documented: issuance does not terminate at the supply target `S*` but continues as a
   rate-bounded tail emission, traded for permanent security funding. See
   [consensus](consensus/spec.md) C-6 and C-10, and WHITEPAPER §5.3.
+- **A node refuses rather than diverges.** Every disagreement between a node's configuration and
+  the chain it is asked to run is a **boot refusal, before the port is bound** — never a degraded
+  mode, never a warning it keeps running past. The genesis total that misses its pin, the stored
+  genesis that does not match the profile, and the stored tip minted under a different emission
+  schedule all end the process with a message naming the values and the remedy, so an operator is
+  told at startup instead of discovering it when the first fresh peer cannot sync. Where the
+  evidence is unavailable rather than contradictory — a pruned or snapshot-bootstrapped prefix with
+  no parent header — the check is *skipped, not failed*: an unverifiable chain is not a wrong one.
+  See [consensus](consensus/spec.md) C-10 and C-11, and [node-api](node-api/spec.md) A-13.
+
 - **Pinned genesis.** Genesis is an explicit authored allocation, never an import. A network profile
   that pins a genesis supply refuses to build or re-verify genesis against a snapshot whose total
   differs — on every boot path, before any balance is seeded and before the port is bound. The pin

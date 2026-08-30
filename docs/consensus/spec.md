@@ -193,7 +193,7 @@ the same hash could be accepted or rejected depending on receive order, splittin
 Second-preimage is neutralised by 0x00/0x01 domain separation, a committed `numTransactions`, and
 the Executor's in-block content-hash dedup (CVE-2012-2459 shape).
 
-### C-10 — Supply-targeted logarithmic emission curve *(implemented, inactive on shipped networks)*
+### C-10 — Supply-targeted logarithmic emission curve *(implemented, scheduled on mainnet and devnet)*
 
 The block subsidy is a function of the chain's own header-committed circulating supply, not of
 height: `R(S) = c · ln(S*/S)`, evaluated entirely in integer arithmetic (a fixed-point
@@ -227,16 +227,31 @@ Decision 3/5); the uncle-free rate is pinned by the calibration test
 
 `NetworkParameters.emissionCurveHeight` gates *which* rule governs a block: `0` (the polarity of
 `powUpgradeHeight`, not `boxActivationHeight`) means **never** — the curve exists, is fully
-specified and vector-pinned, but mints nothing. Every network Rhizome ships today sets it to `0`;
-below activation (i.e. always, at present) the **legacy geometric rule** governs unchanged: the
-subsidy decays geometrically (×2/3) once per `rewardEpochBlocks`, in integer arithmetic. Total
-issuance = `epochBlocks × initialReward × 3 ≈ 100M PDN`. Both knobs are rescaled by the cadence
-ratio (×18 = 90/5) so the **real-time schedule is preserved**: `rewardEpochBlocks ≈ 12 000 000`,
+specified and vector-pinned, but mints nothing on a profile that never schedules it. The shipped
+schedule: **mainnet = 1** (genesis, height 1, pays no coinbase; height 2 — the first block that
+pays any coinbase — is at/above activation, so it pays the calibrated curve value, not a geometric
+leftover; mainnet is pre-launch, so nothing already-mined is reinterpreted), **devnet = 1**
+(`scripts/local-testnet/start.sh` runs devnet, and a local network an operator watches must mint
+under the same rule mainnet mints under), **testnet = 0,
+never** (the test-shaped profile, not a deployed network with operators to notify; keeps the
+geometric rule exercised and the existing suite's reward baseline deterministic). Below activation,
+and permanently on testnet, the **legacy geometric rule** governs unchanged: the subsidy decays
+geometrically (×2/3) once per `rewardEpochBlocks`, in integer arithmetic. Total issuance =
+`epochBlocks × initialReward × 3 ≈ 100M PDN`. Both knobs are rescaled by the cadence ratio
+(×18 = 90/5) so the **real-time schedule is preserved**: `rewardEpochBlocks ≈ 12 000 000`,
 `initialReward = 2.7777 PDN`, epoch ≈ 1.9 yr, 48 000 PDN/day. Locked by a cadence-relative test
 (`emissionScheduleIsCalibratedForTheBlockCadence`) that recomputes both the geometric epoch span
 and the curve's `τ_blocks` from `desiredBlockTimeSec`, so changing block time forces both
-schedules to be revisited. A later feature schedules the real curve activation height once the
-genesis allocation (C-11) is ratified.
+schedules to be revisited.
+
+**Boot-time consistency.** A node's stored tip is checked against the schedule now in force every
+time it boots: if the tip's committed supply no longer equals `parent.supply +
+Issuance.minted(...)` under the current parameters — for example, a data directory minted before
+activation, reopened after — the node refuses to start with a message naming the network, the
+activation height, the expected and found supply, and the remedy (recreate the data directory),
+rather than silently extending a chain no fresh peer can sync. Two header reads, no body, no
+ledger; skipped, not failed, when the parent header is unavailable (snapshot bootstrap, pruned
+prefix).
 
 **Plumbing.** The curve's sole input is the **parent's committed supply** — the C-1 header field,
 never a ledger query, so the reward is as reorg-structural as the supply commitment itself. That
@@ -261,11 +276,14 @@ stating, because each is a place the plumbing could have gone wrong instead:
   it actually occupies on the winning branch mandates.
 
 **Profile inheritance.** `testnet()`/`devnet()` derive from `cleanMainnet().toBuilder()` and
-therefore **inherit** `supplyTarget`, `emissionCoefficient` and `emissionTableSteps` — deliberately,
-unlike the genesis-supply pin they explicitly reset (C-11). The calibration is shared because it is
-inert: `emissionCurveHeight` is `0` on all three, so no profile mints from the curve. Every profile
-still *generates* and validates its table at construction, so a degenerate `(S*, c, N)` triple fails
-loudly at `NetworkParameters` build time rather than at the first curve-active block.
+**inherit** `supplyTarget`, `emissionCoefficient` and `emissionTableSteps` — deliberately, unlike
+the genesis-supply pin they explicitly reset (C-11): the calibration triple is shared regardless of
+whether a given profile mints from it. `emissionCurveHeight` is a different story: `testnet()`
+explicitly **resets** it to `0` (never), while `devnet()` explicitly **states** its own `1`
+(active) — neither inherits `cleanMainnet()`'s value silently, since 006-emission-fork-activation
+made the three profiles disagree on this one field. Every profile still *generates* and validates
+its table at construction, so a degenerate `(S*, c, N)` triple fails loudly at `NetworkParameters`
+build time rather than at the first curve-active block.
 
 ### C-11 — Pinned genesis supply *(implemented)*
 
@@ -346,6 +364,14 @@ profile in ~20 existing suites are unaffected.
   total differs, on every boot path, before any balance is seeded. The check is gated solely by
   the presence of a pin, never by network id — an unpinned profile (testnet/devnet by explicit
   choice) behaves exactly as it did before this check existed.
+- **A stored chain must agree with the schedule now in force.** At boot, the tip's supply
+  accounting identity is re-checked against the current parameters from **two headers only** (no
+  body, no ledger, before the engine's lock is ever taken). A tip minted under a different emission
+  schedule — or a supply-less chain opened under a scheduled curve, which can never begin
+  committing — refuses to start with a message naming the network, the activation height, the
+  expected and found supply, and the remedy. Absence of proof is not proof of fault: an
+  unverifiable tip (parent header pruned or snapshot-bootstrapped) is **skipped, not failed**, and
+  an identity that overflows refuses cleanly rather than surfacing a raw `ArithmeticException`.
 
 ## Key parameters
 
@@ -366,15 +392,15 @@ profile in ~20 existing suites are unaffected.
 | `emissionCoefficient` (`c`) | 23 750 base units |
 | `emissionTableSteps` (`N`) | 256 |
 | `minerRevenueFloor` (`R_min`) | 800 base units (0.08 PDN) — ≈ `R₀/32.6`, **must be > 0** |
-| `emissionCurveHeight` | **0 — never**, on every shipped profile |
+| `emissionCurveHeight` | **1 (mainnet), 1 (devnet), 0 — never (testnet)** |
 
-The four curve constants are inherited unchanged by `testnet()`/`devnet()`; only the activation
-height decides whether they mint, and it is `0` everywhere today. `R_min` is the one that is
-**not** inert for a derived profile that turns the curve on: a `toBuilder()` profile with a
-test-scale `supplyTarget` inherits the mainnet-scale floor, and where `R_min` exceeds the curve's
-own first table entry the floor swallows the whole schedule and every block pays a flat `R_min`.
-Curve-active profiles must set a profile-scaled floor rather than assume the mainnet value stays
-out of the way.
+The three calibration constants (`supplyTarget`, `emissionCoefficient`, `emissionTableSteps`) are
+inherited unchanged by `testnet()`/`devnet()`; `emissionCurveHeight` is not — each shipped profile
+states its own value (see Profile inheritance above). `R_min` is likewise **not** inert on a
+curve-active profile: a `toBuilder()` profile with a test-scale `supplyTarget` inherits the
+mainnet-scale floor, and where `R_min` exceeds the curve's own first table entry the floor
+swallows the whole schedule and every block pays a flat `R_min`. Curve-active profiles must set a
+profile-scaled floor rather than assume the mainnet value stays out of the way.
 
 ## Open items
 
@@ -382,15 +408,12 @@ out of the way.
   connections — the three upgrades that would make a sub-5 s target safe (§6.3).
 - Residual: the **51% attack** within the finality window is irreducible; the window bounds only
   its depth.
-- **Curve activation is unscheduled.** C-10 ships fully specified, vector-pinned and adversarially
-  proven, but `emissionCurveHeight = 0` on every profile, so no shipped network mints from it. A
-  later feature sets the height once the genesis allocation (C-11) is ratified — `S₀` and `c` are
-  two ends of the same calibration, and the coefficient is only meaningful against a final `S₀`.
-  Two known follow-ons ride on that feature: the dashboard's reward display still reads the
-  height-only overload (see [dashboard](../dashboard/spec.md) U-1), and
-  `NetworkParameters.emissionCurveActiveForNextBlock` — kept for symmetry with its
-  `boxActiveForNextBlock`/`tokenActiveForNextBlock` siblings — has no production caller until one
-  exists.
+- **`emissionCurveActiveForNextBlock` still has no production caller.** Kept for symmetry with its
+  `boxActiveForNextBlock`/`tokenActiveForNextBlock` siblings, which serve mempool admission — a use
+  case a coinbase structurally does not have. `BlockAssembler` already judges the height it is
+  building *for* through the ordinary two-arg `miningReward(height, parentSupply)` dispatch, which
+  is mathematically the same predicate this method encodes; documented as a deliberate asymmetry,
+  not an oversight (006-emission-fork-activation).
 
 ## References
 

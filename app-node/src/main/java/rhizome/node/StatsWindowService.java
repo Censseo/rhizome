@@ -4,6 +4,8 @@ import java.util.function.LongFunction;
 import java.util.function.LongSupplier;
 
 import rhizome.core.block.Block;
+import rhizome.core.block.BlockImpl;
+import rhizome.core.blockchain.GenesisBlock;
 
 /**
  * The cached {@code GET /stats} window aggregate, extracted from NodeService (archi-review lot
@@ -18,8 +20,12 @@ import rhizome.core.block.Block;
  */
 final class StatsWindowService {
 
-    /** Aggregate over the last stats window: total tx count and the first/last block timestamps. */
-    record StatsWindow(long windowStart, long height, long txCount, long firstTs, long lastTs) {}
+    /** Aggregate over the last stats window: total tx count, the first/last block timestamps,
+     *  and the tip's parent supply ({@link BlockImpl#SUPPLY_ABSENT} at genesis) — captured here
+     *  rather than re-read by the caller on every poll, since it is gated by the same
+     *  recompute-on-tip-movement cache. */
+    record StatsWindow(long windowStart, long height, long txCount, long firstTs, long lastTs,
+                        long parentSupply) {}
 
     private final LongSupplier height;
     private final LongFunction<Block> blockAt;
@@ -51,8 +57,9 @@ final class StatsWindowService {
             long txCount = 0;
             long firstTs = 0;
             long lastTs = 0;
+            long parentSupply = BlockImpl.SUPPLY_ABSENT;
             for (long i = windowStart; i <= h; i++) {
-                var b = (rhizome.core.block.BlockImpl) blockAt.apply(i);
+                var b = (BlockImpl) blockAt.apply(i);
                 txCount += b.transactions().size();
                 if (i == windowStart) {
                     firstTs = b.timestamp();
@@ -60,8 +67,17 @@ final class StatsWindowService {
                 if (i == h) {
                     lastTs = b.timestamp();
                 }
+                if (i == h - 1) {
+                    parentSupply = b.supply();
+                }
             }
-            StatsWindow w = new StatsWindow(windowStart, h, txCount, firstTs, lastTs);
+            // The window (32 blocks) always covers h - 1 for any h >= 2 in practice, but a
+            // window narrower than 2 blocks would not visit it above — fetch it directly rather
+            // than assume coverage. Still only once per tip movement, not once per /stats poll.
+            if (h > GenesisBlock.GENESIS_ID && windowStart > h - 1) {
+                parentSupply = ((BlockImpl) blockAt.apply(h - 1)).supply();
+            }
+            StatsWindow w = new StatsWindow(windowStart, h, txCount, firstTs, lastTs, parentSupply);
             cache = w;
             return w;
         }

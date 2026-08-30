@@ -17,6 +17,13 @@ public interface ChainStore {
     /** Number of blocks in the chain (0 when uninitialised). */
     long height();
 
+    /**
+     * @throws IllegalArgumentException if no block exists at {@code height} — never seen, or
+     *      pruned. Callers that mean to treat "unreadable at this height" as a distinct, expected
+     *      outcome (rather than a bug) rely on this specific exception type to do so; a caller
+     *      needing to signal something else (e.g. a test asserting a call should not have
+     *      happened at all) must throw a different type so the two are not conflated.
+     */
     Block blockAt(long height);
 
     /**
@@ -25,6 +32,9 @@ public interface ChainStore {
      * through here — a store that has pruned the body can still serve the
      * header. The default derives it from the full block; persistent stores
      * override it to read a dedicated header column family.
+     *
+     * @throws IllegalArgumentException if no header exists at {@code height} — same contract as
+     *      {@link #blockAt}.
      */
     default BlockHeader headerAt(long height) {
         return BlockHeader.of(blockAt(height));

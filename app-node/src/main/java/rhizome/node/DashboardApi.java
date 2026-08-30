@@ -4,6 +4,7 @@ import io.activej.http.HttpHeader;
 import io.activej.http.HttpHeaders;
 import io.activej.http.HttpResponse;
 
+import rhizome.core.block.BlockImpl;
 import rhizome.core.serialization.JsonSink;
 import rhizome.core.serialization.JsonSink.Key;
 
@@ -125,12 +126,21 @@ final class DashboardApi {
         sink.field(K_PEERS, node.knownPeers().size());
         sink.field(K_DESIRED_BLOCK_TIME_SEC, params.desiredBlockTimeSec());
         sink.field(K_DECIMAL_SCALE_FACTOR, params.decimalScaleFactor());
-        // Height-only (geometric) reward: exact on every shipped network, where
-        // emissionCurveHeight == 0 (never active). On the first curve-active network this must
-        // become the supply-aware dispatch miningReward(height, tipParentSupply) — which needs
-        // the tip's committed supply, a surface NodeService does not expose yet. Display-only;
-        // tracked as part of feature 05 (curve activation), which schedules the height.
-        sink.field(K_MINING_REWARD, params.miningReward(height));
+        // Dispatch the way consensus dispatches (006-emission-fork-activation): when the curve
+        // governs this height AND the parent header's supply is committed, report the
+        // supply-aware reward the tip's coinbase actually paid; otherwise the geometric value.
+        // Genesis (height == GENESIS_ID) has no parent header, so StatsWindowService reports
+        // SUPPLY_ABSENT there — note that emissionCurveActiveAt(GENESIS_ID) can still be true
+        // (mainnet/devnet schedule from height 1, i.e. genesis itself), but the
+        // parentSupply == SUPPLY_ABSENT guard below falls back to the geometric value regardless,
+        // since genesis pays no coinbase to look up. Sourced from the window cache (gated by tip
+        // height, same as the aggregate above) rather than a fresh NodeService.header() call, so
+        // repeated dashboard polls at the same tip don't re-take the engine lock for this field.
+        long parentSupply = window.parentSupply();
+        long miningReward = params.emissionCurveActiveAt(height) && parentSupply != BlockImpl.SUPPLY_ABSENT
+            ? params.miningReward(height, parentSupply)
+            : params.miningReward(height);
+        sink.field(K_MINING_REWARD, miningReward);
         sink.field(K_MAX_REORG_DEPTH, params.maxReorgDepth());
         sink.field(K_LAST_BLOCK_TIMESTAMP, lastTs);
         sink.field(K_AVG_BLOCK_INTERVAL_MS, avgIntervalMs);
