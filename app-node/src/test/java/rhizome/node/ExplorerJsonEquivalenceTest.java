@@ -1,6 +1,7 @@
 package rhizome.node;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static rhizome.crypto.Crypto.generateKeyPairTyped;
@@ -248,13 +249,19 @@ class ExplorerJsonEquivalenceTest {
         JSONArray arr = new JSONArray();
         for (long h = start; h <= cappedEnd; h++) {
             var block = (BlockImpl) node.block(h);
-            arr.put(new JSONObject()
+            // supply follows the full-block writer's contract: present only when committed
+            // (>= 0), as a decimal string (007-emission-observability, contract §4).
+            JSONObject row = new JSONObject()
                 .put("height", h)
                 .put("hash", block.hash().toHexString())
                 .put("timestamp", block.timestamp())
                 .put("difficulty", block.difficulty())
                 .put("txCount", block.transactions().size())
-                .put("uncles", block.uncles().size()));
+                .put("uncles", block.uncles().size());
+            if (block.supply() >= 0) {
+                row.put("supply", Long.toString(block.supply()));
+            }
+            arr.put(row);
         }
         return new JSONObject().put("blocks", arr).put("height", node.blockCount());
     }
@@ -326,6 +333,87 @@ class ExplorerJsonEquivalenceTest {
         HttpResponse response = call(HttpRequest.get("http://x/blocks?start=1&end=2").build());
         assertEquals(200, response.getCode());
         assertSameJson(legacy, response);
+    }
+
+    /**
+     * The range summary carries each block's committed supply exactly as the full-block writer
+     * emits it: a decimal string when committed ({@code >= 0}), and NO supply key at all when
+     * not — absence stays absence on a chain that commits none (FR-015, contract §4).
+     */
+    @Test
+    void blocksSummariesCarrySupplyExactlyWhenCommittedAndNotAtAllWhenAbsent() throws Exception {
+        apply(mineNext(List.of()));
+        apply(mineNext(List.of()));
+
+        JSONObject committed = new JSONObject(body(
+            call(HttpRequest.get("http://x/blocks?start=1&end=2").build())));
+        org.json.JSONArray rows = committed.getJSONArray("blocks");
+        assertEquals(2, rows.length());
+        for (int i = 0; i < rows.length(); i++) {
+            JSONObject row = rows.getJSONObject(i);
+            long height = row.getLong("height");
+            assertTrue(row.has("supply"), "summary of a committing block must carry supply");
+            assertEquals(engine.headerAt(height).supply() + "", row.getString("supply"),
+                "supply is the header's own committed value, as a decimal string");
+            assertFalse(row.get("supply") instanceof Number,
+                "supply stays a decimal string (can exceed 2^53), like the full-block writer");
+        }
+
+        // A legacy all-absent chain (manufactured on the store, as in SupplyCommitmentTest):
+        // every summary must have no supply key at all — not null, not "0".
+        rhizome.core.ledger.InMemoryLedger absentLedger = new rhizome.core.ledger.InMemoryLedger();
+        rhizome.core.blockchain.InMemoryChainStore absentStore =
+            new rhizome.core.blockchain.InMemoryChainStore();
+        LedgerSnapshot snapshot = new LedgerSnapshot("absent", 0, params.chainId());
+        rhizome.core.block.Block genesis = rhizome.core.blockchain.GenesisBlock.build(params, snapshot);
+        absentStore.append(genesis);
+        PublicAddress absentMiner = PublicAddress.random();
+        absentStore.append(absentCommittedBlock(2, genesis.hash(), absentMiner));
+        absentStore.append(absentCommittedBlock(3, absentStore.blockAt(2).hash(), absentMiner));
+        var verifier = new SignatureVerifier();
+        ChainEngine absentEngine = ChainEngine.boot(params,
+                TestNodeStores.mixing(absentLedger, absentStore), snapshot)
+            .clock(clock::get).verifier(verifier).build();
+        NodeService absentNode = new NodeService(absentEngine,
+            new MemPool(params, verifier, absentEngine, 1000));
+        AsyncServlet absentServlet = NodeApi.servlet(eventloop, absentNode);
+
+        HttpResponse absentResponse = eventloop.<HttpResponse>submit(() ->
+            absentServlet.serve(HttpRequest.get("http://x/blocks?start=1&end=3").build())
+                .then(resp -> resp.loadBody().map($ -> resp))
+        ).get();
+        assertEquals(200, absentResponse.getCode());
+        JSONObject absentJson = new JSONObject(body(absentResponse));
+        org.json.JSONArray absentRows = absentJson.getJSONArray("blocks");
+        assertEquals(3, absentRows.length());
+        // Height 1 is the manufactured genesis, which legitimately COMMITS supply 0 — "0" is a
+        // committed value, never conflated with absence (DI-7). Heights 2–3 are absent and must
+        // carry no supply key at all — not null, not "0".
+        assertEquals("0", absentRows.getJSONObject(0).getString("supply"),
+            "the committed zero stays a committed zero, distinct from absence");
+        for (int i = 1; i < absentRows.length(); i++) {
+            assertFalse(absentRows.getJSONObject(i).has("supply"),
+                "an all-absent chain produces summaries with no supply key at all");
+        }
+    }
+
+    /** A hand-mined store-fixture block committing SUPPLY_ABSENT (never addBlock'd). */
+    private rhizome.core.block.Block absentCommittedBlock(long height,
+            rhizome.crypto.SHA256Hash parent, PublicAddress absentMiner) {
+        var b = (BlockImpl) BlockImpl.builder()
+            .id((int) height)
+            .timestamp(params.desiredBlockTimeSec() * 1000L * height)
+            .difficulty(params.genesisDifficulty())
+            .lastBlockHash(parent)
+            .supply(BlockImpl.SUPPLY_ABSENT)
+            .build();
+        b.addTransaction(Transaction.of(absentMiner,
+            new TransactionAmount(params.miningReward(height))));
+        var tree = new MerkleTree();
+        tree.setItems(b.transactions());
+        b.merkleRoot(tree.getRootHash());
+        b.nonce(Miner.mineNonce(b.hash(), b.difficulty(), params.powAlgorithm()));
+        return b;
     }
 
     // ---- /block (hash round-trip protected) --------------------------------------------------

@@ -236,6 +236,62 @@ field. The window normally already covers `tip - 1`; a window narrower than two 
 one block directly rather than assuming coverage. Display-only: no consensus path reads it (the
 rendering contract is [dashboard](../dashboard/spec.md) U-1).
 
+### A-16 — Emission observability surfaces *(implemented)*
+
+007-emission-observability publishes the monetary state and the emission schedule on four surfaces:
+two modified additively (`/info`, `/stats`), one new (`/emission`), one existing and reused
+unchanged (`/block`). Every monetary value is a JSON **decimal string in base units** (64-bit
+quantities must not become JS numbers); heights, counts and basis points are JSON numbers; `rule`
+is a string (`"curve"` | `"geometric"`).
+
+**The shared `emission` fragment** (one writer in `EmissionApi`, nested identically under
+`/info` and `/stats` so the two routes cannot drift). Ten fields: `rule` (the rule governing the
+**next** block), `activationHeight` (`0` = never), `supply` (the tip header's committed value —
+JSON `null` when not committed, `"0"` is a legal committed value and is never conflated with
+absence), `subsidy` (the **next** block's subsidy, dispatched through the consensus
+`miningReward(height + 1, supply)` — verifiable from this response alone; distinct from
+`/stats.miningReward`, which keeps its pre-existing meaning: the subsidy the **tip's** coinbase
+paid), `target` (`S*`), `distanceToTarget` (signed `target − supply`; `null` when supply is absent
+**or** the curve does not govern the next block — a chain the curve does not govern is not
+converging on the target), `progressBps` (unclamped integer basis points of `supply/target` — may
+legitimately exceed `10000`; nullable under the same conditions as `distanceToTarget`), `floor`
+(`R_min`, reported beside the subsidy so a flat tail is recognisable as a floor), `burned` (always
+`"0"` — total native coin destroyed by consensus; zero by absence of a mechanism, not absence of a
+counter; no burn-debt field ships because none is defined yet), and `decimalScaleFactor` (base
+units per display unit, present so the fragment is self-describing).
+
+**`/info`** (A-15's classification unchanged: per-IP cost 1, `PEER_PROTOCOL`, **no reorg-window
+gate, never 503**) sources `height` and `emission.supply` from **one** compound consensus-lock
+acquisition (`ChainEngine.tipSupply()`), so a reorg can never tear the pair; the compound read
+costs one acquisition — no more than the pre-feature height read — which is what lets `/info` stay
+outside the A-14 gate. The whole response stays under the 4 KB peer cap (`HttpPeerSource`
+`SCALAR_CAP`) with ≥ 50% headroom. `chainId` and `prunedBelow` keep their exact types (the wallet
+and peer pruning probes read them by name).
+
+**`/stats`** adds the identical fragment, sourced from the `StatsWindow` cache's tip fields — a
+stationary dashboard poll takes no extra consensus lock for it. Its classification (cost
+`STATS_WINDOW`, `READ_BUDGET`, A-14 503) is unchanged.
+
+**`GET /emission`** — the chain-state-free schedule read: network name, `rule` (the schedule's
+*policy*: `"curve"` when the profile schedules the curve at all), `activationHeight`,
+`supplyTarget`, `coefficient`, `steps`, `floor`, `genesisSupply` (`null` on an unpinned profile),
+`decimalScaleFactor`, and `samples` — **exactly 64** entries on a curve-scheduling profile,
+**exactly 0** otherwise (an empty array is the statement "this chain is not curve-governed", not a
+failure). Sample `i` sits at `i × ⌊(S* + S*/4) ÷ 64⌋`, so the last sample lies above `S*` and the
+flat `R_min` tail is visible; every sampled subsidy passes through the single clamp site
+(`miningReward(activationHeight, supply)`), so the served curve is exactly what a miner is paid —
+never negative, never below the floor. Classification: `get("/emission", 1)` — per-IP cost 1, **no
+guards, no aggregate budget, no consensus lock, no chain state**; the response is identical for the
+life of the process. A verification test (`EmissionApiTest`) asserts every served sample equals a
+direct evaluation of the same profile's dispatch, so the published curve can never drift from the
+paid schedule.
+
+**`/blocks`** gains `supply` on each summary entry — emitted only when committed (`>= 0`), with
+the same decimal-string encoding `Block.Serializer.writeJsonBody` applies, so a chain that commits
+no supply produces summaries with no `supply` key at all. Cost is zero marginal: the handler
+already decodes each block in the range; route cost, `BLOCKS_RANGE_MAX` cap, read-budget guard and
+the 410-below-watermark behaviour are unchanged.
+
 ## Known limits (accepted, not defects)
 
 Deployment-shaped gaps that no code change inside the node closes. Stated here so an operator can

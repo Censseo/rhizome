@@ -648,4 +648,243 @@ class NodeApiTest {
         assertTrue(node.dryRun(PublicAddress.empty(), PublicAddress.empty(), new byte[0], 0,
             1_000_000L).isPresent());
     }
+
+    // ---- emission readout (007-emission-observability, US1) ------------------------------------
+
+    private static final java.util.Set<String> PREEXISTING_INFO_FIELDS = java.util.Set.of(
+        "chainId", "network", "height", "difficulty", "mempool", "prunedBelow", "snapshotPivot",
+        "storageFeeFactor", "minValuePerByte");
+
+    private static final java.util.Set<String> EMISSION_FIELDS = java.util.Set.of(
+        "rule", "activationHeight", "supply", "subsidy", "target", "distanceToTarget",
+        "progressBps", "floor", "burned", "decimalScaleFactor");
+
+    /** A fast-PoW curve-active engine + node + servlet, so the emission group has a live curve. */
+    private record Fixture(NetworkParameters params, ChainEngine engine, NodeService node,
+                           AsyncServlet servlet) {}
+
+    private Fixture curveActiveFixture(LedgerSnapshot snapshot) {
+        NetworkParameters p = rhizome.core.blockchain.CurveActiveNetwork.curveActiveTestnet()
+            .toBuilder().powAlgorithm(PowAlgorithm.SHA256).genesisDifficulty(4).build();
+        var verifier = new SignatureVerifier();
+        ChainEngine e = ChainEngine.boot(p, TestNodeStores.inMemory(), snapshot)
+            .clock(clock::get).verifier(verifier).build();
+        MemPool mp = new MemPool(p, verifier, e, 1000);
+        NodeService n = new NodeService(e, mp);
+        return new Fixture(p, e, n, NodeApi.servlet(eventloop, n));
+    }
+
+    /** Mines one honest coinbase-only block onto {@code engine}, paying the reward {@code p}
+     *  actually dispatches for the height being built (geometric or curve). */
+    private void mineOne(NetworkParameters p, ChainEngine e) {
+        long height = e.height() + 1;
+        long parentSupply = e.headerAt(e.height()).supply();
+        var b = BlockImpl.builder()
+            .id((int) height)
+            .timestamp(clock.addAndGet(p.desiredBlockTimeSec() * 1000L))
+            .difficulty(e.difficulty())
+            .lastBlockHash(e.tipHash())
+            .supply(SupplyStamp.next(e, height, e.difficulty()))
+            .build();
+        b.addTransaction(Transaction.of(miner,
+            new TransactionAmount(p.miningReward(height, parentSupply))));
+        var tree = new MerkleTree();
+        tree.setItems(b.transactions());
+        ((BlockImpl) b).merkleRoot(tree.getRootHash());
+        ((BlockImpl) b).nonce(Miner.mineNonce(b.hash(), ((BlockImpl) b).difficulty(), p.powAlgorithm()));
+        assertEquals(ExecutionStatus.SUCCESS, e.addBlock(b));
+    }
+
+    @Test
+    void infoCarriesTheWholeEmissionGroupWithEveryPreExistingFieldIntact() throws Exception {
+        Fixture f = curveActiveFixture(new LedgerSnapshot("curve", 0, params.chainId()));
+        mineOne(f.params(), f.engine());
+        mineOne(f.params(), f.engine());
+
+        HttpResponse response = callWith(f.servlet(), HttpRequest.get("http://x/info").build());
+        assertEquals(200, response.getCode());
+        String body = response.getBody().getString(java.nio.charset.StandardCharsets.UTF_8);
+        JSONObject info = new JSONObject(body);
+
+        // Additive, not mutative: exactly the nine pre-existing fields plus the one new object.
+        assertEquals(PREEXISTING_INFO_FIELDS, info.keySet().stream()
+                .filter(k -> !k.equals("emission")).collect(java.util.stream.Collectors.toSet()),
+            "no pre-existing /info field may be added, removed or renamed");
+        assertEquals(f.params().chainId(), info.getInt("chainId"));
+        assertEquals(f.params().networkName(), info.getString("network"));
+        assertEquals(3, info.getLong("height"));
+        assertEquals(0L, info.getLong("mempool"));
+        assertEquals(0L, info.getLong("prunedBelow"));
+        assertEquals(0L, info.getLong("snapshotPivot"));
+
+        JSONObject emission = info.getJSONObject("emission");
+        assertEquals(EMISSION_FIELDS, emission.keySet(),
+            "the emission group carries exactly its ten contracted fields");
+        assertEquals("curve", emission.getString("rule"));
+        assertEquals(1, emission.getLong("activationHeight"));
+        assertEquals(f.params().supplyTarget() + "", emission.getString("target"));
+        assertEquals(f.params().minerRevenueFloor() + "", emission.getString("floor"));
+        assertEquals("0", emission.getString("burned"));
+        assertEquals(f.params().decimalScaleFactor(), emission.getLong("decimalScaleFactor"));
+        assertEquals(f.engine.headerAt(3).supply() + "", emission.getString("supply"));
+
+        // SC-004: the peer response cap is 4 KB; ≥ 50% headroom means < 2 KB.
+        assertTrue(body.getBytes(java.nio.charset.StandardCharsets.UTF_8).length < 2048,
+            "the /info response must stay under 4 KB with at least 50% headroom, was "
+                + body.getBytes(java.nio.charset.StandardCharsets.UTF_8).length);
+    }
+
+    @Test
+    void thePublishedSubsidyEqualsTheConsensusDispatchOnEveryProfileShape() throws Exception {
+        // Curve-active profile with blocks minted under the curve.
+        Fixture curve = curveActiveFixture(new LedgerSnapshot("curve", 0, params.chainId()));
+        mineOne(curve.params(), curve.engine());
+        mineOne(curve.params(), curve.engine());
+        long curveTipSupply = curve.engine.tipSupply().supply();
+        long curveHeight = curve.engine.height();
+        JSONObject curveInfo = new JSONObject(callWith(curve.servlet(),
+            HttpRequest.get("http://x/info").build()).getBody()
+            .getString(java.nio.charset.StandardCharsets.UTF_8));
+        assertEquals(curve.params.miningReward(curveHeight + 1, curveTipSupply) + "",
+                curveInfo.getJSONObject("emission").getString("subsidy"),
+                "the curve-active subsidy must be the two-arg consensus dispatch");
+
+        // Never-activating profile (plain testnet) with committed supply.
+        long testnetTipSupply = engine.tipSupply().supply();
+        long testnetHeight = engine.height();
+        JSONObject testnetInfo = new JSONObject(call(
+            HttpRequest.get("http://x/info").build()).getBody()
+            .getString(java.nio.charset.StandardCharsets.UTF_8));
+        assertEquals(params.miningReward(testnetHeight + 1, testnetTipSupply) + "",
+                testnetInfo.getJSONObject("emission").getString("subsidy"),
+                "a never-activating profile still dispatches through the two-arg form");
+
+        // Genesis-only chain: the next block's subsidy against the genesis-committed supply.
+        Fixture genesis = curveActiveFixture(new LedgerSnapshot("genesis", 0, params.chainId()));
+        long genesisSupply = genesis.engine.tipSupply().supply();
+        JSONObject genesisInfo = new JSONObject(callWith(genesis.servlet(),
+            HttpRequest.get("http://x/info").build()).getBody()
+            .getString(java.nio.charset.StandardCharsets.UTF_8));
+        assertEquals(genesis.params.miningReward(1 + 1, genesisSupply) + "",
+                genesisInfo.getJSONObject("emission").getString("subsidy"),
+                "the genesis-only subsidy is the dispatch at the genesis supply");
+    }
+
+    @Test
+    void anAbsentSupplyIsNullNeverZeroAndNoBurnDebtFieldExists() throws Exception {
+        // A legacy all-absent chain (manufactured on the store exactly as SupplyCommitmentTest's
+        // prefix-closure proof does): absence must stay absence on every figure it touches.
+        InMemoryLedger absentLedger = new InMemoryLedger();
+        InMemoryChainStore absentStore = new InMemoryChainStore();
+        LedgerSnapshot snapshot = new LedgerSnapshot("absent", 0, params.chainId());
+        rhizome.core.block.Block genesis = rhizome.core.blockchain.GenesisBlock.build(params, snapshot);
+        absentStore.append(genesis);
+        PublicAddress absentMiner = PublicAddress.random();
+        absentStore.append(absentBlock(params, 2, genesis.hash(), absentMiner,
+            BlockImpl.SUPPLY_ABSENT));
+        absentStore.append(absentBlock(params, 3, absentStore.blockAt(2).hash(), absentMiner,
+            BlockImpl.SUPPLY_ABSENT));
+        var verifier = new SignatureVerifier();
+        ChainEngine absentEngine = ChainEngine.boot(params,
+                TestNodeStores.mixing(absentLedger, absentStore), snapshot)
+            .clock(clock::get).verifier(verifier).build();
+        MemPool absentMempool = new MemPool(params, verifier, absentEngine, 1000);
+        AsyncServlet absentServlet = NodeApi.servlet(eventloop,
+            new NodeService(absentEngine, absentMempool));
+
+        JSONObject info = new JSONObject(callWith(absentServlet,
+            HttpRequest.get("http://x/info").build()).getBody()
+            .getString(java.nio.charset.StandardCharsets.UTF_8));
+        JSONObject emission = info.getJSONObject("emission");
+
+        assertTrue(emission.isNull("supply"), "an absent supply must be JSON null");
+        assertFalse(emission.has("supply") && emission.optString("supply", "x").equals("0"),
+            "an absent supply must never be coerced to 0");
+        assertTrue(emission.isNull("distanceToTarget"),
+            "no distance can be stated without a supply");
+        assertTrue(emission.isNull("progressBps"), "no progress can be stated without a supply");
+        // Presence side: the figures that do not depend on a committed supply stay.
+        assertEquals("geometric", emission.getString("rule"));
+        assertEquals(params.emissionCurveHeight(), emission.getLong("activationHeight"));
+        assertEquals(params.miningReward(info.getLong("height") + 1) + "",
+            emission.getString("subsidy"));
+        assertEquals(params.supplyTarget() + "", emission.getString("target"));
+        assertEquals(params.minerRevenueFloor() + "", emission.getString("floor"));
+        assertEquals("0", emission.getString("burned"),
+            "burned ships as the defined constant 0, not as a missing counter");
+        assertEquals(params.decimalScaleFactor(), emission.getLong("decimalScaleFactor"));
+
+        // FR-014 locked: no burn-debt field on any emission surface — if a later feature adds
+        // one by accident, this fails before the un-specified figure ships.
+        for (String key : emission.keySet()) {
+            assertFalse(key.toLowerCase().contains("debt"),
+                "no burn-debt field may exist on the emission fragment, found: " + key);
+        }
+    }
+
+    /** A hand-mined block with an explicit committed supply (store fixture, never addBlock'd). */
+    private static rhizome.core.block.Block absentBlock(NetworkParameters p, long height,
+            rhizome.crypto.SHA256Hash parent, PublicAddress miner, long supply) {
+        var b = (BlockImpl) BlockImpl.builder()
+            .id((int) height)
+            .timestamp(p.desiredBlockTimeSec() * 1000L * height)
+            .difficulty(p.genesisDifficulty())
+            .lastBlockHash(parent)
+            .supply(supply)
+            .build();
+        b.addTransaction(Transaction.of(minerPublic(), new TransactionAmount(p.miningReward(height))));
+        var tree = new MerkleTree();
+        tree.setItems(b.transactions());
+        b.merkleRoot(tree.getRootHash());
+        b.nonce(Miner.mineNonce(b.hash(), b.difficulty(), p.powAlgorithm()));
+        return b;
+    }
+
+    private static PublicAddress minerPublic() {
+        return PublicAddress.random();
+    }
+
+    @Test
+    void aNeverActivatingProfileReportsTheGeometricRuleAndNullCurveFigures() throws Exception {
+        // The default fixture is plain testnet: emissionCurveHeight == 0 — never activates.
+        mineOne(params, engine);
+        mineOne(params, engine);
+
+        JSONObject info = new JSONObject(call(HttpRequest.get("http://x/info").build()).getBody()
+            .getString(java.nio.charset.StandardCharsets.UTF_8));
+        JSONObject emission = info.getJSONObject("emission");
+
+        assertEquals("geometric", emission.getString("rule"));
+        assertEquals(0, emission.getLong("activationHeight"), "0 means never on this profile");
+        long tipSupply = engine.tipSupply().supply();
+        assertEquals(params.miningReward(3, tipSupply) + "", emission.getString("subsidy"),
+            "the subsidy is the geometric value the two-arg dispatch returns");
+        assertEquals(params.supplyTarget() + "", emission.getString("target"),
+            "the target is a published constant, reported even when the curve never governs");
+        assertTrue(emission.isNull("distanceToTarget"),
+            "a chain the curve does not govern is not converging on the target");
+        assertTrue(emission.isNull("progressBps"));
+        assertEquals(tipSupply + "", emission.getString("supply"));
+    }
+
+    @Test
+    void infoStillAnswers200DuringAReorgWindowAndTakesNoExtraLockForThePair() throws Exception {
+        // The peer pruning probe and the wallet chain-id pin read /info unconditionally: it must
+        // never join the reorg-window 503 class, and the height/supply pair must cost ONE lock
+        // acquisition (the compound read), no more than the pre-feature height read.
+        mineOne(params, engine);
+        mineOne(params, engine);
+        assertTrue(rhizome.core.blockchain.ReorgWindowTestAccess.begin(engine), "reorg window opens");
+        try {
+            HttpResponse response = call(HttpRequest.get("http://x/info").build());
+            assertEquals(200, response.getCode(),
+                "/info must never gain a 503 reorg-window response");
+            JSONObject info = new JSONObject(response.getBody()
+                .getString(java.nio.charset.StandardCharsets.UTF_8));
+            assertEquals(engine.tipSupply().height(), info.getLong("height"),
+                "the published height is the same single chain view the supply comes from");
+        } finally {
+            rhizome.core.blockchain.ReorgWindowTestAccess.end(engine);
+        }
+    }
 }

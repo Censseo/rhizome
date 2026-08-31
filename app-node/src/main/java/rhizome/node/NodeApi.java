@@ -175,7 +175,7 @@ public final class NodeApi {
     // -- JsonSink size hints (see class javadoc on JsonSink) -------------------------------------
     private static final int TOTAL_WORK_SIZE_HINT = 96;
     private static final int MEMPOOL_SIZE_HINT = 32;
-    private static final int INFO_SIZE_HINT = 256;
+    private static final int INFO_SIZE_HINT = 768;
     private static final int PEERS_BASE_SIZE_HINT = 64;
     private static final int PEER_ENTRY_SIZE_HINT = 48;
     private static final int STATUS_OK_SIZE_HINT = 32;
@@ -268,6 +268,11 @@ public final class NodeApi {
         int maxBlockBody = node.params().maxBlockSizeBytes() + 1024;
         DashboardAssets dashboard = DashboardAssets.load();
         DocsAssets docs = DocsAssets.load();
+        // Built once, here: every /emission input is a NetworkParameters constant, so the body
+        // is identical for the life of the process — each request just re-wraps the memoized
+        // bytes in a fresh response (never a shared HttpResponse: a served body buffer is
+        // consumed by the write).
+        final byte[] emissionSchedule = EmissionApi.schedulePayload(node);
 
         RoutingServlet routing = RoutingServlet.builder(reactor)
             // ---- embedded dashboard SPA ----
@@ -290,6 +295,10 @@ public final class NodeApi {
             // height's parent lookup throw (testnet campaign S5's failure mode, applied here).
             .with(GET, "/stats", req -> offload(blocking, () -> whenNotReorging(node, () -> DashboardApi.stats(node))))
             .with(GET, "/features", req -> guarded(() -> DashboardApi.features(node, sse)))
+            // Chain-state-free constants + curve samples: no consensus lock, no store read, so
+            // it is plain `ok` like /difficulty — but it MUST be classified in RoutePolicy all
+            // the same (RoutePolicyCompletenessTest fails until it is).
+            .with(GET, "/emission", req -> ok(EmissionApi.emissionSchedule(emissionSchedule)))
             .with(GET, "/blocks", req -> offload(blocking, () -> whenNotReorging(node, () -> ExplorerApi.blocks(node, req))))
             .with(GET, "/block", req -> offload(blocking, () -> whenNotReorging(node, () -> ExplorerApi.block(node, req))))
             .with(GET, "/transaction", req -> offload(blocking, () -> ExplorerApi.findTransaction(node, req)))
@@ -478,19 +487,26 @@ public final class NodeApi {
      * quoted string. {@code prunedBelow} stays a JSON NUMBER too: {@code HttpPeerSource.prunedBelow()}
      * reads it with {@code optLong("prunedBelow", 0)}, and {@code PrunedNodeApiTest} asserts
      * {@code getLong} on it directly.
+     *
+     * <p>The {@code emission} object is additive; its {@code height}-dependent figures come from
+     * ONE compound consensus-lock acquisition ({@link NodeService#tipSupply()}), so a reorg can
+     * never tear {@code height} from {@code emission.supply} — and /info still never answers
+     * 503 for a reorg window (the peer pruning probe depends on that).
      */
     private static HttpResponse infoResponse(NodeService node) {
         JsonSink sink = JsonSink.create(INFO_SIZE_HINT);
+        var tip = node.tipSupply();
         sink.beginObject();
         sink.field(K_CHAIN_ID, node.chainId());
         sink.field(K_NETWORK, node.networkName());
-        sink.field(K_HEIGHT, node.blockCount());
+        sink.field(K_HEIGHT, tip.height());
         sink.field(K_DIFFICULTY, node.difficulty());
         sink.field(K_MEMPOOL, node.mempoolSize());
         sink.field(K_PRUNED_BELOW, node.prunedBelow());
         sink.field(K_SNAPSHOT_PIVOT, node.snapshotPivot());
         sink.field(K_STORAGE_FEE_FACTOR, node.voteableParams()[0]);
         sink.field(K_MIN_VALUE_PER_BYTE, node.voteableParams()[1]);
+        EmissionApi.writeEmissionFragment(sink, node.params(), tip.height(), tip.supply());
         sink.endObject();
         return json(sink);
     }

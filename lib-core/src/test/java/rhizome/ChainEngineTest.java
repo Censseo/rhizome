@@ -3,6 +3,7 @@ package rhizome;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static rhizome.crypto.Crypto.generateKeyPairTyped;
 
 import java.io.IOException;
@@ -102,6 +103,84 @@ class ChainEngineTest {
         b.addTransaction(Transaction.of(miner, new TransactionAmount(params.miningReward(height))));
         transactions.forEach(b::addTransaction);
 
+        var tree = new MerkleTree();
+        tree.setItems(b.transactions());
+        ((BlockImpl) b).merkleRoot(tree.getRootHash());
+        ((BlockImpl) b).nonce(Miner.mineNonce(b.hash(), ((BlockImpl) b).difficulty(), params.powAlgorithm()));
+        return b;
+    }
+
+    /**
+     * The compound tip read (§ emission observability, FR-004): one accessor must return the
+     * tip's {@code (height, supply)} from a single chain view — the supply being the tip
+     * <em>header's</em> committed value, including {@link BlockImpl#SUPPLY_ABSENT} on a chain
+     * that commits none. A caller reading {@code height()} and {@code headerAt(...)} separately
+     * can be torn across a reorg; this is the accessor that makes a torn pair impossible.
+     */
+    @Test
+    void chainTipHeightAndSupplyAreReadUnderOneLockAcquisition() {
+        // Default fixture: genesis commits the snapshot total; honest blocks commit
+        // parent + minted. The pair must mirror the tip header exactly.
+        assertEquals(ExecutionStatus.SUCCESS, engine.addBlock(nextBlock(List.of())));
+        assertEquals(ExecutionStatus.SUCCESS, engine.addBlock(nextBlock(List.of())));
+        var tip = engine.tipSupply();
+        assertEquals(3, tip.height());
+        assertEquals(engine.headerAt(tip.height()).supply(), tip.supply());
+        assertTrue(tip.supply() > 0, "a committing chain reports a real supply, not the sentinel");
+
+        // A chain that commits none: the pair carries SUPPLY_ABSENT, never 0. The all-absent
+        // chain is manufactured on the store exactly as SupplyCommitmentTest's prefix-closure
+        // proof does (addBlock can never produce this shape from a committing genesis).
+        InMemoryLedger absentLedger = new InMemoryLedger();
+        InMemoryChainStore absentStore = new InMemoryChainStore();
+        LedgerSnapshot snapshot = new LedgerSnapshot("absent", 0, params.chainId());
+        rhizome.core.block.Block genesis = rhizome.core.blockchain.GenesisBlock.build(params, snapshot);
+        absentStore.append(genesis);
+        PublicAddress absentMiner = PublicAddress.random();
+        absentStore.append(mineOnto(2, genesis.hash(), absentMiner, BlockImpl.SUPPLY_ABSENT));
+        absentStore.append(mineOnto(3, absentStore.blockAt(2).hash(), absentMiner, BlockImpl.SUPPLY_ABSENT));
+        ChainEngine absentEngine = ChainEngine.boot(params, TestNodeStores.mixing(absentLedger, absentStore),
+                snapshot).clock(clock::get).build();
+        // Extend it once through the engine so the tip is not merely a store fixture.
+        var next = nextBlockOn(absentEngine, List.of());
+        assertEquals(ExecutionStatus.SUCCESS, absentEngine.addBlock(next));
+
+        var absentTip = absentEngine.tipSupply();
+        assertEquals(4, absentTip.height());
+        assertEquals(BlockImpl.SUPPLY_ABSENT, absentTip.supply());
+        assertEquals(absentEngine.headerAt(absentTip.height()).supply(), absentTip.supply());
+    }
+
+    /** A coinbase-only, hand-mined block with an explicit committed supply (store-fixture only). */
+    private Block mineOnto(long height, rhizome.crypto.SHA256Hash parentHash, PublicAddress miner,
+                           long supply) {
+        var b = (BlockImpl) BlockImpl.builder()
+            .id((int) height)
+            .timestamp(clock.addAndGet(params.desiredBlockTimeSec() * 1000L))
+            .difficulty(params.genesisDifficulty())
+            .lastBlockHash(parentHash)
+            .supply(supply)
+            .build();
+        b.addTransaction(Transaction.of(miner, new TransactionAmount(params.miningReward(height))));
+        var tree = new MerkleTree();
+        tree.setItems(b.transactions());
+        b.merkleRoot(tree.getRootHash());
+        b.nonce(Miner.mineNonce(b.hash(), b.difficulty(), params.powAlgorithm()));
+        return b;
+    }
+
+    /** {@link #nextBlock(List)} against an arbitrary engine, for multi-engine tests. */
+    private Block nextBlockOn(ChainEngine target, List<Transaction> transactions) {
+        long height = target.height() + 1;
+        var b = BlockImpl.builder()
+            .id((int) height)
+            .timestamp(clock.addAndGet(params.desiredBlockTimeSec() * 1000L))
+            .difficulty(target.difficulty())
+            .lastBlockHash(target.tipHash())
+            .supply(SupplyStamp.next(target, height, target.difficulty()))
+            .build();
+        b.addTransaction(Transaction.of(miner, new TransactionAmount(params.miningReward(height))));
+        transactions.forEach(b::addTransaction);
         var tree = new MerkleTree();
         tree.setItems(b.transactions());
         ((BlockImpl) b).merkleRoot(tree.getRootHash());

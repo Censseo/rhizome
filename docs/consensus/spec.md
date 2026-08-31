@@ -285,6 +285,12 @@ made the three profiles disagree on this one field. Every profile still *generat
 its table at construction, so a degenerate `(S*, c, N)` triple fails loudly at `NetworkParameters`
 build time rather than at the first curve-active block.
 
+*Reading the curve from outside:* the published monetary state, the schedule constants and the
+sampled curve are served read-only by the node API — see [node-api](../node-api/spec.md) A-16
+(`/info`/`/stats` fragment, `GET /emission`) and its dashboard rendering
+([dashboard](../dashboard/spec.md) U-1). No consensus path reads any of it; this section is the
+rule, A-16 is its reflection.
+
 ### C-11 — Pinned genesis supply *(implemented)*
 
 `NetworkParameters.genesisSupply` is a fixed per-network consensus constant, set per profile

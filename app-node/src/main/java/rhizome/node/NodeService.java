@@ -359,6 +359,16 @@ public final class NodeService {
         return engine.height();
     }
 
+    /**
+     * The tip's {@code (height, committed supply)} pair, read under one consensus-lock
+     * acquisition — the compound read every emission figure on the API is sourced from, so
+     * {@code height} and {@code supply} can never be torn across a reorg. See
+     * {@link ChainEngine#tipSupply()}.
+     */
+    public ChainEngine.TipSupply tipSupply() {
+        return engine.tipSupply();
+    }
+
     /** Aggregate over the last stats window, cached by tip height; see {@link StatsWindowService}. */
     private final StatsWindowService statsWindows;
 

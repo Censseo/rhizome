@@ -21,11 +21,14 @@ import rhizome.core.blockchain.GenesisBlock;
 final class StatsWindowService {
 
     /** Aggregate over the last stats window: total tx count, the first/last block timestamps,
-     *  and the tip's parent supply ({@link BlockImpl#SUPPLY_ABSENT} at genesis) — captured here
+     *  the tip's parent supply ({@link BlockImpl#SUPPLY_ABSENT} at genesis) — captured here
      *  rather than re-read by the caller on every poll, since it is gated by the same
-     *  recompute-on-tip-movement cache. */
+     *  recompute-on-tip-movement cache — and the tip's own committed supply ({@link
+     *  BlockImpl#SUPPLY_ABSENT} on a chain that commits none), which feeds the emission
+     *  fragment. Captured in the same loop iteration that already visits the tip, so the
+     *  per-tip recompute cost is unchanged. */
     record StatsWindow(long windowStart, long height, long txCount, long firstTs, long lastTs,
-                        long parentSupply) {}
+                        long parentSupply, long tipSupply) {}
 
     private final LongSupplier height;
     private final LongFunction<Block> blockAt;
@@ -58,6 +61,7 @@ final class StatsWindowService {
             long firstTs = 0;
             long lastTs = 0;
             long parentSupply = BlockImpl.SUPPLY_ABSENT;
+            long tipSupply = BlockImpl.SUPPLY_ABSENT;
             for (long i = windowStart; i <= h; i++) {
                 var b = (BlockImpl) blockAt.apply(i);
                 txCount += b.transactions().size();
@@ -66,6 +70,7 @@ final class StatsWindowService {
                 }
                 if (i == h) {
                     lastTs = b.timestamp();
+                    tipSupply = b.supply();
                 }
                 if (i == h - 1) {
                     parentSupply = b.supply();
@@ -77,7 +82,8 @@ final class StatsWindowService {
             if (h > GenesisBlock.GENESIS_ID && windowStart > h - 1) {
                 parentSupply = ((BlockImpl) blockAt.apply(h - 1)).supply();
             }
-            StatsWindow w = new StatsWindow(windowStart, h, txCount, firstTs, lastTs, parentSupply);
+            StatsWindow w = new StatsWindow(windowStart, h, txCount, firstTs, lastTs, parentSupply,
+                tipSupply);
             cache = w;
             return w;
         }

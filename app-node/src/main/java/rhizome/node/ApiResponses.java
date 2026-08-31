@@ -159,7 +159,18 @@ final class ApiResponses {
      * gets re-encoded to UTF-8.
      */
     static HttpResponse json(JsonSink sink) {
-        return jsonAtCode(200, sink);
+        return jsonAtCode(200, sink.array(), sink.length());
+    }
+
+    /**
+     * Serves an already-serialized, process-lifetime-immutable payload (e.g. the memoized
+     * {@code GET /emission} body): the bytes are computed once by the caller, and each request
+     * wraps them in a FRESH response — a served response's body {@link ByteBuf} is consumed by
+     * the write, so the {@link HttpResponse} instance itself must never be shared across
+     * requests. The payload array is only ever read, so the shared wrap is safe.
+     */
+    static HttpResponse json(byte[] payload) {
+        return jsonAtCode(200, payload, payload.length);
     }
 
     /**
@@ -170,10 +181,14 @@ final class ApiResponses {
      * the wrapping.
      */
     private static HttpResponse jsonAtCode(int code, JsonSink sink) {
+        return jsonAtCode(code, sink.array(), sink.length());
+    }
+
+    private static HttpResponse jsonAtCode(int code, byte[] body, int length) {
         return HttpResponse.ofCode(code)
             .withHeader(HttpHeaders.CONTENT_TYPE, HttpHeaderValue.ofContentType(ContentTypes.JSON_UTF_8))
             .withHeader(H_XCTO, "nosniff")
-            .withBody(ByteBuf.wrap(sink.array(), 0, sink.length()))
+            .withBody(ByteBuf.wrap(body, 0, length))
             .build();
     }
 

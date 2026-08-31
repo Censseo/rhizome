@@ -85,8 +85,8 @@ class RoutePolicyCompletenessTest {
     @Test
     void theRouteCountIsWhatWeThinkItIs() throws Exception {
         // A blunt tripwire for a bulk edit that adds or drops routes wholesale.
-        assertEquals(41, registeredRoutes().size());
-        assertEquals(41, RoutePolicy.ROUTES.size());
+        assertEquals(42, registeredRoutes().size());
+        assertEquals(42, RoutePolicy.ROUTES.size());
     }
 
     @Test
