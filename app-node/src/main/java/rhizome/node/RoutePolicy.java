@@ -144,6 +144,9 @@ final class RoutePolicy {
         get("/docs/*", 1, Guard.SPA_SHELL),
         get("/stats", DashboardApi.STATS_WINDOW, Guard.READ_BUDGET),
         get("/features", 1),
+        // The /features shape: a constants read with no chain state behind it — per-IP cost 1,
+        // no guards, no aggregate budget (007-emission-observability).
+        get("/emission", 1),
         get("/blocks", Cost.DYNAMIC, Guard.READ_BUDGET, Guard.PEER_PROTOCOL),
         get("/block", 1, Guard.READ_BUDGET, Guard.PEER_PROTOCOL),
         get("/transaction", Cost.DYNAMIC, Guard.READ_BUDGET),

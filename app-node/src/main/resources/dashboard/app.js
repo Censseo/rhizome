@@ -29,6 +29,24 @@ function el(tag, attrs, ...children) {
   return node;
 }
 
+// el() uses createElement, which cannot produce SVG: SVG nodes live in their own namespace and
+// an HTML-namespace <svg> subtree renders nothing. Every chart node goes through this helper.
+const SVG_NS = 'http://www.w3.org/2000/svg';
+
+function svgEl(tag, attrs, ...children) {
+  const node = document.createElementNS(SVG_NS, tag);
+  if (attrs) {
+    for (const [k, v] of Object.entries(attrs)) {
+      node.setAttribute(k, v);
+    }
+  }
+  for (const c of children.flat()) {
+    if (c === null || c === undefined) continue;
+    node.append(c.nodeType ? c : document.createTextNode(c));
+  }
+  return node;
+}
+
 function toast(message, isError) {
   const t = el('div', { class: 'toast' + (isError ? ' err' : '') }, message);
   document.getElementById('toast-zone').append(t);
@@ -78,6 +96,19 @@ async function submitWire(wire) {
 }
 
 const App = { stats: null, features: null, manifest: null };
+
+// /emission is immutable for the life of the node (profile constants + curve shape), so it is
+// fetched ONCE per page load and cached for the session — deliberately NOT on the 5-second
+// poll. A failed fetch is not cached: this page renders the chart as unavailable, and the next
+// page load retries (FR-020 — degrade, never throw).
+let emissionScheduleCache = null;
+
+async function emissionSchedule() {
+  if (emissionScheduleCache) return emissionScheduleCache;
+  const schedule = await api('/emission');
+  emissionScheduleCache = schedule;
+  return schedule;
+}
 
 function scale() { return BigInt(App.stats ? App.stats.decimalScaleFactor : 1); }
 
@@ -344,12 +375,16 @@ function renderDashboard() {
   const feed = el('div', { class: 'feed' });
   const feedCard = el('div', { class: 'card' },
     el('h3', null, 'Événements de contrats (live)'), feed);
+  const curveBody = el('div', { class: 'curve-body' },
+    el('p', { class: 'muted' }, 'Chargement de la courbe…'));
+  const curveCard = el('div', { class: 'card curve-card' },
+    el('h3', null, 'Courbe d’émission'), curveBody);
 
   $view.append(
     el('h1', null, 'Dashboard'),
     el('p', { class: 'sub' }, 'Vue d’ensemble du réseau vue par ce node.'),
     tiles,
-    el('div', { class: 'grid2' }, blocksCard, feedCard),
+    el('div', { class: 'grid2' }, blocksCard, feedCard, curveCard),
   );
 
   every(5000, async () => {
@@ -370,6 +405,7 @@ function renderDashboard() {
       if (s.stateRoot) {
         tileData.push(['State root', short(s.stateRoot, 6), 'état authentifié (SMT)']);
       }
+      tileData.push(...emissionTiles(s.emission));
       tiles.replaceChildren(...tileData.map(([k, v, sub]) =>
         el('div', { class: 'tile' },
           el('div', { class: 'k' }, k), el('div', { class: 'v' }, String(v)),
@@ -382,6 +418,14 @@ function renderDashboard() {
         el('thead', null, el('tr', null,
           el('th', null, 'Bloc'), el('th', null, 'Âge'), el('th', null, 'Tx'), el('th', null, 'Hash'))),
         el('tbody', null, rows)));
+
+      // The figures come from /stats's emission fragment; the schedule (chart shape) arrives
+      // separately, once per session. Both degradation paths end in text, never in a throw.
+      emissionSchedule().then(schedule => {
+        curveBody.replaceChildren(...curveContents(s.emission, schedule));
+      }).catch(() => {
+        curveBody.replaceChildren(...curveContents(s.emission, null));
+      });
     } catch (e) { /* transient */ }
   });
 
@@ -390,6 +434,120 @@ function renderDashboard() {
   } else {
     feed.append(el('div', { class: 'muted' }, 'Flux SSE indisponible sur ce node.'));
   }
+}
+
+/* ---- emission readout (007-emission-observability, US3) ---- */
+
+// A figure this page cannot state is rendered as this word, NEVER as 0 — zero is a legal
+// committed value and a rendered 0 would be a lie about the chain (FR-019).
+const EMISSION_UNAVAILABLE = 'indisponible';
+
+/**
+ * The emission tiles: circulating supply, target and distance to target, from /stats's
+ * emission fragment. Every state is conveyed textually in the sub-label (never by colour
+ * alone), and a figure the chain cannot support shows {@link EMISSION_UNAVAILABLE}.
+ */
+function emissionTiles(em) {
+  if (!em) {
+    return [['Émission', EMISSION_UNAVAILABLE, 'ce node n’expose pas la surface émission']];
+  }
+  const ruleLabel = em.rule === 'curve'
+    ? 'règle : courbe logarithmique'
+    : 'règle : géométrique (hors courbe)';
+  const supplyTile = ['Offre en circulation',
+    em.supply !== null ? fmtCoins(em.supply) : EMISSION_UNAVAILABLE,
+    em.supply !== null ? ruleLabel : ruleLabel + ' · offre non engagée'];
+  const targetTile = ['Cible d’émission', fmtCoins(em.target), ruleLabel];
+  const distanceTile = ['Distance à la cible',
+    em.distanceToTarget !== null ? fmtCoins(em.distanceToTarget) : EMISSION_UNAVAILABLE,
+    em.distanceToTarget !== null ? 'restante avant la cible' : 'non convergente vers la cible'];
+  return [supplyTile, targetTile, distanceTile];
+}
+
+/**
+ * The curve card's contents, in the three display states plus the degraded one:
+ * - curve governing + schedule served: the inline-SVG plot with the position marker;
+ * - geometric governing: a textual statement, no chart (an empty sample set is a statement);
+ * - supply unavailable: a textual statement, no chart, no zero;
+ * - no emission fragment or no schedule: figures live in the tiles, the card says why it is
+ *   empty — the page stays functional (FR-020).
+ */
+function curveContents(em, schedule) {
+  if (!em) {
+    return [el('p', { class: 'muted' },
+      'Émission indisponible : ce node n’expose pas la surface émission (node plus ancien ?)')];
+  }
+  if (em.supply === null) {
+    return [el('p', { class: 'muted' },
+      'Cette chaîne ne commet pas d’offre dans ses en-têtes : pas de position sur la courbe.')];
+  }
+  if (em.rule !== 'curve') {
+    return [el('p', { class: 'muted' },
+      'Cette chaîne est régie par la règle géométrique : la courbe logarithmique ne la '
+      + 'gouverne pas, il n’y a rien à tracer.')];
+  }
+  if (!schedule || !schedule.samples || schedule.samples.length === 0) {
+    return [el('p', { class: 'muted' },
+      'Courbe indisponible : la courbe gouverne cette chaîne mais le noeud n’a pas pu servir '
+      + 'son tracé (/emission).')];
+  }
+  return emissionChart(em, schedule);
+}
+
+/** Unique ids for the chart's accessible name/description wiring. */
+let emissionChartSeq = 0;
+
+/**
+ * The inline-SVG plot of the served samples: curve stroke, target line at S* and a position
+ * marker at the reported (supply, subsidy) — the marker is a large diamond, distinguishable
+ * by shape and size rather than hue alone. The SVG carries role="img" with an accessible name
+ * and description, and the same figures sit in a text summary beside it (SC-006).
+ */
+function emissionChart(em, schedule) {
+  const W = 560, H = 230, L = 52, R = 14, T = 14, B = 30;
+  const samples = schedule.samples.map(p => [BigInt(p.supply), BigInt(p.subsidy)]);
+  const maxX = samples[samples.length - 1][0];
+  const maxY = samples.reduce((m, p) => p[1] > m ? p[1] : m, samples[0][1]);
+  const supply = BigInt(em.supply);
+  const subsidy = BigInt(em.subsidy);
+  const target = BigInt(em.target);
+  const x = v => L + Number((v * BigInt(W - L - R)) / maxX);
+  const y = v => H - B - Number((v * BigInt(H - T - B)) / maxY);
+  const points = samples.map(p => x(p[0]) + ',' + y(p[1])).join(' ');
+
+  const id = 'emission-chart-' + (++emissionChartSeq);
+  const pct = Number((supply * 10000n) / target) / 100;
+  const name = 'Courbe d’émission : offre, cible et position actuelle';
+  const desc = 'Offre en circulation ' + fmtCoins(supply) + ' unités de base ; cible '
+    + fmtCoins(target) + ' ; subvention du prochain bloc ' + fmtCoins(subsidy)
+    + ' ; position à ' + pct.toLocaleString('fr-FR') + ' % de la cible.';
+  const summary = el('p', { class: 'muted curve-summary', id: id + '-summary' },
+    'Offre ' + fmtCoins(supply) + ' · cible ' + fmtCoins(target) + ' · subvention prochaine '
+    + fmtCoins(subsidy) + ' · à ' + pct.toLocaleString('fr-FR') + ' % de la cible');
+
+  // Positioned statically: the whole chart is rebuilt every poll, so a CSS transition could
+  // never animate the marker (a freshly inserted element renders at its final transform) —
+  // the chart introduces no motion at all, which `prefers-reduced-motion` needs no handling
+  // for (T037).
+  const marker = svgEl('g', { class: 'curve-marker', style:
+      'transform: translate(' + x(supply) + 'px, ' + y(subsidy) + 'px);' },
+    svgEl('rect', { x: -5, y: -5, width: 10, height: 10, transform: 'rotate(45)' }));
+
+  const svg = svgEl('svg', {
+    viewBox: '0 0 ' + W + ' ' + H, role: 'img', 'aria-labelledby': id + '-t ' + id + '-d',
+  },
+    svgEl('title', { id: id + '-t' }, name),
+    svgEl('desc', { id: id + '-d' }, desc),
+    svgEl('line', { class: 'curve-axis', x1: L, y1: T, x2: L, y2: H - B }),
+    svgEl('line', { class: 'curve-axis', x1: L, y1: H - B, x2: W - R, y2: H - B }),
+    svgEl('line', { class: 'curve-target', x1: x(target), y1: T, x2: x(target), y2: H - B }),
+    svgEl('polyline', { class: 'curve-line', points }));
+  svg.append(marker);
+
+  const caption = el('p', { class: 'muted curve-caption' },
+    'trait plein : subvention selon l’offre · pointillé : cible · losange : position actuelle');
+
+  return [svg, summary, caption];
 }
 
 function blockRow(b) {

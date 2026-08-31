@@ -74,7 +74,7 @@ final class DashboardApi {
     private static final Key K_TOKENS = Key.of("tokens");
 
     // -- JsonSink size hints (see class javadoc) -----------------------------------------------
-    private static final int STATS_SIZE_HINT = 768;
+    private static final int STATS_SIZE_HINT = 1024;
     private static final int FEATURES_SIZE_HINT = 192;
 
     private DashboardApi() {}
@@ -176,6 +176,11 @@ final class DashboardApi {
         sink.field(K_SYNC_ROUNDS_WITHOUT_PROGRESS, node.syncHealth().roundsWithoutProgress());
         sink.field(K_SYNC_PEERS_BANNED, node.syncHealth().peersSkippedBanned());
         sink.field(K_SYNC_ECLIPSED, node.syncHealth().eclipsed());
+        // The emission fragment, sourced from the SAME window cache as everything height-bound
+        // above (window.height()/window.tipSupply() are one captured tip view) — so a stationary
+        // dashboard poll takes no extra consensus lock for it, and the fragment is byte-identical
+        // to the one /info serves (EmissionApi's single writer, spec FR-013).
+        EmissionApi.writeEmissionFragment(sink, params, window.height(), window.tipSupply());
         sink.endObject();
         return json(sink);
     }

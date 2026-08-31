@@ -48,6 +48,7 @@ final class ExplorerApi {
     private static final Key K_DIFFICULTY = Key.of("difficulty");
     private static final Key K_TX_COUNT = Key.of("txCount");
     private static final Key K_UNCLES = Key.of("uncles");
+    private static final Key K_SUPPLY = Key.of("supply");
     private static final Key K_ADDRESS = Key.of("address");
     private static final Key K_BALANCE = Key.of("balance");
     private static final Key K_NEXT_NONCE = Key.of("nextNonce");
@@ -101,6 +102,13 @@ final class ExplorerApi {
             sink.field(K_DIFFICULTY, block.difficulty());
             sink.field(K_TX_COUNT, block.transactions().size());
             sink.field(K_UNCLES, block.uncles().size());
+            // Emitted only when committed (>= 0), with the same decimal-string encoding the
+            // full-block writer (Block.Serializer.writeJsonBody) applies — so a chain that
+            // commits no supply produces summaries with no supply key at all. The handler
+            // already decoded the block, so this field costs no read (FR-015).
+            if (block.supply() >= 0) {
+                sink.fieldLongAsString(K_SUPPLY, block.supply());
+            }
             sink.endObject();
         }
         sink.endArray();

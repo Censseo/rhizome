@@ -303,6 +303,57 @@ class DashboardApiTest {
     }
 
     @Test
+    void statsCarriesTheIdenticalEmissionObjectAndAnUnchangedMiningReward() throws Exception {
+        // /stats adds the same emission fragment /info serves — written by the same writer, so
+        // the two routes cannot drift — while the pre-existing miningReward field keeps its
+        // value (the subsidy the tip's coinbase paid), its JSON number type and its meaning.
+        apply(mineNext(List.of()));
+        apply(mineNext(List.of()));
+
+        JSONObject stats = new JSONObject(body(call(HttpRequest.get("http://x/stats").build())));
+        JSONObject info = new JSONObject(body(call(HttpRequest.get("http://x/info").build())));
+
+        JSONObject statsEmission = stats.getJSONObject("emission");
+        assertTrue(statsEmission.similar(info.getJSONObject("emission")),
+            "the emission fragment must be identical on both surfaces");
+
+        // Unchanged in value, type and meaning: still the tip's coinbase subsidy, still a NUMBER.
+        assertTrue(stats.has("miningReward"));
+        assertEquals(params.miningReward(stats.getLong("height")),
+            stats.getLong("miningReward"),
+            "miningReward keeps its pre-existing geometric meaning on this never-activating profile");
+        assertFalse(stats.get("miningReward") instanceof String,
+            "miningReward stays a JSON number, unlike the emission fragment's decimal strings");
+    }
+
+    @Test
+    void statsEmissionMatchesTheConsensusDispatchOnACurveActiveProfile() throws Exception {
+        // The /stats fragment's subsidy is the NEXT block's dispatch at the tip's committed
+        // supply — served from the window cache's tip field, so a stationary poll re-takes no
+        // consensus lock for it.
+        NetworkParameters curveParams = CurveActiveNetwork.curveActiveTestnet().toBuilder()
+            .powAlgorithm(PowAlgorithm.SHA256).genesisDifficulty(4).build();
+        Harness curve = bootHarness(curveParams);
+        assertEquals(rhizome.core.mempool.ExecutionStatus.SUCCESS,
+            curve.node().submitBlock(mineNextOn(curve.engine(), curveParams)));
+        assertEquals(rhizome.core.mempool.ExecutionStatus.SUCCESS,
+            curve.node().submitBlock(mineNextOn(curve.engine(), curveParams)));
+
+        JSONObject stats = new JSONObject(body(callOn(curve.servlet(),
+            HttpRequest.get("http://x/stats").build())));
+        JSONObject emission = stats.getJSONObject("emission");
+        long tipHeight = curve.engine().height();
+        long tipSupply = curve.engine().tipSupply().supply();
+        assertEquals(tipHeight, stats.getLong("height"));
+        assertEquals(tipSupply + "", emission.getString("supply"),
+            "the fragment's supply is the tip's own committed supply (not the parent's)");
+        assertEquals(curveParams.miningReward(tipHeight + 1, tipSupply) + "",
+            emission.getString("subsidy"), "the fragment's subsidy is the next block's dispatch");
+        assertEquals("curve", emission.getString("rule"));
+        assertEquals(curveParams.supplyTarget() + "", emission.getString("target"));
+    }
+
+    @Test
     void aGenesisOnlyChainReportsADefinedSubsidy() throws Exception {
         // Curve scheduled from height 1 -- genesis itself has no parent header to read, and pays
         // no coinbase. /stats must not error and must not omit the field.

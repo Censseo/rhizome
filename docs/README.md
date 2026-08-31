@@ -21,8 +21,8 @@ truth: what each area does, what it owns, and which invariants must never regres
 | [networking](networking/spec.md) | HTTP p2p, PEX, gossip, ban scoring, headers-first sync, pruning | `lib-net`, `lib-core` sync | Draft |
 | [state](state/spec.md) | Sparse-Merkle state root, light-client proofs, snapshot bootstrap | `lib-core/state` | Draft |
 | [persistence](persistence/spec.md) | RocksDB column families, atomic batches, undo journals | `lib-persistence` | Draft |
-| [node-api](node-api/spec.md) | HTTP surface, env config, token auth, CSRF/rebinding gates, aggregate budgets | `app-node` | Draft |
-| [dashboard](dashboard/spec.md) | Embedded zero-dependency web UI — 6 pages, browser key custody | `app-node/resources/dashboard` | Draft |
+| [node-api](node-api/spec.md) | HTTP surface, env config, token auth, CSRF/rebinding gates, aggregate budgets, published monetary state & emission schedule | `app-node` | Draft |
+| [dashboard](dashboard/spec.md) | Embedded zero-dependency web UI — 6 pages, browser key custody, emission tiles & curve plot | `app-node/resources/dashboard` | Draft |
 | [wallet](wallet/spec.md) | CLI wallet, encrypted keystore, chain-id pin, local signing | `app-wallet` | Draft |
 | [crypto](crypto/spec.md) | Ed25519, Pufferfish2 PoW, hashes | `lib-crypto` | Draft |
 | [platform](platform/spec.md) | Java 25 toolchain, Gradle wrapper, dependency pins & rationale, native image, lint gate | *(build-wide)* | Draft |
@@ -68,6 +68,16 @@ These span domains and are restated in each spec that carries part of them:
   and documented: issuance does not terminate at the supply target `S*` but continues as a
   rate-bounded tail emission, traded for permanent security funding. See
   [consensus](consensus/spec.md) C-6 and C-10, and WHITEPAPER §5.3.
+- **What is published is what is paid.** Every monetary figure a node serves is either a value the
+  chain already committed — the tip header's `supply` — or one O(1) evaluation of the *same*
+  emission dispatch consensus pays; never a re-derivation, never a floating-point approximation of
+  the curve. A test asserts each published sample equals that dispatch, so the served schedule
+  cannot drift from the paid one. Amounts cross the wire as decimal strings in base units, because
+  a 64-bit quantity must not become a JavaScript number. The read side adds no consensus rule, no
+  persisted state and no header field, and a surface reporting a `(height, supply)` pair takes one
+  lock acquisition so a reorg cannot tear it. See [node-api](node-api/spec.md) A-16 and
+  [dashboard](dashboard/spec.md) U-1 — [consensus](consensus/spec.md) C-10 is the rule, A-16 its
+  reflection.
 - **A node refuses rather than diverges.** Every disagreement between a node's configuration and
   the chain it is asked to run is a **boot refusal, before the port is bound** — never a degraded
   mode, never a warning it keeps running past. The genesis total that misses its pin, the stored

@@ -56,12 +56,12 @@ import static rhizome.core.mempool.ExecutionStatus.*;
  *   <li><b>Serialised on the engine lock.</b> Every mutator ({@link #addBlock}, {@code popBlock},
  *       {@link #stampStateRoot}, {@link #runExclusive}, {@link #withConsistentView}) and every
  *       getter that reads the ledger, the store or a derived cache ({@link #height},
- *       {@link #tipHash}, {@link #blockAt}, {@link #headerAt}, {@link #difficulty},
- *       {@link #totalWork}, {@link #nextNonce}, {@link #confirmedBalance}, {@link #box},
- *       {@link #tokenBalance}, {@link #voteableParams}, {@link #stateRoot}, …). One writer at a
- *       time; readers see a consistent snapshot. Every private method reachable from here carries
- *       {@code assert lock.isHeldByCurrentThread()}, so an unlocked caller fails loudly under
- *       {@code -ea} instead of silently racing.</li>
+ *       {@link #tipHash}, {@link #blockAt}, {@link #headerAt}, {@link #tipSupply},
+ *       {@link #difficulty}, {@link #totalWork}, {@link #nextNonce}, {@link #confirmedBalance},
+ *       {@link #box}, {@link #tokenBalance}, {@link #voteableParams}, {@link #stateRoot}, …).
+ *       One writer at a time; readers see a consistent snapshot. Every private method reachable
+ *       from here carries {@code assert lock.isHeldByCurrentThread()}, so an unlocked caller fails
+ *       loudly under {@code -ea} instead of silently racing.</li>
  *   <li><b>Deliberately lock-free, seqlock-guarded.</b> {@link #scanBoxes}, {@link #boxEvents} and
  *       {@link #tokenEvents} go through {@code readOutsideStamp}: they read the box/token stores
  *       without the lock and fall back to it only if a {@code stampStateRoot} dry-run overlapped
@@ -1093,6 +1093,28 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
             lock.unlock();
         }
     }
+
+    /**
+     * The tip's {@code (height, supply)} pair, read under <b>one</b> lock acquisition — the
+     * {@link #nextBlockTimestamp} shape. Every emission-observability surface reports these two
+     * figures together, and reading them as {@code height()} + {@code headerAt(...)} would let a
+     * reorg land between the two calls and serve a torn pair (the same class of read node-api
+     * A-14 exists to prevent). {@code supply} is the tip header's committed value, or
+     * {@link BlockImpl#SUPPLY_ABSENT} on a chain that commits none — the sentinel is passed
+     * through, never coerced to {@code 0}.
+     */
+    public TipSupply tipSupply() {
+        lock.lock();
+        try {
+            long h = store.height();
+            return new TipSupply(h, store.headerAt(h).supply());
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** The compound tip read of {@link #tipSupply()}: both fields from one chain view. */
+    public record TipSupply(long height, long supply) {}
 
     /** Exclusive upper bound of pruned block bodies ({@code 0} = archive node). See {@link ChainStore#prunedBelow()}. */
     public long prunedBelow() {

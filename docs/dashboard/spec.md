@@ -63,6 +63,34 @@ chain ([node-api](../node-api/spec.md) A-14, A-15). It is a display-only value �
 reads it — and the field stays a plain JSON number with no unit, format or label change across
 activation.
 
+**Emission display** (007-emission-observability). The overview page also shows the monetary state
+and the chain's position on the curve ([node-api](../node-api/spec.md) A-16): three new tiles
+(**Offre en circulation**, **Cible d’émission**, **Distance à la cible**, French labels, formatted
+with the existing `fmtCoins` from the decimal-string encoding), and a **Courbe d’émission** card in
+the overview grid: an inline-SVG plot of `/emission`'s 64 samples — built with a namespace-aware
+`svgEl` helper (`createElement` cannot produce SVG) — with a dashed target line at `S*` and a
+position marker at the reported `(supply, subsidy)`. `/emission` is fetched **once per page load**
+and cached for the session (the payload is immutable for the life of the node); the figures come
+from `/stats`'s emission fragment, so a stationary poll takes no extra node work.
+
+The three display states are distinguished **textually**, never by colour alone, and an
+unavailable figure is rendered as *indisponible*, never as `0` (zero is a legal committed supply):
+the curve governing (figures + chart + position marker), the geometric governing (figures + a
+stated rule label, no chart — an empty sample set is a statement), and supply unavailable (tiles
+and chart marked unavailable with the reason). Degradation renders, never throws: a `/stats`
+without an `emission` key (an older node) and a failed `/emission` fetch each render the page with
+the affected parts marked unavailable in text. Accessibility: the SVG carries `role="img"` with an
+accessible name and a description conveying supply, target, subsidy and position relative to the
+target, plus an equivalent text summary beside it; every informative stroke clears 3:1 contrast on
+the dark surfaces, and the position marker is a large diamond — distinguishable by shape and size
+rather than hue; the chart is motion-free by construction (redrawn each poll with the marker at
+its final position, so it introduces no transition `prefers-reduced-motion` would need to gate).
+There is no screen-reader
+announcement of poll updates beyond the page's existing behaviour: the figures change every 5
+seconds and announcing each would be noise — the values are reachable as text on demand. The
+dashboard gains no dependency, no build step, and the Content-Security-Policy is unchanged (the
+chart is inline SVG markup, not script).
+
 ### U-2 — Browser-custodied keys *(implemented)*
 
 Keys are generated and stored **in the browser** (localStorage) and transactions signed locally in
