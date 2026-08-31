@@ -29,6 +29,7 @@ aggregate token-bucket gate that sheds with HTTP 429 *before* doing the work.
 | Node wiring / lifecycle | [RhizomeNode.java](../../app-node/src/main/java/rhizome/node/RhizomeNode.java) |
 | Response helpers, guards, log sanitisation | [ApiResponses.java](../../app-node/src/main/java/rhizome/node/ApiResponses.java) |
 | Explorer handlers | [ExplorerApi.java](../../app-node/src/main/java/rhizome/node/ExplorerApi.java) |
+| Emission fragment & schedule read | [EmissionApi.java](../../app-node/src/main/java/rhizome/node/EmissionApi.java) |
 | Contract / log / SSE handlers | [ContractApi.java](../../app-node/src/main/java/rhizome/node/ContractApi.java), [SseLogHub.java](../../app-node/src/main/java/rhizome/node/SseLogHub.java) |
 | Box, token, state, sync handlers | [BoxApi.java](../../app-node/src/main/java/rhizome/node/BoxApi.java), [TokenApi.java](../../app-node/src/main/java/rhizome/node/TokenApi.java), [StateApi.java](../../app-node/src/main/java/rhizome/node/StateApi.java), [SyncApi.java](../../app-node/src/main/java/rhizome/node/SyncApi.java) |
 | Feature flags / stats / asset serving | [DashboardApi.java](../../app-node/src/main/java/rhizome/node/DashboardApi.java), [StatsWindowService.java](../../app-node/src/main/java/rhizome/node/StatsWindowService.java), [DashboardAssets.java](../../app-node/src/main/java/rhizome/node/DashboardAssets.java) |
