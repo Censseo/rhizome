@@ -70,8 +70,15 @@ d’émission** (the **live** `S*(h)`; the peak is secondary text beside it, and
 programmée" once a decay is scheduled), **Distance à la cible** (computed against the live
 target; a **negative** distance is stated as text — "l’offre dépasse la cible (décroissance
 engagée)" — never by colour alone), and **Obligation de brûlage** (008: the per-block derived
-burn obligation, formatted like every other monetary figure, `0` when none; the tile text states
-that nothing is destroyed — `burned` stays `"0"`) — French labels, formatted with the existing
+burn obligation, formatted like every other monetary figure, `0` when none — 009 restates its
+text: it is the **plafond dérivé pour le prochain bloc**, the clamp ceiling, no longer claiming
+that nothing is destroyed), plus two 009 tiles — **Brûlé (dernier bloc)** (the tip block's
+destroyed amount, from the fragment's repointed `burned`; `"0"` renders as `0` with the text
+"rien n'a été détruit par le dernier bloc", deliberately distinct from *indisponible*, which
+means the node cannot say) and **Dette de brûlage** (the carried debt `burnDebt`: a positive
+stock reads "brûlage restant pour rejoindre la cible", `"0"` reads "aucun brûlage dû : l'offre
+est à ou sous la cible", and `null` — the curve does not govern the next block — renders
+*indisponible*, never `0`) — French labels, formatted with the existing
 `fmtCoins` from the decimal-string encoding (which handles the negative distance), and a **Courbe
 d’émission** card in the overview grid: an inline-SVG plot of `/emission`'s 64 samples — built
 with a namespace-aware `svgEl` helper (`createElement` cannot produce SVG) — with a dashed target
@@ -81,8 +88,8 @@ cached in the browser keyed by the **decay-epoch index** (computed from the payl
 constants and `sampleHeight`) and re-fetched only when the epoch turns over — on a node predating
 008, or at the `0` sentinel, that is once per page load exactly as before; the figures come from
 `/stats`'s emission fragment, so a stationary poll takes no extra node work. A node that omits
-`peakTarget`/`obligation` (pre-008) renders with those figures *indisponible*, exactly as it
-already tolerates a missing `emission` key.
+`peakTarget`/`obligation` (pre-008) or `burned`-as-a-figure/`burnDebt` (pre-009) renders with
+those figures *indisponible*, exactly as it already tolerates a missing `emission` key.
 
 The three display states are distinguished **textually**, never by colour alone, and an
 unavailable figure is rendered as *indisponible*, never as `0` (zero is a legal committed supply):

@@ -235,9 +235,41 @@ one relaxation time), `E = 1 576 800` (one quarter), `799/800` = 0.4991 %/year,
 `S*_floor = S*/2 = 1 498 962 290 000`; `E_f = 555` (the closed form's 554 is the documented
 off-by-one), floor arrival `1 001 268 000`. For supply to actually track the target down, feature
 08's burn must destroy ≈2 003 538 PDN/year — the target's fall **plus** the floor's own tail
-issuance; that fee flow is not met at launch, so the obligation is published per block and
-deliberately not enforced (and deliberately never accumulated: it would reach ~3.5× circulating
-supply over 200 years and describe nothing).
+issuance. **Feature 08 now enforces the obligation** (009-native-coin-burn; still derived, never
+accumulated — a counter would reach ~3.5× circulating supply over 200 years and describe nothing,
+and it is not header-committed either: `burned(h)` is recoverable from two headers as
+`parent.supply + minted(h) − block.supply`). The rule, at every curve-active height:
+
+- **Pool** — every base unit the block credits the miner that was *not freshly minted*:
+  declared transfer/box/token fees, contract gas revenue, and box storage rent. Excluded by
+  construction: the coinbase subsidy, uncle/nephew rewards, box released value, contract native
+  payouts, and a call's attached value — which is why the burn can never reach into minted coin.
+  Accumulated at the credit sites in application order (identical on every node), with checked
+  arithmetic; never persisted, never published, never in the state root.
+- **Share** — a pinned per-network fraction `βₙ/β_d` (mainnet `1/2`, guards `0 ≤ βₙ < β_d` at
+  construction; a 100 % share is the empty-block failure mode and is refused as a calibration).
+  One floor division, at one site.
+- **Debt** — the derived supply excess `debt(h) = max(0, parentSupply + minted(h) − S*(h))`,
+  the clamp's ceiling: `burned(h) = min(⌊pool × βₙ/β_d⌋, debt(h))`, `0` wherever the curve does
+  not govern. What a block does not burn stays in supply and reappears in the next block's debt.
+- **Enforcement** — split like the state root: a header-only bound `0 ≤ ceiling − blockSupply ≤
+  debt(h)` runs pre-PoW in BOTH gates through one shared `SupplyGate` (the three duplicated
+  002-era gates collapsed onto it); the exact identity `block.supply == parent.supply +
+  minted(h) − burned(h)` is checked post-execution beside the state root's check, with the block
+  fully rolled back before rejection. The bound collapses to exact equality wherever `debt = 0`
+  — every pre-activation height, every never-scheduled profile, and every curve-active height at
+  or below the target.
+- **Reversal** — one withdrawal from the miner recorded in the existing ledger undo journal; the
+  journal-less fallback re-derives the identical burn from the block's own committed values.
+- **Floor safety** — `burned ≤ pool` by construction, and the pool excludes every minted term,
+  so the miner's revenue never drops below `R_min` (feature 05's single clamp remains the only
+  clamp), and including a fee-paying transaction stays strictly profitable (once the fee clears
+  the share's rounding grain).
+
+Application and reversal are exact inverses at every reorg depth to `maxReorgDepth`. The carried
+debt and the burned amount are published on the emission fragment (A-16); the share constants are
+published on `GET /emission`. The construction guard `c ≤ S*_floor` secures `obligation ≤ debt`
+at every height (the `ln x ≤ x − 1` argument), so a block that owes can always pay.
 
 **A misconfigured schedule refuses at boot, sentinel included.** Every degenerate constant is
 refused when the schedule is built, so a node that cannot state its own monetary policy never

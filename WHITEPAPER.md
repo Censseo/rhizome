@@ -474,7 +474,7 @@ the provisional genesis supply `S₀ = 1 000 000 000 000` base units (100M PDN, 
 | Decay schedule | start `H_d = 126 144 000` (20 years at 5 s, one relaxation time `τ`); epoch `E = 1 576 800` blocks (one quarter); ratio `799/800` = **0.4991 %/year**; floor `S*_floor = 1 498 962 290 000` = `S*/2` (149 896 229 PDN) |
 | Epochs to floor / arrival | `E_f = 555` (measured by the normative iteration; the closed form's 554 is the documented off-by-one), `H_f = 1 001 268 000` — 138.8 years after decay starts |
 | Per-epoch subsidy reduction `D` | `30` base units (`⌈c · ln(800/799)⌉ = ⌈29.7⌉`) — the maximum amount one completed epoch can reduce the subsidy by at a fixed supply; measured worst case at this calibration is exactly `30`, at `S₀` |
-| Burn needed for the supply to track the target | ≈`2 003 538` PDN/year — the target's fall (`≈1 498 962`) PLUS the floor's own tail issuance (`504 576`), because a record that omitted the floor's minting would understate the required flow. At feature 08's proposed 50 % burn cap that is ≈4.0M PDN/year of fee flow — **not met at launch** and not met for a long time; until burn exists nothing is enforced and the obligation is a published figure only |
+| Burn needed for the supply to track the target | ≈`2 003 538` PDN/year — the target's fall (`≈1 498 962`) PLUS the floor's own tail issuance (`504 576`), because a record that omitted the floor's minting would understate the required flow. At feature 08's shipped 50 % burn share that is ≈4.0M PDN/year of fee flow — **not met at launch** and not met for a long time; the burn rule itself is normative below, but it is inert until the chain carries real economic traffic |
 | Launch reward `R₀ = c · ln(S*/S₀)` | `26 075` base units ≈ 2.6075 PDN/block — ≈6.1% below the geometric schedule's 2.7777 PDN/block launch reward, inside the 10% least-surprise band (SC-004) |
 | Miner revenue floor `R_min` | `800` base units (0.08 PDN) ≈ `R₀/32.6` — from the low-subsidy security analysis (feature 05): rewriting the `maxReorgDepth = 120`-block finality window at `minDifficulty = 16` costs `120 × 2^16 = 7 864 320` hashes, so under feature 03's zero clamp the subsidy reaching the truncation band collapses honest hashrate's revenue reason to zero exactly when the chain carries the most value. The floor keeps the protocol-guaranteed security budget `≥ 800` base units/block (≈ 1 382 PDN/day) forever. Crossover at `S ≈ 0.9669 × S*` (`ln(S*/S) = R_min/c ≈ 0.0337`); from there on the schedule is a flat `R_min` |
 | Tail emission (consequence, deliberate) | Under the floor issuance never terminates: supply crosses `S*` and keeps growing until feature 08's burn counterbalances it. An **uncle-free** block mints exactly `R_min` ≈ 504 576 PDN/year ≈ **0.168 % of `S*` per year**; that is the floor of the rate, not a cap. Uncle and nephew rewards derive from the floored base (§3.6), so a block carrying the maximum `maxUnclesPerBlock = 2` uncles at zero difficulty deficit mints `R_min · (1 + 2 · (1/2 + 1/32)) = 2.0625 · R_min`, and the tail rate is bounded by **0.347 % of `S*` per year** in the worst case. Below `S*` this uncle contribution was always part of issuance; what the floor changes is that it no longer vanishes above `S*` (feature 03's zero clamp made every term zero there). The cap becomes a soft attractor supply slowly drifts above — permanent, rate-bounded security funding in exchange (research.md Decision 3/5) |
@@ -507,6 +507,56 @@ peak plateau, the decay-start boundary, the epoch boundaries and the floor arriv
 `(height, supply → rawReward)` pairs for the decayed evaluation. An implementation passes iff
 every vector matches exactly. Both artifacts are test vectors — nothing in the node reads them at
 runtime.
+
+**The native coin burn (normative; feature 08).** At every curve-active height the block
+destroys `burned(h) = min(⌊pool(B) × βₙ/β_d⌋, debt(h))` base units, where:
+
+- **pool(B)** is every base unit the block credits the block miner that was **not freshly
+  minted** — declared transfer, box and token fees, contract gas revenue (`gasUsed × gasPrice`,
+  charged on revert too), and box storage rent — accumulated at the credit sites in application
+  order, identical on every node. Excluded by construction: the coinbase subsidy, uncle and
+  nephew rewards, box released value (including the `BOX_COLLECT` collector's credit), contract
+  native payouts, and a successful call's attached value. The pool is never persisted, never
+  published, never in the state root.
+- **βₙ/β_d** is a pinned per-network fraction — mainnet `1/2`; guards `0 ≤ βₙ < β_d` refuse a
+  profile at construction. A 100 % share is refused as a calibration: it is the empty-block
+  failure mode (every mined fee burns itself, so no rational miner includes transactions).
+- **debt(h) = max(0, parentSupply + minted(h) − S*(h))** is the **carried burn debt** — derived,
+  a pure function of the parent header and the height. Nothing is accumulated, nothing is
+  committed, nothing is persisted: what a block does not burn stays in supply and reappears in
+  the next block's debt, so a reorg needs no debt rollback code.
+- Exactly one floor division, at one site; per-transaction amounts are untouched.
+
+The committed supply identity becomes `block.supply = parent.supply + minted(h) − burned(h)`,
+with `burned(h)` **recoverable from two headers** (`parent.supply + minted(h) − block.supply`) —
+so no header field, no wire change, no codec change and no prefix-closure rule are added.
+Enforcement splits like the state root: a header-only bound
+`0 ≤ parent.supply + minted(h) − block.supply ≤ debt(h)` runs pre-PoW in both gates through one
+shared rule (`SupplyGate` — the three duplicated 002-era gates collapsed onto it), collapsing to
+exact equality wherever `debt = 0`; the exact identity is checked post-execution, beside the
+state-root check, with the block fully rolled back before rejection (a documented, bounded
+relaxation of the cheapest-first invariant — the pool is execution-dependent, and the inflation
+direction stays pre-PoW). Application is ONE withdrawal from the miner after the uncle rewards;
+reversal rides the existing ledger undo journal, and the journal-less fallback re-derives the
+identical burn from the block's own committed values — apply and rollback are exact inverses at
+every reorg depth to `maxReorgDepth = 120`. Destroyed coin has no ledger entry, no burn address,
+no state-root record.
+
+**Floor safety (structural).** `burned ≤ pool` by construction, and the pool excludes every
+minted term, so miner revenue never falls below `R_min` — feature 05's clamp remains the only
+clamp — and adding a fee-paying transaction is strictly profitable (the kept fraction
+`(β_d − βₙ)/β_d` is strictly positive; a 1-base-unit fee at `β = 1/2` rounds to a 0 gain, so
+"strictly" holds from the second base unit on). Burn-funded subsidy manipulation stays
+unprofitable below full hashrate: the guard `c ≤ S*_floor` bounds the raw reward's rise from a
+burn of ΔS at `≤ ΔS`, so an attacker with hashrate share α recovers at most `α·ΔS` — strictly
+less than it cost for every α < 1.
+
+**Honest bound: a soft attractor, not a peg.** Nothing forces supply to track the falling
+target. At the shipped calibration supply must fall ≈`2 003 538` PDN/year to track `S*(h)`; at
+`β = 1/2` that requires ≈`4 007 076` PDN/year of fee, gas and rent flow (≈`10 977` PDN/day)
+against a launch subsidy of ≈`45 100` PDN/day — the burn is inert until the chain carries real
+economic traffic, and converges only once fee flow is a meaningful fraction of the subsidy. The
+target is a soft attractor the mechanism pushes supply toward, never a cap and never a peg.
 
 **The legacy geometric rule (below activation).** Retained for every block below an activation
 height, and permanently on a profile that never schedules one (testnet), the subsidy decays
