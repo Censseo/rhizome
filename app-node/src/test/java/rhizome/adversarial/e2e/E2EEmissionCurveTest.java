@@ -530,13 +530,14 @@ class E2EEmissionCurveTest {
     void syncingALongRealCurveCrossingChainStaysWithinPatienceAndTheVictimStaysResponsiveThroughout()
             throws Exception {
         try (TestNetwork network = new TestNetwork(tempDir)) {
-            // Same shape as E2ECurveReorgTest.crossableProfile(), coefficient included: 1300 keeps
-            // table[1] = 901 strictly above the inherited 800-base-unit revenue floor, so the run
+            // Same shape as E2ECurveReorgTest.crossableProfile(), coefficient included: 3000 keeps
+            // table[1] = 2079 strictly above the inherited 800-base-unit revenue floor, so the run
             // genuinely traverses the curve's interpolated branch before crossing rather than
-            // paying a constant R_min from the first block on.
+            // paying a constant R_min from the first block on. (S*, c) also satisfy the burn
+            // feature's construction guard G-4 (c <= the lowest supply target).
             NetworkParameters params = TestNetwork.FAST.toBuilder()
-                .supplyTarget(1000L)
-                .emissionCoefficient(1300L)
+                .supplyTarget(4000L)
+                .emissionCoefficient(3000L)
                 .emissionTableSteps(2)
                 .emissionCurveHeight(1)
                 .build();

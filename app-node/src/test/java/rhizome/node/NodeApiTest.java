@@ -658,7 +658,7 @@ class NodeApiTest {
     private static final java.util.Set<String> EMISSION_FIELDS = java.util.Set.of(
         "rule", "activationHeight", "supply", "subsidy", "target", "peakTarget",
         "decayStartHeight", "distanceToTarget", "progressBps", "obligation",
-        "floor", "burned", "decimalScaleFactor");
+        "floor", "burned", "burnDebt", "decimalScaleFactor");
 
     /** A fast-PoW curve-active engine + node + servlet, so the emission group has a live curve. */
     private record Fixture(NetworkParameters params, ChainEngine engine, NodeService node,
@@ -812,14 +812,19 @@ class NodeApiTest {
         assertEquals(params.supplyTarget() + "", emission.getString("target"));
         assertEquals(params.minerRevenueFloor() + "", emission.getString("floor"));
         assertEquals("0", emission.getString("burned"),
-            "burned ships as the defined constant 0, not as a missing counter");
+            "burned is a real per-block figure: this chain committed no supply and destroyed "
+                + "nothing, so it reads 0 — never a missing cumulative counter");
         assertEquals(params.decimalScaleFactor(), emission.getLong("decimalScaleFactor"));
 
-        // FR-014 locked: no burn-debt field on any emission surface — if a later feature adds
-        // one by accident, this fails before the un-specified figure ships.
+        // 009 rewrote the FR-014 lock (T054): burnDebt now SHIPS — as the next block's carried
+        // stock, null here (this all-absent chain commits no supply, so no debt figure can be
+        // stated). What stays locked is the DISTINCTION: per-block and stock, never a
+        // cumulative counter.
+        assertTrue(emission.isNull("burnDebt"),
+            "burnDebt ships as null where the chain cannot state a debt — never coerced to 0");
         for (String key : emission.keySet()) {
-            assertFalse(key.toLowerCase().contains("debt"),
-                "no burn-debt field may exist on the emission fragment, found: " + key);
+            assertFalse(key.toLowerCase().contains("cumulative"),
+                "no cumulative burn field may exist on the emission fragment, found: " + key);
         }
     }
 

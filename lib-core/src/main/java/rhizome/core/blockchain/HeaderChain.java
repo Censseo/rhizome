@@ -246,40 +246,25 @@ public final class HeaderChain {
     }
 
     /**
-     * Supply accounting gate (§ supply header commitment, FR-003/FR-004), header-only: byte-for-
-     * byte the same rule as {@code ChainEngine.checkSupply} --
+     * Supply accounting gate (§ supply header commitment, FR-003/FR-004), header-only: the SAME
+     * rule as {@code ChainEngine.checkSupply}, enforced through the one shared home
+     * {@link SupplyGate} (009-native-coin-burn: registry OI-4's collapse) --
      *
      * <ul>
      *   <li>Parent supply-less (FR-004 prefix closure): {@code header} must ALSO be supply-less --
      *       a mid-chain start is rejected exactly like a dropped commitment.</li>
-     *   <li>Parent committed: {@code header} MUST commit too, and must equal EXACTLY
-     *       {@code parent.supply + Issuance.minted(header)} (FR-003), the single formula shared
-     *       with {@link ChainEngine} and {@code BlockAssembler} (FR-007) -- computed here from
-     *       {@code header} and {@code parent} alone, no body, no ledger state.</li>
+     *   <li>Parent committed: {@code header} MUST commit too, and must satisfy the shared rule --
+     *       exact equality against {@code parent.supply + Issuance.minted(header)} at this stage
+     *       (FR-003) -- computed here from {@code header} and {@code parent} alone, no body, no
+     *       ledger state.</li>
      * </ul>
      *
      * <p>Returns {@code null} on success, or the {@link Rejection} to report at this header's
-     * height. Uses {@link Math#addExact}: an overflowing identity can never be satisfied by any
-     * legal {@code long}, so it is rejected rather than crashing (FR-014).
+     * height — this caller's own mapping of the gate's neutral verdict (S-5).
      */
     private static Rejection checkSupply(NetworkParameters params, BlockHeader header, BlockHeader parent) {
-        long parentSupply = parent.supply();
-        long headerSupply = header.supply();
-        if (parentSupply == BlockImpl.SUPPLY_ABSENT) {
-            return headerSupply == BlockImpl.SUPPLY_ABSENT ? null : Rejection.INVALID_SUPPLY;
-        }
-        if (headerSupply < 0) {
-            // Parent committed: dropping the commitment (or any value below the absent sentinel,
-            // which decode-time bounds already reject on every wire ingress path) is invalid too.
-            return Rejection.INVALID_SUPPLY;
-        }
-        long expected;
-        try {
-            expected = Math.addExact(parentSupply,
-                Issuance.minted(params, header.id(), parentSupply, header.difficulty(), header.uncles()));
-        } catch (ArithmeticException overflow) {
-            return Rejection.INVALID_SUPPLY;
-        }
-        return headerSupply == expected ? null : Rejection.INVALID_SUPPLY;
+        SupplyGate.Verdict verdict = SupplyGate.check(params, header.id(), parent.supply(),
+            header.supply(), header.difficulty(), header.uncles());
+        return verdict == SupplyGate.Verdict.OK ? null : Rejection.INVALID_SUPPLY;
     }
 }

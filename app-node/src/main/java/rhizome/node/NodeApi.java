@@ -504,7 +504,8 @@ public final class NodeApi {
         sink.field(K_SNAPSHOT_PIVOT, node.snapshotPivot());
         sink.field(K_STORAGE_FEE_FACTOR, node.voteableParams()[0]);
         sink.field(K_MIN_VALUE_PER_BYTE, node.voteableParams()[1]);
-        EmissionApi.writeEmissionFragment(sink, node.params(), tip.height(), tip.supply());
+        EmissionApi.writeEmissionFragment(sink, node.params(), new EmissionApi.TipView(
+            tip.height(), tip.supply(), tip.parentSupply(), tip.difficulty(), tip.uncles()));
         sink.endObject();
         return json(sink);
     }

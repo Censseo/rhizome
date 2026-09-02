@@ -439,11 +439,16 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
                     "the stored tip broke supply prefix-closure — recreate the data directory "
                         + "under the current network parameters"));
             }
-            long expected;
-            try {
-                expected = Math.addExact(parentSupply,
-                    Issuance.minted(params, tipHeight, parentSupply, tip.difficulty(), tip.uncles()));
-            } catch (ArithmeticException overflow) {
+            // Rule 6 is the ONE supply rule (SupplyGate, 009-native-coin-burn: OI-4's collapse) —
+            // the same verdict the addBlock gate and header sync enforce. The boot-refusal
+            // message below is preserved verbatim: network, both height-gated emission
+            // constants, expected, found, remedy.
+            SupplyGate.Verdict verdict = SupplyGate.check(params, tipHeight, parentSupply,
+                tipSupply, tip.difficulty(), tip.uncles());
+            if (verdict == SupplyGate.Verdict.OK) {
+                return; // Rule 7: PASS.
+            }
+            if (verdict == SupplyGate.Verdict.OVERFLOW) {
                 // Mirrors checkSupply's own guard: an overflowing identity can never be satisfied
                 // by any legal long, so it is rejected rather than crashing boot (FR-014 -- checked
                 // arithmetic never wraps, and a boot refusal must never surface a raw stack trace).
@@ -452,14 +457,13 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
                     "the stored tip cannot be verified against the emission schedule now in force "
                         + "— recreate the data directory under the current network parameters"));
             }
-            if (tipSupply != expected) { // Rule 6.
-                throw new IllegalStateException(bootRefusalMessage(params, tipHeight,
-                    "expected supply " + expected + ", found " + tipSupply,
-                    "the stored tip was minted under a different emission schedule than the one "
-                        + "now in force — recreate the data directory under the current network "
-                        + "parameters"));
-            }
-            // Rule 7: PASS.
+            long expected = Math.addExact(parentSupply,
+                Issuance.minted(params, tipHeight, parentSupply, tip.difficulty(), tip.uncles()));
+            throw new IllegalStateException(bootRefusalMessage(params, tipHeight,
+                "expected supply " + expected + ", found " + tipSupply,
+                "the stored tip was minted under a different emission schedule than the one "
+                    + "now in force — recreate the data directory under the current network "
+                    + "parameters"));
         }
 
         /** Consensus quantities and the network name only — no data-directory path, no stack
@@ -757,7 +761,7 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
             try {
                 ExecutionStatus status = Executor.executeBlock(
                     block, ledger, store::hasTransaction, params, verifier,
-                    contractProcessor, boxProcessor, tokenProcessor, touched, parent.supply());
+                    contractProcessor, boxProcessor, tokenProcessor, touched, parent.supply()).status();
                 if (status != SUCCESS) {
                     return status;
                 }
@@ -770,7 +774,8 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
                     byte[] newRoot = stateAccumulator.applyBlock(height2, collectStateChanges(block, touched, height2));
                     if (!java.util.Arrays.equals(newRoot, b.stateRoot().toBytes())) {
                         stateAccumulator.revertBlock(height2);
-                        Executor.rollbackBlock(block, ledger, contractProcessor, boxProcessor, height2, params);
+                        Executor.rollbackBlock(block, ledger, contractProcessor, boxProcessor, height2,
+                            params, parent.supply());
                         revertStateDomains(height2);
                         return INVALID_STATE_ROOT;
                     }
@@ -780,7 +785,8 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
                     // cannot verify. Accepting it blindly would fork this node from every validating
                     // node (audit M6: state-root validation must not depend on local configuration),
                     // so refuse a block whose committed state we are unable to check.
-                    Executor.rollbackBlock(block, ledger, contractProcessor, boxProcessor, b.id(), params);
+                    Executor.rollbackBlock(block, ledger, contractProcessor, boxProcessor, b.id(),
+                        params, parent.supply());
                     revertStateDomains(b.id());
                     return INVALID_STATE_ROOT;
                 }
@@ -897,7 +903,10 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
             store.beginBlockCommit();
             boolean popped = false;
             try {
-                Executor.rollbackBlock(tip, ledger, contractProcessor, boxProcessor, height, params);
+                // The parent's committed supply feeds the journal-less burn re-derivation
+                // (009 T041): the parent is this pop's own chain context, read before it moves.
+                Executor.rollbackBlock(tip, ledger, contractProcessor, boxProcessor, height, params,
+                    store.headerAt(height - 1).supply());
                 // Stage the nonce reversals BEFORE the pop so they flush in the same atomic batch
                 // as the height decrement (audit perf: per-sender fsync) — derived purely from the
                 // popped tip, so on a failed pop they are discarded, as they were previously never
@@ -1100,26 +1109,41 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
     }
 
     /**
-     * The tip's {@code (height, supply)} pair, read under <b>one</b> lock acquisition — the
-     * {@link #nextBlockTimestamp} shape. Every emission-observability surface reports these two
-     * figures together, and reading them as {@code height()} + {@code headerAt(...)} would let a
-     * reorg land between the two calls and serve a torn pair (the same class of read node-api
-     * A-14 exists to prevent). {@code supply} is the tip header's committed value, or
-     * {@link BlockImpl#SUPPLY_ABSENT} on a chain that commits none — the sentinel is passed
-     * through, never coerced to {@code 0}.
+     * The tip's compound emission view, read under <b>one</b> lock acquisition — the
+     * {@link #nextBlockTimestamp} shape. Every emission-observability surface reports these
+     * figures together, and reading them as separate accessors would let a reorg land between
+     * the calls and serve a torn view (the same class of read node-api A-14 exists to prevent).
+     *
+     * <p>009 T058 widened it to carry everything the tip block's <b>burned</b> figure needs:
+     * the parent header's committed supply and the tip's difficulty/uncles (the
+     * {@link Issuance#minted} inputs), so {@code burned = parent.supply + minted(tip) −
+     * tip.supply} is recoverable from this one view without a second acquisition. Still ONE
+     * lock acquisition: the tip and its parent are two array reads under the same hold, so
+     * {@code /info} keeps its per-IP cost 1 outside the A-14 503 class, and the no-tear
+     * guarantee holds for the whole fragment.
+     *
+     * <p>{@code supply} is the tip header's committed value, or {@link BlockImpl#SUPPLY_ABSENT}
+     * on a chain that commits none — the sentinel is passed through, never coerced to {@code 0}.
+     * {@code parentSupply} is {@link BlockImpl#SUPPLY_ABSENT} at genesis (no parent) or when the
+     * parent commits none.
      */
     public TipSupply tipSupply() {
         lock.lock();
         try {
             long h = store.height();
-            return new TipSupply(h, store.headerAt(h).supply());
+            BlockHeader tip = store.headerAt(h);
+            long parentSupply = h > GenesisBlock.GENESIS_ID
+                ? store.headerAt(h - 1).supply()
+                : BlockImpl.SUPPLY_ABSENT;
+            return new TipSupply(h, tip.supply(), parentSupply, tip.difficulty(), tip.uncles());
         } finally {
             lock.unlock();
         }
     }
 
-    /** The compound tip read of {@link #tipSupply()}: both fields from one chain view. */
-    public record TipSupply(long height, long supply) {}
+    /** The compound tip read of {@link #tipSupply()}: every field from one chain view. */
+    public record TipSupply(long height, long supply, long parentSupply, int difficulty,
+                            List<UncleRef> uncles) {}
 
     /** Exclusive upper bound of pruned block bodies ({@code 0} = archive node). See {@link ChainStore#prunedBelow()}. */
     public long prunedBelow() {
@@ -1556,20 +1580,33 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
     }
 
     /**
-     * Stamps {@code candidate}'s {@code stateRoot} with the root it would produce, so the
-     * producer can mine a header that commits it. Tentatively applies the block to compute
-     * the root, then rolls the application back — the block is re-applied for real when
-     * submitted through {@link #addBlock}. A no-op when the accumulator is off.
+     * Stamps {@code candidate}'s <b>committed supply and state root</b> from one dry-run
+     * execution, so the producer can mine a header that commits both (009 T051, FR-037: both
+     * committed values provably describe the same execution of the same candidate — they cannot
+     * drift because neither is computed anywhere else). Tentatively applies the block to execute
+     * it, reads the burn the execution performed, stamps
+     * {@code supply = parent.supply + minted - burned}, folds the state changes into the
+     * accumulator, then rolls the application back — the block is re-applied for real when
+     * submitted through {@link #addBlock}. Producer order: assemble → dry-run → stamp → mine.
+     *
+     * <p>A no-op when there is nothing to stamp: a supply-less parent (legacy all-absent chain)
+     * keeps the candidate supply-less too (FR-004 prefix closure), and an absent accumulator
+     * skips the root (the supply stamp still runs — committing chains need it, and the exact
+     * value now requires executing the block).
      */
     public void stampStateRoot(Block candidate) {
-        if (stateAccumulator == null) {
-            return;
-        }
         lock.lock();
         try {
             // A reorg window is open: the chain sits truncated at a fork height, so stamping a
             // candidate on it is wasted work whose block addBlock would refuse anyway. Skip.
             if (reorgWindowOpen.get()) {
+                return;
+            }
+            long parentSupply = store.headerAt(store.height()).supply();
+            boolean supplyNeeded = parentSupply != BlockImpl.SUPPLY_ABSENT
+                && ((BlockImpl) candidate).supply() == BlockImpl.SUPPLY_ABSENT;
+            boolean rootNeeded = stateAccumulator != null;
+            if (!supplyNeeded && !rootNeeded) {
                 return;
             }
             // Stage this dry-run's ledger writes in the overlay so they never touch the column
@@ -1588,16 +1625,23 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
             try {
                 var b = (BlockImpl) candidate;
                 java.util.Set<PublicAddress> touched = new java.util.HashSet<>();
-                long parentSupply = store.headerAt(store.height()).supply();
-                ExecutionStatus status = Executor.executeBlock(candidate, ledger, store::hasTransaction, params,
-                    verifier, contractProcessor, boxProcessor, tokenProcessor, touched, parentSupply);
-                if (status != SUCCESS) {
-                    return; // invalid block; leave the state root empty and let addBlock reject it
+                Executor.BlockOutcome outcome = Executor.executeBlock(candidate, ledger,
+                    store::hasTransaction, params, verifier, contractProcessor, boxProcessor,
+                    tokenProcessor, touched, parentSupply);
+                if (outcome.status() != SUCCESS) {
+                    return; // invalid block; leave the header unstamped and let addBlock reject it
                 }
                 long h = b.id();
-                byte[] root = stateAccumulator.dryApply(collectStateChanges(candidate, touched, h));
-                b.stateRoot(SHA256Hash.of(root));
-                Executor.rollbackBlock(candidate, ledger, contractProcessor, boxProcessor, h, params);
+                if (supplyNeeded) {
+                    long minted = Issuance.minted(params, h, parentSupply, b.difficulty(), b.uncles());
+                    b.supply(Math.subtractExact(Math.addExact(parentSupply, minted), outcome.burned()));
+                }
+                if (rootNeeded) {
+                    byte[] root = stateAccumulator.dryApply(collectStateChanges(candidate, touched, h));
+                    b.stateRoot(SHA256Hash.of(root));
+                }
+                Executor.rollbackBlock(candidate, ledger, contractProcessor, boxProcessor, h, params,
+                    parentSupply);
                 revertStateDomains(h);
             } finally {
                 store.discardBlockCommit(); // drop the dry-run's staged ledger writes
@@ -1776,37 +1820,15 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
      * exact. Reads {@code parent} ONLY -- never ledger state -- so it stays in the cheap
      * structural pass, before merkle/nonces/PoW.
      *
-     * <ul>
-     *   <li>Parent supply-less (FR-004 prefix closure): the block must ALSO be supply-less --
-     *       a mid-chain start is rejected exactly like a dropped commitment.</li>
-     *   <li>Parent committed: the block MUST commit too, and must equal EXACTLY
-     *       {@code parent.supply + Issuance.minted(this block)} (FR-003), the single formula
-     *       shared with {@link HeaderChain} and {@link BlockAssembler} (FR-007).</li>
-     * </ul>
-     *
-     * <p>The accounting sum uses {@link Math#addExact}: an overflowing identity can never be
-     * satisfied by any legal {@code long}, so it is rejected rather than crashing {@link #addBlock}
-     * (FR-014 -- checked arithmetic never wraps).
+     * <p>The rule itself lives in {@link SupplyGate} — the ONE copy (009-native-coin-burn:
+     * registry OI-4's three byte-for-byte duplicates collapse onto it, and the burn feature
+     * changes the rule in that one place). This caller only maps the neutral verdict to its own
+     * failure surface, {@link ExecutionStatus#INVALID_SUPPLY}.
      */
     private ExecutionStatus checkSupply(Block b, BlockHeader parent) {
-        long parentSupply = parent.supply();
-        long blockSupply = b.supply();
-        if (parentSupply == BlockImpl.SUPPLY_ABSENT) {
-            return blockSupply == BlockImpl.SUPPLY_ABSENT ? SUCCESS : INVALID_SUPPLY;
-        }
-        if (blockSupply < 0) {
-            // Parent committed: dropping the commitment (or any value below the absent sentinel,
-            // which decode-time bounds already reject on every wire ingress path) is invalid too.
-            return INVALID_SUPPLY;
-        }
-        long expected;
-        try {
-            expected = Math.addExact(parentSupply,
-                Issuance.minted(params, b.id(), parentSupply, b.difficulty(), b.uncles()));
-        } catch (ArithmeticException overflow) {
-            return INVALID_SUPPLY;
-        }
-        return blockSupply == expected ? SUCCESS : INVALID_SUPPLY;
+        SupplyGate.Verdict verdict = SupplyGate.check(params, b.id(), parent.supply(),
+            b.supply(), b.difficulty(), b.uncles());
+        return verdict == SupplyGate.Verdict.OK ? SUCCESS : INVALID_SUPPLY;
     }
 
     // ---- account nonces ----

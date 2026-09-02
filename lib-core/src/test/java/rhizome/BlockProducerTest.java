@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static rhizome.crypto.Crypto.generateKeyPairTyped;
 
+import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -17,6 +18,7 @@ import rhizome.core.block.Block;
 import rhizome.core.block.BlockImpl;
 import rhizome.core.blockchain.BlockProducer;
 import rhizome.core.blockchain.ChainEngine;
+import rhizome.core.blockchain.CurveActiveNetwork;
 import rhizome.core.blockchain.NetworkParameters;
 import rhizome.core.blockchain.SignatureVerifier;
 import rhizome.core.blockchain.TestNodeStores;
@@ -138,5 +140,58 @@ class BlockProducerTest {
         BlockProducer stale = new BlockProducer(engine, mempool, miner, () -> 0L);
         assertTrue(stale.produce().isPresent());
         assertEquals(2, engine.height());
+    }
+
+    @Test
+    void aProducedBurningBlockIsAcceptedByTheValidatorItWillFace() {
+        // 009 T053 (FR-018): an honestly-assembled candidate at a curve-active, above-target
+        // height — carrying real fee flow, so the dry run genuinely burns — must satisfy the
+        // exact supply identity its own validator enforces. The producer stamps supply from the
+        // dry run (the only execution that knows the pool); this test recomputes the expected
+        // burn independently from the flows it pooled and demands the committed figure match.
+        NetworkParameters curveParams = CurveActiveNetwork.curveActiveTestnet().toBuilder()
+            .powAlgorithm(PowAlgorithm.SHA256).genesisDifficulty(4).build();
+        NetworkParameters saved = params;
+        params = curveParams;
+        try {
+            LedgerSnapshot snapshot = new LedgerSnapshot("test", 0, params.chainId());
+            snapshot.put(sender, new TransactionAmount(20_000_000L));
+            var verifier = new SignatureVerifier();
+            engine = ChainEngine.boot(params, TestNodeStores.inMemory(), snapshot)
+                .clock(clock::get)
+                .verifier(verifier)
+                .build();
+            mempool = new MemPool(params, verifier, engine, 1000);
+            producer = new BlockProducer(engine, mempool, miner, () -> clock.addAndGet(90_000));
+
+            long parentSupply = engine.headerAt(1).supply();
+            assertEquals(20_000_000L, parentSupply);
+            long minted = rhizome.core.blockchain.Issuance.minted(params, 2, parentSupply,
+                engine.difficulty(), List.of());
+            long debt = rhizome.core.blockchain.Burn.debt(params, 2, parentSupply, minted);
+            long pool = 4_000L;
+            long expectedBurned = rhizome.core.blockchain.Burn.burned(params, 2, pool, debt);
+            assertTrue(expectedBurned > 0, "sanity: the flow really burns under this profile");
+
+            Transaction feeTx = Transaction.of(sender, PublicAddress.random(),
+                new TransactionAmount(0), key, new TransactionAmount(pool), clock.get(),
+                params.chainId(), 0);
+            feeTx.sign(priv);
+            assertEquals(ExecutionStatus.SUCCESS, mempool.addTransaction(feeTx));
+
+            Optional<Block> produced = producer.produce();
+            assertTrue(produced.isPresent(),
+                "the produced burning block must be accepted by the validator it will face");
+            assertEquals(2, engine.height());
+            assertEquals(parentSupply + minted - expectedBurned,
+                engine.headerAt(2).supply(),
+                "the committed supply is exactly parent + minted - burned from the one dry run");
+            assertEquals(minted + pool - expectedBurned, engine.confirmedBalance(miner),
+                "the miner was paid the subsidy and the kept half of the pool");
+            assertEquals(20_000_000L - pool, engine.confirmedBalance(sender),
+                "the sender paid exactly its fee");
+        } finally {
+            params = saved;
+        }
     }
 }

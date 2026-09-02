@@ -7,6 +7,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import rhizome.core.block.Block;
 import rhizome.core.block.BlockImpl;
 import rhizome.core.block.UncleRef;
+import rhizome.core.blockchain.Burn;
 import rhizome.core.blockchain.Issuance;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
@@ -196,14 +197,27 @@ public final class BlockForge {
         block.merkleRoot(merkleRootOf(body));
         // Supply is in the PoW preimage (§ supply header commitment), so it is stamped here,
         // last, from whatever the forge's content says AT THIS POINT — after every mutator
-        // (uncles(), coinbaseTo(), ...) has run. Computed the same way BlockAssembler stamps an
-        // honest candidate, so an unmutated forge() keeps satisfying addBlock's check, and a
-        // scenario that mutates the uncle list still commits a value consistent with its OWN
-        // (possibly forged) declared uncles — the point being to fail on the rule under attack,
-        // not to be rejected earlier as an accounting mismatch that proves nothing.
-        block.supply(parentSupply == BlockImpl.SUPPLY_ABSENT
-            ? BlockImpl.SUPPLY_ABSENT
-            : Math.addExact(parentSupply, Issuance.minted(params, block.id(), parentSupply, block.difficulty(), block.uncles())));
+        // (uncles(), coinbaseTo(), ...) has run. Computed the same way an honest producer stamps
+        // an approved candidate (009: ceiling minus the executed burn), so an unmutated forge()
+        // keeps satisfying addBlock's EXACT identity even at a curve-active height where the
+        // forge's own fee flow burns, and a scenario that mutates the uncle list still commits a
+        // value consistent with its OWN (possibly forged) declared uncles — the point being to
+        // fail on the rule under attack, not to be rejected earlier as an accounting mismatch
+        // that proves nothing. The pool here is the Σ of the forge's declared fees: the fixture
+        // wires no contract/box processors, so fees are the only eligible flow a forge can carry
+        // (009 T052, the burn-aware successor of the plain ceiling stamp).
+        long pool = 0;
+        for (Transaction t : transactions) {
+            pool = Math.addExact(pool, t.fee().amount());
+        }
+        if (parentSupply == BlockImpl.SUPPLY_ABSENT) {
+            block.supply(BlockImpl.SUPPLY_ABSENT);
+        } else {
+            long ceiling = Math.addExact(parentSupply,
+                Issuance.minted(params, block.id(), parentSupply, block.difficulty(), block.uncles()));
+            long debt = Burn.debt(params, block.id(), parentSupply, ceiling - parentSupply);
+            block.supply(ceiling - Burn.burned(params, block.id(), pool, debt));
+        }
     }
 
     /** The Merkle root of {@code transactions} as consensus computes it. */

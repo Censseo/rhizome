@@ -234,7 +234,7 @@ class LedgerReversalExactnessTest {
         tokens.begin();
         assertEquals(ExecutionStatus.SUCCESS,
             Executor.executeBlock(b, ledger, (SHA256Hash h) -> false, curveParams, null, null, boxes, tokens,
-                null, parentSupply),
+                null, parentSupply).status(),
             what + ": the block must apply, or the reversal is not what is under test");
         boxes.commit(b.id());
         tokens.commit(b.id());
@@ -332,7 +332,7 @@ class LedgerReversalExactnessTest {
         tokens.begin();
         assertEquals(ExecutionStatus.SUCCESS,
             Executor.executeBlock(b, ledger, (SHA256Hash h) -> false, curveParams, null, null, boxes, tokens,
-                null, parentSupply),
+                null, parentSupply).status(),
             "the block must apply for its paid uncle/nephew amounts to be observable");
         boxes.commit(b.id());
         tokens.commit(b.id());
@@ -371,7 +371,7 @@ class LedgerReversalExactnessTest {
         tokens.begin();
         assertEquals(ExecutionStatus.SUCCESS,
             Executor.executeBlock(b, ledger, (SHA256Hash h) -> false, curveParams, null, null, boxes, tokens,
-                null, parentSupply),
+                null, parentSupply).status(),
             "the block must apply for its paid uncle/nephew amounts to be observable");
         boxes.commit(b.id());
         tokens.commit(b.id());
@@ -414,7 +414,7 @@ class LedgerReversalExactnessTest {
         tokens.begin();
         assertEquals(ExecutionStatus.SUCCESS,
             Executor.executeBlock(b, ledger, (SHA256Hash h) -> false, curveParams, null, null, boxes, tokens,
-                null, parentSupply),
+                null, parentSupply).status(),
             "a valid block may legitimately carry a floored coinbase");
         boxes.commit(b.id());
         tokens.commit(b.id());
@@ -468,7 +468,7 @@ class LedgerReversalExactnessTest {
         tokens.begin();
         assertEquals(ExecutionStatus.SUCCESS,
             Executor.executeBlock(amountCheckBlock, ledger, (SHA256Hash h) -> false, curveParams, null, null,
-                boxes, tokens, null, parentSupply),
+                boxes, tokens, null, parentSupply).status(),
             "the block must apply for its paid uncle/nephew amounts to be observable");
         boxes.commit(amountCheckBlock.id());
         tokens.commit(amountCheckBlock.id());
@@ -507,6 +507,54 @@ class LedgerReversalExactnessTest {
         // their `> 0` guards, which is where the third and fourth drifts lived.
         assertRoundTripIsExact(block(2, List.of(), boxCreate(5_000, 0, 0), tokenMint(0, 1)),
             "box + token at zero fee");
+    }
+
+    @Test
+    void aBurnCarryingBlockReversesExactlyThroughTheRecomputeFallback() {
+        // 009 T039: the burn is ONE more ledger op the inverse must undo. With the journal
+        // pruned (the aged-past-maxReorgDepth regime), undoBlock's recompute fallback must
+        // re-derive the identical burn — parent.supply + minted - block.supply from the block's
+        // own committed values and the caller's parent supply — and re-deposit it, or the
+        // miner's balance comes back wrong by exactly the burned amount. The parent supply
+        // rides the caller's chain context (the engine's), not a new public parameter.
+        long parentSupply = 4_000_000L; // far above curveActiveTestnet's live target: debt never binds
+        long fee = 500;
+        long minted = curveParams.miningReward(2, parentSupply);
+        long burned = Burn.burned(curveParams, 2, fee,
+            Burn.debt(curveParams, 2, parentSupply, minted));
+        assertTrue(burned > 0, "sanity: the fixture really burns");
+        var b = (BlockImpl) BlockImpl.builder().id(2).timestamp(5000)
+            .difficulty(curveParams.genesisDifficulty()).lastBlockHash(SHA256Hash.empty())
+            .supply(parentSupply + minted - burned)
+            .build();
+        b.addTransaction(Transaction.of(miner, new TransactionAmount(minted)));
+        b.addTransaction(transfer(0, fee, 0));
+        var tree = new MerkleTree();
+        tree.setItems(b.transactions());
+        b.merkleRoot(tree.getRootHash());
+
+        Map<String, Long> before = balances();
+        boxes.begin();
+        tokens.begin();
+        assertEquals(ExecutionStatus.SUCCESS,
+            Executor.executeBlock(b, ledger, (SHA256Hash h) -> false, curveParams, null, null,
+                boxes, tokens, null, parentSupply).status(),
+            "the burning block must apply, or the reversal is not what is under test");
+        boxes.commit(b.id());
+        tokens.commit(b.id());
+        // The forward burn: the miner keeps the coinbase and the fee minus exactly the burn.
+        // getOrDefault on BOTH sides: balances() omits zero balances (the miner starts unfunded).
+        assertEquals(before.getOrDefault(miner.toHexString(), 0L) + minted + fee - burned,
+            ledger.getWalletValue(miner).amount(),
+            "the forward burn withdraws exactly min(share, debt) from the miner");
+        ledger.pruneJournals(b.id() + 1); // force undoBlock's recompute fallback, not the journal replay
+
+        Executor.rollbackBlock(b, ledger, null, boxes, b.id(), curveParams, parentSupply);
+        boxes.revertBlock(b.id());
+        tokens.revertBlock(b.id());
+
+        assertEquals(before, balances(),
+            "the re-derived burn must be the identical amount the forward pass withdrew");
     }
 
     private static byte[] hashOf(int seed) {

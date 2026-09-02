@@ -1,0 +1,57 @@
+{
+  "comment": "Native coin burn test vectors (009-native-coin-burn T008) — the seven boundary cases of contracts/native-coin-burn.md §10, pinned bit-for-bit. A TEST resource: nothing in main reads this file. The share constants name the calibration the expected values were computed against (mainnet's 1/2); every 64-bit quantity is a decimal STRING, never a bare JSON number (the 2^53 JS-precision rule, 002 precedent).",
+  "burnShareNum": "1",
+  "burnShareDen": "2",
+  "activationHeight": "1",
+  "vectors": [
+    {
+      "name": "empty block: a zero pool destroys nothing however large the debt",
+      "curveActive": true,
+      "pool": "0",
+      "debt": "10000",
+      "expected": "0"
+    },
+    {
+      "name": "share rounds to zero: a one-base-unit flow is below the floor of the fraction",
+      "curveActive": true,
+      "pool": "1",
+      "debt": "10000",
+      "expected": "0"
+    },
+    {
+      "name": "flow-limited: the share of the pool is the lesser term",
+      "curveActive": true,
+      "pool": "1000",
+      "debt": "10000",
+      "expected": "500"
+    },
+    {
+      "name": "debt-limited: the carried debt is the lesser term",
+      "curveActive": true,
+      "pool": "10000",
+      "debt": "400",
+      "expected": "400"
+    },
+    {
+      "name": "exact landing on the target: the debt term equals the share exactly",
+      "curveActive": true,
+      "pool": "10000",
+      "debt": "5000",
+      "expected": "5000"
+    },
+    {
+      "name": "curve inactive: no coin is destroyed whatever the pool and whatever is owed",
+      "curveActive": false,
+      "pool": "10000",
+      "debt": "12345",
+      "expected": "0"
+    },
+    {
+      "name": "at the target: a zero debt clamps the burn to zero",
+      "curveActive": true,
+      "pool": "999999",
+      "debt": "0",
+      "expected": "0"
+    }
+  ]
+}

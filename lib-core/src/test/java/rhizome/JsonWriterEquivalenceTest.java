@@ -456,6 +456,37 @@ class JsonWriterEquivalenceTest {
         assertSameJson(json, write(zero));
     }
 
+    /**
+     * 009 T056: the burn's two observable fields — the emission fragment's {@code burned} and
+     * {@code burnDebt} — follow the SAME decimal-string rule this file pins for {@code supply}
+     * and {@code timestamp}: a 64-bit monetary quantity is a STRING in every writer shape,
+     * never a bare JSON number the dashboard's JS {@code Number} would round above 2^53. The
+     * fragment's own single writer is {@code EmissionApi}'s {@code JsonSink} (app-node, FR-013 —
+     * the module boundary keeps it out of this file), so what is locked HERE is the writer-level
+     * shape: a value emitted through {@code JsonSink.fieldLongAsString} and the equivalent
+     * {@code org.json} string agree in kind and content under {@link #assertSameJson} — the
+     * equivalence the fragment fields rely on. The burn adds no field to the block itself (T023),
+     * so the block's two writers are untouched by this feature.
+     */
+    @Test
+    void emissionBurnFieldsFollowTheDecimalStringRuleInBothWriterShapes() {
+        long burned = 83_333_333_330_500L;   // a 64-bit-scale figure: exactly where a bare
+        long burnDebt = 12_974_962_290_000L; // JSON number would silently lose precision
+
+        // Writer A (org.json shape): the value as a decimal string.
+        JSONObject legacy = new JSONObject().put("burned", String.valueOf(burned))
+            .put("burnDebt", String.valueOf(burnDebt));
+
+        // Writer B (JsonSink shape): fieldLongAsString, what EmissionApi uses.
+        var sink = rhizome.core.serialization.JsonSink.create(64);
+        sink.beginObject();
+        sink.fieldLongAsString(rhizome.core.serialization.JsonSink.Key.of("burned"), burned);
+        sink.fieldLongAsString(rhizome.core.serialization.JsonSink.Key.of("burnDebt"), burnDebt);
+        sink.endObject();
+
+        assertSameJson(legacy, sink.toByteArray());
+    }
+
     @Test
     void supplyRoundTripsThroughFromJsonToAnEqualHashBlock() {
         BlockImpl set = block(SHA256Hash.empty(), 0, List.of(), List.of(), 999_999_999L);

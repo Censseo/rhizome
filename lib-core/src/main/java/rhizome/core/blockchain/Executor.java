@@ -58,6 +58,35 @@ public final class Executor {
     }
 
     /**
+     * The outcome of applying one contract/box/token transaction: its block-validity status and
+     * the amount it credited the miner that was not freshly minted — the fee, the gas fee or the
+     * storage rent — i.e. its contribution to the eligible burn pool (009 T028). Returning the
+     * credit from the exact site that made it keeps the pool's accumulation in application order
+     * (P-2) with no re-derivation anywhere else.
+     */
+    private record DomainOutcome(ExecutionStatus status, long credited) {
+        static DomainOutcome of(ExecutionStatus status) {
+            return new DomainOutcome(status, 0);
+        }
+    }
+
+    /**
+     * The outcome of applying a whole block: its block-validity status and, when execution
+     * reached the burn site, the amount the block destroyed — the same {@code min(share, debt)}
+     * quantity the executor withdrew from the miner. The producer's dry run reads the burn to
+     * stamp the exact committed supply ({@code parent + minted - burned}) from the ONE execution
+     * it already performs (009 T051, FR-037); the pool is execution-dependent, so there is no
+     * other way to learn it without a second execution. {@code burned} is {@code 0} whenever the
+     * status is not {@link ExecutionStatus#SUCCESS} — a rejected block is rolled back whole, so
+     * it destroyed nothing — and at every height the curve does not govern.
+     */
+    public record BlockOutcome(ExecutionStatus status, long burned) {
+        static BlockOutcome of(ExecutionStatus status) {
+            return new BlockOutcome(status, 0);
+        }
+    }
+
+    /**
      * Validates and applies {@code block} to {@code ledger}.
      *
      * @param alreadyExecuted membership test over content hashes of transactions
@@ -115,10 +144,10 @@ public final class Executor {
                                                SignatureVerifier verifier,
                                                ContractProcessor processor,
                                                BoxProcessor boxProcessor,
-                                               TokenProcessor tokenProcessor,
-                                               Set<PublicAddress> touchedLedger) {
+                                                TokenProcessor tokenProcessor,
+                                                Set<PublicAddress> touchedLedger) {
         return executeBlock(block, ledger, alreadyExecuted, params, verifier,
-            processor, boxProcessor, tokenProcessor, touchedLedger, BlockImpl.SUPPLY_ABSENT);
+            processor, boxProcessor, tokenProcessor, touchedLedger, BlockImpl.SUPPLY_ABSENT).status();
     }
 
     /**
@@ -131,23 +160,26 @@ public final class Executor {
                                                Predicate<SHA256Hash> alreadyExecuted,
                                                NetworkParameters params, long parentSupply) {
         return executeBlock(block, ledger, alreadyExecuted, params, null, null, null, null, null,
-            parentSupply);
+            parentSupply).status();
     }
 
     /**
      * As above, with the parent block's committed circulating supply ({@code parentSupply}, or
      * {@link BlockImpl#SUPPLY_ABSENT} when unknown/uncommitted) threaded through to the
-     * supply-aware coinbase check (research.md Decision 4).
+     * supply-aware coinbase check (research.md Decision 4), reporting through
+     * {@link BlockOutcome#burned} the burn the block actually performed (009 T051, FR-037) —
+     * the producer's dry run uses it to stamp the exact committed supply
+     * ({@code parent + minted - burned}) from the ONE execution it already performs.
      */
-    public static ExecutionStatus executeBlock(Block block, Ledger ledger,
-                                               Predicate<SHA256Hash> alreadyExecuted,
-                                               NetworkParameters params,
-                                               SignatureVerifier verifier,
-                                               ContractProcessor processor,
-                                               BoxProcessor boxProcessor,
-                                               TokenProcessor tokenProcessor,
-                                               Set<PublicAddress> touchedLedger,
-                                               long parentSupply) {
+    public static BlockOutcome executeBlock(Block block, Ledger ledger,
+                                            Predicate<SHA256Hash> alreadyExecuted,
+                                            NetworkParameters params,
+                                            SignatureVerifier verifier,
+                                            ContractProcessor processor,
+                                            BoxProcessor boxProcessor,
+                                            TokenProcessor tokenProcessor,
+                                            Set<PublicAddress> touchedLedger,
+                                            long parentSupply) {
         // A null processor means "this node has no such domain". Normalize here so the body below
         // talks to a processor rather than guarding against a null one; absence is then expressed
         // by available(), and the pass-1 rejections keep their exact semantics.
@@ -159,15 +191,15 @@ public final class Executor {
     }
 
     /** As {@link #executeBlock}, with the three domains guaranteed non-null. */
-    private static ExecutionStatus runBlock(Block block, Ledger ledger,
-                                            Predicate<SHA256Hash> alreadyExecuted,
-                                            NetworkParameters params,
-                                            SignatureVerifier verifier,
-                                            ContractProcessor processor,
-                                            BoxProcessor boxProcessor,
-                                            TokenProcessor tokenProcessor,
-                                            Set<PublicAddress> touchedLedger,
-                                            long parentSupply) {
+    private static BlockOutcome runBlock(Block block, Ledger ledger,
+                                         Predicate<SHA256Hash> alreadyExecuted,
+                                         NetworkParameters params,
+                                         SignatureVerifier verifier,
+                                         ContractProcessor processor,
+                                         BoxProcessor boxProcessor,
+                                         TokenProcessor tokenProcessor,
+                                         Set<PublicAddress> touchedLedger,
+                                         long parentSupply) {
         List<BlockStateProcessor> domains =
             BlockStateProcessor.inCommitOrder(processor, boxProcessor, tokenProcessor);
         Block blockImpl = block;
@@ -175,7 +207,7 @@ public final class Executor {
         long expectedReward;
         if (params.emissionCurveActiveAt(height)) {
             if (parentSupply == BlockImpl.SUPPLY_ABSENT) {
-                return INCORRECT_MINING_FEE;
+                return BlockOutcome.of(INCORRECT_MINING_FEE);
             }
             expectedReward = params.miningReward(height, parentSupply);
         } else {
@@ -188,7 +220,7 @@ public final class Executor {
 
         // Batch-verify all signatures in parallel before the structural pass.
         if (verifier != null && !verifier.verifyAll(block.transactions())) {
-            return INVALID_SIGNATURE;
+            return BlockOutcome.of(INVALID_SIGNATURE);
         }
 
         // --- Pass 1: structural validation, no state touched ---
@@ -200,7 +232,7 @@ public final class Executor {
             Transaction tx = t;
             if (tx.isTransactionFee()) {
                 if (coinbase != null) {
-                    return EXTRA_MINING_FEE;
+                    return BlockOutcome.of(EXTRA_MINING_FEE);
                 }
                 // The coinbase must be a plain TRANSFER. The wire codec (TransactionDto)
                 // serializes `kind` independently of the isTransactionFee flag, and the
@@ -212,20 +244,20 @@ public final class Executor {
                 // receipt lists, and a popBlock blew up mid-reorg with the ledger half-reverted:
                 // a permanent-fork poison block. Reject it on the cheap structural pass.
                 if (tx.kind() != rhizome.core.transaction.TransactionKind.TRANSFER) {
-                    return INCORRECT_MINING_FEE;
+                    return BlockOutcome.of(INCORRECT_MINING_FEE);
                 }
                 coinbase = t;
                 continue;
             }
             if (tx.chainId() != params.chainId()) {
-                return INVALID_CHAIN_ID;
+                return BlockOutcome.of(INVALID_CHAIN_ID);
             }
             // Contract transactions execute only when a processor is wired; without
             // one, consensus does not run them, so a block carrying one is rejected —
             // no contract tx can be mistaken for a transfer.
             if (tx.kind().isContract()) {
                 if (!processor.available()) {
-                    return CONTRACT_EXECUTION_UNAVAILABLE;
+                    return BlockOutcome.of(CONTRACT_EXECUTION_UNAVAILABLE);
                 }
                 // Consensus gas ceiling. gasLimit is otherwise bounded only by affordability, and at
                 // gasPrice 0 (valid here — min-fee is mempool-only) a free call can name an arbitrary
@@ -236,34 +268,34 @@ public final class Executor {
                 // a pure consensus rule; 0 disables either cap.
                 long gasLimit = tx.gasLimit();
                 if (gasLimit < 0) {
-                    return INVALID_TRANSACTION_AMOUNT;
+                    return BlockOutcome.of(INVALID_TRANSACTION_AMOUNT);
                 }
                 if (params.maxTxGas() > 0 && gasLimit > params.maxTxGas()) {
-                    return GAS_LIMIT_EXCEEDED;
+                    return BlockOutcome.of(GAS_LIMIT_EXCEEDED);
                 }
                 if (params.maxBlockGas() > 0) {
                     try {
                         blockGas = Math.addExact(blockGas, gasLimit);
                     } catch (ArithmeticException overflow) {
-                        return GAS_LIMIT_EXCEEDED; // an unbounded-gasLimit sum can only be over the cap
+                        return BlockOutcome.of(GAS_LIMIT_EXCEEDED); // an unbounded-gasLimit sum can only be over the cap
                     }
                     if (blockGas > params.maxBlockGas()) {
-                        return GAS_LIMIT_EXCEEDED;
+                        return BlockOutcome.of(GAS_LIMIT_EXCEEDED);
                     }
                 }
             }
             if (tx.kind().isBox()) {
                 if (!boxProcessor.available() || !params.boxActiveAt(height)) {
-                    return BOX_UNAVAILABLE;
+                    return BlockOutcome.of(BOX_UNAVAILABLE);
                 }
                 // Box ops run no VM and cost no gas; the gas fields are reserved and must
                 // be zero (else the signed preimage could carry hidden, unpriced data).
                 if (tx.gasLimit() != 0 || tx.gasPrice() != 0) {
-                    return BOX_PAYLOAD_INVALID;
+                    return BlockOutcome.of(BOX_PAYLOAD_INVALID);
                 }
                 if (tx.kind() == rhizome.core.transaction.TransactionKind.BOX_COLLECT) {
                     if (++boxCollects > params.maxBoxCollectsPerBlock()) {
-                        return BOX_LIMIT_EXCEEDED;
+                        return BlockOutcome.of(BOX_LIMIT_EXCEEDED);
                     }
                     // BOX_COLLECT is self-authorized: signatureValid() returns true unconditionally
                     // and the account-nonce rule is skipped (ChainEngine.isSelfAuthorized). Its only
@@ -277,18 +309,18 @@ public final class Executor {
                     // tx may never name a funded sender or move sender value.
                     if (!tx.from().equals(PublicAddress.empty())
                         || tx.fee().amount() != 0 || tx.amount().amount() != 0) {
-                        return BOX_PAYLOAD_INVALID;
+                        return BlockOutcome.of(BOX_PAYLOAD_INVALID);
                     }
                 }
             }
             if (tx.kind().isToken()) {
                 if (!tokenProcessor.available() || !params.tokenActiveAt(height)) {
-                    return TOKEN_UNAVAILABLE;
+                    return BlockOutcome.of(TOKEN_UNAVAILABLE);
                 }
                 // Token ops run no VM, cost no gas, and move no PDN — the token amount lives
                 // in the payload, so the gas fields and the PDN amount field must be zero.
                 if (tx.gasLimit() != 0 || tx.gasPrice() != 0 || tx.amount().amount() != 0) {
-                    return TOKEN_PAYLOAD_INVALID;
+                    return BlockOutcome.of(TOKEN_PAYLOAD_INVALID);
                 }
             }
             // A negative amount or fee would invert the ledger arithmetic: withdrawing
@@ -296,7 +328,7 @@ public final class Executor {
             // recipient's balance negative. Amounts are conceptually unsigned, so any
             // negative long (including values with the high bit set) is illegal.
             if (tx.amount().amount() < 0 || tx.fee().amount() < 0) {
-                return INVALID_TRANSACTION_AMOUNT;
+                return BlockOutcome.of(INVALID_TRANSACTION_AMOUNT);
             }
             // Consensus fee floor — the SAME rule MemPool.addTransaction applies at admission,
             // promoted into validation from consensusV2Height on (audit: fee floor was
@@ -314,29 +346,39 @@ public final class Executor {
             // Below consensusV2Height the legacy rule applies: no consensus floor at all, so
             // blocks already accepted with under-floor fees re-verify unchanged.
             if (consensusV2 && FeePolicy.underMinFee(params, tx)) {
-                return TRANSACTION_FEE_TOO_LOW;
+                return BlockOutcome.of(TRANSACTION_FEE_TOO_LOW);
             }
             SHA256Hash id = t.hashContents();
             if (!seenInBlock.add(id) || alreadyExecuted.test(id)) {
-                return EXPIRED_TRANSACTION;
+                return BlockOutcome.of(EXPIRED_TRANSACTION);
             }
             if (!tx.senderBindingValid()) {
-                return WALLET_SIGNATURE_MISMATCH;
+                return BlockOutcome.of(WALLET_SIGNATURE_MISMATCH);
             }
             if (verifier == null && !t.signatureValid()) {
-                return INVALID_SIGNATURE;
+                return BlockOutcome.of(INVALID_SIGNATURE);
             }
         }
         if (coinbase == null) {
-            return NO_MINING_FEE;
+            return BlockOutcome.of(NO_MINING_FEE);
         }
         if (coinbase.amount().amount() != expectedReward) {
-            return INCORRECT_MINING_FEE;
+            return BlockOutcome.of(INCORRECT_MINING_FEE);
         }
 
         // --- Pass 2: transactional application ---
         PublicAddress miner = coinbase.to();
         List<AppliedOp> applied = new ArrayList<>();
+        // The eligible burn pool (009-native-coin-burn): every base unit this block credits to
+        // the miner that was NOT freshly minted, accumulated at the moment of each credit, in
+        // application order — so it is identical on every node (P-2). Math.addExact: an overflow
+        // rejects the block rather than wrapping into a plausible-looking burn (P-5/P-1). The
+        // pool is one long, local to this execution: never persisted, never published, never in
+        // the state root (P-4).
+        long pool = 0;
+        // The burn this execution performed, reported through the BlockOutcome once the block
+        // commits — a rejected block burned nothing, it was rolled back whole.
+        long executedBurn = 0;
         for (BlockStateProcessor domain : domains) {
             domain.begin();
         }
@@ -347,24 +389,27 @@ public final class Executor {
                     continue;
                 }
                 if (tx.kind().isContract()) {
-                    ExecutionStatus contractStatus = applyContract(tx, ledger, applied, miner, processor);
-                    if (contractStatus != SUCCESS) {
-                        return abort(domains, ledger, applied, contractStatus);
+                    DomainOutcome contractStatus = applyContract(tx, ledger, applied, miner, processor);
+                    if (contractStatus.status() != SUCCESS) {
+                        return abort(domains, ledger, applied, contractStatus.status());
                     }
+                    pool = Math.addExact(pool, contractStatus.credited());
                     continue;
                 }
                 if (tx.kind().isBox()) {
-                    ExecutionStatus boxStatus = applyBox(tx, ledger, applied, miner, boxProcessor, height);
-                    if (boxStatus != SUCCESS) {
-                        return abort(domains, ledger, applied, boxStatus);
+                    DomainOutcome boxStatus = applyBox(tx, ledger, applied, miner, boxProcessor, height);
+                    if (boxStatus.status() != SUCCESS) {
+                        return abort(domains, ledger, applied, boxStatus.status());
                     }
+                    pool = Math.addExact(pool, boxStatus.credited());
                     continue;
                 }
                 if (tx.kind().isToken()) {
-                    ExecutionStatus tokenStatus = applyToken(tx, ledger, applied, miner, tokenProcessor, height);
-                    if (tokenStatus != SUCCESS) {
-                        return abort(domains, ledger, applied, tokenStatus);
+                    DomainOutcome tokenStatus = applyToken(tx, ledger, applied, miner, tokenProcessor, height);
+                    if (tokenStatus.status() != SUCCESS) {
+                        return abort(domains, ledger, applied, tokenStatus.status());
                     }
+                    pool = Math.addExact(pool, tokenStatus.credited());
                     continue;
                 }
                 long amount = tx.amount().amount();
@@ -397,6 +442,7 @@ public final class Executor {
                 deposit(ledger, applied, tx.to(), tx.amount(), consensusV2);
                 if (fee > 0) {
                     deposit(ledger, applied, miner, new TransactionAmount(fee));
+                    pool = Math.addExact(pool, fee); // pool site 1: the transfer fee (P-2)
                 }
             }
             deposit(ledger, applied, miner, coinbase.amount(), consensusV2);
@@ -405,6 +451,48 @@ public final class Executor {
             // reward is minted without matching work. Uncle validity (miner address, depth,
             // no double-crediting) was already enforced by the engine.
             payUncleRewards(blockImpl, ledger, applied, miner, params, parentSupply);
+            // The burn (009-native-coin-burn, T029): ONE withdrawal from the miner, at this one
+            // fixed point after every transaction and after payUncleRewards — so it is provably
+            // exclusive of every minted term (the coinbase subsidy and the uncle/nephew rewards
+            // are all behind us) and identical on every node (B-4). The `> 0` guard mirrors the
+            // deposit convention: where nothing is owed or the pool rounds to nothing, no ledger
+            // op is recorded at all, so the journal, the touched set and the state root all see
+            // a block with no burn in it — exactly the pre-feature shape.
+            if (params.emissionCurveActiveAt(height) && parentSupply != BlockImpl.SUPPLY_ABSENT) {
+                long minted = Issuance.minted(params, height, parentSupply, blockImpl.difficulty(),
+                    blockImpl.uncles());
+                long debt = Burn.debt(params, height, parentSupply, minted);
+                long burned = Burn.burned(params, height, pool, debt);
+                executedBurn = burned; // the producer's dry-run report (009 T051)
+                if (burned > 0) {
+                    // NOT protected by an underflow invariant: the miner may be the sender of a
+                    // LATER transaction in this block and spend the pool income (or the subsidy
+                    // just credited above) before this site runs, so the balance here is simply
+                    // whatever the miner left. If it is below `burned`, the ledger's checked
+                    // withdrawal throws and the block is rejected BALANCE_TOO_LOW with every
+                    // applied op rolled back — deterministic on every node (the identical body
+                    // executes) and self-inflicted (the miner authors the block), so no fork and
+                    // no third-party DoS; pinned by BurnPoolTest's miner-sweep rejection. The
+                    // miner rule that follows: keep at least ⌊pool × βₙ/β_d⌋ of the block's fee
+                    // income unspent, or spend it next block.
+                    withdraw(ledger, applied, miner, new TransactionAmount(burned));
+                }
+                // The EXACT supply identity (T030, FR-013/FR-016): beside the state-root check's
+                // discipline — the block is fully rolled back (abort below) before the rejection
+                // is returned. This is the post-execution half of the split validation: the
+                // pre-PoW gate (SupplyGate) can only check the header-only bound, because the
+                // pool is not known until the block has actually executed.
+                long expectedSupply;
+                try {
+                    expectedSupply = Math.subtractExact(Math.addExact(parentSupply, minted), burned);
+                } catch (ArithmeticException overflow) {
+                    return abort(domains, ledger, applied, INVALID_SUPPLY);
+                }
+                if (blockImpl.supply() != BlockImpl.SUPPLY_ABSENT
+                    && blockImpl.supply() != expectedSupply) {
+                    return abort(domains, ledger, applied, INVALID_SUPPLY);
+                }
+            }
             for (BlockStateProcessor domain : domains) {
                 domain.commit(blockImpl.id());
             }
@@ -421,7 +509,7 @@ public final class Executor {
                     touchedLedger.add(op.wallet());
                 }
             }
-            return SUCCESS;
+            return new BlockOutcome(SUCCESS, executedBurn);
         } catch (LedgerException e) {
             return abort(domains, ledger, applied, BALANCE_TOO_LOW);
         } catch (ArithmeticException e) {
@@ -498,14 +586,15 @@ public final class Executor {
         return base >>> difficultyDeficit;
     }
 
-    /** Rolls back applied ledger ops and discards the contract/box/token sessions, then returns the status. */
-    private static ExecutionStatus abort(List<BlockStateProcessor> domains, Ledger ledger,
-                                         List<AppliedOp> applied, ExecutionStatus status) {
+    /** Rolls back applied ledger ops and discards the contract/box/token sessions, then returns
+     *  the outcome (a rejected block burned nothing). */
+    private static BlockOutcome abort(List<BlockStateProcessor> domains, Ledger ledger,
+                                      List<AppliedOp> applied, ExecutionStatus status) {
         rollback(ledger, applied);
         for (BlockStateProcessor domain : domains) {
             domain.discard();
         }
-        return status;
+        return BlockOutcome.of(status);
     }
 
     /**
@@ -523,8 +612,8 @@ public final class Executor {
      * mempool's cumulative-balance selection makes them unreachable in an honestly-produced block,
      * so they only arise in a malicious block, which must be rejected.
      */
-    private static ExecutionStatus applyToken(Transaction tx, Ledger ledger, List<AppliedOp> applied,
-                                              PublicAddress miner, TokenProcessor tokenProcessor, long height) {
+    private static DomainOutcome applyToken(Transaction tx, Ledger ledger, List<AppliedOp> applied,
+                                            PublicAddress miner, TokenProcessor tokenProcessor, long height) {
         // Success stages the token change; a precondition failure stages nothing. Either way the
         // only ledger effect is the fee below, so the block stays valid and revertToken (which
         // reverts exactly the fee) is an exact inverse in both cases.
@@ -532,15 +621,16 @@ public final class Executor {
         long fee = tx.fee().amount();
         if (fee > 0) {
             if (!ledger.hasWallet(tx.from())) {
-                return SENDER_DOES_NOT_EXIST;
+                return DomainOutcome.of(SENDER_DOES_NOT_EXIST);
             }
             if (ledger.getWalletValue(tx.from()).amount() < fee) {
-                return BALANCE_TOO_LOW;
+                return DomainOutcome.of(BALANCE_TOO_LOW);
             }
             withdraw(ledger, applied, tx.from(), new TransactionAmount(fee));
             deposit(ledger, applied, miner, new TransactionAmount(fee));
+            return new DomainOutcome(SUCCESS, fee); // pool site: the token-op fee
         }
-        return SUCCESS;
+        return DomainOutcome.of(SUCCESS);
     }
 
     /**
@@ -559,8 +649,8 @@ public final class Executor {
      * honestly-produced block (the mempool selects within the sender's confirmed balance), so they
      * signal a malicious block that must be rejected.
      */
-    private static ExecutionStatus applyBox(Transaction tx, Ledger ledger, List<AppliedOp> applied,
-                                            PublicAddress miner, BoxProcessor boxProcessor, long height) {
+    private static DomainOutcome applyBox(Transaction tx, Ledger ledger, List<AppliedOp> applied,
+                                          PublicAddress miner, BoxProcessor boxProcessor, long height) {
         long amount = tx.amount().amount();
         long fee = tx.fee().amount();
         BoxProcessor.BoxResult result =
@@ -568,49 +658,57 @@ public final class Executor {
         if (!result.success()) {
             if (fee > 0) {
                 if (!ledger.hasWallet(tx.from())) {
-                    return SENDER_DOES_NOT_EXIST;
+                    return DomainOutcome.of(SENDER_DOES_NOT_EXIST);
                 }
                 if (ledger.getWalletValue(tx.from()).amount() < fee) {
-                    return BALANCE_TOO_LOW;
+                    return DomainOutcome.of(BALANCE_TOO_LOW);
                 }
                 withdraw(ledger, applied, tx.from(), new TransactionAmount(fee));
                 deposit(ledger, applied, miner, new TransactionAmount(fee));
+                // Pool site: a SOFT-REVERTED box op still contributed — the pool is what the
+                // miner received, not what succeeded (P-3).
+                return new DomainOutcome(SUCCESS, fee);
             }
-            return SUCCESS;
+            return DomainOutcome.of(SUCCESS);
         }
         long debit;
         try {
             debit = Math.addExact(fee, result.debitFrom());
         } catch (ArithmeticException e) {
-            return INVALID_TRANSACTION_AMOUNT;
+            return DomainOutcome.of(INVALID_TRANSACTION_AMOUNT);
         }
         // Only a positive debit needs a funded sender; a rent collector taking value out
         // of a box (debit 0) may have no wallet yet — the deposit below creates it.
         if (debit > 0) {
             if (!ledger.hasWallet(tx.from())) {
-                return SENDER_DOES_NOT_EXIST;
+                return DomainOutcome.of(SENDER_DOES_NOT_EXIST);
             }
             if (ledger.getWalletValue(tx.from()).amount() < debit) {
-                return BALANCE_TOO_LOW;
+                return DomainOutcome.of(BALANCE_TOO_LOW);
             }
             withdraw(ledger, applied, tx.from(), new TransactionAmount(debit));
         }
+        long credited = 0;
         if (fee > 0) {
             deposit(ledger, applied, miner, new TransactionAmount(fee));
+            credited = Math.addExact(credited, fee); // pool site: the box-op fee (success path)
         }
         // Accrued storage rent charged out of the box's locked value (audit M7): it leaves the
         // box state in the processor and is paid to the block miner — never back to the owner,
         // so re-arming the rent clock always has a real cost.
         if (result.rentToMiner() > 0) {
             deposit(ledger, applied, miner, new TransactionAmount(result.rentToMiner()));
+            credited = Math.addExact(credited, result.rentToMiner()); // pool site: the storage rent
         }
         // Released value goes to the box owner on a SPEND (the signer, tx.from), or to the
         // collector named in a permissionless BOX_COLLECT (tx.to, whose from is empty).
+        // Deliberately NOT pooled: released value is not fresh credit to the miner (it belongs
+        // to the box), and crediting it would make destruction reach into other people's coin.
         if (result.creditFrom() > 0) {
             PublicAddress creditTarget = boxCreditTarget(tx);
             deposit(ledger, applied, creditTarget, new TransactionAmount(result.creditFrom()));
         }
-        return SUCCESS;
+        return new DomainOutcome(SUCCESS, credited);
     }
 
     /** Who receives value released by a box op: the collector for BOX_COLLECT, else the sender. */
@@ -627,20 +725,20 @@ public final class Executor {
      * invalidate the block, Ethereum-style). A non-SUCCESS status means the
      * transaction could not be afforded or applied and the block is invalid.
      */
-    private static ExecutionStatus applyContract(Transaction tx, Ledger ledger,
-                                                 List<AppliedOp> applied, PublicAddress miner,
-                                                 ContractProcessor processor) {
+    private static DomainOutcome applyContract(Transaction tx, Ledger ledger,
+                                               List<AppliedOp> applied, PublicAddress miner,
+                                               ContractProcessor processor) {
         long value = tx.amount().amount();
         long gasLimit = tx.gasLimit();
         long gasPrice = tx.gasPrice();
         if (value < 0 || gasLimit < 0 || gasPrice < 0) {
-            return INVALID_TRANSACTION_AMOUNT;
+            return DomainOutcome.of(INVALID_TRANSACTION_AMOUNT);
         }
         long required;
         try {
             required = Math.addExact(value, Math.multiplyExact(gasLimit, gasPrice));
         } catch (ArithmeticException e) {
-            return INVALID_TRANSACTION_AMOUNT;
+            return DomainOutcome.of(INVALID_TRANSACTION_AMOUNT);
         }
         // Balance-not-key-presence, exactly as the normal-transfer path (audit 5th-pass, consensus
         // Finding 1): a phantom 0-balance sender must not make a required==0 call (value 0, gasLimit or
@@ -648,33 +746,39 @@ public final class Executor {
         // real, sufficiently funded wallet, so every withdraw below hits an existing wallet.
         long available = ledger.balanceOrZero(tx.from()); // one store read (audit perf)
         if (available < required) {
-            return BALANCE_TOO_LOW;
+            return DomainOutcome.of(BALANCE_TOO_LOW);
         }
 
         ContractProcessor.ContractResult result =
             processor.run(tx.from(), tx.kind(), tx.to(), tx.data(), value, gasLimit, tx.nonce());
 
         long gasFee = Math.multiplyExact(result.gasUsed(), gasPrice);
+        long credited = 0;
         if (gasFee > 0) {
             withdraw(ledger, applied, tx.from(), new TransactionAmount(gasFee));
             deposit(ledger, applied, miner, new TransactionAmount(gasFee));
+            credited = gasFee; // pool site: the gas fee, success and revert alike (P-3)
         }
         // Native payouts the contract made from its own balance via transfer_value (audit T4).
         // The VM bounded each to the contract's committed balance, so these withdrawals succeed;
         // the list is empty on a revert. Applied before the attached value moves (which the VM
         // did not count as spendable), so a contract can never pay out coin it does not hold.
+        // Deliberately NOT pooled: this is the contract's own coin moving, not a credit to the
+        // miner — pooling it would make the burn reach into other people's balances.
         for (ContractProcessor.NativeTransfer nt : result.transfers()) {
             if (nt.amount() > 0) {
                 withdraw(ledger, applied, nt.from(), new TransactionAmount(nt.amount()));
                 deposit(ledger, applied, nt.to(), new TransactionAmount(nt.amount()));
             }
         }
+        // The attached value moves to the contract only on success — and is deliberately NOT
+        // pooled: it belongs to the contract now, it never became the miner's revenue.
         if (result.success() && value > 0) {
             PublicAddress target = result.contractAddress() != null ? result.contractAddress() : tx.to();
             withdraw(ledger, applied, tx.from(), new TransactionAmount(value));
             deposit(ledger, applied, target, new TransactionAmount(value));
         }
-        return SUCCESS;
+        return new DomainOutcome(SUCCESS, credited);
     }
 
     private static void withdraw(Ledger ledger, List<AppliedOp> applied,
@@ -750,21 +854,37 @@ public final class Executor {
      * most recently applied one (used by {@code popBlock} during reorgs).
      */
     public static void rollbackBlock(Block block, Ledger ledger, ContractProcessor processor,
-                                     long height, NetworkParameters params) {
+                                      long height, NetworkParameters params) {
         rollbackBlock(block, ledger, processor, null, height, params);
     }
 
     /** As above, also reversing the block's box transactions via the {@link BoxProcessor}. */
     public static void rollbackBlock(Block block, Ledger ledger, ContractProcessor processor,
                                      BoxProcessor boxProcessor, long height, NetworkParameters params) {
+        rollbackBlock(block, ledger, processor, boxProcessor, height, params, BlockImpl.SUPPLY_ABSENT);
+    }
+
+    /**
+     * The rollback the engine drives, with the parent block's committed supply supplied for the
+     * journal-less burn re-derivation (009 T041). Package-private, and deliberately NOT a wider
+     * public signature: the parent supply is an already-validated chain fact only the caller
+     * holds ({@code popBlock} reads it from the store; the state-root reject sites hold the
+     * parent header), the public forms stay exactly as they were, and no caller can silently
+     * skip it — the engine is the only producer of reorgs. {@code rollbackBlock} itself gains no
+     * parameter on its public face (registry anti-pattern; data-model.md §8).
+     */
+    static void rollbackBlock(Block block, Ledger ledger, ContractProcessor processor,
+                              BoxProcessor boxProcessor, long height, NetworkParameters params,
+                              long parentSupply) {
         undoBlock(block, ledger,
             processor == null ? ContractProcessor.NONE : processor,
-            boxProcessor == null ? BoxProcessor.NONE : boxProcessor, height, params);
+            boxProcessor == null ? BoxProcessor.NONE : boxProcessor, height, params, parentSupply);
     }
 
     /** As {@link #rollbackBlock}, with both domains guaranteed non-null. */
     private static void undoBlock(Block block, Ledger ledger, ContractProcessor processor,
-                                  BoxProcessor boxProcessor, long height, NetworkParameters params) {
+                                  BoxProcessor boxProcessor, long height, NetworkParameters params,
+                                  long parentSupply) {
         // The ledger's own undo journal, recorded by executeBlock, is the exact inverse of every
         // ledger mutation the block applied — no arithmetic re-derivation from the transaction,
         // no receipts walk, no mirrors to keep in sync (audit: one undo protocol, and a journal
@@ -842,6 +962,29 @@ public final class Executor {
         }
 
         long coinbaseAmount = coinbase.amount().amount();
+
+        // The burn's journal-less re-derivation (009 T041), reverted FIRST — the burn was the
+        // LAST ledger op the forward pass applied (after uncles), so it is the first to undo.
+        // This package-private form carries the parent's committed supply, so `minted` comes
+        // from the ONE home — Issuance.minted — rather than a second inline spelling of the
+        // identity: pass 1 pinned coinbase.amount == miningReward(height, parentSupply) when
+        // the block was accepted, so the scheduled value IS the amount the block minted, and a
+        // reward term ever added to Issuance.minted can never leave this mirror silently
+        // disagreeing (the exact drift Issuance's javadoc exists to prevent). Burn.rederive is
+        // then the header-only identity: burned = parent.supply + minted - block.supply. The
+        // public rollbackBlock forms pass SUPPLY_ABSENT and skip this mirror — only a
+        // curve-active burning block can carry a burn, and such a pop always runs through the
+        // engine.
+        if (params.emissionCurveActiveAt(height)
+                && parentSupply != BlockImpl.SUPPLY_ABSENT
+                && block.supply() != BlockImpl.SUPPLY_ABSENT) {
+            long minted = Issuance.minted(params, height, parentSupply, block.difficulty(),
+                block.uncles());
+            long burned = Burn.rederive(parentSupply, minted, block.supply());
+            if (burned > 0) { // > 0 guard mirrors the forward pass: a zero burn recorded no op
+                ledger.deposit(miner, new TransactionAmount(burned));
+            }
+        }
 
         // Exact inverse of payUncleRewards. That path scales each reward to the uncle's PROVEN
         // work — base >>> (nephewDifficulty - ref.difficulty()) via scaleRewardToWork (audit C1) —

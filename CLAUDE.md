@@ -128,6 +128,22 @@ template, the corresponding checked-in `.wasm` must be rebuilt to match.
   wallet keys are generated and kept in the browser, the node never sees a private key.
 
 ## Recent Changes
+- 009-native-coin-burn: the emission curve's negative branch gains a destruction mechanism — the
+  chain's first way to reduce native supply. At a curve-active height a block destroys
+  `min(floor(pool x burnShareNum / burnShareDen), debt)`, where `pool` is every base unit the block
+  credits to the miner that was not freshly minted (declared fees, contract gas revenue, box
+  storage rent) and `debt` is the derived supply excess `max(0, parentSupply + minted - S*(h))`.
+  The share is `1/2` on mainnet, pinned per profile, refused at construction unless
+  `0 <= num < den`. The subsidy and every uncle/nephew term are excluded from the pool, so the
+  feature-005 floor `R_min` stays structurally unreachable and including a transaction stays
+  strictly profitable. No header field, no wire change, no persisted state: `burned` is recoverable
+  from two headers (`parent.supply + minted - block.supply`), so reorg reversal stays structural.
+  The eligible pool needs execution, so the exact identity check moves beside the state root's
+  (post-PoW, full rollback on mismatch) while a header-only bound `0 <= burned <= debt(h)` stays in
+  the pre-PoW pass — collapsing to today's exact equality wherever no burn is possible. The three
+  byte-for-byte duplicated supply gates (`ChainEngine`, `HeaderChain`, the boot check) collapse
+  into one shared rule, closing registry OI-4. `burned` on the API is repointed from a constant
+  cumulative `"0"` to the tip block's amount, and `burnDebt` is added.
 - 008-decaying-supply-target: the emission target becomes a function of height. `S*(h)`
   (`SupplyTargetSchedule` in lib-core) holds at the pinned peak until a scheduled decay-start
   height, then decays geometrically per epoch to a pinned floor. The recurrence is tabulated at
@@ -156,4 +172,5 @@ template, the corresponding checked-in `.wasm` must be rebuilt to match.
 
 ## Active Technologies
 - Java 25 (Gradle toolchain + `options.release = 25`), no new dependencies; JDK 25 standard
-  library only (`java.math.BigInteger` for build-time emission-table generation)
+  library only (`java.math.BigInteger` for build-time emission-table generation, `Math.*Exact`
+  for every consensus sum)

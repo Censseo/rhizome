@@ -12,9 +12,12 @@ import java.util.Optional;
 
 import org.junit.jupiter.api.Test;
 
+import rhizome.core.blockchain.CurveActiveNetwork;
 import rhizome.core.blockchain.DifficultyAdjustment;
 import rhizome.core.blockchain.EmissionCurve;
+import rhizome.core.blockchain.Issuance;
 import rhizome.core.blockchain.NetworkParameters;
+import rhizome.core.blockchain.SupplyTargetSchedule;
 import rhizome.crypto.PowAlgorithm;
 
 class NetworkParametersTest {
@@ -283,6 +286,41 @@ class NetworkParametersTest {
             "strided supply " + stridedSupply + " diverges " + (relativeDivergence * 100)
                 + "% from the literal per-block supply " + literalSupply + " over " + literalBlocks
                 + " blocks, exceeds the 0.1% per-stride design bound (research.md Decision 7)");
+
+        // Burn-funded reward manipulation stays unprofitable (009 T048; research.md Decision 9):
+        // on the branch where burning supply RAISES the subsidy (S >= S*) the reward's
+        // responsiveness |dR/dS| times the relaxation time tau = S*/c must stay below 1 — the
+        // subsidy rise a burn buys lasts ~tau blocks at |dR/dS| per unit burned, so a product
+        // >= 1 would let an attacker cycle burn -> subsidy faster than the curve relaxes. A
+        // property of the CALIBRATION, asserted here, not a comment.
+        double relaxation = (double) sStar / c;
+
+        // (a) The DISPATCHED reward: the floor clamps the whole mirrored branch at the shipped
+        // calibration, so its slope is exactly 0 — the burn cannot move the subsidy at all.
+        long preDecay = activationHeight; // pinned pre-decay: the crossover the record publishes
+        long step = Math.max(1L, sStar / 1_000L);
+        for (long floored = sStar; floored <= 4 * sStar; floored = Math.addExact(floored + step, 0)) {
+            assertEquals(floor, p.miningReward(preDecay, floored),
+                "the mirrored branch must stay floored at the shipped calibration, supply="
+                    + floored);
+            if (floored > 3 * sStar) {
+                break; // the flat region is proven; the loop documents it without running to 4x
+            }
+        }
+
+        // (b) The RAW curve underneath: its slope on the mirrored branch times tau stays below 1
+        // for any supply, so the property survives even a future recalibration that moves the
+        // floor. Slope measured exactly, by integer differences over a ~0.1% step.
+        double rawSlopeScale = (double) step;
+        for (long probe = sStar + 1; probe <= 4 * sStar; probe = Math.multiplyExact(probe, 3) / 2) {
+            long r1 = rawCurve.raw(probe, sStar);
+            long r2 = rawCurve.raw(Math.addExact(probe, step), sStar);
+            double slope = Math.abs((double) (r2 - r1)) / rawSlopeScale;
+            assertTrue(slope * relaxation < 1.0,
+                "|dR/dS| x relaxation = " + (slope * relaxation) + " at supply " + probe
+                    + " -- burn-funded reward manipulation would be profitable (research.md "
+                    + "Decision 9)");
+        }
     }
 
     @Test
@@ -769,5 +807,127 @@ class NetworkParametersTest {
             () -> NetworkParameters.testnet().toBuilder().minerRevenueFloor(-1).build());
         // A positive floor is accepted.
         assertDoesNotThrow(() -> NetworkParameters.testnet().toBuilder().minerRevenueFloor(1).build());
+    }
+
+    // --- Native coin burn share (009-native-coin-burn) ---
+
+    @Test
+    void theBurnShareIsAProperFractionOnEveryShippedProfile() {
+        // Guards G-1..G-3 guarantee the fraction shape at construction; this locks the shipped
+        // calibration itself: every profile states 1/2 explicitly (T004, WI-9) — stated, never
+        // inherited through toBuilder(), so a future mainnet retuning cannot silently move a
+        // derived profile's monetary policy (and vice versa).
+        for (NetworkParameters p : java.util.List.of(NetworkParameters.cleanMainnet(),
+                NetworkParameters.testnet(), NetworkParameters.devnet())) {
+            assertTrue(p.burnShareDen() > 0, p.networkName() + ": G-1");
+            assertTrue(p.burnShareNum() >= 0, p.networkName() + ": G-2");
+            assertTrue(p.burnShareNum() < p.burnShareDen(),
+                p.networkName() + ": G-3 — a 100 % share is refused as a calibration");
+            assertEquals(1L, p.burnShareNum(), p.networkName() + " share numerator");
+            assertEquals(2L, p.burnShareDen(), p.networkName() + " share denominator");
+        }
+    }
+
+    @Test
+    void aBurnShareOfOneIsRefusedAtConstruction() {
+        // G-3, the headline case: beta_n == beta_d is the empty-block failure mode — a block
+        // would burn its whole fee pool, so including any transaction nets the miner exactly
+        // nothing and every rational miner mines empty blocks. Refused as a calibration here,
+        // never mid-chain.
+        assertThrows(IllegalArgumentException.class,
+            () -> NetworkParameters.testnet().toBuilder().burnShareNum(2L).burnShareDen(2L).build());
+        // Strictly above 100 % would reach into minted coin — refused for the same reason.
+        assertThrows(IllegalArgumentException.class,
+            () -> NetworkParameters.testnet().toBuilder().burnShareNum(3L).burnShareDen(2L).build());
+        // G-1 / G-2: a share is a proper fraction or the profile does not start.
+        assertThrows(IllegalArgumentException.class,
+            () -> NetworkParameters.testnet().toBuilder().burnShareDen(0L).build());
+        assertThrows(IllegalArgumentException.class,
+            () -> NetworkParameters.testnet().toBuilder().burnShareDen(-2L).build());
+        assertThrows(IllegalArgumentException.class,
+            () -> NetworkParameters.testnet().toBuilder().burnShareNum(-1L).build());
+        // The boundary that IS legal: zero burn (beta_n == 0) is a valid, if pointless, policy.
+        assertDoesNotThrow(
+            () -> NetworkParameters.testnet().toBuilder().burnShareNum(0L).build());
+        // And a legal share builds with the guards silent.
+        assertDoesNotThrow(
+            () -> NetworkParameters.testnet().toBuilder().burnShareNum(1L).burnShareDen(2L).build());
+    }
+
+    @Test
+    void theCoefficientNeverExceedsTheLowestSupplyTarget() {
+        // G-4's boundary itself: c <= the lowest reachable target (the decay floor when a decay is
+        // scheduled, the peak otherwise) builds; one above it refuses, with a message naming both
+        // constants and the obligation <= debt property the guard secures.
+        assertDoesNotThrow(() -> NetworkParameters.testnet().toBuilder()
+            .supplyTarget(100_000L).emissionCoefficient(100_000L).build());
+        IllegalArgumentException refused = assertThrows(IllegalArgumentException.class,
+            () -> NetworkParameters.testnet().toBuilder()
+                .supplyTarget(100_000L).emissionCoefficient(100_001L).build());
+        assertTrue(refused.getMessage().contains("obligation <= debt"),
+            "the G-4 message must name the property it secures: " + refused.getMessage());
+        // Scheduled-decay variant: the floor, not the peak, is the binding bound.
+        assertDoesNotThrow(() -> CurveActiveNetwork.decaySchedule(
+                NetworkParameters.testnet().toBuilder()
+                    .supplyTarget(CurveActiveNetwork.TEST_SUPPLY_TARGET)
+                    .emissionCoefficient(CurveActiveNetwork.TEST_SUPPLY_TARGET / 2))
+            .build());
+        assertThrows(IllegalArgumentException.class, () -> CurveActiveNetwork.decaySchedule(
+                NetworkParameters.testnet().toBuilder()
+                    .supplyTarget(CurveActiveNetwork.TEST_SUPPLY_TARGET)
+                    .emissionCoefficient(CurveActiveNetwork.TEST_SUPPLY_TARGET / 2 + 1))
+            .build());
+    }
+
+    @Test
+    void theObligationNeverExceedsTheCarriedDebt() {
+        // SC-011: G-4 delivers `obligation(h) <= debt(h)` — the burn clamp's ceiling is always
+        // covered by what the carried debt permits, so a block that owes can always pay. Swept
+        // over supplies [S*_floor, 4 × S*_peak] and heights spanning the full decay schedule
+        // (pre-activation, the peak plateau, decay epochs, floor arrival and beyond).
+        NetworkParameters p = NetworkParameters.cleanMainnet();
+        long peak = p.supplyTarget();
+        long floorTarget = p.supplyTargetFloor();
+        SupplyTargetSchedule schedule = p.supplyTargetSchedule();
+
+        // Heights: pre-activation, the plateau, the decay start and the first epochs, coarse
+        // steps through the decay, the floor-arrival height and a far-future sentinel height.
+        long[] heights = new long[] {
+            0L, 1L, 2L,
+            p.decayStartHeight() - 1, p.decayStartHeight(),
+            p.decayStartHeight() + p.decayEpochBlocks(),
+            p.decayStartHeight() + 2 * p.decayEpochBlocks(),
+            p.decayStartHeight() + 10 * p.decayEpochBlocks(),
+            p.decayStartHeight() + 100 * p.decayEpochBlocks(),
+            schedule.floorArrivalHeight() > 0 ? schedule.floorArrivalHeight() - 1 : 0L,
+            schedule.floorArrivalHeight() > 0 ? schedule.floorArrivalHeight() : 0L,
+            schedule.floorArrivalHeight() > 0
+                ? schedule.floorArrivalHeight() + p.decayEpochBlocks() : 0L,
+        };
+        for (long h : heights) {
+            long sStar = p.supplyTargetAt(h);
+            // Supplies: the swept floor band, a coarse geometric climb to 4 × peak, and the
+            // tight band right around the live target where the property is at its tightest
+            // (obligation just switched on, debt only just turned positive).
+            java.util.ArrayList<Long> supplies = new java.util.ArrayList<>();
+            for (long s = floorTarget; s > 0 && s <= 4 * peak && s > 0; s = Math.multiplyExact(s, 3) / 2) {
+                supplies.add(s);
+            }
+            supplies.add(4 * peak);
+            for (long around : new long[] {-2, -1, 0, 1, 2, 1_000, 1_000_000}) {
+                long s = Math.addExact(sStar, around);
+                if (s > 0) {
+                    supplies.add(s);
+                }
+            }
+            for (long supply : supplies) {
+                long minted = Issuance.minted(p, h, supply, p.minDifficulty(), java.util.List.of());
+                long debt = Math.max(0, Math.subtractExact(Math.addExact(supply, minted), sStar));
+                long obligation = p.burnObligation(h, supply);
+                assertTrue(obligation <= debt,
+                    "obligation " + obligation + " exceeded carried debt " + debt
+                        + " at height " + h + ", supply " + supply + " (S*(h)=" + sStar + ")");
+            }
+        }
     }
 }

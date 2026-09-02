@@ -28,7 +28,8 @@ final class StatsWindowService {
      *  fragment. Captured in the same loop iteration that already visits the tip, so the
      *  per-tip recompute cost is unchanged. */
     record StatsWindow(long windowStart, long height, long txCount, long firstTs, long lastTs,
-                        long parentSupply, long tipSupply) {}
+                        long parentSupply, long tipSupply, int tipDifficulty,
+                        java.util.List<rhizome.core.block.UncleRef> tipUncles) {}
 
     private final LongSupplier height;
     private final LongFunction<Block> blockAt;
@@ -62,6 +63,8 @@ final class StatsWindowService {
             long lastTs = 0;
             long parentSupply = BlockImpl.SUPPLY_ABSENT;
             long tipSupply = BlockImpl.SUPPLY_ABSENT;
+            int tipDifficulty = 0;
+            java.util.List<rhizome.core.block.UncleRef> tipUncles = java.util.List.of();
             for (long i = windowStart; i <= h; i++) {
                 var b = (BlockImpl) blockAt.apply(i);
                 txCount += b.transactions().size();
@@ -71,6 +74,8 @@ final class StatsWindowService {
                 if (i == h) {
                     lastTs = b.timestamp();
                     tipSupply = b.supply();
+                    tipDifficulty = b.difficulty();
+                    tipUncles = b.uncles();
                 }
                 if (i == h - 1) {
                     parentSupply = b.supply();
@@ -83,7 +88,7 @@ final class StatsWindowService {
                 parentSupply = ((BlockImpl) blockAt.apply(h - 1)).supply();
             }
             StatsWindow w = new StatsWindow(windowStart, h, txCount, firstTs, lastTs, parentSupply,
-                tipSupply);
+                tipSupply, tipDifficulty, tipUncles);
             cache = w;
             return w;
         }

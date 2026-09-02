@@ -235,9 +235,48 @@ one relaxation time), `E = 1 576 800` (one quarter), `799/800` = 0.4991 %/year,
 `S*_floor = S*/2 = 1 498 962 290 000`; `E_f = 555` (the closed form's 554 is the documented
 off-by-one), floor arrival `1 001 268 000`. For supply to actually track the target down, feature
 08's burn must destroy ≈2 003 538 PDN/year — the target's fall **plus** the floor's own tail
-issuance; that fee flow is not met at launch, so the obligation is published per block and
-deliberately not enforced (and deliberately never accumulated: it would reach ~3.5× circulating
-supply over 200 years and describe nothing).
+issuance. **Feature 08 now enforces the obligation** (009-native-coin-burn; still derived, never
+accumulated — a counter would reach ~3.5× circulating supply over 200 years and describe nothing,
+and it is not header-committed either: `burned(h)` is recoverable from two headers as
+`parent.supply + minted(h) − block.supply`). The rule, at every curve-active height:
+
+- **Pool** — every base unit the block credits the miner that was *not freshly minted*:
+  declared transfer/box/token fees, contract gas revenue, and box storage rent. Excluded by
+  construction: the coinbase subsidy, uncle/nephew rewards, box released value, contract native
+  payouts, and a call's attached value — which is why the burn can never reach into minted coin.
+  Accumulated at the credit sites in application order (identical on every node), with checked
+  arithmetic; never persisted, never published, never in the state root.
+- **Share** — a pinned per-network fraction `βₙ/β_d` (mainnet `1/2`, guards `0 ≤ βₙ < β_d` at
+  construction; a 100 % share is the empty-block failure mode and is refused as a calibration).
+  One floor division, at one site.
+- **Debt** — the derived supply excess `debt(h) = max(0, parentSupply + minted(h) − S*(h))`,
+  the clamp's ceiling: `burned(h) = min(⌊pool × βₙ/β_d⌋, debt(h))`, `0` wherever the curve does
+  not govern. What a block does not burn stays in supply and reappears in the next block's debt.
+- **Enforcement** — split like the state root: a header-only bound `0 ≤ ceiling − blockSupply ≤
+  debt(h)` runs pre-PoW in BOTH gates through one shared `SupplyGate` (the three duplicated
+  002-era gates collapsed onto it); the exact identity `block.supply == parent.supply +
+  minted(h) − burned(h)` is checked post-execution beside the state root's check, with the block
+  fully rolled back before rejection. The bound collapses to exact equality wherever `debt = 0`
+  — every pre-activation height, every never-scheduled profile, and every curve-active height at
+  or below the target.
+- **Reversal** — one withdrawal from the miner recorded in the existing ledger undo journal; the
+  journal-less fallback re-derives the identical burn from the block's own committed values.
+- **Floor safety** — `burned ≤ pool` by construction, and the pool excludes every minted term,
+  so the miner's revenue never drops below `R_min` (feature 05's single clamp remains the only
+  clamp), and including a fee-paying transaction stays strictly profitable (once the fee clears
+  the share's rounding grain).
+- **Miner reserve** — the burn withdrawal runs *after* every transaction, and nothing stops the
+  miner from being the sender of a later in-block one: a miner that sweeps its fee income before
+  the burn site leaves the withdrawal unfunded, and the block is rejected (`BALANCE_TOO_LOW`,
+  fully rolled back — deterministic on every node since the identical body executes, and
+  self-inflicted since the miner authors the block, so no fork and no third-party DoS). A miner
+  that wants its block accepted keeps at least `⌊pool × βₙ/β_d⌋` of the block's fee income
+  unspent, or spends it next block.
+
+Application and reversal are exact inverses at every reorg depth to `maxReorgDepth`. The carried
+debt and the burned amount are published on the emission fragment (A-16); the share constants are
+published on `GET /emission`. The construction guard `c ≤ S*_floor` secures `obligation ≤ debt`
+at every height (the `ln x ≤ x − 1` argument), so a block that owes can always pay.
 
 **A misconfigured schedule refuses at boot, sentinel included.** Every degenerate constant is
 refused when the schedule is built, so a node that cannot state its own monetary policy never
@@ -297,11 +336,18 @@ curve's `τ_blocks` **and the decay schedule** (`decayStartHeight` = 20 years, `
 one quarter) from `desiredBlockTimeSec`, so changing block time forces all three to be revisited.
 
 **Boot-time consistency.** A node's stored tip is checked against the schedule now in force every
-time it boots: if the tip's committed supply no longer equals `parent.supply +
-Issuance.minted(...)` under the current parameters — for example, a data directory minted before
+time it boots, through the same shared `SupplyGate` the add-time and header-sync gates run: if the
+tip's committed supply falls outside the header-only bound `0 ≤ parent.supply + minted(h) −
+tip.supply ≤ debt(h)` under the current parameters — for example, a data directory minted before
 activation, reopened after — the node refuses to start with a message naming the network, the
 activation height, the expected and found supply, and the remedy (recreate the data directory),
-rather than silently extending a chain no fresh peer can sync. Two header reads, no body, no
+rather than silently extending a chain no fresh peer can sync. Wherever no burn is possible
+(`debt = 0`) the bound collapses to the exact equality `tip.supply == parent.supply +
+Issuance.minted(...)` — the pre-burn refusal, unchanged. Above the live target the relaxation is
+deliberate and necessarily best-effort: tail issuance keeps `debt > 0` in the steady state, so a
+burning tip legitimately sits anywhere in `[ceiling − debt, ceiling]` and a schedule change that
+leaves the tip inside that band boots (every *new* block still validates under the parameters now
+in force — the boot check guards operator confusion, not consensus). Two header reads, no body, no
 ledger; skipped, not failed, when the parent header is unavailable (snapshot bootstrap, pruned
 prefix).
 
@@ -427,14 +473,18 @@ profile in ~20 existing suites are unaffected.
   total differs, on every boot path, before any balance is seeded. The check is gated solely by
   the presence of a pin, never by network id — an unpinned profile (testnet/devnet by explicit
   choice) behaves exactly as it did before this check existed.
-- **A stored chain must agree with the schedule now in force.** At boot, the tip's supply
-  accounting identity is re-checked against the current parameters from **two headers only** (no
-  body, no ledger, before the engine's lock is ever taken). A tip minted under a different emission
-  schedule — or a supply-less chain opened under a scheduled curve, which can never begin
-  committing — refuses to start with a message naming the network, the activation height, the
-  expected and found supply, and the remedy. Absence of proof is not proof of fault: an
-  unverifiable tip (parent header pruned or snapshot-bootstrapped) is **skipped, not failed**, and
-  an identity that overflows refuses cleanly rather than surfacing a raw `ArithmeticException`.
+- **A stored chain must agree with the schedule now in force.** At boot, the tip's supply rule
+  is re-checked against the current parameters from **two headers only** (no body, no ledger,
+  before the engine's lock is ever taken) through the same shared `SupplyGate` the add-time gate
+  runs — exact equality wherever `debt = 0`, the burn band above the target (necessarily
+  best-effort there: a burning tip legitimately sits anywhere in `[ceiling − debt, ceiling]`, so
+  the refusal catches only tips outside the band a legal block could have committed). A tip
+  minted under a different emission schedule — or a supply-less chain opened under a scheduled
+  curve, which can never begin committing — refuses to start with a message naming the network,
+  the activation height, the expected and found supply, and the remedy. Absence of proof is not
+  proof of fault: an unverifiable tip (parent header pruned or snapshot-bootstrapped) is
+  **skipped, not failed**, and an identity that overflows refuses cleanly rather than surfacing a
+  raw `ArithmeticException`.
 
 ## Key parameters
 

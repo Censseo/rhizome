@@ -118,12 +118,14 @@ final class E2EFixtures {
             .timestamp(node.engine().nextBlockTimestamp(System.currentTimeMillis()))
             .difficulty(node.engine().difficulty())
             .lastBlockHash(node.engine().tipHash())
-            .supply(SupplyStamp.next(node.engine(), height, node.engine().difficulty()))
             .build();
         // Curve-aware, mirroring BlockAssembler.assemble's own dispatch exactly: the coinbase must
-        // agree with the supply stamp above (both read from the SAME parentSupply), or a curve-
-        // active profile mints a coinbase that contradicts its own committed supply header and
-        // Executor.runBlock rejects it (INCORRECT_MINING_FEE) on every block this fixture builds.
+        // agree with the parentSupply the stamp dry-run reads (both read from the SAME
+        // parentSupply), or a curve-active profile mints a coinbase that contradicts its own
+        // committed supply header and Executor.runBlock rejects it (INCORRECT_MINING_FEE) on
+        // every block this fixture builds. The supply itself is NOT pre-stamped here (009 T052):
+        // the eligible burn pool is execution-dependent, so stampStateRoot's dry run commits the
+        // exact value from the one execution below.
         long rewardAmount = parentSupply == BlockImpl.SUPPLY_ABSENT
             ? params.miningReward(height)
             : params.miningReward(height, parentSupply);
@@ -140,6 +142,15 @@ final class E2EFixtures {
         // INVALID_STATE_ROOT and the scenario silently builds no branch at all. Same order as
         // BlockProducer.produce().
         node.engine().stampStateRoot(block);
+        // A block whose OTHER content is deliberately invalid (an under-floor fee, a wrong
+        // coinbase) fails the stamp dry-run, which leaves the supply uncommitted — the supply
+        // gate would then mask the rejection status the scenario is actually testing. Pre-stamp
+        // the honest ceiling in exactly that case, so the intended gate reports its own status
+        // (the pre-009 fixture behaviour), while every VALID block keeps the exact dry-run stamp.
+        if (parentSupply != BlockImpl.SUPPLY_ABSENT
+                && block.supply() == BlockImpl.SUPPLY_ABSENT) {
+            block.supply(SupplyStamp.next(node.engine(), height, node.engine().difficulty()));
+        }
         block.nonce(Miner.mineNonce(block.hash(), block.difficulty(),
             params.powAlgorithm(), params.powCostsAt(height)));
         return block;

@@ -131,8 +131,12 @@ class BlockAssemblerUncleSizeTest {
         assertTrue(consensusSize(candidate) <= cap,
             "the assembled block must satisfy the consensus size cap, was " + consensusSize(candidate));
 
-        // And it is actually accepted after mining — never BLOCK_TOO_LARGE.
+        // And it is actually accepted after stamping + mining — never BLOCK_TOO_LARGE. The
+        // producer order (009 T050/T051) is assemble -> dry-run stamp -> mine: the stamp dry-run
+        // commits the exact supply (and state root where an accumulator is wired) from one
+        // execution, so the candidate the miner works on is the candidate that validates.
         var b = (BlockImpl) candidate;
+        engine.stampStateRoot(b);
         b.nonce(Miner.mineNonce(b.hash(), b.difficulty(), params.powAlgorithm()));
         assertEquals(ExecutionStatus.SUCCESS, engine.addBlock(b));
     }

@@ -118,6 +118,7 @@ no network proof anywhere is a rule nobody has watched an assembled node apply.
 `SUPPLY` circulating supply header commitment ·
 `FLOOR` miner revenue floor ·
 `DECAY` the decaying supply target ·
+`BURN` the native coin burn ·
 `GENESIS` pinned genesis supply and allocation ·
 `REORG` fork choice, finality, synchronisation ·
 `POOL` mempool and relay policy ·
@@ -328,6 +329,31 @@ reduction bound) live in `lib-core/src/test/java/rhizome/SupplyTargetScheduleTes
 | DECAY-02 | Manipulate block timestamps (within every legal bound — minimum-pace floor, median-time-past, future bound) hoping to reach the decay boundary sooner or drag it later, i.e. hoping the decay clock runs on wall time. Two branches under opposite timestamp policies must see the identical target at every height, and a block minted for a boundary "shifted" one epoch must be rejected. | A3 | DEFENDED | `lib-core/src/test/java/rhizome/adversarial/TargetDecayAttackTest.java#timestampManipulationCannotMoveTheDecayBoundaryBecauseHeightAloneGoverns` |
 | DECAY-03 | Mine the same chain under a DIFFERENT decay ratio (8/10 where consensus says 9/10) — indistinguishable below the decay start, so nothing trips until the boundary — then submit the first decayed-height block, chained to the real tip with valid PoW, hoping a node accepts a supply its own schedule never derives. | A3 | DEFENDED | `lib-core/src/test/java/rhizome/adversarial/TargetDecayAttackTest.java#aPeerOnADifferentDecayScheduleIsRejectedAtTheFirstDecayedHeight` |
 | DECAY-04 | Reorg across a decay-epoch boundary, hoping the pop-and-replay loses the stepped target, mis-restores the committed supply, or swings the paid reward by more than the published continuity bound (curve interpolation ≤ 1 base unit plus one per-epoch decay step) — or that any rollback code exists to get it wrong. | A3 | DEFENDED | `lib-core/src/test/java/rhizome/SupplyCommitmentTest.java#reorgAcrossADecayEpochBoundaryRestoresTargetSupplyAndRewardExactly` |
+
+## BURN — the native coin burn
+
+The burn (`Burn`, `SupplyGate`, 009-native-coin-burn) destroys `min(⌊share × pool⌋, debt)` at a
+curve-active height, where the pool is every base unit the block credits the miner that was not
+freshly minted and the debt is the derived supply excess. The quantity is not committed anywhere:
+it is recoverable from two headers, so every attack is a variation of lying about a value nobody
+stores — claiming a burn the body never performed (BURN-01), burning past the debt to undershoot
+the live target (BURN-02), claiming a negative burn to over-mint (BURN-03), or routing revenue
+through a channel the pool supposedly never hears of (BURN-04). The reversal closes the pop side
+(BURN-05: apply and rollback are exact inverses, with no rollback code of its own to get wrong on
+the primary path — the burn rides the ledger undo journal), and the economics close the incentive
+side (BURN-06: funding a burn to raise the subsidy stays unprofitable below full hashrate).
+BURN-07 pins the scoring interlock both ways: an identity violation returns the scored
+`INVALID_SUPPLY` class, while a valid burning branch that loses a fork race is not misbehaviour.
+
+| ID | Scenario | Class | Verdict | Proof |
+|----|----------|-------|---------|-------|
+| BURN-01 | Mine a block at a curve-active height claiming a burn its body never performed — commit supply a share below the unburned ceiling while carrying no fee flow, so execution pools nothing — hoping the derived quantity's absence from the wire means nobody can check the claim. The exact identity check must reject the block (fully rolled back) while the honest block at the same height applies. | A3 | DEFENDED | `lib-core/src/test/java/rhizome/adversarial/BurnAttackTest.java#aBlockClaimingABurnItDidNotPerformIsRejectedAndTheHonestBlockApplies` |
+| BURN-02 | Burn PAST the carried debt, committing supply below the live target `S*(h)` with a huge fee flow to back the claim, hoping the burn doubles as a supply-collapse lever. The pre-PoW bound (`0 <= burned <= debt`) must reject it before any hash is verified. | A3 | DEFENDED | `lib-core/src/test/java/rhizome/adversarial/BurnAttackTest.java#aBlockBurningPastItsDebtToUndershootTheTargetIsRejectedBeforeProofOfWork` |
+| BURN-03 | Claim a NEGATIVE burn — commit supply above the unburned ceiling, minting coin the schedule never issued — hoping the burn feature's arrival loosened the inflation direction. The bound's lower edge must reject it pre-PoW. | A3 | DEFENDED | `lib-core/src/test/java/rhizome/adversarial/BurnAttackTest.java#aNegativeBurnClaimingPhantomMintIsRejectedBeforeProofOfWork` |
+| BURN-04 | Route revenue to the miner through gas or rent instead of a declared fee (self-dealing call: fee 0, gasPrice high), hoping the pool never hears of it and the burn shrinks. The pool is "every miner credit that is not freshly minted", so the same flow must burn the same amount whichever pipe carried it. | A3 | DEFENDED | `lib-core/src/test/java/rhizome/adversarial/BurnAttackTest.java#revenueRoutedThroughGasOrRentIsPooledExactlyLikeADeclaredFee` |
+| BURN-05 | Reorg across a burning block hoping the pop mis-restores: keeps the burn destroyed (a double-burn out of the miner), refunds more than was burned (a mint), or leaves supply and ledger inconsistent. Apply, pop, and re-apply: the pre-burn state must return byte for byte and the re-applied block must burn the identical amount. | A3 | DEFENDED | `lib-core/src/test/java/rhizome/adversarial/BurnAttackTest.java#aReorgAcrossABurningBlockRestoresSupplyAndLedgerExactly` |
+| BURN-06 | Fund a burn of ΔS to raise the subsidy, at a hashrate share strictly below 1, hoping the raised subsidy repays more than the burn cost. The calibration bound (`c <= S*_floor`) must keep the total raise at or under ΔS — so any α < 1 recovers strictly less than it spends — swept over reachable burn sizes. | A3 | DEFENDED | `lib-core/src/test/java/rhizome/adversarial/BurnAttackTest.java#burnFundedRewardManipulationStaysUnprofitableBelowFullHashrate` |
+| BURN-07 | Score the wrong thing: either a burn-identity violation that is NOT scored (an unban-nable structural lie), or — the opposite mistake — a valid burning block that loses a fork race getting scored, so honest competing branches ban each other. The violation must return the scored `INVALID_SUPPLY` class while the valid burning block applies as plain `SUCCESS` on its own chain. | A3 | DEFENDED | `lib-core/src/test/java/rhizome/adversarial/BurnAttackTest.java#aBurnIdentityViolationIsScoredWhileADifferentlyBurningBranchIsNot` |
 
 ## GENESIS — pinned genesis supply and allocation
 
@@ -591,6 +617,7 @@ activation dispatch in `EmissionActivationGateTest`.
 | E2E-85 | Send several concurrent `/submit` requests for individually-valid (real PoW) competing blocks at the same next height, some landing in the curve's negative/mirror branch simultaneously, hoping `ChainEngine`'s single lock fails to serialize the curve evaluation cleanly -- corruption or a crash rather than exactly one admitted block. | A1 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EEmissionCurveTest.java#concurrentSubmitOfCompetingBlocksAboveTheSupplyTargetAdmitsExactlyOne` |
 | E2E-86 | Fabricate a block whose OWN declared header supply field (not the parent's) is a wire-legal extreme value (near `Long.MAX_VALUE`, or disconnected from the real parent) and post it to `/submit`, hoping that self-declared field is ever fed into `EmissionCurve.raw()` as an argument (only the already-validated parent value is), rather than producing nothing worse than a clean comparison mismatch. | A1 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EEmissionCurveTest.java#aWireLegalExtremeSelfDeclaredSupplyFieldNeverFeedsTheCurveArithmeticAndOnlyMismatchesCleanly` |
 | E2E-87 | Mine a real node across a decay-epoch boundary (008's `SupplyTargetSchedule`), hoping the boundary block pays anything other than the stepped target's reward or the pre-boundary block anything other than the peak's, then join a fresh peer and let it sync the whole history from scratch, hoping the replayed chain converges on different blocks or commits different supplies at any height across the boundary. | A3 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2ETargetDecayTest.java#aRealNodeMinesAcrossADecayEpochBoundaryAndAPeerSyncsTheHistoryFromScratch` |
+| E2E-88 | Run a real mining node with live fee flow through the supply-target crossing under a crossable curve profile — the blocks burn once supply passes the target — and join a fresh peer, hoping the node's published `burned` figure is a cumulative lie or a per-poll fabrication, the carried `burnDebt` ever negative, or the peer converges on a different history than the burning node mined. | A3 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EBurnTest.java#aRealNodeBurnsLiveFeesAcrossTheCrossingAndAPeerConvergesOnTheIdenticalHistory` |
 
 ---
 
@@ -602,9 +629,22 @@ taken.
 
 | ID | Scenario | Why |
 |----|----------|-----|
-| E2E-88 | A GraalVM native-image binary of the node resolving the embedded genesis resource identically to the JVM build, and failing cleanly (not crashing, not silently substituting a different genesis) if the reachability-metadata entry for that classpath resource is ever stripped from `app-node/src/main/resources/META-INF/native-image/`. | `native-image` is not installed in this development environment (confirmed in `WHITEPAPER.md`), so no test that actually builds and runs the native binary can execute here. This is future work once a GraalVM SDK is available on the box that runs this suite -- see `./gradlew :app-node:nativeImage`'s own guard for the same absence. Reserved id, bumped again as the CURVE E2E test plan claimed E2E-61..86 for real proven scenarios (completing that plan's full scope except CURVE-09, redundant with E2E-64 and documented as merged rather than implemented, and CURVE-20, an infra gap the plan itself deferred): the next new `E2E` scenario added to the table above should start at E2E-87, not reuse this one, since this row is intentionally excluded from the family's dense-numbering check (`AdversarialProtocolTest` only counts rows in the main scenario table, which this "why" column's shorter row shape structurally excludes it from). |
+| E2E-89 | A GraalVM native-image binary of the node resolving the embedded genesis resource identically to the JVM build, and failing cleanly (not crashing, not silently substituting a different genesis) if the reachability-metadata entry for that classpath resource is ever stripped from `app-node/src/main/resources/META-INF/native-image/`. | `native-image` is not installed in this development environment (confirmed in `WHITEPAPER.md`), so no test that actually builds and runs the native binary can execute here. This is future work once a GraalVM SDK is available on the box that runs this suite -- see `./gradlew :app-node:nativeImage`'s own guard for the same absence. Reserved id, bumped again as the CURVE E2E test plan claimed E2E-61..86 for real proven scenarios (completing that plan's full scope except CURVE-09, redundant with E2E-64 and documented as merged rather than implemented, and CURVE-20, an infra gap the plan itself deferred): the next new `E2E` scenario added to the table above should take the next dense id (E2E-88 was taken by 009's burn E2E on 2026-09-02, bumping this reservation to E2E-89), not reuse this one, since this row is intentionally excluded from the family's dense-numbering check (`AdversarialProtocolTest` only counts rows in the main scenario table, which this "why" column's shorter row shape structurally excludes it from). |
 
 ## Change log
+
+- **2026-09-02** — New `BURN` family (BURN-01..07) and E2E-88 for the native coin burn
+  (branch `009-native-coin-burn`). The burn is derived — recoverable from two headers and clamped
+  against the carried debt — so the family's scenarios are all one con varied: lying about a value
+  nobody stores. `BurnAttackTest` proves the claimed-but-unperformed burn dies on the exact
+  identity (BURN-01), burning past the debt dies pre-PoW (BURN-02), a negative burn dies pre-PoW
+  (BURN-03), gas- and rent-routed revenue is pooled exactly like a declared fee (BURN-04), the
+  pop across a burning block restores byte for byte (BURN-05), burn-funded subsidy manipulation
+  stays unprofitable below full hashrate (BURN-06), and the scoring interlock holds both ways:
+  the violation returns the scored `INVALID_SUPPLY` class while a valid burning branch is never
+  misbehaviour (BURN-07, with the `PushStrikeTable` membership locked in app-node). E2E-88 mines
+  a real node with live fee flow through the target crossing and converges a peer on the
+  identical history. The reserved native-image gap id moves E2E-88 -> E2E-89.
 
 - **2026-09-01** — New `DECAY` family (DECAY-01..04) and E2E-87 for the decaying supply target
   (branch `008-decaying-supply-target`). The target `S*(h)` is a pure function of height, so the

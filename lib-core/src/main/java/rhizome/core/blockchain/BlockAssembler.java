@@ -55,15 +55,12 @@ public final class BlockAssembler {
         });
         long height = view.height();
 
-        // Stamp supply from the parent header alone (§ supply header commitment, FR-008): the
-        // SAME Issuance.minted formula ChainEngine.addBlock and HeaderChain.validate enforce, so
-        // an honestly-assembled candidate always satisfies the check it will be re-validated
-        // against. A supply-less parent (legacy all-absent chain) leaves the field absent too --
-        // FR-004 prefix closure forbids opting in partway through a chain.
-        long supply = view.parentSupply() == BlockImpl.SUPPLY_ABSENT
-            ? BlockImpl.SUPPLY_ABSENT
-            : Math.addExact(view.parentSupply(),
-                Issuance.minted(params, height, view.parentSupply(), view.difficulty(), view.uncles()));
+        // The candidate ships with supply UNCOMMITTED (009 T050, FR-037/FR-018): the eligible
+        // burn pool is execution-dependent, so no value assemble could stamp is guaranteed
+        // correct. {@code ChainEngine.stampStateRoot}'s dry run stamps BOTH committed values —
+        // supply and state root — from the one execution it already performs, so an
+        // honestly-assembled candidate always satisfies the exact identity it will face in
+        // validation. Producer order: assemble -> dry-run -> stamp -> mine.
 
         var block = (BlockImpl) BlockImpl.builder()
             .id((int) height)
@@ -75,7 +72,6 @@ public final class BlockAssembler {
             // toward the true majority of work when blocks are produced faster than
             // they propagate.
             .uncles(view.uncles())
-            .supply(supply)
             .build();
 
         // Same SUPPLY_ABSENT guard as the supply stamp above: the curve's sole input is the

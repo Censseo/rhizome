@@ -262,11 +262,25 @@ basis points of `supply/S*(h)` — may legitimately exceed `10000`, and keeps gr
 target decays; nullable under the same conditions as `distanceToTarget`), `obligation` (the next
 block's derived burn obligation, `max(0, −raw(supply, S*(h)))` — `"0"` when the curve governs and
 the raw value is non-negative, positive once the target is below supply, `null` when the curve
-does not govern; **published only, never enforced** — no coin is destroyed, and no cumulative
-obligation or burn-debt field ships), `floor` (`R_min`, reported beside the subsidy so a flat tail
-is recognisable as a floor), `burned` (always `"0"` — total native coin destroyed by consensus;
-zero by absence of a mechanism, not absence of a counter; feature 08 supplies the mechanism), and
-`decimalScaleFactor` (base units per display unit, present so the fragment is self-describing).
+does not govern; **a rate signal only — the enforced clamp is `burnDebt`**, see below), `floor`
+(`R_min`, reported beside the subsidy so a flat tail is recognisable as a floor), `burned`
+(**009 repointed**: the **tip block's** destroyed amount, `parent.supply + minted(tip) −
+tip.supply`, recovered from the two headers; never `null` — `"0"` where nothing was destroyed),
+`burnDebt` (**009, new**: the **next** block's carried debt `max(0, supply + minted(h+1) −
+S*(h+1))` — the stock standing between supply and the live target; `null` where the curve does
+not govern the next block or supply is absent, `"0"` where the curve governs and nothing is owed
+— absence is `null`, never `0`), and `decimalScaleFactor` (base units per display unit, present
+so the fragment is self-describing).
+
+**The `burned` repoint, with its rationale (009).** The field shipped as the constant `"0"`,
+documented as a cumulative total. A genuine cumulative total is **not derivable** — the chain
+tracks neither cumulative minted nor cumulative burned — so honouring the old documentation would
+require a persisted counter that could not reverse structurally on a reorg, exactly the state 008
+and 009 both refuse. Repointing a published field to the quantity that actually governs is this
+surface's own precedent (008 repointed `target` from the peak to the live value). The observable
+value is unchanged in every case that has ever occurred (`"0"`), but the documented meaning
+changes: the fragment now carries the **per-block** burned figure and the **stock** debt — and
+deliberately no cumulative counter of either.
 
 **`/info`** (A-15's classification unchanged: per-IP cost 1, `PEER_PROTOCOL`, **no reorg-window
 gate, never 503**) sources `height` and `emission.supply` from **one** compound consensus-lock
@@ -284,7 +298,9 @@ stationary dashboard poll takes no extra consensus lock for it. Its classificati
 *policy*: `"curve"` when the profile schedules the curve at all), `activationHeight`,
 `supplyTarget` (the **peak** — correctly named; the live target is the fragment's `target`),
 `coefficient`, `steps`, `floor`, `genesisSupply` (`null` on an unpinned profile),
-`decimalScaleFactor`, `decay` (008: the eight decay constants — `startHeight`, `epochBlocks`,
+`decimalScaleFactor`, `burnShareNum` / `burnShareDen` (009: the pinned burn share, decimal
+strings, beside the other pinned constants so an independent implementer can reproduce the burn
+rule from this route alone; height-invariant, so the memo key is unaffected), `decay` (008: the eight decay constants — `startHeight`, `epochBlocks`,
 `num`, `den`, `targetFloor`, `epochsToFloor`, `floorArrivalHeight`, `perEpochReductionBound` —
 all decimal strings, so a consumer can reproduce the whole schedule without a second endpoint),
 `sampleHeight` (008: the height the samples were drawn at — named so a consumer never has to

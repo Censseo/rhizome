@@ -31,12 +31,15 @@ public final class HonestBlockMiner {
         long height = engine.height() + 1;
         var b = (BlockImpl) BlockImpl.builder().id((int) height).timestamp(timestamp)
             .difficulty(engine.difficulty()).lastBlockHash(engine.tipHash())
-            .supply(SupplyStamp.next(engine, height, engine.difficulty()))
             .build();
         b.addTransaction(coinbase);
         var tree = new MerkleTree();
         tree.setItems(b.transactions());
         b.merkleRoot(tree.getRootHash());
+        // The stamp dry-run commits BOTH header values the candidate needs — supply (exact,
+        // burn-aware: the pool is only known after execution) and, when an accumulator is
+        // wired, the state root (009 T051). The candidate ships with supply uncommitted and
+        // this call fills it in; a supply-less parent chain stays supply-less (FR-004).
         engine.stampStateRoot(b);
         b.nonce(Miner.mineNonce(b.hash(), b.difficulty(), params.powAlgorithm()));
         return b;

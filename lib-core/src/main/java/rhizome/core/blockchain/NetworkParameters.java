@@ -315,6 +315,28 @@ public final class NetworkParameters {
     @lombok.Builder.Default
     private final long supplyTargetFloor = 0;
 
+    // --- Native coin burn (009-native-coin-burn) ---
+    /**
+     * Burn share numerator {@code βₙ} of the pinned per-network fraction
+     * {@code βₙ/β_d} of a block's eligible fee pool consensus destroys at a curve-active height
+     * (see {@code Burn}): {@code burned = min(⌊pool × βₙ / β_d⌋, debt)}. A pinned consensus
+     * constant like {@link #chainId} — never voted, never environment-configurable. Constraints
+     * are enforced at construction: {@code βₙ >= 0} and, strictly, {@code βₙ < β_d} — a 100 %
+     * share is the empty-block failure mode and is refused as a calibration, not merely advised
+     * against. See {@link #burnShareDen}.
+     */
+    @lombok.Builder.Default
+    private final long burnShareNum = 1L;
+    /**
+     * Burn share denominator {@code β_d}; must be strictly positive with
+     * {@link #burnShareNum} strictly below it. Mainnet ships {@code 1/2}: the miner always keeps
+     * at least half of every fee plus the whole subsidy, which is what makes
+     * "including a transaction is strictly profitable" provable once, for all supplies
+     * (contracts/native-coin-burn.md §5).
+     */
+    @lombok.Builder.Default
+    private final long burnShareDen = 2L;
+
     /**
      * The generated stepped table for {@code (supplyTarget, emissionCoefficient,
      * emissionTableSteps)}, built once at construction time so a degenerate curve configuration
@@ -471,9 +493,10 @@ public final class NetworkParameters {
                       long uncleRewardNum, long uncleRewardDen, long nephewRewardDivisor,
                       long supplyTarget, long emissionCoefficient, int emissionTableSteps,
                       long emissionCurveHeight, long minerRevenueFloor,
-                      long decayStartHeight, long decayEpochBlocks, long decayNum,
-                      long decayDen, long supplyTargetFloor,
-                      EmissionCurve ignoredBuilderEmissionCurve,
+                       long decayStartHeight, long decayEpochBlocks, long decayNum,
+                       long decayDen, long supplyTargetFloor,
+                       long burnShareNum, long burnShareDen,
+                       EmissionCurve ignoredBuilderEmissionCurve,
                       SupplyTargetSchedule ignoredBuilderSupplyTargetSchedule,
                       long boxActivationHeight, int maxBoxSizeBytes, int maxBoxRegisters,
                       long minValuePerByte, long storagePeriodBlocks, long storageFeeFactor,
@@ -551,6 +574,48 @@ public final class NetworkParameters {
             throw new IllegalArgumentException(
                 "supplyTarget must be > genesisSupply when a genesis supply is pinned");
         }
+        // Native coin burn share (009-native-coin-burn, guards G-1..G-3): pinned consensus
+        // constants — never voted, never environment-configurable (data-model.md §5) — so a
+        // profile that cannot state a proper fraction must not start. G-3 is strict on purpose:
+        // at βₙ == β_d a block burns its entire fee pool, so a mined transaction raises the burn
+        // by exactly its own fee and the miner nets nothing for including it — every rational
+        // miner prefers empty blocks and the fee market collapses (the empty-block failure mode).
+        // A share above 100 % would reach into the minted subsidy, which the pool's construction
+        // forbids; both are refused as calibrations, here at startup, never mid-chain.
+        if (burnShareDen <= 0) { // G-1
+            throw new IllegalArgumentException("network '" + networkName
+                + "': burnShareDen must be > 0, was " + burnShareDen
+                + " — the burn share num/den must be a proper fraction");
+        }
+        if (burnShareNum < 0) { // G-2
+            throw new IllegalArgumentException("network '" + networkName
+                + "': burnShareNum must be >= 0, was " + burnShareNum
+                + " — a negative share would mint coin on the burn path");
+        }
+        if (burnShareNum >= burnShareDen) { // G-3
+            throw new IllegalArgumentException("network '" + networkName
+                + "': burnShareNum (" + burnShareNum + ") must be < burnShareDen (" + burnShareDen
+                + ") — a 100 % burn is refused as a calibration: a block would destroy its whole "
+                + "fee pool, an empty block would beat every block that includes transactions, "
+                + "and the burn would reach past the fee pool into minted coin");
+        }
+        // Guard G-4 (009-native-coin-burn, contracts/native-coin-burn.md §3): the coefficient must
+        // not exceed the LOWEST target the schedule can reach — the decay floor when a decay is
+        // scheduled (supplyTargetFloor > 0 exactly when it is; an unscheduled profile holds the
+        // 0 sentinel and its peak IS its floor), else the peak itself. This turns the
+        // `ln(x) <= x − 1` argument into a checked invariant: obligation(h) <= c·ln(x) + 1 and
+        // debt(h) >= S*·(x − 1) + minted, so `c <= S*_floor` together with `minted >= R_min >= 1`
+        // secures `obligation <= debt` at every height — the block's clamp can never be looser
+        // than what the debt permits, so the burn can always be applied in full.
+        long sFloor = supplyTargetFloor > 0 ? supplyTargetFloor : supplyTarget;
+        if (emissionCoefficient > sFloor) {
+            throw new IllegalArgumentException("network '" + networkName
+                + "': emissionCoefficient (" + emissionCoefficient + ") must be <= the lowest "
+                + "supply target (" + sFloor + (supplyTargetFloor > 0 ? ", supplyTargetFloor"
+                    : ", the peak — no decay is scheduled")
+                + ") — this secures obligation <= debt at every height, so a block's burn "
+                + "obligation is always covered by the carried debt it clamps against");
+        }
         // EmissionCurve.build validates supplyTarget/coefficient/steps itself (IllegalArgumentException)
         // and does the O(N) table generation eagerly, right here at construction time — a
         // degenerate curve configuration must fail fast at node startup, never mid-chain on the
@@ -612,6 +677,8 @@ public final class NetworkParameters {
         this.decayNum = decayNum;
         this.decayDen = decayDen;
         this.supplyTargetFloor = supplyTargetFloor;
+        this.burnShareNum = burnShareNum;
+        this.burnShareDen = burnShareDen;
         this.boxActivationHeight = boxActivationHeight;
         this.maxBoxSizeBytes = maxBoxSizeBytes;
         this.maxBoxRegisters = maxBoxRegisters;
@@ -949,6 +1016,11 @@ public final class NetworkParameters {
             .decayNum(799L)
             .decayDen(800L)
             .supplyTargetFloor(1_498_962_290_000L)
+            // Burn share (009-native-coin-burn, T004): 1/2 — the miner keeps the other half of
+            // every fee plus the whole subsidy. Stated explicitly even though it equals the
+            // builder default, so a future retuning of the default cannot silently move mainnet.
+            .burnShareNum(1L)
+            .burnShareDen(2L)
             .build();
     }
 
@@ -1003,6 +1075,12 @@ public final class NetworkParameters {
             .decayNum(0L)
             .decayDen(0L)
             .supplyTargetFloor(0L)
+            // Explicitly restate the burn share (009 T004, WI-9): testnet derives from
+            // cleanMainnet().toBuilder() and would silently inherit any future mainnet retuning.
+            // The curve never activates on this profile, so the share is inert here — stated
+            // anyway so the profile names its own monetary policy.
+            .burnShareNum(1L)
+            .burnShareDen(2L)
             .build();
     }
 
@@ -1065,6 +1143,10 @@ public final class NetworkParameters {
             .decayNum(0L)
             .decayDen(0L)
             .supplyTargetFloor(0L)
+            // Explicitly restate the burn share (009 T004, WI-9): same reasoning as testnet(),
+            // but devnet IS curve-active — the 1/2 share is live here exactly as on mainnet.
+            .burnShareNum(1L)
+            .burnShareDen(2L)
             .build();
     }
 }
