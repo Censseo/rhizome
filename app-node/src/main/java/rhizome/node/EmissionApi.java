@@ -213,7 +213,12 @@ final class EmissionApi {
         if (supplyCommitted && tip.parentSupply() != BlockImpl.SUPPLY_ABSENT) {
             long mintedTip = Issuance.minted(params, height, tip.parentSupply(),
                 tip.tipDifficulty(), tip.tipUncles());
-            burned = Math.max(0, Burn.rederive(tip.parentSupply(), mintedTip, tipSupply));
+            // No clamp: on a validated chain the gates force burned >= 0 (SupplyGate's
+            // inflation direction runs pre-PoW on every accepted block), so a negative figure
+            // here is a loud symptom of an inconsistent store rather than something to paper
+            // over with a zero — and an overflowing identity already throws through
+            // Burn.rederive (checked arithmetic, never a wrap).
+            burned = Burn.rederive(tip.parentSupply(), mintedTip, tipSupply);
         }
         sink.fieldLongAsString(K_BURNED, burned);
         sink.field(K_DECIMAL_SCALE_FACTOR, params.decimalScaleFactor());

@@ -761,7 +761,7 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
             try {
                 ExecutionStatus status = Executor.executeBlock(
                     block, ledger, store::hasTransaction, params, verifier,
-                    contractProcessor, boxProcessor, tokenProcessor, touched, parent.supply());
+                    contractProcessor, boxProcessor, tokenProcessor, touched, parent.supply()).status();
                 if (status != SUCCESS) {
                     return status;
                 }
@@ -1625,17 +1625,16 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
             try {
                 var b = (BlockImpl) candidate;
                 java.util.Set<PublicAddress> touched = new java.util.HashSet<>();
-                long[] burnOut = {0};
-                ExecutionStatus status = Executor.executeBlock(candidate, ledger, store::hasTransaction, params,
-                    verifier, contractProcessor, boxProcessor, tokenProcessor, touched, parentSupply,
-                    burnOut);
-                if (status != SUCCESS) {
+                Executor.BlockOutcome outcome = Executor.executeBlock(candidate, ledger,
+                    store::hasTransaction, params, verifier, contractProcessor, boxProcessor,
+                    tokenProcessor, touched, parentSupply);
+                if (outcome.status() != SUCCESS) {
                     return; // invalid block; leave the header unstamped and let addBlock reject it
                 }
                 long h = b.id();
                 if (supplyNeeded) {
                     long minted = Issuance.minted(params, h, parentSupply, b.difficulty(), b.uncles());
-                    b.supply(Math.subtractExact(Math.addExact(parentSupply, minted), burnOut[0]));
+                    b.supply(Math.subtractExact(Math.addExact(parentSupply, minted), outcome.burned()));
                 }
                 if (rootNeeded) {
                     byte[] root = stateAccumulator.dryApply(collectStateChanges(candidate, touched, h));

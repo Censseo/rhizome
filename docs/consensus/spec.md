@@ -265,6 +265,13 @@ and it is not header-committed either: `burned(h)` is recoverable from two heade
   so the miner's revenue never drops below `R_min` (feature 05's single clamp remains the only
   clamp), and including a fee-paying transaction stays strictly profitable (once the fee clears
   the share's rounding grain).
+- **Miner reserve** — the burn withdrawal runs *after* every transaction, and nothing stops the
+  miner from being the sender of a later in-block one: a miner that sweeps its fee income before
+  the burn site leaves the withdrawal unfunded, and the block is rejected (`BALANCE_TOO_LOW`,
+  fully rolled back — deterministic on every node since the identical body executes, and
+  self-inflicted since the miner authors the block, so no fork and no third-party DoS). A miner
+  that wants its block accepted keeps at least `⌊pool × βₙ/β_d⌋` of the block's fee income
+  unspent, or spends it next block.
 
 Application and reversal are exact inverses at every reorg depth to `maxReorgDepth`. The carried
 debt and the burned amount are published on the emission fragment (A-16); the share constants are
@@ -329,11 +336,18 @@ curve's `τ_blocks` **and the decay schedule** (`decayStartHeight` = 20 years, `
 one quarter) from `desiredBlockTimeSec`, so changing block time forces all three to be revisited.
 
 **Boot-time consistency.** A node's stored tip is checked against the schedule now in force every
-time it boots: if the tip's committed supply no longer equals `parent.supply +
-Issuance.minted(...)` under the current parameters — for example, a data directory minted before
+time it boots, through the same shared `SupplyGate` the add-time and header-sync gates run: if the
+tip's committed supply falls outside the header-only bound `0 ≤ parent.supply + minted(h) −
+tip.supply ≤ debt(h)` under the current parameters — for example, a data directory minted before
 activation, reopened after — the node refuses to start with a message naming the network, the
 activation height, the expected and found supply, and the remedy (recreate the data directory),
-rather than silently extending a chain no fresh peer can sync. Two header reads, no body, no
+rather than silently extending a chain no fresh peer can sync. Wherever no burn is possible
+(`debt = 0`) the bound collapses to the exact equality `tip.supply == parent.supply +
+Issuance.minted(...)` — the pre-burn refusal, unchanged. Above the live target the relaxation is
+deliberate and necessarily best-effort: tail issuance keeps `debt > 0` in the steady state, so a
+burning tip legitimately sits anywhere in `[ceiling − debt, ceiling]` and a schedule change that
+leaves the tip inside that band boots (every *new* block still validates under the parameters now
+in force — the boot check guards operator confusion, not consensus). Two header reads, no body, no
 ledger; skipped, not failed, when the parent header is unavailable (snapshot bootstrap, pruned
 prefix).
 
@@ -459,14 +473,18 @@ profile in ~20 existing suites are unaffected.
   total differs, on every boot path, before any balance is seeded. The check is gated solely by
   the presence of a pin, never by network id — an unpinned profile (testnet/devnet by explicit
   choice) behaves exactly as it did before this check existed.
-- **A stored chain must agree with the schedule now in force.** At boot, the tip's supply
-  accounting identity is re-checked against the current parameters from **two headers only** (no
-  body, no ledger, before the engine's lock is ever taken). A tip minted under a different emission
-  schedule — or a supply-less chain opened under a scheduled curve, which can never begin
-  committing — refuses to start with a message naming the network, the activation height, the
-  expected and found supply, and the remedy. Absence of proof is not proof of fault: an
-  unverifiable tip (parent header pruned or snapshot-bootstrapped) is **skipped, not failed**, and
-  an identity that overflows refuses cleanly rather than surfacing a raw `ArithmeticException`.
+- **A stored chain must agree with the schedule now in force.** At boot, the tip's supply rule
+  is re-checked against the current parameters from **two headers only** (no body, no ledger,
+  before the engine's lock is ever taken) through the same shared `SupplyGate` the add-time gate
+  runs — exact equality wherever `debt = 0`, the burn band above the target (necessarily
+  best-effort there: a burning tip legitimately sits anywhere in `[ceiling − debt, ceiling]`, so
+  the refusal catches only tips outside the band a legal block could have committed). A tip
+  minted under a different emission schedule — or a supply-less chain opened under a scheduled
+  curve, which can never begin committing — refuses to start with a message naming the network,
+  the activation height, the expected and found supply, and the remedy. Absence of proof is not
+  proof of fault: an unverifiable tip (parent header pruned or snapshot-bootstrapped) is
+  **skipped, not failed**, and an identity that overflows refuses cleanly rather than surfacing a
+  raw `ArithmeticException`.
 
 ## Key parameters
 

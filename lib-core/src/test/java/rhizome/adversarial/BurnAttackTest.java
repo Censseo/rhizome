@@ -255,7 +255,7 @@ class BurnAttackTest {
         gasLedger.deposit(gasChain.sender(), new TransactionAmount(50_000_000L));
         assertEquals(ExecutionStatus.SUCCESS,
             rhizome.core.blockchain.Executor.executeBlock(gas, gasLedger, h -> false,
-                gasChain.engine().params(), null, gasReporter, null, null, null, gasParent),
+                gasChain.engine().params(), null, gasReporter, null, null, null, gasParent).status(),
             "the gas-routed block must apply: its gas fee IS in the pool");
         assertEquals(feeBurned, gasBurned,
             "the same flow burns the same amount whichever pipe carried it");

@@ -234,7 +234,7 @@ class LedgerReversalExactnessTest {
         tokens.begin();
         assertEquals(ExecutionStatus.SUCCESS,
             Executor.executeBlock(b, ledger, (SHA256Hash h) -> false, curveParams, null, null, boxes, tokens,
-                null, parentSupply),
+                null, parentSupply).status(),
             what + ": the block must apply, or the reversal is not what is under test");
         boxes.commit(b.id());
         tokens.commit(b.id());
@@ -332,7 +332,7 @@ class LedgerReversalExactnessTest {
         tokens.begin();
         assertEquals(ExecutionStatus.SUCCESS,
             Executor.executeBlock(b, ledger, (SHA256Hash h) -> false, curveParams, null, null, boxes, tokens,
-                null, parentSupply),
+                null, parentSupply).status(),
             "the block must apply for its paid uncle/nephew amounts to be observable");
         boxes.commit(b.id());
         tokens.commit(b.id());
@@ -371,7 +371,7 @@ class LedgerReversalExactnessTest {
         tokens.begin();
         assertEquals(ExecutionStatus.SUCCESS,
             Executor.executeBlock(b, ledger, (SHA256Hash h) -> false, curveParams, null, null, boxes, tokens,
-                null, parentSupply),
+                null, parentSupply).status(),
             "the block must apply for its paid uncle/nephew amounts to be observable");
         boxes.commit(b.id());
         tokens.commit(b.id());
@@ -414,7 +414,7 @@ class LedgerReversalExactnessTest {
         tokens.begin();
         assertEquals(ExecutionStatus.SUCCESS,
             Executor.executeBlock(b, ledger, (SHA256Hash h) -> false, curveParams, null, null, boxes, tokens,
-                null, parentSupply),
+                null, parentSupply).status(),
             "a valid block may legitimately carry a floored coinbase");
         boxes.commit(b.id());
         tokens.commit(b.id());
@@ -468,7 +468,7 @@ class LedgerReversalExactnessTest {
         tokens.begin();
         assertEquals(ExecutionStatus.SUCCESS,
             Executor.executeBlock(amountCheckBlock, ledger, (SHA256Hash h) -> false, curveParams, null, null,
-                boxes, tokens, null, parentSupply),
+                boxes, tokens, null, parentSupply).status(),
             "the block must apply for its paid uncle/nephew amounts to be observable");
         boxes.commit(amountCheckBlock.id());
         tokens.commit(amountCheckBlock.id());
@@ -538,7 +538,7 @@ class LedgerReversalExactnessTest {
         tokens.begin();
         assertEquals(ExecutionStatus.SUCCESS,
             Executor.executeBlock(b, ledger, (SHA256Hash h) -> false, curveParams, null, null,
-                boxes, tokens, null, parentSupply),
+                boxes, tokens, null, parentSupply).status(),
             "the burning block must apply, or the reversal is not what is under test");
         boxes.commit(b.id());
         tokens.commit(b.id());

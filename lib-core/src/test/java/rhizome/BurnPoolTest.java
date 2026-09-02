@@ -209,12 +209,18 @@ class BurnPoolTest {
             Burn.debt(params, height, PARENT_SUPPLY, minted));
         BlockImpl b = stampedBlock(txs, uncles, minted, expectedBurned);
         ExecutionStatus status = Executor.executeBlock(b, ledger, hash -> false, params, null,
-            contracts, boxes, tokens, touched, PARENT_SUPPLY);
+            contracts, boxes, tokens, touched, PARENT_SUPPLY).status();
         return new Run(status, ledger, touched);
     }
 
     private BlockImpl stampedBlock(List<Transaction> txs, List<UncleRef> uncles, long minted,
                                    long burned) {
+        return stampedBlock(txs, uncles, minted, burned, miner);
+    }
+
+    /** As above, paying the coinbase to {@code coinbaseTo} — the miner the burn withdraws from. */
+    private BlockImpl stampedBlock(List<Transaction> txs, List<UncleRef> uncles, long minted,
+                                   long burned, PublicAddress coinbaseTo) {
         var b = (BlockImpl) BlockImpl.builder()
             .id((int) height)
             .timestamp(clock.addAndGet(5_000L))
@@ -223,7 +229,7 @@ class BurnPoolTest {
             .uncles(new java.util.ArrayList<>(uncles))
             .supply(PARENT_SUPPLY + minted - burned)
             .build();
-        b.addTransaction(Transaction.of(miner,
+        b.addTransaction(Transaction.of(coinbaseTo,
             new TransactionAmount(params.miningReward(height, PARENT_SUPPLY))));
         txs.forEach(b::addTransaction);
         var tree = new MerkleTree();
@@ -317,7 +323,7 @@ class BurnPoolTest {
             }
         };
         assertEquals(ExecutionStatus.SUCCESS, Executor.executeBlock(payout, payoutLedger,
-            hash -> false, params, null, paying, NO_BOX, null, touched, PARENT_SUPPLY),
+            hash -> false, params, null, paying, NO_BOX, null, touched, PARENT_SUPPLY).status(),
             "the gas fee is pooled; the native payout is not");
         assertEquals(4_321, payoutLedger.getWalletValue(payoutTarget).amount(),
             "the payout reached its recipient untouched by the burn");
@@ -413,7 +419,7 @@ class BurnPoolTest {
                         int window) {
                     return new ScanPage(List.of(), null);
                 }
-            }, null, touched, PARENT_SUPPLY));
+            }, null, touched, PARENT_SUPPLY).status());
 
         // Every address is exactly its flows — the soft-reverted SPEND's fee included (P-3).
         assertEquals(before - (100 + 40 + 60 + 800), ledger.getWalletValue(sender).amount(),
@@ -434,5 +440,48 @@ class BurnPoolTest {
         // burn through a burn address or sentinel wallet would show up here as a third entry.
         assertEquals(Set.of(sender, miner), touched,
             "no ledger entry and therefore no state-root record represents the destroyed coin");
+    }
+
+    @Test
+    void aMinerWhoSpendsItsPoolIncomeBeforeTheBurnSiteIsRejected() {
+        // The burn withdrawal runs AFTER every transaction, and nothing stops the miner from
+        // being the SENDER of a later in-block transaction: a wallet that sweeps its fee income
+        // in the same block spends the very balance the burn is about to withdraw. There is no
+        // underflow invariant at the site — the miner's balance at burn time is simply whatever
+        // the miner left — so the ledger's checked withdrawal throws and the executor's
+        // transactionality rejects the whole block BALANCE_TOO_LOW: deterministic on every node
+        // (the identical body executes) and self-inflicted (the miner authored it), so no fork
+        // and no third-party DoS. This pins the miner rule: keep at least ⌊pool × βₙ/β_d⌋ of the
+        // block's fee income unspent, or spend it next block.
+        var minerPair = generateKeyPairTyped();
+        PublicAddress spendingMiner = PublicAddress.of(minerPair.publicKey());
+        long fee = 100_000L;
+        // The sweep: the miner sends its whole pool income onward at zero fee (testnet has no
+        // fee floor), so its balance at the burn site is the coinbase alone — far below the burn.
+        Transaction sweep = Transaction.of(spendingMiner, recipient,
+            new TransactionAmount(fee), minerPair.publicKey(), new TransactionAmount(0),
+            clock.get(), params.chainId(), 0);
+        sweep.sign(minerPair.privateKey());
+
+        InMemoryLedger ledger = new InMemoryLedger();
+        ledger.createWallet(sender);
+        ledger.deposit(sender, new TransactionAmount(50_000_000L));
+        long coinbase = params.miningReward(height, PARENT_SUPPLY);
+        long minted = coinbase; // no uncles
+        long burned = fee / 2; // the flow-limited share; the debt never binds this far above S*
+        assertTrue(burned > coinbase,
+            "sanity: the burn must exceed what the swept miner holds at the burn site");
+        BlockImpl b = stampedBlock(List.of(transfer(fee, 0), sweep), List.of(), minted, burned,
+            spendingMiner);
+
+        Set<PublicAddress> touched = new LinkedHashSet<>();
+        ExecutionStatus status = Executor.executeBlock(b, ledger, hash -> false, params, null,
+            contractReturning(0, true), NO_BOX, null, touched, PARENT_SUPPLY).status();
+        assertEquals(ExecutionStatus.BALANCE_TOO_LOW, status,
+            "the burn cannot be funded from coin the miner already spent");
+        assertEquals(50_000_000L, ledger.getWalletValue(sender).amount(),
+            "the rejection rolled the fee withdrawal back exactly");
+        assertEquals(0L, ledger.balanceOrZero(spendingMiner),
+            "the rejection rolled the fee credit and the sweep back exactly");
     }
 }

@@ -99,8 +99,10 @@ class E2EBurnTest {
             Assertions.assertTrue(captured >= 3,
                 "sanity: the chain must have mined through the crossing");
 
-            // The fragment at the captured view: burned a real figure, burnDebt a non-negative
-            // stock (the curve governs, so it is never null on this profile).
+            // The LIVE fragment — the producer keeps running, so the tip may already be past
+            // `captured` (both assertions below hold for any post-crossing tip): burned a real
+            // figure, burnDebt a non-negative stock (the curve governs, so it is never null on
+            // this profile).
             JSONObject emission = emissionOf(source);
             long burned = Long.parseLong(emission.getString("burned"));
             long burnDebt = Long.parseLong(emission.getString("burnDebt"));
