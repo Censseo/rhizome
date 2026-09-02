@@ -26,7 +26,13 @@ import static rhizome.node.ApiResponses.json;
  * <p>008: {@code target} is the <b>live</b> {@code S*(h)} for the next block, not the peak —
  * a consumer that keeps reading {@code target} must get the number that actually governs the
  * next block, so the peak is what moved to the new {@code peakTarget} name (contracts/
- * emission-api.md §1). {@code distanceToTarget} and {@code progressBps} are computed against the
+ * emission-api.md §1).
+ *
+ * <p>009-native-coin-burn: {@code burned} is repointed to the tip block's destroyed amount
+ * (recovered from two headers; deliberately not a cumulative counter — none is derivable) and
+ * {@code burnDebt} is added as the next block's carried stock, both decimal strings with
+ * absence-as-null; the pinned share constants join {@code GET /emission} (contracts/
+ * emission-fragment.md §1). {@code distanceToTarget} and {@code progressBps} are computed against the
  * live target and may be negative / exceed 10 000 respectively; {@code obligation} publishes the
  * block's derived burn obligation — never a cumulative figure (research.md Decision 4).
  *

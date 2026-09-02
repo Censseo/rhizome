@@ -142,6 +142,10 @@ class BurnMinerRevenueFloorTest {
                     // And the whole-carried-debt extreme: even a debt far larger than any
                     // reachable pool leaves the subsidy untouched and the flow at least half kept.
                     assertTrue(Burn.burned(p, h, pool, Long.MAX_VALUE / 4) <= pool);
+                    // The share itself never exceeds its pool, over the WHOLE sweep (review
+                    // T081: replaces a single-point spot check).
+                    assertTrue(Burn.applyShare(p, pool) <= pool,
+                        "applyShare(" + pool + ") exceeded the pool at height " + h);
                 }
                 // The share itself never exceeds the pool, at 1/2 by one integer division.
                 if (sStar > 0) {
