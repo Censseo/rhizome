@@ -52,11 +52,26 @@ public final class SupplyGate {
      * The supply rule for a block at {@code height} committing {@code blockSupply} on top of a
      * parent committing {@code parentSupply}.
      *
-     * <p><b>At this stage (T013) the rule is exact equality</b> — {@code blockSupply ==
-     * parentSupply + Issuance.minted(...)} — byte-for-byte the behaviour the three duplicated
-     * gates enforced before this class existed. The burn bound that replaces the equality where
-     * a burn is possible arrives with the burn itself (T031), so this refactor is
-     * behaviour-preserving and any regression here is unambiguous.
+     * <p><b>The rule (T031, FR-015): the bound</b> {@code 0 <= burned <= debt(h)}, where
+     * {@code burned = parentSupply + minted(h) − blockSupply} is what the block is claiming to
+     * have destroyed and {@code debt(h)} is the carried excess {@link Burn#debt} computes. Two
+     * properties carry the design:
+     *
+     * <ul>
+     *   <li><b>The inflation direction is unchanged</b> (S-4): {@code burned >= 0} is exactly
+     *       today's {@code blockSupply <= parentSupply + minted(h)} — no block can over-mint
+     *       past this gate, still before PoW.</li>
+     *   <li><b>The bound collapses to exact equality wherever no burn is possible</b> (S-3):
+     *       {@code debt(h) == 0} at every pre-activation height, on every profile that never
+     *       schedules the curve, and at every curve-active height at or below the live target —
+     *       and there {@code 0 <= burned <= 0} forces {@code blockSupply == ceiling}, byte for
+     *       byte the pre-feature rule.</li>
+     * </ul>
+     *
+     * <p>Only where a burn is actually possible does the equality relax into the bound — the
+     * exact figure is enforced post-execution in {@code Executor} (the pool is not known before
+     * the block runs), mirroring the {@code stateRoot} precedent. This relaxation is the one
+     * documented deviation in the feature's Complexity Tracking.
      *
      * @param params           network parameters (the reward schedule)
      * @param height           the block's height
@@ -83,13 +98,14 @@ public final class SupplyGate {
         } catch (ArithmeticException overflow) {
             return Verdict.OVERFLOW;
         }
-        long expected;
+        long burned;
         try {
-            expected = Math.addExact(parentSupply, minted);
+            long ceiling = Math.addExact(parentSupply, minted);
+            burned = Math.subtractExact(ceiling, blockSupply);
         } catch (ArithmeticException overflow) {
             return Verdict.OVERFLOW;
         }
-        // T013: the pre-burn rule, verbatim — exact equality.
-        return blockSupply == expected ? Verdict.OK : Verdict.OUT_OF_BOUND;
+        long debt = Burn.debt(params, height, parentSupply, minted);
+        return burned >= 0 && burned <= debt ? Verdict.OK : Verdict.OUT_OF_BOUND;
     }
 }

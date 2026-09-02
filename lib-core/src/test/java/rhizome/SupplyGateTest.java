@@ -17,6 +17,7 @@ import rhizome.core.blockchain.ChainEngine;
 import rhizome.core.blockchain.GenesisBlock;
 import rhizome.core.blockchain.HeaderChain;
 import rhizome.core.blockchain.InMemoryChainStore;
+import rhizome.core.blockchain.Issuance;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
 import rhizome.core.blockchain.SupplyGate;
@@ -187,5 +188,123 @@ class SupplyGateTest {
         // rejection verdict, never a wrapped comparison.
         assertEquals(Verdict.OVERFLOW,
             SupplyGate.check(params, 2, Long.MAX_VALUE, Long.MAX_VALUE, difficulty, List.of()));
+    }
+
+    @Test
+    void theBoundCollapsesToExactEqualityWhereNoBurnIsPossible() {
+        // SC-006 / S-3: wherever debt(h) == 0 the bound `0 <= burned <= debt` admits exactly one
+        // supply — the exact pre-burn value — so today's rule survives verbatim in every regime
+        // where nothing can burn: pre-activation heights, profiles that never schedule the
+        // curve, and curve-active heights at or below the live target.
+        //
+        // (a) A profile that never schedules the curve.
+        long geometric = params.miningReward(2);
+        int difficulty = params.genesisDifficulty();
+        assertEquals(Verdict.OK, SupplyGate.check(params, 2, 0, geometric, difficulty, List.of()));
+        assertEquals(Verdict.OUT_OF_BOUND,
+            SupplyGate.check(params, 2, 0, geometric + 1, difficulty, List.of()));
+        assertEquals(Verdict.OUT_OF_BOUND,
+            SupplyGate.check(params, 2, 0, geometric - 1, difficulty, List.of()));
+
+        // (b) A curve-active profile, parent supply at or below the live target: debt 0.
+        NetworkParameters active = rhizome.core.blockchain.CurveActiveNetwork.curveActiveTestnet();
+        long belowTarget = 500_000L;
+        long minted = Issuance.minted(active, 2, belowTarget, difficulty, List.of());
+        assertEquals(0, rhizome.core.blockchain.Burn.debt(active, 2, belowTarget, minted),
+            "sanity: at/below the live target nothing is owed");
+        assertEquals(Verdict.OK,
+            SupplyGate.check(active, 2, belowTarget, belowTarget + minted, difficulty, List.of()),
+            "the exact pre-burn supply is the ONLY accepted value where debt == 0");
+        assertEquals(Verdict.OUT_OF_BOUND,
+            SupplyGate.check(active, 2, belowTarget, belowTarget + minted + 1, difficulty, List.of()));
+        assertEquals(Verdict.OUT_OF_BOUND,
+            SupplyGate.check(active, 2, belowTarget, belowTarget + minted - 1, difficulty, List.of()));
+    }
+
+    @Test
+    void aTipThatBurnedBootsWhileATipMintedUnderOtherConstantsRefuses() {
+        // FR-033 / SC-010: the boot check (rule 6) shares the bound, so a tip that legitimately
+        // burned BOOTS — the brick-every-burning-node defect cannot exist — while a tip minted
+        // under a DIFFERENT reward schedule still refuses, exactly as before: the relaxation
+        // must not open the boot door to schedule mismatches.
+        //
+        // (a) A burning tip boots.
+        NetworkParameters active = rhizome.core.blockchain.CurveActiveNetwork.curveActiveTestnet();
+        PublicAddress burningMiner = PublicAddress.random();
+        InMemoryLedger ledgerA = new InMemoryLedger();
+        InMemoryChainStore storeA = new InMemoryChainStore();
+        AtomicLong clockA = new AtomicLong(1_000_000L);
+        LedgerSnapshot snapshot = new LedgerSnapshot("t", 0, active.chainId());
+        var pair = rhizome.crypto.Crypto.generateKeyPairTyped();
+        PublicAddress sender = PublicAddress.of(pair.publicKey());
+        snapshot.put(sender, new TransactionAmount(20_000_000L));
+        ChainEngine engineA = ChainEngine.boot(active, TestNodeStores.mixing(ledgerA, storeA), snapshot)
+            .clock(clockA::get)
+            .build();
+        long parent = engineA.headerAt(1).supply();
+        long minted = active.miningReward(2, parent);
+        long debt = rhizome.core.blockchain.Burn.debt(active, 2, parent, minted);
+        assertTrue(debt > 0, "sanity: the fixture sits above the live target");
+        // One real fee so the pool is live: burned = min(⌊pool/2⌋, debt) = 10_000 — inside the
+        // bound, far below the debt cap, which is the common case an honestly-burning tip is in.
+        long fee = 20_000;
+        long burned = fee / 2;
+        var b = (BlockImpl) BlockImpl.builder()
+            .id(2)
+            .timestamp(clockA.addAndGet(active.desiredBlockTimeSec() * 1000L))
+            .difficulty(engineA.difficulty())
+            .lastBlockHash(engineA.tipHash())
+            .supply(parent + minted - burned)
+            .build();
+        b.addTransaction(Transaction.of(burningMiner, new TransactionAmount(minted)));
+        Transaction feeTx = Transaction.of(sender, PublicAddress.random(), new TransactionAmount(0),
+            pair.publicKey(), new TransactionAmount(fee), clockA.get(), active.chainId(), 0);
+        feeTx.sign(pair.privateKey());
+        b.addTransaction(feeTx);
+        var tree = new MerkleTree();
+        tree.setItems(b.transactions());
+        b.merkleRoot(tree.getRootHash());
+        b.nonce(Miner.mineNonce(b.hash(), b.difficulty(), active.powAlgorithm()));
+        assertEquals(ExecutionStatus.SUCCESS, engineA.addBlock(b),
+            "the burning block must be accepted by the engine first");
+        assertTrue(engineA.headerAt(2).supply() < parent + minted,
+            "sanity: the tip really burned");
+
+        // Reboot over the same store: rule 6 now enforces the BOUND — the burned tip is inside
+        // it, so the node boots. Under the old exact-equality rule 6 this boot REFUSED, which
+        // is precisely the defect the bound exists to remove.
+        ChainEngine reboot = ChainEngine.boot(active, TestNodeStores.mixing(new InMemoryLedger(), storeA),
+                snapshot)
+            .clock(clockA::get)
+            .build();
+        assertEquals(parent + minted - burned, reboot.headerAt(2).supply(),
+            "the burned tip boots and reads back exactly what it committed");
+
+        // (b) A tip minted under other constants refuses. Mine one honest geometric block, then
+        // boot the same store under a halved reward schedule: the tip now over-commits relative
+        // to the constants in force (burned would be NEGATIVE), and the refusal fires.
+        InMemoryLedger ledgerB = new InMemoryLedger();
+        InMemoryChainStore storeB = new InMemoryChainStore();
+        LedgerSnapshot snapshotB = new LedgerSnapshot("t", 0, params.chainId());
+        ChainEngine engineB = ChainEngine.boot(params, TestNodeStores.mixing(ledgerB, storeB), snapshotB)
+            .clock(clockA::get)
+            .build();
+        long honest = params.miningReward(2);
+        Block honestBlock = mineOnto(params, 2, engineB.tipHash(), engineB.difficulty(),
+            clockA.addAndGet(params.desiredBlockTimeSec() * 1000L), miner, honest);
+        assertEquals(ExecutionStatus.SUCCESS, engineB.addBlock(honestBlock));
+
+        NetworkParameters otherSchedule = params.toBuilder()
+            .initialReward(params.initialReward() / 2)
+            .build();
+        long expectedUnderOtherSchedule = otherSchedule.miningReward(2); // genesis supply 0, no uncles
+        IllegalStateException refused = assertThrows(IllegalStateException.class,
+            () -> ChainEngine.boot(otherSchedule, TestNodeStores.mixing(new InMemoryLedger(), storeB),
+                    snapshotB)
+                .clock(clockA::get)
+                .build());
+        assertTrue(refused.getMessage().contains("expected supply " + expectedUnderOtherSchedule),
+            "the schedule-mismatch refusal keeps its expected/found message: "
+                + refused.getMessage());
     }
 }
