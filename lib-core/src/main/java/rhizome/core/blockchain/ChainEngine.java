@@ -439,11 +439,16 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
                     "the stored tip broke supply prefix-closure — recreate the data directory "
                         + "under the current network parameters"));
             }
-            long expected;
-            try {
-                expected = Math.addExact(parentSupply,
-                    Issuance.minted(params, tipHeight, parentSupply, tip.difficulty(), tip.uncles()));
-            } catch (ArithmeticException overflow) {
+            // Rule 6 is the ONE supply rule (SupplyGate, 009-native-coin-burn: OI-4's collapse) —
+            // the same verdict the addBlock gate and header sync enforce. The boot-refusal
+            // message below is preserved verbatim: network, both height-gated emission
+            // constants, expected, found, remedy.
+            SupplyGate.Verdict verdict = SupplyGate.check(params, tipHeight, parentSupply,
+                tipSupply, tip.difficulty(), tip.uncles());
+            if (verdict == SupplyGate.Verdict.OK) {
+                return; // Rule 7: PASS.
+            }
+            if (verdict == SupplyGate.Verdict.OVERFLOW) {
                 // Mirrors checkSupply's own guard: an overflowing identity can never be satisfied
                 // by any legal long, so it is rejected rather than crashing boot (FR-014 -- checked
                 // arithmetic never wraps, and a boot refusal must never surface a raw stack trace).
@@ -452,14 +457,13 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
                     "the stored tip cannot be verified against the emission schedule now in force "
                         + "— recreate the data directory under the current network parameters"));
             }
-            if (tipSupply != expected) { // Rule 6.
-                throw new IllegalStateException(bootRefusalMessage(params, tipHeight,
-                    "expected supply " + expected + ", found " + tipSupply,
-                    "the stored tip was minted under a different emission schedule than the one "
-                        + "now in force — recreate the data directory under the current network "
-                        + "parameters"));
-            }
-            // Rule 7: PASS.
+            long expected = Math.addExact(parentSupply,
+                Issuance.minted(params, tipHeight, parentSupply, tip.difficulty(), tip.uncles()));
+            throw new IllegalStateException(bootRefusalMessage(params, tipHeight,
+                "expected supply " + expected + ", found " + tipSupply,
+                "the stored tip was minted under a different emission schedule than the one "
+                    + "now in force — recreate the data directory under the current network "
+                    + "parameters"));
         }
 
         /** Consensus quantities and the network name only — no data-directory path, no stack
@@ -1776,37 +1780,15 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
      * exact. Reads {@code parent} ONLY -- never ledger state -- so it stays in the cheap
      * structural pass, before merkle/nonces/PoW.
      *
-     * <ul>
-     *   <li>Parent supply-less (FR-004 prefix closure): the block must ALSO be supply-less --
-     *       a mid-chain start is rejected exactly like a dropped commitment.</li>
-     *   <li>Parent committed: the block MUST commit too, and must equal EXACTLY
-     *       {@code parent.supply + Issuance.minted(this block)} (FR-003), the single formula
-     *       shared with {@link HeaderChain} and {@link BlockAssembler} (FR-007).</li>
-     * </ul>
-     *
-     * <p>The accounting sum uses {@link Math#addExact}: an overflowing identity can never be
-     * satisfied by any legal {@code long}, so it is rejected rather than crashing {@link #addBlock}
-     * (FR-014 -- checked arithmetic never wraps).
+     * <p>The rule itself lives in {@link SupplyGate} — the ONE copy (009-native-coin-burn:
+     * registry OI-4's three byte-for-byte duplicates collapse onto it, and the burn feature
+     * changes the rule in that one place). This caller only maps the neutral verdict to its own
+     * failure surface, {@link ExecutionStatus#INVALID_SUPPLY}.
      */
     private ExecutionStatus checkSupply(Block b, BlockHeader parent) {
-        long parentSupply = parent.supply();
-        long blockSupply = b.supply();
-        if (parentSupply == BlockImpl.SUPPLY_ABSENT) {
-            return blockSupply == BlockImpl.SUPPLY_ABSENT ? SUCCESS : INVALID_SUPPLY;
-        }
-        if (blockSupply < 0) {
-            // Parent committed: dropping the commitment (or any value below the absent sentinel,
-            // which decode-time bounds already reject on every wire ingress path) is invalid too.
-            return INVALID_SUPPLY;
-        }
-        long expected;
-        try {
-            expected = Math.addExact(parentSupply,
-                Issuance.minted(params, b.id(), parentSupply, b.difficulty(), b.uncles()));
-        } catch (ArithmeticException overflow) {
-            return INVALID_SUPPLY;
-        }
-        return blockSupply == expected ? SUCCESS : INVALID_SUPPLY;
+        SupplyGate.Verdict verdict = SupplyGate.check(params, b.id(), parent.supply(),
+            b.supply(), b.difficulty(), b.uncles());
+        return verdict == SupplyGate.Verdict.OK ? SUCCESS : INVALID_SUPPLY;
     }
 
     // ---- account nonces ----
