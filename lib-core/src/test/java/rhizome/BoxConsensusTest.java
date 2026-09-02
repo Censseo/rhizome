@@ -185,6 +185,7 @@ class BoxConsensusTest {
         assertTrue(hasCollect, "assembler should mint a rent collection for the expired box");
 
         var b = (BlockImpl) candidate;
+        engine.stampStateRoot(b); // producer order: assemble -> dry-run stamp (exact supply) -> mine
         b.nonce(Miner.mineNonce(b.hash(), b.difficulty(), params.powAlgorithm()));
         assertEquals(ExecutionStatus.SUCCESS, engine.addBlock(b));
 

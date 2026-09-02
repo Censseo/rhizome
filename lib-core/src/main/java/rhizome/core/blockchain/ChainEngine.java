@@ -1565,20 +1565,33 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
     }
 
     /**
-     * Stamps {@code candidate}'s {@code stateRoot} with the root it would produce, so the
-     * producer can mine a header that commits it. Tentatively applies the block to compute
-     * the root, then rolls the application back — the block is re-applied for real when
-     * submitted through {@link #addBlock}. A no-op when the accumulator is off.
+     * Stamps {@code candidate}'s <b>committed supply and state root</b> from one dry-run
+     * execution, so the producer can mine a header that commits both (009 T051, FR-037: both
+     * committed values provably describe the same execution of the same candidate — they cannot
+     * drift because neither is computed anywhere else). Tentatively applies the block to execute
+     * it, reads the burn the execution performed, stamps
+     * {@code supply = parent.supply + minted - burned}, folds the state changes into the
+     * accumulator, then rolls the application back — the block is re-applied for real when
+     * submitted through {@link #addBlock}. Producer order: assemble → dry-run → stamp → mine.
+     *
+     * <p>A no-op when there is nothing to stamp: a supply-less parent (legacy all-absent chain)
+     * keeps the candidate supply-less too (FR-004 prefix closure), and an absent accumulator
+     * skips the root (the supply stamp still runs — committing chains need it, and the exact
+     * value now requires executing the block).
      */
     public void stampStateRoot(Block candidate) {
-        if (stateAccumulator == null) {
-            return;
-        }
         lock.lock();
         try {
             // A reorg window is open: the chain sits truncated at a fork height, so stamping a
             // candidate on it is wasted work whose block addBlock would refuse anyway. Skip.
             if (reorgWindowOpen.get()) {
+                return;
+            }
+            long parentSupply = store.headerAt(store.height()).supply();
+            boolean supplyNeeded = parentSupply != BlockImpl.SUPPLY_ABSENT
+                && ((BlockImpl) candidate).supply() == BlockImpl.SUPPLY_ABSENT;
+            boolean rootNeeded = stateAccumulator != null;
+            if (!supplyNeeded && !rootNeeded) {
                 return;
             }
             // Stage this dry-run's ledger writes in the overlay so they never touch the column
@@ -1597,16 +1610,24 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
             try {
                 var b = (BlockImpl) candidate;
                 java.util.Set<PublicAddress> touched = new java.util.HashSet<>();
-                long parentSupply = store.headerAt(store.height()).supply();
+                long[] burnOut = {0};
                 ExecutionStatus status = Executor.executeBlock(candidate, ledger, store::hasTransaction, params,
-                    verifier, contractProcessor, boxProcessor, tokenProcessor, touched, parentSupply);
+                    verifier, contractProcessor, boxProcessor, tokenProcessor, touched, parentSupply,
+                    burnOut);
                 if (status != SUCCESS) {
-                    return; // invalid block; leave the state root empty and let addBlock reject it
+                    return; // invalid block; leave the header unstamped and let addBlock reject it
                 }
                 long h = b.id();
-                byte[] root = stateAccumulator.dryApply(collectStateChanges(candidate, touched, h));
-                b.stateRoot(SHA256Hash.of(root));
-                Executor.rollbackBlock(candidate, ledger, contractProcessor, boxProcessor, h, params);
+                if (supplyNeeded) {
+                    long minted = Issuance.minted(params, h, parentSupply, b.difficulty(), b.uncles());
+                    b.supply(Math.subtractExact(Math.addExact(parentSupply, minted), burnOut[0]));
+                }
+                if (rootNeeded) {
+                    byte[] root = stateAccumulator.dryApply(collectStateChanges(candidate, touched, h));
+                    b.stateRoot(SHA256Hash.of(root));
+                }
+                Executor.rollbackBlock(candidate, ledger, contractProcessor, boxProcessor, h, params,
+                    parentSupply);
                 revertStateDomains(h);
             } finally {
                 store.discardBlockCommit(); // drop the dry-run's staged ledger writes

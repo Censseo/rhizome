@@ -30,6 +30,7 @@ import rhizome.core.ledger.LedgerSnapshot;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.mempool.ExecutionStatus;
 import rhizome.core.mempool.MemPool;
+import rhizome.core.blockchain.SupplyStamp;
 import rhizome.core.merkletree.MerkleTree;
 import rhizome.core.transaction.Transaction;
 import rhizome.core.transaction.TransactionAmount;
@@ -67,9 +68,23 @@ class EmissionActivationGateTest {
      *  from the supply-identity check (mirrors {@code MinerRevenueFloorAttackTest#coinbaseBlock}). */
     private static BlockImpl candidateWithReward(NetworkParameters params, ChainEngine engine,
             AtomicLong clock, PublicAddress miner, long reward) {
+        // Built by hand (not via HonestBlockMiner) deliberately: the stamp dry-run would refuse
+        // the wrong-reward coinbase and leave the supply uncommitted, so the gate would report
+        // INVALID_SUPPLY before the executor could report the INCORRECT_MINING_FEE this test
+        // exists to pin. The supply here is the honest ceiling for the height; ONLY the coinbase
+        // is wrong-rule.
         long height = engine.height() + 1;
         long ts = clock.addAndGet(params.desiredBlockTimeSec() * 1000L);
-        return HonestBlockMiner.mineNext(params, engine, ts, coinbaseTx(miner, reward, ts));
+        var b = (BlockImpl) BlockImpl.builder().id((int) height).timestamp(ts)
+            .difficulty(engine.difficulty()).lastBlockHash(engine.tipHash())
+            .supply(SupplyStamp.next(engine, height, engine.difficulty()))
+            .build();
+        b.addTransaction(coinbaseTx(miner, reward, ts));
+        var tree = new MerkleTree();
+        tree.setItems(b.transactions());
+        b.merkleRoot(tree.getRootHash());
+        b.nonce(Miner.mineNonce(b.hash(), b.difficulty(), params.powAlgorithm()));
+        return b;
     }
 
     /** A coinbase-shaped transaction with an explicit, deterministic timestamp — {@code Transaction.of(to, amount)}
@@ -345,6 +360,7 @@ class EmissionActivationGateTest {
                 + "by the height being built for -- not the confirmed tip");
 
         var b = (BlockImpl) candidate;
+        engine.stampStateRoot(b); // producer order: assemble -> dry-run stamp (exact supply) -> mine
         b.nonce(Miner.mineNonce(b.hash(), b.difficulty(), PARAMS.powAlgorithm()));
         assertEquals(ExecutionStatus.SUCCESS, engine.addBlock(b),
             "the mined candidate must be accepted");

@@ -80,8 +80,9 @@ public final class BlockProducer {
         Block candidate = BlockAssembler.assemble(engine, mempool, miner, nowMillis.getAsLong());
         var block = (BlockImpl) candidate;
         block.vote(vote); // the miner's parameter vote (ABSTAIN by default)
-        // Commit the authenticated state root this block produces (no-op if the accumulator
-        // is off) before solving the PoW, so the header hash binds it.
+        // The stamp dry-run commits BOTH header values — the exact (burn-aware) supply and, when
+        // the accumulator is on, the state root — from one execution of this candidate, before
+        // the PoW binds them into the header hash (009 T051: assemble -> dry-run -> stamp -> mine).
         engine.stampStateRoot(block);
         block.nonce(Miner.mineNonce(block.hash(), block.difficulty(), engine.params().powAlgorithm(),
             engine.params().powCostsAt(engine.height() + 1)));

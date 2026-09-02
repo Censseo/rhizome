@@ -161,6 +161,28 @@ public final class Executor {
                                                TokenProcessor tokenProcessor,
                                                Set<PublicAddress> touchedLedger,
                                                long parentSupply) {
+        return executeBlock(block, ledger, alreadyExecuted, params, verifier,
+            processor, boxProcessor, tokenProcessor, touchedLedger, parentSupply, null);
+    }
+
+    /**
+     * As above, additionally reporting the burn the block actually performed through
+     * {@code burnOut[0]} (when non-null) — the producer's dry run uses it to stamp the exact
+     * committed supply ({@code parent + minted - burned}) from the ONE execution it already
+     * performs (009 T051, FR-037). The value is the same {@code min(share, debt)} quantity the
+     * executor withdrew from the miner; the pool is execution-dependent, so there is no other
+     * way to learn it without a second execution.
+     */
+    public static ExecutionStatus executeBlock(Block block, Ledger ledger,
+                                               Predicate<SHA256Hash> alreadyExecuted,
+                                               NetworkParameters params,
+                                               SignatureVerifier verifier,
+                                               ContractProcessor processor,
+                                               BoxProcessor boxProcessor,
+                                               TokenProcessor tokenProcessor,
+                                               Set<PublicAddress> touchedLedger,
+                                               long parentSupply,
+                                               long[] burnOut) {
         // A null processor means "this node has no such domain". Normalize here so the body below
         // talks to a processor rather than guarding against a null one; absence is then expressed
         // by available(), and the pass-1 rejections keep their exact semantics.
@@ -168,7 +190,7 @@ public final class Executor {
             processor == null ? ContractProcessor.NONE : processor,
             boxProcessor == null ? BoxProcessor.NONE : boxProcessor,
             tokenProcessor == null ? TokenProcessor.NONE : tokenProcessor,
-            touchedLedger, parentSupply);
+            touchedLedger, parentSupply, burnOut);
     }
 
     /** As {@link #executeBlock}, with the three domains guaranteed non-null. */
@@ -180,7 +202,8 @@ public final class Executor {
                                             BoxProcessor boxProcessor,
                                             TokenProcessor tokenProcessor,
                                             Set<PublicAddress> touchedLedger,
-                                            long parentSupply) {
+                                            long parentSupply,
+                                            long[] burnOut) {
         List<BlockStateProcessor> domains =
             BlockStateProcessor.inCommitOrder(processor, boxProcessor, tokenProcessor);
         Block blockImpl = block;
@@ -441,6 +464,9 @@ public final class Executor {
                     blockImpl.uncles());
                 long debt = Burn.debt(params, height, parentSupply, minted);
                 long burned = Burn.burned(params, height, pool, debt);
+                if (burnOut != null) {
+                    burnOut[0] = burned; // the producer's dry-run report (009 T051)
+                }
                 if (burned > 0) {
                     // Cannot underflow: the miner was just credited the whole pool plus a strictly
                     // positive subsidy, and burned <= pool by construction (B-2).
