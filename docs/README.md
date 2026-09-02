@@ -12,7 +12,7 @@ truth: what each area does, what it owns, and which invariants must never regres
 
 | Domain | Description | Modules | Status |
 |---|---|---|---|
-| [consensus](consensus/spec.md) | Block validation order, difficulty, cadence, GHOST fork choice, finality, supply-targeted emission curve (scheduled on mainnet and devnet) against a height-decaying target, miner revenue floor, pinned genesis supply | `lib-core/blockchain`, `lib-core/block` | Draft |
+| [consensus](consensus/spec.md) | Block validation order, difficulty, cadence, GHOST fork choice, finality, supply-targeted emission curve (scheduled on mainnet and devnet) against a height-decaying target, miner revenue floor, revenue-share coin burn, pinned genesis supply | `lib-core/blockchain`, `lib-core/block` | Draft |
 | [transactions](transactions/spec.md) | Transaction envelope, nonces, ledger arithmetic, execution, mempool & fee market | `lib-core/transaction`, `ledger`, `mempool` | Draft |
 | [contracts](contracts/spec.md) | WASM VM determinism, host ABI, gas, sessions & undo journals, reference contracts | `lib-vm` | Draft |
 | [boxes](boxes/spec.md) | Data boxes — typed registers, anti-dust deposit, storage rent, scans | `lib-core/box` | Draft |
@@ -21,8 +21,8 @@ truth: what each area does, what it owns, and which invariants must never regres
 | [networking](networking/spec.md) | HTTP p2p, PEX, gossip, ban scoring, headers-first sync, pruning | `lib-net`, `lib-core` sync | Draft |
 | [state](state/spec.md) | Sparse-Merkle state root, light-client proofs, snapshot bootstrap | `lib-core/state` | Draft |
 | [persistence](persistence/spec.md) | RocksDB column families, atomic batches, undo journals | `lib-persistence` | Draft |
-| [node-api](node-api/spec.md) | HTTP surface, env config, token auth, CSRF/rebinding gates, aggregate budgets, published monetary state, live emission target & burn obligation | `app-node` | Draft |
-| [dashboard](dashboard/spec.md) | Embedded zero-dependency web UI — 6 pages, browser key custody, live-target emission tiles & curve plot | `app-node/resources/dashboard` | Draft |
+| [node-api](node-api/spec.md) | HTTP surface, env config, token auth, CSRF/rebinding gates, aggregate budgets, published monetary state, live emission target, per-block burned & carried burn debt | `app-node` | Draft |
+| [dashboard](dashboard/spec.md) | Embedded zero-dependency web UI — 6 pages, browser key custody, live-target emission tiles, burn tiles & curve plot | `app-node/resources/dashboard` | Draft |
 | [wallet](wallet/spec.md) | CLI wallet, encrypted keystore, chain-id pin, local signing | `app-wallet` | Draft |
 | [crypto](crypto/spec.md) | Ed25519, Pufferfish2 PoW, hashes | `lib-crypto` | Draft |
 | [platform](platform/spec.md) | Java 25 toolchain, Gradle wrapper, dependency pins & rationale, native image, lint gate | *(build-wide)* | Draft |
@@ -71,7 +71,8 @@ These span domains and are restated in each spec that carries part of them:
   weaken this: above the live target the floor absorbs the whole reduction, so a falling target
   costs miners nothing; below it the reduction is bounded, monotone, published as a number
   (`≈ c·ln(den/num)` base units per elapsed decay epoch) and never carries the subsidy below
-  `R_min`. See
+  `R_min`. Neither does the burn that enforces that fall: it takes a fixed fraction of *collected*
+  revenue only, never of minted coin, so it cannot reach the subsidy at all. See
   [consensus](consensus/spec.md) C-6 and C-10, and WHITEPAPER §5.3.
 - **The monetary target is a pure function of height.** `S*(h)` holds at its pinned peak until a
   scheduled decay-start height, then decays geometrically once per epoch — checked integer
@@ -83,9 +84,25 @@ These span domains and are restated in each spec that carries part of them:
   construction, so evaluation is an array read rather than an iteration, and the table is a
   different encoding of the same pure function, not a cache of chain state. Where the target falls
   below supply the raw curve value goes negative *structurally* rather than transiently, and the
-  floor absorbs it — yielding a per-block **burn obligation** that is derivable and published but
-  **not enforced: no coin is destroyed, and no cumulative debt is accumulated**. See
-  [consensus](consensus/spec.md) C-10 and [adversarial](adversarial/spec.md) `DECAY`.
+  floor absorbs it — yielding a per-block **burn obligation**, a rate signal that 009 turned from a
+  published number into an enforced one (next bullet), still with **no cumulative debt accumulated**.
+  See [consensus](consensus/spec.md) C-10 and [adversarial](adversarial/spec.md) `DECAY`.
+- **Supply falls only out of revenue, and only by a derived amount.** A curve-active block destroys
+  `min(⌊pool × βₙ/β_d⌋, debt(h))` — `pool` being every base unit it credits the miner that was *not*
+  freshly minted (declared fees, contract gas revenue, box storage rent), `debt(h)` the derived
+  supply excess `max(0, parentSupply + minted − S*(h))`, and `βₙ/β_d` a pinned per-network share
+  (`1/2` on mainnet) refused at construction unless `0 ≤ βₙ < β_d`. The subsidy and every
+  uncle/nephew term are excluded from the pool *by construction* — which is what keeps `R_min`
+  structurally unreachable from below and including a fee-paying transaction strictly more
+  profitable than excluding it. Nothing new is stored or sent: no header field, no cumulative
+  counter, no burn journal, because `burned(h)` is recoverable from two headers as
+  `parent.supply + minted(h) − block.supply` — so reorg reversal stays structural, exactly as the
+  target's does. Enforcement splits like the state root's: the header-only bound
+  `0 ≤ burned(h) ≤ debt(h)` runs pre-PoW through one shared `SupplyGate` (the three byte-for-byte
+  duplicated 002-era supply gates collapsed onto it), and the exact identity runs post-execution
+  with full rollback on mismatch — the bound collapsing to the pre-burn exact equality wherever no
+  burn is possible. See [consensus](consensus/spec.md) C-10, [node-api](node-api/spec.md) A-16 and
+  [adversarial](adversarial/spec.md) `BURN`.
 - **What is published is what is paid.** Every monetary figure a node serves is either a value the
   chain already committed — the tip header's `supply` — or one O(1) evaluation of the *same*
   emission dispatch consensus pays; never a re-derivation, never a floating-point approximation of
