@@ -63,15 +63,26 @@ chain ([node-api](../node-api/spec.md) A-14, A-15). It is a display-only value �
 reads it — and the field stays a plain JSON number with no unit, format or label change across
 activation.
 
-**Emission display** (007-emission-observability). The overview page also shows the monetary state
-and the chain's position on the curve ([node-api](../node-api/spec.md) A-16): three new tiles
-(**Offre en circulation**, **Cible d’émission**, **Distance à la cible**, French labels, formatted
-with the existing `fmtCoins` from the decimal-string encoding), and a **Courbe d’émission** card in
-the overview grid: an inline-SVG plot of `/emission`'s 64 samples — built with a namespace-aware
-`svgEl` helper (`createElement` cannot produce SVG) — with a dashed target line at `S*` and a
-position marker at the reported `(supply, subsidy)`. `/emission` is fetched **once per page load**
-and cached for the session (the payload is immutable for the life of the node); the figures come
-from `/stats`'s emission fragment, so a stationary poll takes no extra node work.
+**Emission display** (007-emission-observability; 008-decaying-supply-target). The overview page
+also shows the monetary state and the chain's position on the curve
+([node-api](../node-api/spec.md) A-16): four tiles — **Offre en circulation**, **Cible
+d’émission** (the **live** `S*(h)`; the peak is secondary text beside it, and reads "décroissance
+programmée" once a decay is scheduled), **Distance à la cible** (computed against the live
+target; a **negative** distance is stated as text — "l’offre dépasse la cible (décroissance
+engagée)" — never by colour alone), and **Obligation de brûlage** (008: the per-block derived
+burn obligation, formatted like every other monetary figure, `0` when none; the tile text states
+that nothing is destroyed — `burned` stays `"0"`) — French labels, formatted with the existing
+`fmtCoins` from the decimal-string encoding (which handles the negative distance), and a **Courbe
+d’émission** card in the overview grid: an inline-SVG plot of `/emission`'s 64 samples — built
+with a namespace-aware `svgEl` helper (`createElement` cannot produce SVG) — with a dashed target
+line tracking the **live** `S*(h)` (so the plotted curve and the reported `(supply, subsidy)`
+marker cannot disagree) and a position marker at the reported `(supply, subsidy)`. `/emission` is
+cached in the browser keyed by the **decay-epoch index** (computed from the payload's own decay
+constants and `sampleHeight`) and re-fetched only when the epoch turns over — on a node predating
+008, or at the `0` sentinel, that is once per page load exactly as before; the figures come from
+`/stats`'s emission fragment, so a stationary poll takes no extra node work. A node that omits
+`peakTarget`/`obligation` (pre-008) renders with those figures *indisponible*, exactly as it
+already tolerates a missing `emission` key.
 
 The three display states are distinguished **textually**, never by colour alone, and an
 unavailable figure is rendered as *indisponible*, never as `0` (zero is a legal committed supply):
@@ -80,8 +91,9 @@ stated rule label, no chart — an empty sample set is a statement), and supply 
 and chart marked unavailable with the reason). Degradation renders, never throws: a `/stats`
 without an `emission` key (an older node) and a failed `/emission` fetch each render the page with
 the affected parts marked unavailable in text. Accessibility: the SVG carries `role="img"` with an
-accessible name and a description conveying supply, target, subsidy and position relative to the
-target, plus an equivalent text summary beside it; every informative stroke clears 3:1 contrast on
+accessible name and a description conveying supply, the live target, subsidy and position relative
+to the **live** target (progress past 100 % is a real state once the target decays below supply),
+plus an equivalent text summary beside it; every informative stroke clears 3:1 contrast on
 the dark surfaces, and the position marker is a large diamond — distinguishable by shape and size
 rather than hue; the chart is motion-free by construction (redrawn each poll with the marker at
 its final position, so it introduces no transition `prefers-reduced-motion` would need to gate).

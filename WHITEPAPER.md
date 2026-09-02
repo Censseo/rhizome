@@ -340,14 +340,15 @@ pinned to the height's reward.
 ### 5.3 Economics
 
 **The supply-targeted logarithmic curve.** The block subsidy is a function of the chain's own
-header-committed circulating supply, not of height: `R(S) = c · ln(S*/S)`, evaluated in
-integer-only arithmetic so independent implementations cannot disagree and fork the chain (the
-fix for Pandanite's `double`-based reward). `S*` is a fixed monetary target (mainnet:
-`2 997 924 580 000` base units — 299 792 458 PDN, the speed of light in km/s as an exact SI
-integer); `c` is a calibration coefficient fixing the convergence timescale. As circulating
-supply `S` rises toward `S*` the reward falls logarithmically and reaches exactly zero once
-`⌊c · ln(S*/S)⌋` truncates to `0` — supply asymptotically approaches `S*` and issuance halts
-entirely, rather than the geometric schedule's indefinite (if vanishingly small) long tail.
+header-committed circulating supply and of the chain's height: `R(S, h) = c · ln(S*(h)/S)`,
+evaluated in integer-only arithmetic so independent implementations cannot disagree and fork the
+chain (the fix for Pandanite's `double`-based reward). `S*(h)` is the supply target — a function of
+height alone (below), pinned at its peak `S*_peak` (mainnet: `2 997 924 580 000` base units —
+299 792 458 PDN, the speed of light in km/s as an exact SI integer) until the scheduled decay
+starts; `c` is a calibration coefficient fixing the convergence timescale. As circulating supply
+`S` rises toward `S*(h)` the reward falls logarithmically and reaches exactly zero once
+`⌊c · ln(S*(h)/S)⌋` truncates to `0`; above it the raw value mirrors negative and the clamp (below)
+pays the floor instead — supply asymptotes rather than being forbidden to exceed the target.
 
 This corrects a second Pandanite-class risk beyond floating point: a purely height-based decay
 schedule is blind to the chain's actual monetary state — a schedule tuned for one launch
@@ -355,6 +356,39 @@ allocation keeps minting on the same clock even if the real circulating supply e
 what the schedule assumed. A supply-targeted rule self-corrects: it always measures distance from
 the real target, read from the header the chain already carries (feature 01's committed `supply`
 field), never from an assumption baked in at genesis.
+
+**The decaying supply target `S*(h)`.** A fixed target is itself blind to time: it asks a chain
+that has already converged to keep minting the full logarithmic tail forever. The target therefore
+decays, on a schedule fixed by five per-network constants (never voted, never
+environment-configurable): the peak `S*_peak`, a decay-start height `H_d` (`0` = never — the
+`powUpgradeHeight` polarity), an epoch length `E` in blocks, a per-epoch ratio `num/den`, and a
+floor `S*_floor`. The schedule is:
+
+```text
+targetAt(h):
+    if H_d <= 0 or h < H_d:  return S*_peak          (exact; no arithmetic)
+    e = (h − H_d) / E                                  (completed epochs, floor division)
+    if e >= E_f:             return S*_floor
+    t = S*_peak
+    repeat e times:  t = t * num / den                (checked multiply, then floor division)
+                     if t <= S*_floor: return S*_floor
+    return t
+```
+
+where `E_f` (epochs to the floor) is the smallest `e ≥ 0` with `T(e) ≤ S*_floor` computed by this
+same iteration — never the continuous closed form `ln 2 / ln(den/num)`, which disagrees by one
+step at the shipped calibration (554 vs the exact 555). The target is a pure function of height:
+total, non-increasing, strictly positive, costing at most `E_f` iterations, identical on every
+node, and needing no rollback code on a reorg. The bound is slack rather than tight: the
+recurrence above is tabulated at construction (556 entries on mainnet), so evaluation is an array
+read, and only a calibration needing more than 65 536 epochs iterates at all. Evaluation against
+the live target never
+regenerates the emission table: `raw(S, T) = raw_peak(⌊S × S*_peak / T⌋)` — the peak-generated
+table evaluated at the scaled argument, the product computed with an arbitrary-precision
+intermediate and narrowed with a checked conversion that throws (never wraps). Measured against a
+table regenerated at `T`, the scaled evaluation agrees to within ±1 base unit (research.md
+Decision 1); the short-circuit `T == S*_peak` makes every pre-decay evaluation bit-for-bit the
+pre-feature arithmetic.
 
 **Generation (build time, integer-only).** The curve is a stepped table of `N` uniform positions
 over `(0, S*]`, generated once when a network's parameters are constructed, from three published
@@ -433,15 +467,19 @@ the provisional genesis supply `S₀ = 1 000 000 000 000` base units (100M PDN, 
 
 | Quantity | Value |
 |---|---|
-| Supply target `S*` | `2 997 924 580 000` base units (299 792 458 PDN) |
+| Peak supply target `S*_peak` | `2 997 924 580 000` base units (299 792 458 PDN) |
 | Coefficient `c` | `23 750` base units |
 | Table steps `N` | `256` |
 | Relaxation time `τ_blocks = S*/c` | `126 228 403` blocks ≈ 20.0003 years |
+| Decay schedule | start `H_d = 126 144 000` (20 years at 5 s, one relaxation time `τ`); epoch `E = 1 576 800` blocks (one quarter); ratio `799/800` = **0.4991 %/year**; floor `S*_floor = 1 498 962 290 000` = `S*/2` (149 896 229 PDN) |
+| Epochs to floor / arrival | `E_f = 555` (measured by the normative iteration; the closed form's 554 is the documented off-by-one), `H_f = 1 001 268 000` — 138.8 years after decay starts |
+| Per-epoch subsidy reduction `D` | `30` base units (`⌈c · ln(800/799)⌉ = ⌈29.7⌉`) — the maximum amount one completed epoch can reduce the subsidy by at a fixed supply; measured worst case at this calibration is exactly `30`, at `S₀` |
+| Burn needed for the supply to track the target | ≈`2 003 538` PDN/year — the target's fall (`≈1 498 962`) PLUS the floor's own tail issuance (`504 576`), because a record that omitted the floor's minting would understate the required flow. At feature 08's proposed 50 % burn cap that is ≈4.0M PDN/year of fee flow — **not met at launch** and not met for a long time; until burn exists nothing is enforced and the obligation is a published figure only |
 | Launch reward `R₀ = c · ln(S*/S₀)` | `26 075` base units ≈ 2.6075 PDN/block — ≈6.1% below the geometric schedule's 2.7777 PDN/block launch reward, inside the 10% least-surprise band (SC-004) |
 | Miner revenue floor `R_min` | `800` base units (0.08 PDN) ≈ `R₀/32.6` — from the low-subsidy security analysis (feature 05): rewriting the `maxReorgDepth = 120`-block finality window at `minDifficulty = 16` costs `120 × 2^16 = 7 864 320` hashes, so under feature 03's zero clamp the subsidy reaching the truncation band collapses honest hashrate's revenue reason to zero exactly when the chain carries the most value. The floor keeps the protocol-guaranteed security budget `≥ 800` base units/block (≈ 1 382 PDN/day) forever. Crossover at `S ≈ 0.9669 × S*` (`ln(S*/S) = R_min/c ≈ 0.0337`); from there on the schedule is a flat `R_min` |
 | Tail emission (consequence, deliberate) | Under the floor issuance never terminates: supply crosses `S*` and keeps growing until feature 08's burn counterbalances it. An **uncle-free** block mints exactly `R_min` ≈ 504 576 PDN/year ≈ **0.168 % of `S*` per year**; that is the floor of the rate, not a cap. Uncle and nephew rewards derive from the floored base (§3.6), so a block carrying the maximum `maxUnclesPerBlock = 2` uncles at zero difficulty deficit mints `R_min · (1 + 2 · (1/2 + 1/32)) = 2.0625 · R_min`, and the tail rate is bounded by **0.347 % of `S*` per year** in the worst case. Below `S*` this uncle contribution was always part of issuance; what the floor changes is that it no longer vanishes above `S*` (feature 03's zero clamp made every term zero there). The cap becomes a soft attractor supply slowly drifts above — permanent, rate-bounded security funding in exchange (research.md Decision 3/5) |
 | Terminal supply (raw curve only) | `S* − 127 289 756` base units (≈ `S* −` 12 729 PDN) — the first supply at which `⌊c · ln(S*/S)⌋` truncates to exactly `0`; found by exhaustive search over the generated table, not a closed form (the continuous first-order estimate `S*(1 − e^(−1/c))` only approximates it). Under the floor this is a property of `raw()` alone and no longer a supply the chain stops at: the *minted* reward is `R_min` long before this point (from the crossover above) and stays there. |
-| Reorg continuity | Two chain tips whose committed supply diverged within a 120-block reorg window (the maximum reorg depth, §3.7) mint rewards that differ by **at most one base unit** — never a large jump. The continuous first-order estimate (`(c/S₀) · ΔS`, negligible) undercounts the discrete implementation slightly: two evaluations landing in different interpolation segments each carry independent floor rounding, which can compound to exactly one base unit — never more, exhaustively verified — even where the continuous estimate rounds to zero |
+| Reorg continuity — two separately named bounds | Two chain tips whose committed supply diverged within a 120-block reorg window (the maximum reorg depth, §3.7) mint rewards that differ by at most the SUM of two independently published terms, stated separately so neither is mistaken for the other: **(1) the curve's interpolation term — ≤ 1 base unit** (the continuous first-order estimate `(c/S₀) · ΔS` is negligible, but two evaluations landing in different interpolation segments each carry independent floor rounding, which can compound to exactly one base unit — never more, exhaustively verified — even where the continuous estimate rounds to zero); and **(2) the per-epoch decay term — ≤ `D = 30` base units**, the headroom a reorg window that spans a decay-epoch boundary can contribute. Note `≤`, not `<`, in both: the proven bounds are inclusive |
 
 `N = 256` uniform steps keep interpolation fidelity comfortably under one base unit across the
 economically reachable domain `[S₀, S*]`, at 2 KiB of generated constants — the table *is* the
@@ -459,11 +497,16 @@ curve too.
 **Reproducibility.** The generation and evaluation algorithm above is the complete, normative
 specification — an independent implementation that follows it exactly reproduces every value
 bit-for-bit. `lib-core/src/test/resources/emission/curve-vectors.json` is the published
-implementer-facing artifact: the header constants plus 327 `(supply → rawReward)` pairs — every
-step boundary, both domain edges, a dense sweep of `[S₀, S*]`, the truncation region, and
-negative-branch samples, all 64-bit quantities as decimal strings (never bare JSON numbers, which
-lose precision above 2^53 for a JS consumer). An implementation passes iff every vector matches
-exactly.
+implementer-facing artifact for the peak curve: the header constants plus 327 `(supply → rawReward)`
+pairs — every step boundary, both domain edges, a dense sweep of `[S₀, S*]`, the truncation region,
+and negative-branch samples, all 64-bit quantities as decimal strings (never bare JSON numbers,
+which lose precision above 2^53 for a JS consumer). Its sibling
+`lib-core/src/test/resources/emission/target-decay-vectors.json` pins the decaying target the same
+way: the decay constants and derived values in its header, `(height → target)` pairs across the
+peak plateau, the decay-start boundary, the epoch boundaries and the floor arrival, and
+`(height, supply → rawReward)` pairs for the decayed evaluation. An implementation passes iff
+every vector matches exactly. Both artifacts are test vectors — nothing in the node reads them at
+runtime.
 
 **The legacy geometric rule (below activation).** Retained for every block below an activation
 height, and permanently on a profile that never schedules one (testnet), the subsidy decays

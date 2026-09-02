@@ -117,6 +117,7 @@ no network proof anywhere is a rule nobody has watched an assembled node apply.
 `UNCLE` GHOST uncle rewards ·
 `SUPPLY` circulating supply header commitment ·
 `FLOOR` miner revenue floor ·
+`DECAY` the decaying supply target ·
 `GENESIS` pinned genesis supply and allocation ·
 `REORG` fork choice, finality, synchronisation ·
 `POOL` mempool and relay policy ·
@@ -304,6 +305,29 @@ suite carries the catalogue-cited copies because `AdversarialProtocolTest` scans
 | FLOOR-02 | Above the curve's supply target, where the honest reward is exactly `R_min`, claim `0` (feature 03's interim rule), `R_min − 1`, or `R_min + 1`, hoping the coinbase-exactness gate admits any value other than exactly the floored base. | A3 | DEFENDED | `lib-core/src/test/java/rhizome/adversarial/MinerRevenueFloorAttackTest.java#aValidatorEnforcesTheFlooredScheduleExactlyAboveTheSupplyTarget` |
 | FLOOR-03 | Above the curve's supply target, include an uncle in a block, hoping the uncle/nephew rewards re-derive from something other than the floored base (a second clamp, or the pre-floor zero) — breaking the supply identity or the exactness of a pop. | A3 | DEFENDED | `lib-core/src/test/java/rhizome/adversarial/MinerRevenueFloorAttackTest.java#uncleAndNephewRewardsFloorThroughTheBaseAboveTheSupplyTarget` |
 | FLOOR-04 | Configure a profile with `minerRevenueFloor <= 0`, hoping a non-positive floor is silently accepted and quietly restores the zero-clamp cliff rather than refusing to build. | A6 | DEFENDED | `lib-core/src/test/java/rhizome/adversarial/MinerRevenueFloorAttackTest.java#aNonPositiveMinerRevenueFloorRefusesToBuild` |
+
+## DECAY — the decaying supply target
+
+The supply target `S*(h)` (`SupplyTargetSchedule`, 008-decaying-supply-target) is a pure function
+of height: it holds at the pinned peak until the scheduled decay-start height, then decays
+geometrically once per epoch down to the pinned floor. Because the target reads only height, no
+timestamp a miner controls, no peer message and no chain state can move the boundary or change
+what any height pays — every attack on the schedule is a variation of pretending the chain is at
+a height it is not at. The family proves the honest crossing mints exactly per height and the
+stale-target con dies on the supply identity (DECAY-01), that timestamp manipulation cannot move
+the boundary by a single block (DECAY-02), that a chain grown under different decay constants is
+rejected at the first decayed height (DECAY-03), and that a reorg across a boundary restores
+target, supply and reward exactly with no rollback code (DECAY-04). Non-adversarial property
+proofs (totality, the iteration bound, the construction refusals, the published per-epoch
+reduction bound) live in `lib-core/src/test/java/rhizome/SupplyTargetScheduleTest.java` and
+`lib-core/src/test/java/rhizome/DecayedRewardCostTest.java`.
+
+| ID | Scenario | Class | Verdict | Proof |
+|----|----------|-------|---------|-------|
+| DECAY-01 | Mine across a decay-epoch boundary hoping the target step is advisory: commit supply and pay a coinbase computed under the pre-boundary (peak) target at the first decayed height, with a valid proof of work re-mined after the forgery, hoping the exact accounting identity waves a stale mint through. | A3 | DEFENDED | `lib-core/src/test/java/rhizome/adversarial/TargetDecayAttackTest.java#aStaleTargetMinerCrossingTheEpochBoundaryIsRejectedWhileTheHonestBlockApplies` |
+| DECAY-02 | Manipulate block timestamps (within every legal bound — minimum-pace floor, median-time-past, future bound) hoping to reach the decay boundary sooner or drag it later, i.e. hoping the decay clock runs on wall time. Two branches under opposite timestamp policies must see the identical target at every height, and a block minted for a boundary "shifted" one epoch must be rejected. | A3 | DEFENDED | `lib-core/src/test/java/rhizome/adversarial/TargetDecayAttackTest.java#timestampManipulationCannotMoveTheDecayBoundaryBecauseHeightAloneGoverns` |
+| DECAY-03 | Mine the same chain under a DIFFERENT decay ratio (8/10 where consensus says 9/10) — indistinguishable below the decay start, so nothing trips until the boundary — then submit the first decayed-height block, chained to the real tip with valid PoW, hoping a node accepts a supply its own schedule never derives. | A3 | DEFENDED | `lib-core/src/test/java/rhizome/adversarial/TargetDecayAttackTest.java#aPeerOnADifferentDecayScheduleIsRejectedAtTheFirstDecayedHeight` |
+| DECAY-04 | Reorg across a decay-epoch boundary, hoping the pop-and-replay loses the stepped target, mis-restores the committed supply, or swings the paid reward by more than the published continuity bound (curve interpolation ≤ 1 base unit plus one per-epoch decay step) — or that any rollback code exists to get it wrong. | A3 | DEFENDED | `lib-core/src/test/java/rhizome/SupplyCommitmentTest.java#reorgAcrossADecayEpochBoundaryRestoresTargetSupplyAndRewardExactly` |
 
 ## GENESIS — pinned genesis supply and allocation
 
@@ -566,6 +590,7 @@ activation dispatch in `EmissionActivationGateTest`.
 | E2E-84 | Flood a curve-active node's real `/submit` route with PoW-invalid blocks, each built on the real current tip whose parent supply is already at or above `supplyTarget` -- deliberately routing every admitted request into the `BigInteger` negative-branch calculation of `EmissionCurve.raw`, paid before merkle/nonce/PoW under `ChainEngine`'s single lock -- hoping the existing rate-limiting defence doesn't actually hold once every admitted request is this expensive. | A1 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EEmissionCurveTest.java#floodingSubmitWithInvalidPowBlocksThatReachTheNegativeCurveBranchLeavesTheNodeHealthy` |
 | E2E-85 | Send several concurrent `/submit` requests for individually-valid (real PoW) competing blocks at the same next height, some landing in the curve's negative/mirror branch simultaneously, hoping `ChainEngine`'s single lock fails to serialize the curve evaluation cleanly -- corruption or a crash rather than exactly one admitted block. | A1 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EEmissionCurveTest.java#concurrentSubmitOfCompetingBlocksAboveTheSupplyTargetAdmitsExactlyOne` |
 | E2E-86 | Fabricate a block whose OWN declared header supply field (not the parent's) is a wire-legal extreme value (near `Long.MAX_VALUE`, or disconnected from the real parent) and post it to `/submit`, hoping that self-declared field is ever fed into `EmissionCurve.raw()` as an argument (only the already-validated parent value is), rather than producing nothing worse than a clean comparison mismatch. | A1 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EEmissionCurveTest.java#aWireLegalExtremeSelfDeclaredSupplyFieldNeverFeedsTheCurveArithmeticAndOnlyMismatchesCleanly` |
+| E2E-87 | Mine a real node across a decay-epoch boundary (008's `SupplyTargetSchedule`), hoping the boundary block pays anything other than the stepped target's reward or the pre-boundary block anything other than the peak's, then join a fresh peer and let it sync the whole history from scratch, hoping the replayed chain converges on different blocks or commits different supplies at any height across the boundary. | A3 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2ETargetDecayTest.java#aRealNodeMinesAcrossADecayEpochBoundaryAndAPeerSyncsTheHistoryFromScratch` |
 
 ---
 
@@ -580,6 +605,17 @@ taken.
 | E2E-88 | A GraalVM native-image binary of the node resolving the embedded genesis resource identically to the JVM build, and failing cleanly (not crashing, not silently substituting a different genesis) if the reachability-metadata entry for that classpath resource is ever stripped from `app-node/src/main/resources/META-INF/native-image/`. | `native-image` is not installed in this development environment (confirmed in `WHITEPAPER.md`), so no test that actually builds and runs the native binary can execute here. This is future work once a GraalVM SDK is available on the box that runs this suite -- see `./gradlew :app-node:nativeImage`'s own guard for the same absence. Reserved id, bumped again as the CURVE E2E test plan claimed E2E-61..86 for real proven scenarios (completing that plan's full scope except CURVE-09, redundant with E2E-64 and documented as merged rather than implemented, and CURVE-20, an infra gap the plan itself deferred): the next new `E2E` scenario added to the table above should start at E2E-87, not reuse this one, since this row is intentionally excluded from the family's dense-numbering check (`AdversarialProtocolTest` only counts rows in the main scenario table, which this "why" column's shorter row shape structurally excludes it from). |
 
 ## Change log
+
+- **2026-09-01** — New `DECAY` family (DECAY-01..04) and E2E-87 for the decaying supply target
+  (branch `008-decaying-supply-target`). The target `S*(h)` is a pure function of height, so the
+  family's scenarios are all one con varied: pretending the chain is at a height it is not at.
+  `TargetDecayAttackTest` proves the stale-target mint at the first decayed height dies on the
+  supply identity pre-PoW (DECAY-01), that timestamp manipulation within every legal bound moves
+  the boundary by zero blocks (DECAY-02), and that a block grown under a divergent decay ratio
+  (8/10 vs the consensus 9/10) is rejected at the first decayed height after the schedules were
+  indistinguishable below it (DECAY-03). DECAY-04 cites the US1 reorg proof across a boundary
+  (`SupplyCommitmentTest`) — the reorg is a fairness property, not a new gate. E2E-87 mines a real
+  node across the boundary and converges a fresh peer on the identical history.
 
 - **2026-08-25** — New `FLOOR` family (FLOOR-01..04) closes the miner revenue floor's adversarial
   interlock (branch `005-miner-revenue-floor`), and the E2E-64/65/75 rows are re-premised to the

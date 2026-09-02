@@ -378,7 +378,13 @@ public final class RhizomeNode implements AutoCloseable {
         // assemble(): engine → hub → service → engine, closed here because the hub needs the
         // event loop this method just created.
         SseLogHub sseHub = new SseLogHub(eventloop, 256);
-        c.engine().setOnBlockApplied(height -> sseHub.publish(height, () -> c.service().logsAt(height)));
+        // 008 T032: the /emission memo's epoch index rides the same per-applied-block hook
+        // (two volatile writes under the consensus lock — the rebuild itself happens lazily
+        // on the API worker when the route next serves the payload).
+        c.engine().setOnBlockApplied(height -> {
+            c.service().noteAppliedHeight(height);
+            sseHub.publish(height, () -> c.service().logsAt(height));
+        });
         // Per-client rate limit (fixed 1s window) with a bounded client table
         // (the table cap is the memory-leak fix; the per-window count is generous
         // so honest peers on a shared host are never throttled).

@@ -461,7 +461,7 @@ class E2ECurveReorgTest {
             long height2Reward = params.miningReward(2, fundedTotal);
             EmissionCurve standalone = EmissionCurve.build(
                 params.supplyTarget(), params.emissionCoefficient(), params.emissionTableSteps());
-            assertEquals(Math.max(params.minerRevenueFloor(), standalone.raw(fundedTotal)), height2Reward,
+            assertEquals(Math.max(params.minerRevenueFloor(), standalone.raw(fundedTotal, params.supplyTarget())), height2Reward,
                 "the NetworkParameters dispatch must pay exactly what a standalone EmissionCurve "
                     + "instance built from the same three constants computes, floored at R_min");
             assertEquals(height2Reward, left.engine().blockAt(2).transactions().get(0).amount().amount(),

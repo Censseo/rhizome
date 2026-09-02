@@ -290,7 +290,7 @@ class MinerRevenueFloorAttackTest {
     /** Asserts the floor invariant at one supply: reward >= R_min, strictly positive, == max(R_min, raw). */
     private static void assertFloored(NetworkParameters params, EmissionCurve curve,
             long height, long floor, long supply) {
-        long raw = curve.raw(supply);
+        long raw = curve.raw(supply, params.supplyTargetAt(height));
         long reward = params.miningReward(height, supply);
         assertTrue(reward >= floor,
             "reward " + reward + " fell below the floor " + floor + " at supply=" + supply

@@ -55,11 +55,13 @@ final class TestNetwork implements AutoCloseable {
      * {@code CurveActiveNetwork.curveActiveTestnet()} does not provide, since that helper derives
      * from the "slow", real-PoW {@code NetworkParameters.testnet()} rather than this class's
      * instant-mining profile. Same test-scale {@code (S*, c, N)} triple as
-     * {@code CurveActiveNetwork}, chosen only for a small, well-populated table — not calibrated to
-     * any real-world timescale (see {@code NetworkParameters.cleanMainnet()} for that).
+     * {@code CurveActiveNetwork} — the peak is taken from it directly, so a profile built here can
+     * carry {@code CurveActiveNetwork.decaySchedule}'s floor, which is defined against that peak.
+     * Chosen only for a small, well-populated table — not calibrated to any real-world timescale
+     * (see {@code NetworkParameters.cleanMainnet()} for that).
      */
     static final NetworkParameters CURVE_ACTIVE = FAST.toBuilder()
-        .supplyTarget(1_000_000L)
+        .supplyTarget(rhizome.core.blockchain.CurveActiveNetwork.TEST_SUPPLY_TARGET)
         .emissionCoefficient(10_000L)
         .emissionTableSteps(16)
         .emissionCurveHeight(1)

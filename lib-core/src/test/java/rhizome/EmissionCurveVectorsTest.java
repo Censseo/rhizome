@@ -70,8 +70,8 @@ class EmissionCurveVectorsTest {
             JSONObject vector = vectors.getJSONObject(i);
             long supply = Long.parseLong(vector.getString("supply"));
             long expectedReward = Long.parseLong(vector.getString("rawReward"));
-            assertEquals(expectedReward, curve.raw(supply),
-                "raw(" + supply + ") mismatched the published vector");
+            assertEquals(expectedReward, curve.raw(supply, supplyTarget),
+                "raw(" + supply + ", " + supplyTarget + ") mismatched the published vector");
         }
     }
 

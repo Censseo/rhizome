@@ -193,29 +193,81 @@ the same hash could be accepted or rejected depending on receive order, splittin
 Second-preimage is neutralised by 0x00/0x01 domain separation, a committed `numTransactions`, and
 the Executor's in-block content-hash dedup (CVE-2012-2459 shape).
 
-### C-10 — Supply-targeted logarithmic emission curve *(implemented, scheduled on mainnet and devnet)*
+### C-10 — Supply-targeted logarithmic emission curve with a decaying target *(implemented, scheduled on mainnet and devnet)*
 
-The block subsidy is a function of the chain's own header-committed circulating supply, not of
-height: `R(S) = c · ln(S*/S)`, evaluated entirely in integer arithmetic (a fixed-point
+The block subsidy is a function of the chain's own header-committed circulating supply and of the
+block's height: `R(S, h) = c · ln(S*(h)/S)`, evaluated entirely in integer arithmetic (a fixed-point
 successive-squaring log, `BigInteger` at build time, `long` at evaluation time — never floating
-point) so independent implementations cannot disagree and fork the chain. `S*` (mainnet:
-`2 997 924 580 000` base units) is a fixed monetary target; `c` (mainnet: `23 750` base units) is
-a calibration coefficient. The curve is a stepped table of `N = 256` uniform positions over
-`(0, S*]`, generated once per `NetworkParameters` construction from the published `(S*, c, N)`
-triple, evaluated in O(1) with linear interpolation; above `S*` the reward mirrors negative by
-ratio (`raw(S) = −(interp(⌊S*²/S⌋) + 1)`, an exact `0` only at `S = S*`); consensus clamps the
-mined reward to `max(R_min, raw(S))` at a single site — the miner revenue floor (feature 05),
-`R_min = 800` base units on mainnet, the consensus-guaranteed minimum subsidy at every
-curve-active height and every supply. The full generation/evaluation algorithm and
-its calibration record (`τ ≈ 20 y`, launch reward ≈2.61 PDN/block, terminal supply, `R_min`,
-reorg continuity ≤1 base unit) are the normative WHITEPAPER §5.3; the checked-in
-`lib-core/src/test/resources/emission/curve-vectors.json` pins the generated output bit-for-bit
-for independent implementers.
+point) so independent implementations cannot disagree and fork the chain. `S*(h)` is the supply
+target — a pure function of height (below); its peak `S*_peak` (mainnet:
+`2 997 924 580 000` base units) and `c` (mainnet: `23 750` base units, a calibration coefficient)
+are pinned per network. The curve is a stepped table of `N = 256` uniform positions over
+`(0, S*_peak]`, generated once per `NetworkParameters` construction from the published
+`(S*_peak, c, N)` triple, evaluated in O(1) with linear interpolation; above the live target the
+reward mirrors negative by ratio, an exact `0` only at `S = S*(h)`; consensus clamps the
+mined reward to `max(R_min, raw(parentSupply, targetAt(h)))` at a single site — the miner revenue
+floor (feature 05), `R_min = 800` base units on mainnet, the consensus-guaranteed minimum subsidy
+at every curve-active height and every supply. The full generation/evaluation algorithm and its
+calibration record (`τ ≈ 20 y`, launch reward ≈2.61 PDN/block, terminal supply, `R_min`, the two
+reorg-continuity bounds below) are the normative WHITEPAPER §5.3; the checked-in
+`lib-core/src/test/resources/emission/curve-vectors.json` pins the peak curve bit-for-bit and its
+sibling `lib-core/src/test/resources/emission/target-decay-vectors.json` pins the decaying target
+and the decayed evaluation, for independent implementers.
 
-**`S*` is a target, not a cap.** Above the target the raw value mirrors negative and consensus
-floors to `R_min`, so supply does not stop at `S*` — under the floor it drifts deliberately: from
-`S ≈ 0.9669 × S*` onward the schedule is a flat `R_min`, supply crosses `S*`, and keeps growing
-until feature 08's burn counterbalances it. An **uncle-free** block mints exactly `R_min`
+**The decaying target `S*(h)`.** Five per-network constants — never voted, never
+environment-configurable — fix the schedule: the peak `S*_peak`, a decay-start height `H_d`
+(`0` = never, the `powUpgradeHeight` polarity), an epoch length `E` in blocks, a per-epoch ratio
+`num/den`, and a floor `S*_floor`. The target holds at the peak below `H_d`, decays
+`×num/den` once per completed epoch (checked multiply-then-divide, floor at every step), and
+clamps at the floor; the first decayed value appears at `H_d + E` (the boundary reading the spec
+pins). `E_f` (epochs to floor) is computed by that same bounded iteration — never the continuous
+closed form, which disagrees by one step at the shipped calibration — so evaluation costs at most
+`E_f` iterations and `floorArrivalHeight = H_d + E_f × E` is exact. In practice it costs none: the
+recurrence is tabulated once at construction (`T(0)…T(E_f)`, 4.4 KB at the mainnet calibration), so
+`targetAt` is an array read, and only a calibration past 65 536 epochs iterates at all — resuming
+from the last tabulated value rather than from the peak. The table is a different encoding of the
+same pure function, not a cache of chain state: nothing invalidates it and nothing rolls it back.
+The
+target is total, non-increasing, strictly positive, identical on every node, and a pure function
+of height: a reorg needs no target rollback code, and coinbase validation stays in the pre-PoW
+structural pass with no ledger read. Mainnet's calibration: `H_d = 126 144 000` (20 years at 5 s,
+one relaxation time), `E = 1 576 800` (one quarter), `799/800` = 0.4991 %/year,
+`S*_floor = S*/2 = 1 498 962 290 000`; `E_f = 555` (the closed form's 554 is the documented
+off-by-one), floor arrival `1 001 268 000`. For supply to actually track the target down, feature
+08's burn must destroy ≈2 003 538 PDN/year — the target's fall **plus** the floor's own tail
+issuance; that fee flow is not met at launch, so the obligation is published per block and
+deliberately not enforced (and deliberately never accumulated: it would reach ~3.5× circulating
+supply over 200 years and describe nothing).
+
+**A misconfigured schedule refuses at boot, sentinel included.** Every degenerate constant is
+refused when the schedule is built, so a node that cannot state its own monetary policy never
+starts — and that extends to the *inert* constants: at the `H_d = 0` sentinel, `E`, `num`, `den`
+and `S*_floor` must all be `0` too. They would be discarded there, but a profile stating a full
+decay with an unstated start height has almost certainly meant to schedule one, and the polarity
+makes that the easy mistake (`0` means *never* here, *from genesis* on `boxActivationHeight` and
+its siblings). Silently discarding it would mint at the peak forever with no diagnostic. Testnet
+and devnet therefore state their zeros explicitly rather than inheriting mainnet's schedule.
+
+**The curve's evaluation domain is bounded and published.** Evaluating a live target below the
+peak scales the argument to `⌊S × S*_peak / T⌋`, narrowed with a checked conversion, so `raw` is
+defined exactly for `S ≤ Long.MAX_VALUE × T / S*_peak` and throws above it. Over every target a
+schedule reaches that bound is `maxEvaluableSupply = ⌊Long.MAX_VALUE × S*_floor / S*_peak⌋` —
+`Long.MAX_VALUE / 2` ≈ 4.6e18 at the shipped calibration, some 1.5 million times the peak target.
+Construction refuses a calibration whose bound falls below the peak, so a curve that cannot be
+evaluated at its own target is a boot-time refusal rather than a mid-chain throw. Every consensus
+caller already treats the throw as a rejected block.
+
+**Two separately named reorg-continuity bounds.** Two tips diverged within the finality window
+differ in scheduled reward by at most the sum of **(1) the curve's interpolation term — ≤ 1 base
+unit** (compounding floor rounding across two interpolations reaches exactly 1, never more), and
+**(2) the per-epoch decay term — ≤ `D = 30` base units** (`⌈c·ln(den/num)⌉`), the headroom a
+window spanning a decay-epoch boundary can contribute. Both are `≤`, not `<`.
+
+**`S*(h)` is a target, not a cap.** Above the live target the raw value mirrors negative and
+consensus floors to `R_min`, so supply does not stop at the target — under the floor it drifts
+deliberately: from `S ≈ 0.9669 × S*(h)` onward the schedule is a flat `R_min`, supply crosses the
+target, and keeps growing until feature 08's burn counterbalances it. An **uncle-free** block
+mints exactly `R_min`
 (≈ 0.168 % of `S*` per year at the shipped calibration) — the floor of the tail rate, not a cap:
 uncle and nephew rewards derive from the same floored base (C-6), so a block carrying the maximum
 `maxUnclesPerBlock = 2` uncles at zero difficulty deficit mints `2.0625 × R_min`, bounding the tail
@@ -240,9 +292,9 @@ geometrically (×2/3) once per `rewardEpochBlocks`, in integer arithmetic. Total
 `epochBlocks × initialReward × 3 ≈ 100M PDN`. Both knobs are rescaled by the cadence ratio
 (×18 = 90/5) so the **real-time schedule is preserved**: `rewardEpochBlocks ≈ 12 000 000`,
 `initialReward = 2.7777 PDN`, epoch ≈ 1.9 yr, 48 000 PDN/day. Locked by a cadence-relative test
-(`emissionScheduleIsCalibratedForTheBlockCadence`) that recomputes both the geometric epoch span
-and the curve's `τ_blocks` from `desiredBlockTimeSec`, so changing block time forces both
-schedules to be revisited.
+(`emissionScheduleIsCalibratedForTheBlockCadence`) that recomputes the geometric epoch span, the
+curve's `τ_blocks` **and the decay schedule** (`decayStartHeight` = 20 years, `decayEpochBlocks` =
+one quarter) from `desiredBlockTimeSec`, so changing block time forces all three to be revisited.
 
 **Boot-time consistency.** A node's stored tip is checked against the schedule now in force every
 time it boots: if the tip's committed supply no longer equals `parent.supply +
@@ -281,9 +333,14 @@ the genesis-supply pin they explicitly reset (C-11): the calibration triple is s
 whether a given profile mints from it. `emissionCurveHeight` is a different story: `testnet()`
 explicitly **resets** it to `0` (never), while `devnet()` explicitly **states** its own `1`
 (active) — neither inherits `cleanMainnet()`'s value silently, since 006-emission-fork-activation
-made the three profiles disagree on this one field. Every profile still *generates* and validates
-its table at construction, so a degenerate `(S*, c, N)` triple fails loudly at `NetworkParameters`
-build time rather than at the first curve-active block.
+made the three profiles disagree on this one field. 008's decay constants get the same audit:
+every shipped profile states its `decayStartHeight` explicitly — mainnet schedules the decay
+(`126 144 000`), and **both `testnet()` and `devnet()` explicitly restate `0` (never)**: a devnet
+lives for minutes, so a 20-year decay start would be theatre, and silent inheritance is the hazard
+003, 005 and 006 each had to handle (WI-9). Every profile still *generates* and validates its
+table and its schedule at construction, so a degenerate `(S*, c, N)` triple or a degenerate decay
+configuration fails loudly at `NetworkParameters` build time rather than at the first curve-active
+block.
 
 *Reading the curve from outside:* the published monetary state, the schedule constants and the
 sampled curve are served read-only by the node API — see [node-api](../node-api/spec.md) A-16

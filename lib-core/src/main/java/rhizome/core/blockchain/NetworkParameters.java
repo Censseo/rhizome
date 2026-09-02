@@ -285,6 +285,36 @@ public final class NetworkParameters {
     @lombok.Builder.Default
     private final long minerRevenueFloor = 800L;
 
+    // --- Decaying supply target (008-decaying-supply-target) ---
+    /**
+     * Height at which the supply target {@code S*} begins its scheduled decay toward
+     * {@link #supplyTargetFloor} (0 = <em>never</em> — the {@link #powUpgradeHeight}/
+     * {@link #emissionCurveHeight} polarity, NOT the {@link #boxActivationHeight} "0 = from
+     * genesis" polarity; both conventions live on this class, and copying the wrong sibling
+     * silently activates the decay on every network). On a profile at the sentinel,
+     * {@link #supplyTargetSchedule} holds the peak everywhere and the whole feature is inert.
+     *
+     * <p>Per-profile consensus constant set like {@link #chainId} — never voted, never
+     * environment-configurable (FR-009). See {@link SupplyTargetSchedule}.
+     */
+    @lombok.Builder.Default
+    private final long decayStartHeight = 0;
+    /** Epoch length {@code E} in blocks between target reductions (inert at the sentinel). */
+    @lombok.Builder.Default
+    private final long decayEpochBlocks = 0;
+    /** Per-epoch ratio numerator (inert at the sentinel). */
+    @lombok.Builder.Default
+    private final long decayNum = 0;
+    /** Per-epoch ratio denominator (inert at the sentinel). */
+    @lombok.Builder.Default
+    private final long decayDen = 0;
+    /**
+     * The target floor {@code S*_floor} the decay stops at (inert at the sentinel). Must be
+     * strictly between 0 and {@link #supplyTarget} whenever the decay is scheduled.
+     */
+    @lombok.Builder.Default
+    private final long supplyTargetFloor = 0;
+
     /**
      * The generated stepped table for {@code (supplyTarget, emissionCoefficient,
      * emissionTableSteps)}, built once at construction time so a degenerate curve configuration
@@ -293,6 +323,18 @@ public final class NetworkParameters {
      */
     @lombok.Getter(lombok.AccessLevel.NONE)
     private final EmissionCurve emissionCurve;
+
+    /**
+     * The derived decay schedule {@code S*(h)}, built eagerly at construction time from
+     * {@link #supplyTarget} and the five decay constants above (plus {@link #emissionCoefficient},
+     * from which the per-epoch reduction bound is derived) — exactly as {@link #emissionCurve} is.
+     * Not builder-settable — a builder-supplied value is discarded, so a constructed instance's
+     * schedule can never drift from its own constants. Validation lives in
+     * {@link SupplyTargetSchedule#build}: a degenerate decay configuration refuses node start
+     * here, never mid-chain (FR-022).
+     */
+    @lombok.Getter(lombok.AccessLevel.NONE)
+    private final SupplyTargetSchedule supplyTargetSchedule;
 
     // --- Data boxes ---
     /**
@@ -429,7 +471,10 @@ public final class NetworkParameters {
                       long uncleRewardNum, long uncleRewardDen, long nephewRewardDivisor,
                       long supplyTarget, long emissionCoefficient, int emissionTableSteps,
                       long emissionCurveHeight, long minerRevenueFloor,
+                      long decayStartHeight, long decayEpochBlocks, long decayNum,
+                      long decayDen, long supplyTargetFloor,
                       EmissionCurve ignoredBuilderEmissionCurve,
+                      SupplyTargetSchedule ignoredBuilderSupplyTargetSchedule,
                       long boxActivationHeight, int maxBoxSizeBytes, int maxBoxRegisters,
                       long minValuePerByte, long storagePeriodBlocks, long storageFeeFactor,
                       int maxBoxCollectsPerBlock, long tokenActivationHeight,
@@ -516,6 +561,12 @@ public final class NetworkParameters {
         // below, never from a builder-supplied value, so a constructed instance's curve can
         // never drift from its own constants.
         this.emissionCurve = EmissionCurve.build(supplyTarget, emissionCoefficient, emissionTableSteps);
+        // Same discipline as the curve above: the schedule is ALWAYS derived fresh from the five
+        // decay constants (+ the coefficient), never taken from the builder — and its own
+        // construction-time validation refuses a degenerate decay configuration here, at node
+        // startup, never mid-chain.
+        this.supplyTargetSchedule = SupplyTargetSchedule.build(supplyTarget, decayStartHeight,
+            decayEpochBlocks, decayNum, decayDen, supplyTargetFloor, emissionCoefficient);
         this.chainId = chainId;
         this.networkName = networkName;
         this.powAlgorithm = powAlgorithm;
@@ -556,6 +607,11 @@ public final class NetworkParameters {
         this.emissionTableSteps = emissionTableSteps;
         this.emissionCurveHeight = emissionCurveHeight;
         this.minerRevenueFloor = minerRevenueFloor;
+        this.decayStartHeight = decayStartHeight;
+        this.decayEpochBlocks = decayEpochBlocks;
+        this.decayNum = decayNum;
+        this.decayDen = decayDen;
+        this.supplyTargetFloor = supplyTargetFloor;
         this.boxActivationHeight = boxActivationHeight;
         this.maxBoxSizeBytes = maxBoxSizeBytes;
         this.maxBoxRegisters = maxBoxRegisters;
@@ -653,6 +709,16 @@ public final class NetworkParameters {
     }
 
     /**
+     * The derived decay schedule {@code S*(h)} for this network — always present (an unscheduled
+     * profile holds a schedule whose {@link SupplyTargetSchedule#targetAt} is the peak everywhere).
+     * Manual accessor because the field's builder-supplied twin is discarded
+     * ({@code @Getter(NONE)}); derived exactly like {@code emissionCurve}, never builder-settable.
+     */
+    public SupplyTargetSchedule supplyTargetSchedule() {
+        return supplyTargetSchedule;
+    }
+
+    /**
      * The Pufferfish2 cost parameters in force for a block at {@code height}: the genesis
      * costs below {@link #powUpgradeHeight} (or always, when no upgrade is scheduled), the
      * "after" costs from the upgrade height on.
@@ -706,18 +772,53 @@ public final class NetworkParameters {
      * <p>Dispatches on {@link #emissionCurveActiveAt}: below activation (or on a profile that
      * never schedules the curve) this returns exactly {@link #miningReward(long)}'s geometric
      * result, ignoring {@code parentSupply} entirely. At or above activation it returns the
-     * curve's raw value at {@code parentSupply}, floored to {@link #minerRevenueFloor} — the
-     * single clamp site (contracts/miner-revenue-floor.md §2): the curve's negative branch
-     * (supply at/above {@link #supplyTarget}) and every supply whose raw value drops below the
-     * floor must never mint a reward below {@code R_min}. {@code EmissionCurve.raw} itself stays
-     * signed — this {@code max} is the only clamp, so the floored base is what every derivation
-     * (uncle, nephew, {@code Issuance.minted}) sees.
+     * curve's raw value at {@code parentSupply}, measured against the <b>live</b> supply target
+     * {@code S*(h)} ({@link #supplyTargetSchedule}'s {@code targetAt(height)} — the peak below
+     * the scheduled decay-start height, decayed above it), floored to
+     * {@link #minerRevenueFloor} — the single clamp site (contracts/miner-revenue-floor.md §2;
+     * 008 contracts/supply-target-schedule.md §5): the curve's negative branch (supply at/above
+     * the live target) and every supply whose raw value drops below the floor must never mint a
+     * reward below {@code R_min}. {@code EmissionCurve.raw} itself stays signed — this
+     * {@code max} is the only clamp, so the floored base is what every derivation (uncle,
+     * nephew, {@code Issuance.minted}) sees. The inputs are still exactly
+     * {@code (height, parent header's committed supply)} — no ledger read is introduced, so
+     * coinbase validation stays in the pre-PoW structural pass.
      */
     public long miningReward(long height, long parentSupply) {
         if (emissionCurveActiveAt(height)) {
-            return Math.max(minerRevenueFloor, emissionCurve.raw(parentSupply));
+            return Math.max(minerRevenueFloor,
+                emissionCurve.raw(parentSupply, supplyTargetSchedule.targetAt(height)));
         }
         return miningReward(height);
+    }
+
+    /**
+     * The live supply target {@code S*(h)} the curve measures distance from at {@code height} —
+     * the peak below/at the decay-start height, decayed geometrically per epoch to the floor
+     * after it. Derived publication accessor (FR-017): the same value
+     * {@link #miningReward(long, long)} dispatches through, exposed so the node API and tests
+     * publish the number that actually governs rather than re-deriving it (one formula, one
+     * home — {@link SupplyTargetSchedule#targetAt}).
+     */
+    public long supplyTargetAt(long height) {
+        return supplyTargetSchedule.targetAt(height);
+    }
+
+    /**
+     * The block at {@code height}'s <b>burn obligation</b>: {@code max(0, -raw(parentSupply,
+     * targetAt(h)))} while the curve governs, {@code 0} below activation or on a profile that
+     * never schedules the curve (008 contracts/supply-target-schedule.md §6). Derived, never
+     * stored, never on the consensus wire, and <b>never enforced by this feature</b> — no coin
+     * is destroyed here; publication only (the destruction mechanism is feature 08's). A
+     * non-zero obligation states how much the block <em>may</em> destroy so supply tracks the
+     * falling target; a cumulative form is deliberately absent (research.md Decision 4).
+     */
+    public long burnObligation(long height, long parentSupply) {
+        if (!emissionCurveActiveAt(height)) {
+            return 0;
+        }
+        long raw = emissionCurve.raw(parentSupply, supplyTargetSchedule.targetAt(height));
+        return Math.max(0, Math.negateExact(raw));
     }
 
     /** The supply-driven twin of {@link #uncleReward(long)}, deriving from the dispatched base. */
@@ -836,6 +937,18 @@ public final class NetworkParameters {
             // S* per year until feature 08's burn counterbalances it). Live from height 1 on
             // mainnet and devnet; inert only on testnet, which never schedules the curve.
             .minerRevenueFloor(800L)
+            // The mainnet decay schedule (008-decaying-supply-target, T045 — set strictly LAST,
+            // after every proof was green; the sequencing principle from 006). Calibrated per
+            // research.md §Decision 3 (the single source the tests cite; contracts/
+            // supply-target-schedule.md §8 cross-links it): decay starts at one relaxation time
+            // (20 years at this 5 s cadence), falls 799/800 per quarter (0.4991 %/year) to the
+            // floor S*/2 — reached E_f = 555 epochs later (H_f = 1 001 268 000). Until then every
+            // height pays the peak target: bit-for-bit the pre-decay arithmetic.
+            .decayStartHeight(126_144_000L)
+            .decayEpochBlocks(1_576_800L)
+            .decayNum(799L)
+            .decayDen(800L)
+            .supplyTargetFloor(1_498_962_290_000L)
             .build();
     }
 
@@ -879,6 +992,17 @@ public final class NetworkParameters {
             // reward baseline deterministic — they assume the height-only miningReward(height)
             // form stays the mainnet-baseline geometric value.
             .emissionCurveHeight(0L)
+            // Explicitly never schedule the decay (008 T045, WI-9): cleanMainnet() now carries a
+            // 20-year decay start, and silent inheritance would make a testnet node carry a
+            // schedule it can never reach. Stated, never inherited — and the whole group is
+            // stated, not just the sentinel: SupplyTargetSchedule.build refuses an unscheduled
+            // profile that still carries mainnet's inert epoch/ratio/floor, precisely so a
+            // forgotten start height cannot masquerade as "no decay".
+            .decayStartHeight(0L)
+            .decayEpochBlocks(0L)
+            .decayNum(0L)
+            .decayDen(0L)
+            .supplyTargetFloor(0L)
             .build();
     }
 
@@ -930,6 +1054,17 @@ public final class NetworkParameters {
             // unless RHIZOME_SNAPSHOT supplies the shipped mainnet allocation — a known, accepted
             // limitation of running devnet without a funded snapshot.
             .emissionCurveHeight(1L)
+            // Explicitly restate (008 T045, WI-9) rather than inherit cleanMainnet()'s decay:
+            // unlike the curve — which devnet activates deliberately — a 20-year decay start is
+            // unreachable on a devnet that lives for minutes, so scheduling it here would be
+            // theatre. The restatement exists to defeat silent inheritance, not to enable the
+            // feature (research.md Decision 5) — and covers the inert constants too, which
+            // SupplyTargetSchedule.build now requires to agree with the sentinel.
+            .decayStartHeight(0L)
+            .decayEpochBlocks(0L)
+            .decayNum(0L)
+            .decayDen(0L)
+            .supplyTargetFloor(0L)
             .build();
     }
 }

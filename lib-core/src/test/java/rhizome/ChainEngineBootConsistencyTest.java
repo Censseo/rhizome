@@ -98,6 +98,52 @@ class ChainEngineBootConsistencyTest {
         assertEquals(heightAfterFirstBoot, reopened.height());
     }
 
+    /**
+     * 008-decaying-supply-target T021 (FR-024, SC-010): a tip minted under a DIFFERENT decay
+     * schedule already refuses boot -- rule 6 reaches the decay through {@code Issuance.minted}'s
+     * dispatch, which now measures against the live target, so no new boot check exists to
+     * write. The refusal MESSAGE must name {@code decayStartHeight} beside
+     * {@code emissionCurveHeight}, so an operator whose chain was minted under a different decay
+     * schedule is told which consensus constant moved (FR-024). Verified behaviourally first:
+     * the test asserted the refusal fired BEFORE the message was extended.
+     */
+    @Test
+    void aTipMintedUnderADifferentDecayScheduleRefusesBootAndNamesTheDecayStartHeight() {
+        // The decay fixture: decay starts at height 10, so a chain past that height has minted
+        // under decayed targets and its committed supplies pin the schedule that produced them.
+        NetworkParameters params = CurveActiveNetwork.decayActiveTestnet();
+        InMemoryLedger ledger = new InMemoryLedger();
+        InMemoryChainStore store = new InMemoryChainStore();
+        NodeStores stores = TestNodeStores.mixing(ledger, store, new InMemoryNonceStore());
+        LedgerSnapshot snapshot = new LedgerSnapshot("t", 0, params.chainId());
+        AtomicLong clock = new AtomicLong(1_000_000L);
+
+        ChainEngine first = ChainEngine.boot(params, stores, snapshot).clock(clock::get).build();
+        // The tip is at start + epoch + 1, i.e. ONE completed decay epoch: the decayed target is
+        // visible at the tip itself (the boot check validates the tip block, not every block).
+        for (int i = 0; i < 16; i++) {
+            mineOnto(params, first, clock, PublicAddress.random());
+        }
+        assertTrue(first.height() > params.supplyTargetSchedule().startHeight()
+                + params.supplyTargetSchedule().epochBlocks(),
+            "sanity: the stored tip must sit in DECAYED territory (past the first epoch boundary)");
+
+        // Reopen the SAME store under a profile whose decay ratio differs: the tip's committed
+        // supplies were minted under 9/10 and cannot equal what 8/10 would have minted, so
+        // rule 6 (the accounting identity) must refuse boot.
+        NetworkParameters differentDecay = params.toBuilder().decayNum(8L).build();
+        assertTrue(differentDecay.supplyTargetSchedule().isScheduled(),
+            "sanity: the reopening profile still schedules a decay");
+        IllegalStateException refused = assertThrows(IllegalStateException.class,
+            () -> ChainEngine.boot(differentDecay, stores, snapshot).clock(clock::get).build());
+        String message = refused.getMessage();
+        assertTrue(message.contains("emissionCurveHeight"),
+            "the refusal must keep naming the curve activation height: " + message);
+        assertTrue(message.contains("decayStartHeight"),
+            "the refusal must name decayStartHeight beside emissionCurveHeight (FR-024): "
+                + message);
+    }
+
     @Test
     void aGenesisOnlyChainBootsNormally() {
         NetworkParameters params = CurveActiveNetwork.curveActiveTestnet();

@@ -4,22 +4,29 @@ import io.activej.http.HttpResponse;
 
 import rhizome.core.block.BlockImpl;
 import rhizome.core.blockchain.NetworkParameters;
+import rhizome.core.blockchain.SupplyTargetSchedule;
 import rhizome.core.serialization.JsonSink;
 import rhizome.core.serialization.JsonSink.Key;
 
 import static rhizome.node.ApiResponses.json;
 
 /**
- * The emission-observability readouts (007-emission-observability): the shared
- * {@code emission} response fragment that {@code GET /info} and {@code GET /stats} both nest,
- * and — in this class's second half of tasks — the chain-state-free {@code GET /emission}
- * schedule read.
+ * The emission-observability readouts (007-emission-observability; 008-decaying-supply-target):
+ * the shared {@code emission} response fragment that {@code GET /info} and {@code GET /stats}
+ * both nest, and the schedule read {@code GET /emission}.
  *
  * <p>The fragment has exactly one writer so the two surfaces cannot drift (spec FR-013). Every
  * monetary value is a decimal string in <b>base units</b>; an absent committed supply stays
  * JSON {@code null} and is never coerced to {@code "0"} (zero is a legal committed value —
  * node-api DI-7's distinction). Figures the chain's state cannot support are {@code null}
  * rather than zeroed: a chain the curve does not govern is not converging on the target.
+ *
+ * <p>008: {@code target} is the <b>live</b> {@code S*(h)} for the next block, not the peak —
+ * a consumer that keeps reading {@code target} must get the number that actually governs the
+ * next block, so the peak is what moved to the new {@code peakTarget} name (contracts/
+ * emission-api.md §1). {@code distanceToTarget} and {@code progressBps} are computed against the
+ * live target and may be negative / exceed 10 000 respectively; {@code obligation} publishes the
+ * block's derived burn obligation — never a cumulative figure (research.md Decision 4).
  *
  * <p>Bodies are written with {@link JsonSink} instead of an {@code org.json} tree — see that
  * class's Javadoc.
@@ -37,18 +44,23 @@ final class EmissionApi {
     private static final Key K_SUPPLY = Key.of("supply");
     private static final Key K_SUBSIDY = Key.of("subsidy");
     private static final Key K_TARGET = Key.of("target");
+    private static final Key K_PEAK_TARGET = Key.of("peakTarget");
+    private static final Key K_DECAY_START_HEIGHT = Key.of("decayStartHeight");
     private static final Key K_DISTANCE_TO_TARGET = Key.of("distanceToTarget");
     private static final Key K_PROGRESS_BPS = Key.of("progressBps");
+    private static final Key K_OBLIGATION = Key.of("obligation");
     private static final Key K_FLOOR = Key.of("floor");
     private static final Key K_BURNED = Key.of("burned");
     private static final Key K_DECIMAL_SCALE_FACTOR = Key.of("decimalScaleFactor");
 
-    /** One fragment is ten fields, longest value 13 digits — a ~300-byte allocation hint. */
-    static final int EMISSION_SIZE_HINT = 384;
+    /** One fragment is thirteen fields, longest value 13 digits — a ~400-byte allocation hint
+     *  (raised from 384 by 008's three added fields; contracts/emission-api.md §1 Size). */
+    static final int EMISSION_SIZE_HINT = 512;
 
     /** Total native coin destroyed by consensus: zero because no destruction mechanism exists
-     *  (spec FR-014). A defined constant, deliberately distinct from a burn-debt field — none
-     *  ships, because no definition of one exists yet. */
+     *  (feature 08 supplies it; 008 publishes the obligation, it destroys nothing). A defined
+     *  constant, deliberately distinct from a burn-debt field — none ships, because a cumulative
+     *  form is absent by design (research.md Decision 4). */
     private static final long BURNED = 0L;
 
     /** How many points the published curve is sampled at: a quarter of the generated table's
@@ -63,11 +75,31 @@ final class EmissionApi {
     private static final Key K_STEPS = Key.of("steps");
     private static final Key K_GENESIS_SUPPLY = Key.of("genesisSupply");
     private static final Key K_SAMPLES = Key.of("samples");
+    private static final Key K_DECAY = Key.of("decay");
+    private static final Key K_SAMPLE_HEIGHT = Key.of("sampleHeight");
+    private static final Key K_START_HEIGHT = Key.of("startHeight");
+    private static final Key K_EPOCH_BLOCKS = Key.of("epochBlocks");
+    private static final Key K_NUM = Key.of("num");
+    private static final Key K_DEN = Key.of("den");
+    private static final Key K_TARGET_FLOOR = Key.of("targetFloor");
+    private static final Key K_EPOCHS_TO_FLOOR = Key.of("epochsToFloor");
+    private static final Key K_FLOOR_ARRIVAL_HEIGHT = Key.of("floorArrivalHeight");
+    private static final Key K_PER_EPOCH_REDUCTION_BOUND = Key.of("perEpochReductionBound");
 
-    /** Base object ~200 B plus 64 two-field samples of two decimal strings each. */
+    /** Base object plus 64 two-field samples of two decimal strings each. */
     private static final int SCHEDULE_SIZE_HINT = 4096;
 
     private EmissionApi() {}
+
+    /**
+     * The decay-epoch index the /emission memo is keyed by: {@code 0} on any height before the
+     * decay start (including every height on a profile that never schedules one, so the index —
+     * and therefore the memo — is constant there, exactly 007's behaviour), and the count of
+     * completed decay epochs once decaying. Pure arithmetic on {@code (params, height)}.
+     */
+    static long decayEpochIndexOf(NetworkParameters params, long height) {
+        return params.supplyTargetSchedule().epochIndexAt(height);
+    }
 
     /**
      * Writes the {@code emission} object into {@code sink} from {@code (params, height,
@@ -81,6 +113,14 @@ final class EmissionApi {
      * commits no supply the one-arg geometric form is used — the same fallback the two-arg form
      * itself makes, made explicit here so the absent sentinel never reaches the curve.
      *
+     * <p>{@code target} is the live {@code S*(h)} the next block's dispatch actually measures
+     * against ({@link NetworkParameters#supplyTargetAt(long)} — the same value the dispatch
+     * reads, so the published figure cannot disagree with the minted one). {@code obligation} is
+     * the next block's derived burn obligation: {@code "0"} when the curve governs and the raw
+     * value is non-negative, positive when the target has fallen below supply, and {@code null}
+     * when the curve does not govern (a chain the curve does not govern has no obligation —
+     * figures the chain's state cannot support are null rather than zeroed).
+     *
      * <p>Arithmetic guards: {@code distanceToTarget} subtracts and {@code progressBps}
      * multiplies with {@code Math.*Exact} so a pathological profile fails loudly instead of
      * wrapping into a plausible-looking figure (data-model §Overflow).
@@ -90,6 +130,7 @@ final class EmissionApi {
         boolean supplyCommitted = tipSupply != BlockImpl.SUPPLY_ABSENT;
         // The rule governing the NEXT block, not the tip's.
         boolean curveGovernsNext = params.emissionCurveActiveAt(height + 1);
+        long liveTarget = params.supplyTargetAt(height + 1);
 
         sink.name(K_EMISSION);
         sink.beginObject();
@@ -102,19 +143,25 @@ final class EmissionApi {
             sink.fieldNull(K_SUPPLY);
             sink.fieldLongAsString(K_SUBSIDY, params.miningReward(height + 1));
         }
-        sink.fieldLongAsString(K_TARGET, params.supplyTarget());
+        sink.fieldLongAsString(K_TARGET, liveTarget);
+        sink.fieldLongAsString(K_PEAK_TARGET, params.supplyTarget());
+        sink.fieldLongAsString(K_DECAY_START_HEIGHT, params.decayStartHeight());
         if (supplyCommitted && curveGovernsNext) {
+            // May be negative: past the decay start the live target can sit BELOW the
+            // committed supply — the sign is the whole story an operator watches (FR-026).
             sink.fieldLongAsString(K_DISTANCE_TO_TARGET,
-                Math.subtractExact(params.supplyTarget(), tipSupply));
-            // Integer basis points of supply/target, UNCLAMPED — above the target it
-            // legitimately exceeds 10 000. The divisor cannot be zero: NetworkParameters'
-            // constructor eagerly builds the curve, and EmissionCurve.build refuses
-            // supplyTarget <= 0 — no constructible profile reaches this division unsound.
+                Math.subtractExact(liveTarget, tipSupply));
+            // Integer basis points of supply/live-target, UNCLAMPED — above the target it
+            // legitimately exceeds 10 000 (and keeps growing as the target decays away). The
+            // divisor cannot be zero: SupplyTargetSchedule.targetAt is strictly positive by
+            // construction (the floor is > 0 whenever scheduled, the peak > 0 always).
             sink.field(K_PROGRESS_BPS,
-                Math.multiplyExact(tipSupply, 10_000L) / params.supplyTarget());
+                Math.multiplyExact(tipSupply, 10_000L) / liveTarget);
+            sink.fieldLongAsString(K_OBLIGATION, params.burnObligation(height + 1, tipSupply));
         } else {
             sink.fieldNull(K_DISTANCE_TO_TARGET);
             sink.fieldNull(K_PROGRESS_BPS);
+            sink.fieldNull(K_OBLIGATION);
         }
         sink.fieldLongAsString(K_FLOOR, params.minerRevenueFloor());
         sink.fieldLongAsString(K_BURNED, BURNED);
@@ -123,26 +170,35 @@ final class EmissionApi {
     }
 
     /**
-     * Serializes the {@code GET /emission} schedule body ONCE: the profile's published
-     * constants plus a 64-point sampling of its curve, over {@code (0, 1.25 × S*]} so the
-     * floored tail past the target — the regime the miner revenue floor created — is visible
-     * instead of hidden.
+     * Serializes the {@code GET /emission} schedule body: the profile's published constants
+     * (including the {@code decay} object and the {@code sampleHeight} the samples were drawn
+     * at) plus a 64-point sampling of its curve at the LIVE target for {@code height}, over
+     * {@code (0, 1.25 × S*]} so the floored tail past the target — the regime the miner revenue
+     * floor created — is visible instead of hidden.
      *
-     * <p>Chain-state-free by requirement: no consensus lock, no header read, no ledger read.
-     * Every input is a construction-time constant of {@link NetworkParameters}, so the payload
-     * is identical for the life of the process — the caller memoizes it ({@code NodeApi} builds
-     * it once at route assembly) and serves each request through {@link #emissionSchedule(byte[])}.
-     * {@code rule} here is the schedule's <b>policy</b> — whether the profile schedules the
-     * curve at all — not the height-dependent rule the fragment reports. Every sampled subsidy
-     * passes through the single clamp site (two-arg {@code miningReward}), so the served curve
-     * is exactly what a miner would be paid at those supplies: never negative, never below the
-     * floor.
+     * <p>Chain-state-free by requirement: the method itself takes no consensus lock, reads no
+     * header and no ledger — {@code height} arrives from the caller (the memo's observed tip
+     * height), making the payload a pure function of {@code (params, height)}. Every sampled
+     * subsidy passes through the single clamp site (two-arg {@code miningReward}) at
+     * {@code sampleHeight}, so the served curve is exactly what a miner would be paid at those
+     * supplies under the live target: never negative, never below the floor. {@code rule} here
+     * is the schedule's <b>policy</b> — whether the profile schedules the curve at all — not the
+     * height-dependent rule the fragment reports.
      *
+     * @param height the height the samples are drawn at (the memo key's own height —
+     *               {@code sampleHeight} names it so a consumer never has to infer which target
+     *               the samples were drawn against)
      * @return an owned copy of the serialized body (the sink's backing array is not held)
      */
-    static byte[] schedulePayload(NodeService node) {
-        NetworkParameters params = node.params();
+    static byte[] schedulePayload(NetworkParameters params, long height) {
         boolean scheduled = params.emissionCurveHeight() > 0;
+        // The samples must show the CURVE, never the pre-activation geometric constant: below
+        // the activation height miningReward(height, supply) ignores `supply` entirely, so all
+        // 64 samples would collapse to one flat value while `rule` still reads "curve" (007
+        // pinned emissionCurveHeight here for exactly that reason). Clamping UP to the
+        // activation height restores it, and sampleHeight publishes the clamped value so the
+        // field keeps naming the height the samples were actually drawn at.
+        long sampleHeight = scheduled ? Math.max(height, params.emissionCurveHeight()) : height;
         JsonSink sink = JsonSink.create(SCHEDULE_SIZE_HINT);
         sink.beginObject();
         sink.field(K_NETWORK, params.networkName());
@@ -158,20 +214,35 @@ final class EmissionApi {
             sink.fieldNull(K_GENESIS_SUPPLY);
         }
         sink.field(K_DECIMAL_SCALE_FACTOR, params.decimalScaleFactor());
+        // The decay constants: published verbatim (008 contracts/emission-api.md §2) so a
+        // consumer can reproduce the whole schedule without a second endpoint. 0 = never.
+        sink.name(K_DECAY);
+        sink.beginObject();
+        SupplyTargetSchedule schedule = params.supplyTargetSchedule();
+        sink.fieldLongAsString(K_START_HEIGHT, schedule.startHeight());
+        sink.fieldLongAsString(K_EPOCH_BLOCKS, schedule.epochBlocks());
+        sink.fieldLongAsString(K_NUM, schedule.num());
+        sink.fieldLongAsString(K_DEN, schedule.den());
+        sink.fieldLongAsString(K_TARGET_FLOOR, schedule.floor());
+        sink.fieldLongAsString(K_EPOCHS_TO_FLOOR, schedule.epochsToFloor());
+        sink.fieldLongAsString(K_FLOOR_ARRIVAL_HEIGHT, schedule.floorArrivalHeight());
+        sink.fieldLongAsString(K_PER_EPOCH_REDUCTION_BOUND, schedule.perEpochReductionBound());
+        sink.endObject();
+        sink.field(K_SAMPLE_HEIGHT, sampleHeight);
         sink.name(K_SAMPLES);
         sink.beginArray();
         if (scheduled) {
             // An empty array is a statement, not a failure; a scheduling profile samples
-            // supply = i × ⌊(S* + S*/4) ÷ 64⌋ for i in [1, 64]. Checked arithmetic on the span
-            // and the index product: a degenerate profile fails loudly, never wraps.
+            // supply = i × ⌊(S* + S*/4) ÷ 64⌋ for i in [1, 64], each subsidy evaluated against
+            // the live target at sampleHeight. Checked arithmetic on the span and the index
+            // product: a degenerate profile fails loudly, never wraps.
             long span = Math.addExact(params.supplyTarget(), params.supplyTarget() / 4);
             long step = span / SAMPLE_COUNT;
             for (int i = 1; i <= SAMPLE_COUNT; i++) {
                 long supply = Math.multiplyExact(i, step);
                 sink.beginObject();
                 sink.fieldLongAsString(K_SUPPLY, supply);
-                sink.fieldLongAsString(K_SUBSIDY, params.miningReward(
-                    params.emissionCurveHeight(), supply));
+                sink.fieldLongAsString(K_SUBSIDY, params.miningReward(sampleHeight, supply));
                 sink.endObject();
             }
         }

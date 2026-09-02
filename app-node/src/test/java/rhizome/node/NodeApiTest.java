@@ -656,8 +656,9 @@ class NodeApiTest {
         "storageFeeFactor", "minValuePerByte");
 
     private static final java.util.Set<String> EMISSION_FIELDS = java.util.Set.of(
-        "rule", "activationHeight", "supply", "subsidy", "target", "distanceToTarget",
-        "progressBps", "floor", "burned", "decimalScaleFactor");
+        "rule", "activationHeight", "supply", "subsidy", "target", "peakTarget",
+        "decayStartHeight", "distanceToTarget", "progressBps", "obligation",
+        "floor", "burned", "decimalScaleFactor");
 
     /** A fast-PoW curve-active engine + node + servlet, so the emission group has a live curve. */
     private record Fixture(NetworkParameters params, ChainEngine engine, NodeService node,

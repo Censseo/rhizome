@@ -463,11 +463,16 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
         }
 
         /** Consensus quantities and the network name only — no data-directory path, no stack
-         *  trace text, no secret (FR-014). */
+         *  trace text, no secret (FR-014). The message names BOTH height-gated emission
+         *  constants — the curve activation height and the decay-start height — so an operator
+         *  whose tip was minted under a different schedule can tell at a glance which consensus
+         *  constant moved (008 T021, FR-024); rule 6 itself already covers the decay's behaviour
+         *  through {@code Issuance.minted}'s dispatch, so the message is the only change. */
         private static String bootRefusalMessage(NetworkParameters params, long tipHeight,
                 String detail, String remedy) {
             return "Stored chain tip at height " + tipHeight + " on network '" + params.networkName()
                 + "' (emissionCurveHeight=" + params.emissionCurveHeight()
+                + ", decayStartHeight=" + params.decayStartHeight()
                 + ") is inconsistent with the emission rule now in force: " + detail + ". Remedy: "
                 + remedy + ".";
         }
