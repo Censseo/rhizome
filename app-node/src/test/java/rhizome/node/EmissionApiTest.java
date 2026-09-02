@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicLong;
 
 import io.activej.eventloop.Eventloop;
 import io.activej.http.AsyncServlet;
@@ -16,15 +17,21 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import rhizome.core.block.BlockImpl;
 import rhizome.core.blockchain.ChainEngine;
 import rhizome.core.blockchain.CurveActiveNetwork;
+import rhizome.core.serialization.JsonSink;
+import rhizome.core.blockchain.HonestBlockMiner;
 import rhizome.core.blockchain.NetworkParameters;
 import rhizome.core.blockchain.SignatureVerifier;
 import rhizome.core.blockchain.TestNodeStores;
 import rhizome.core.ledger.InMemoryLedger;
 import rhizome.core.ledger.LedgerSnapshot;
 import rhizome.core.ledger.PublicAddress;
+import rhizome.core.mempool.ExecutionStatus;
 import rhizome.core.mempool.MemPool;
+import rhizome.core.transaction.Transaction;
+import rhizome.core.transaction.TransactionAmount;
 import rhizome.crypto.PowAlgorithm;
 
 /**
@@ -92,8 +99,9 @@ class EmissionApiTest {
         JSONObject emission = new JSONObject(getBody(h.servlet()));
 
         assertEquals(Set.of("network", "rule", "activationHeight", "supplyTarget", "coefficient",
-                "steps", "floor", "genesisSupply", "decimalScaleFactor", "samples"),
-            emission.keySet(), "the schedule carries exactly its ten contracted fields");
+                "steps", "floor", "genesisSupply", "decimalScaleFactor", "samples",
+                "decay", "sampleHeight"),
+            emission.keySet(), "the schedule carries exactly its twelve contracted fields");
         assertEquals(h.params().networkName(), emission.getString("network"));
         assertEquals("curve", emission.getString("rule"));
         assertEquals(h.params().emissionCurveHeight(), emission.getLong("activationHeight"));
@@ -165,6 +173,231 @@ class EmissionApiTest {
         }
         assertTrue(previous > target,
             "the last sample sits above S* so the floored tail is visible");
+    }
+
+    @Test
+    void theSchedulePublishesTheDecayObjectAndNamesItsSampleHeight() throws Exception {
+        Harness h = harness(CurveActiveNetwork.decayActiveTestnet().toBuilder()
+            .powAlgorithm(PowAlgorithm.SHA256).genesisDifficulty(4).build());
+        JSONObject emission = new JSONObject(getBody(h.servlet()));
+
+        // sampleHeight names the height the samples were drawn at — the boot height here, so a
+        // consumer never has to infer which live target the samples were drawn against.
+        assertEquals(1, emission.getLong("sampleHeight"));
+        var schedule = h.params().supplyTargetSchedule();
+        JSONObject decay = emission.getJSONObject("decay");
+        assertEquals(Set.of("startHeight", "epochBlocks", "num", "den", "targetFloor",
+                "epochsToFloor", "floorArrivalHeight", "perEpochReductionBound"),
+            decay.keySet(), "the decay object carries exactly its eight contracted fields");
+        assertEquals(schedule.startHeight() + "", decay.getString("startHeight"));
+        assertEquals(schedule.epochBlocks() + "", decay.getString("epochBlocks"));
+        assertEquals(schedule.num() + "", decay.getString("num"));
+        assertEquals(schedule.den() + "", decay.getString("den"));
+        assertEquals(schedule.floor() + "", decay.getString("targetFloor"));
+        assertEquals(schedule.epochsToFloor() + "", decay.getString("epochsToFloor"));
+        assertEquals(schedule.floorArrivalHeight() + "", decay.getString("floorArrivalHeight"));
+        assertEquals(schedule.perEpochReductionBound() + "",
+            decay.getString("perEpochReductionBound"));
+
+        // The samples are drawn at the LIVE target of sampleHeight: with the decay starting at
+        // height 10, the boot height is still on the peak plateau, so the samples equal the
+        // peak-target dispatch — but they are explicitly the height-height evaluations.
+        JSONArray samples = emission.getJSONArray("samples");
+        assertEquals(64, samples.length());
+        long at = emission.getLong("sampleHeight");
+        for (int i = 0; i < samples.length(); i++) {
+            JSONObject sample = samples.getJSONObject(i);
+            long supply = Long.parseLong(sample.getString("supply"));
+            assertEquals(h.params().miningReward(at, supply),
+                Long.parseLong(sample.getString("subsidy")),
+                "sample " + i + " must equal the dispatch at sampleHeight's live target");
+        }
+    }
+
+    @Test
+    void theScheduleMemoIsReplacedWhenTheDecayEpochIndexChanges() throws Exception {
+        Harness h = harness(CurveActiveNetwork.decayActiveTestnet().toBuilder()
+            .powAlgorithm(PowAlgorithm.SHA256).genesisDifficulty(4).build());
+        NodeService n = harnessService(h);
+        var schedule = h.params().supplyTargetSchedule();
+
+        // Boot: memo built for height 1 (peak plateau, epoch index 0).
+        byte[] before = n.emissionSchedulePayload();
+        n.noteAppliedHeight(1);
+        assertEquals(before, n.emissionSchedulePayload(),
+            "a new applied height in the SAME epoch must not rebuild the memo");
+
+        // Cross the decay start AND the first epoch boundary: the index changes, the memo is
+        // replaced — sampleHeight moves and the samples are re-drawn at the decayed target.
+        long boundary = schedule.startHeight() + schedule.epochBlocks() + 2;
+        n.noteAppliedHeight(boundary);
+        byte[] after = n.emissionSchedulePayload();
+        org.junit.jupiter.api.Assertions.assertArrayEquals(after, n.emissionSchedulePayload(),
+            "a second read within the new epoch must be served from the memo, not rebuilt");
+        JSONObject payloadA = new JSONObject(new String(before,
+            java.nio.charset.StandardCharsets.UTF_8));
+        JSONObject payloadB = new JSONObject(new String(after,
+            java.nio.charset.StandardCharsets.UTF_8));
+        assertEquals(1, payloadA.getLong("sampleHeight"));
+        assertEquals(boundary, payloadB.getLong("sampleHeight"),
+            "the replaced memo must name its own (moved) sample height");
+        long targetA = Long.parseLong(payloadA.getJSONArray("samples").getJSONObject(0)
+            .getString("subsidy"));
+        long targetB = Long.parseLong(payloadB.getJSONArray("samples").getJSONObject(0)
+            .getString("subsidy"));
+        assertTrue(targetA != targetB || payloadA.getLong("sampleHeight") != payloadB
+            .getLong("sampleHeight"),
+            "the payload must actually move across the epoch boundary");
+    }
+
+    @Test
+    void aRestartedNodeSeedsTheScheduleMemoAtTheStoredTipNotAtHeightOne() throws Exception {
+        NetworkParameters p = decayActive();
+        var schedule = p.supplyTargetSchedule();
+        AtomicLong clock = new AtomicLong(1_000_000L);
+        LedgerSnapshot snapshot = new LedgerSnapshot("test", 0, p.chainId());
+        var verifier = new SignatureVerifier();
+        ChainEngine e = ChainEngine.boot(p, TestNodeStores.mixing(new InMemoryLedger(),
+            new rhizome.core.blockchain.InMemoryChainStore()), snapshot)
+            .clock(clock::get).verifier(verifier).build();
+
+        // Mine past the decay start AND the first epoch boundary: the stored tip an actual
+        // restart boots from (honest coinbase per height — the dispatch handles the decay).
+        PublicAddress miner = PublicAddress.random();
+        long tip = schedule.startHeight() + schedule.epochBlocks() + 2;
+        for (long h = e.height() + 1; h <= tip; h++) {
+            long parentSupply = e.headerAt(e.height()).supply();
+            BlockImpl b = HonestBlockMiner.mineNext(p, e,
+                clock.addAndGet(p.desiredBlockTimeSec() * 1000L),
+                Transaction.of(miner, new TransactionAmount(p.miningReward(h, parentSupply))));
+            assertEquals(ExecutionStatus.SUCCESS, e.addBlock(b), "block " + h + " must apply");
+        }
+        assertEquals(tip, e.height());
+
+        // The restart: a service assembled over the already-tipped engine with NO
+        // noteAppliedHeight call — the block-applied listener never fires for the stored tip
+        // loaded at boot, so the memo must be seeded from the engine's own height.
+        NodeService restarted = new NodeService(e, new MemPool(p, verifier, e, 1000));
+        byte[] first = restarted.emissionSchedulePayload();
+        org.junit.jupiter.api.Assertions.assertArrayEquals(first, restarted.emissionSchedulePayload(),
+            "the boot memo must be served as-is on repeated reads within the epoch");
+        JSONObject payload = new JSONObject(new String(first,
+            java.nio.charset.StandardCharsets.UTF_8));
+        assertEquals(tip, payload.getLong("sampleHeight"),
+            "the boot memo must name the stored tip, not height 1 — a height-1 seed would serve "
+                + "a peak-target schedule while the live-target tiles already report the decay");
+        assertTrue(p.supplyTargetAt(tip) != p.supplyTarget(),
+            "fixture sanity: the decay must have moved the live target off the peak at the tip");
+        JSONArray samples = payload.getJSONArray("samples");
+        long at = payload.getLong("sampleHeight");
+        for (int i = 0; i < samples.length(); i++) {
+            JSONObject sample = samples.getJSONObject(i);
+            long supply = Long.parseLong(sample.getString("supply"));
+            assertEquals(p.miningReward(at, supply),
+                Long.parseLong(sample.getString("subsidy")),
+                "sample " + i + " must be drawn at the stored tip's decayed target");
+        }
+    }
+
+    /** Writes the fragment directly and parses it back -- the single-writer contract's own seat. */
+    private JSONObject fragment(NetworkParameters params, long height, long tipSupply) {
+        JsonSink sink = JsonSink.create(512);
+        // The fragment always nests inside a served root object (that is how /info and /stats
+        // write it), so the helper mirrors that shape.
+        sink.beginObject();
+        EmissionApi.writeEmissionFragment(sink, params, height, tipSupply);
+        sink.endObject();
+        return new JSONObject(new String(sink.toByteArray(), java.nio.charset.StandardCharsets.UTF_8))
+            .getJSONObject("emission");
+    }
+
+    private NetworkParameters decayActive() {
+        return CurveActiveNetwork.decayActiveTestnet().toBuilder()
+            .powAlgorithm(PowAlgorithm.SHA256).genesisDifficulty(4).build();
+    }
+
+    @Test
+    void theFragmentReportsTheLiveTargetNotThePeakOnceTheDecayEngages() throws Exception {
+        NetworkParameters params = decayActive();
+        long supply = 900_000L; // above the decayed target after the first epochs
+        long height = schedulePastFirstEpoch(params);
+
+        JSONObject em = fragment(params, height, supply);
+        // SC-009: no published surface may report the peak as "the target" once decay is live.
+        assertEquals(params.supplyTargetAt(height + 1), Long.parseLong(em.getString("target")),
+            "target must be the live S*(h) for the next block");
+        assertTrue(Long.parseLong(em.getString("target")) != params.supplyTarget(),
+            "past the first decay epoch the live target differs from the peak");
+        assertEquals(params.supplyTarget() + "", em.getString("peakTarget"),
+            "the peak moves to peakTarget, unchanged");
+        assertEquals(params.decayStartHeight() + "", em.getString("decayStartHeight"));
+    }
+
+    @Test
+    void theFragmentCarriesNegativeDistanceUnclampedProgressAndTheObligation() throws Exception {
+        NetworkParameters params = decayActive();
+        long supply = 900_000L; // deliberately ABOVE the decayed target
+        long height = schedulePastFirstEpoch(params);
+        long liveTarget = params.supplyTargetAt(height + 1);
+        assertTrue(supply > liveTarget, "fixture sanity: supply above the live target");
+
+        JSONObject em = fragment(params, height, supply);
+        assertEquals(liveTarget - supply, Long.parseLong(em.getString("distanceToTarget")),
+            "the distance is negative when supply sits above the live target (FR-026)");
+        assertTrue(em.getLong("progressBps") > 10_000,
+            "progress past the target legitimately exceeds 10 000 bps — unclamped");
+        assertEquals(params.burnObligation(height + 1, supply) + "",
+            em.getString("obligation"),
+            "the obligation is the per-block derived figure, positive here");
+        assertEquals("0", em.getString("burned"),
+            "burned stays the defined constant — nothing is destroyed by this feature");
+        assertFalse(em.has("burnDebt") || em.has("cumulativeObligation"),
+            "no cumulative obligation or burn-debt field ships (FR-018, research Decision 4)");
+    }
+
+    @Test
+    void theFragmentKeepsNullSemanticsWhereTheChainCannotSupportTheFigures() throws Exception {
+        NetworkParameters params = decayActive();
+        long height = schedulePastFirstEpoch(params);
+
+        // Supply absent: distance/progress/obligation are null — never zeroed.
+        JSONObject absent = fragment(params, height, rhizome.core.block.BlockImpl.SUPPLY_ABSENT);
+        assertTrue(absent.isNull("distanceToTarget"));
+        assertTrue(absent.isNull("progressBps"));
+        assertTrue(absent.isNull("obligation"));
+        assertTrue(absent.isNull("supply"));
+
+        // A profile that never schedules the curve: the curve does not govern the next block —
+        // null again, and the published target is the (live == peak) value.
+        NetworkParameters geometricProfile = NetworkParameters.testnet().toBuilder()
+            .powAlgorithm(PowAlgorithm.SHA256).genesisDifficulty(4).build();
+        JSONObject geometric = fragment(geometricProfile, 1, 900_000L);
+        assertTrue(geometric.isNull("obligation"),
+            "a chain the curve does not govern has no obligation — null, not 0");
+        assertTrue(geometric.isNull("distanceToTarget"));
+        assertEquals(geometricProfile.supplyTargetAt(2) + "", geometric.getString("target"),
+            "the target is still published (the live value, peak here) even when geometric");
+    }
+
+    /** A height whose NEXT block sits two completed decay epochs in (start 10, epoch 5). */
+    private static long schedulePastFirstEpoch(NetworkParameters params) {
+        var schedule = params.supplyTargetSchedule();
+        return schedule.startHeight() + 2 * schedule.epochBlocks() - 1;
+    }
+
+    private NodeService harnessService(Harness h) {
+        // Rebuilds the service the harness's servlet wraps -- the harness record keeps only the
+        // servlet, so this constructs an equivalent service for memo-level assertions.
+        LedgerSnapshot snapshot = new LedgerSnapshot("test", 0, h.params().chainId());
+        if (h.params().genesisSupply() != NetworkParameters.GENESIS_SUPPLY_UNPINNED) {
+            snapshot.put(PublicAddress.random(),
+                new rhizome.core.transaction.TransactionAmount(h.params().genesisSupply()));
+        }
+        var verifier = new SignatureVerifier();
+        ChainEngine e = ChainEngine.boot(h.params(), TestNodeStores.mixing(new InMemoryLedger(),
+            new rhizome.core.blockchain.InMemoryChainStore()), snapshot)
+            .clock(() -> 0L).verifier(verifier).build();
+        return new NodeService(e, new MemPool(h.params(), verifier, e, 1000));
     }
 
     @Test

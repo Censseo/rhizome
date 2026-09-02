@@ -119,6 +119,19 @@ public final class EmissionCurve {
     }
 
     /**
+     * {@code floor(coefficient * ln(numerator / denominator))} via the exact fixed-point algorithm
+     * the generated table uses ({@code numerator > denominator > 0}, so the ratio is {@code > 1}
+     * and {@link #logTableEntry}'s reduction never needs a negative doubling count). Package-private:
+     * {@link SupplyTargetSchedule}'s per-epoch reduction bound (contracts/
+     * supply-target-schedule.md section 2, {@code D = ceil(c * ln(den/num))}) is derived from this
+     * so the bound and the table share ONE logarithm implementation -- two fixed-point ports would
+     * be two things to keep bit-for-bit identical.
+     */
+    static long logRatioFloor(long coefficient, long numerator, long denominator) {
+        return logTableEntry(numerator, coefficient, denominator);
+    }
+
+    /**
      * {@code floor(c * ln(S* / S_i))} via the successive-squaring fixed-point log (contracts/
      * emission-curve.md section 2). {@code S_i <= S*} always holds for a generated table
      * position, so the ratio is always {@code >= 1} and the reduction below never needs a
@@ -179,14 +192,63 @@ public final class EmissionCurve {
     }
 
     /**
-     * The raw (unclamped) curve value at {@code supply}, total over the entire {@code long}
-     * domain: {@code table[1]} below the first step, table-interpolated between the first step
-     * and {@code supplyTarget}, and strictly negative (ratio-mirrored on the same table) at and
-     * above {@code supplyTarget} -- except exactly {@code supplyTarget}, which the mirror also
-     * resolves to exactly {@code 0}, agreeing with the positive side by construction rather than
-     * by special case.
+     * The raw (unclamped) curve value at {@code supply}, measured against the live supply target
+     * {@code liveTarget} — total over the entire {@code long} domain.
+     *
+     * <p><b>Widened in place</b> (008-decaying-supply-target, project rule WI-12 — there is no
+     * target-less overload): the table is generated once for the peak {@code supplyTarget} and is
+     * never regenerated; a live target below the peak is applied by scaling the evaluation
+     * argument to {@code floor(supply * supplyTarget / liveTarget)} (see below). When
+     * {@code liveTarget == supplyTarget} — every shipped profile before its decay-start height,
+     * and every profile that never schedules a decay — the evaluation short-circuits to the
+     * original peak path unchanged, which makes "no behaviour change below the decay" structural
+     * rather than merely tested (FR-004/G1).
+     *
+     * <p>Shape of the result, all as before the widening: {@code table[1]} below the first step,
+     * table-interpolated between the first step and the target, and strictly negative
+     * (ratio-mirrored on the same table) at and above the target — except exactly at the target,
+     * which the mirror also resolves to exactly {@code 0}, agreeing with the positive side by
+     * construction rather than by special case.
+     *
+     * <p><b>Domain</b>: unlike the peak-only form, this one is NOT total over {@code long}. The
+     * scaled argument is narrowed <i>checked</i>, so the method is defined exactly for
+     * {@code supply <= Long.MAX_VALUE * liveTarget / supplyTarget} and throws above it. Taken over
+     * every target a schedule reaches, that bound is
+     * {@code SupplyTargetSchedule.maxEvaluableSupply()} — published there, and proven at
+     * construction to be at least the peak target. Every consensus caller
+     * ({@code HeaderChain.checkSupply}, {@code ChainEngine.checkSupply} and
+     * {@code checkEmissionScheduleConsistency}) already treats the throw as a rejected block; an
+     * observability caller reaches it only with a supply no validated chain could commit.
+     *
+     * @throws IllegalArgumentException if {@code liveTarget <= 0} — a target is a strictly
+     *             positive monetary quantity ({@code SupplyTargetSchedule.targetAt} can never
+     *             produce one); passing a sentinel here is a caller bug, not a degenerate value
+     * @throws ArithmeticException if {@code supply} exceeds the domain bound above — deliberate
+     *             (FR-023): the narrowing must never wrap or clamp into a plausible-looking reward
      */
-    public long raw(long supply) {
+    public long raw(long supply, long liveTarget) {
+        if (liveTarget <= 0) {
+            throw new IllegalArgumentException("liveTarget must be > 0, was " + liveTarget);
+        }
+        if (liveTarget == supplyTarget) {
+            return rawAtPeak(supply);
+        }
+
+        // Scaled argument floor(S * S* / T): the identity c*ln(T/S) == c*ln(S* / (S*S*/T))
+        // means the peak table evaluated at the scaled argument measures distance from the live
+        // target. The product genuinely overflows a long at mainnet scale (~3e25), so the
+        // arbitrary-precision intermediate is mandatory, not defensive -- and the narrowing is
+        // CHECKED: it throws rather than wrapping or clamping (FR-023), byte-for-byte the
+        // discipline mirror() below already uses.
+        long scaled = BigInteger.valueOf(supply)
+            .multiply(BigInteger.valueOf(supplyTarget))
+            .divide(BigInteger.valueOf(liveTarget))
+            .longValueExact();
+        return rawAtPeak(scaled);
+    }
+
+    /** The peak-target evaluation -- the entire pre-widening {@code raw}, unchanged. */
+    private long rawAtPeak(long supply) {
         if (supply < supplyTarget) {
             return curveValue(supply);
         }

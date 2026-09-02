@@ -18,6 +18,7 @@ import rhizome.core.block.BlockImpl;
 import rhizome.core.block.UncleRef;
 import rhizome.core.blockchain.ChainEngine;
 import rhizome.core.blockchain.ChainSynchronizer;
+import rhizome.core.blockchain.CurveActiveNetwork;
 import rhizome.core.blockchain.InMemoryChainStore;
 import rhizome.core.blockchain.Issuance;
 import rhizome.core.blockchain.Miner;
@@ -277,10 +278,13 @@ class SupplyCommitmentTest {
 
     // ---- User Story 2 (reorg restores supply structurally, FR-009) ----
 
-    /** Mines a coinbase-only block onto {@code engine}'s current tip, applies it, and returns it. */
+    /** Mines a coinbase-only block onto {@code engine}'s current tip, applies it, and returns it.
+     *  The coinbase pays the supply-aware dispatched reward — identical to the geometric value on
+     *  the curve-inactive profiles the older tests use, and correct on curve/decay-active ones. */
     private static BlockImpl mineCoinbaseOnly(NetworkParameters params, ChainEngine engine,
             AtomicLong clock, PublicAddress miner) {
         long height = engine.height() + 1;
+        long parentSupply = engine.headerAt(engine.height()).supply();
         var b = (BlockImpl) BlockImpl.builder()
             .id((int) height)
             .timestamp(clock.addAndGet(params.desiredBlockTimeSec() * 1000L))
@@ -288,7 +292,8 @@ class SupplyCommitmentTest {
             .lastBlockHash(engine.tipHash())
             .supply(SupplyStamp.next(engine, height, engine.difficulty()))
             .build();
-        b.addTransaction(Transaction.of(miner, new TransactionAmount(params.miningReward(height))));
+        b.addTransaction(Transaction.of(miner,
+            new TransactionAmount(params.miningReward(height, parentSupply))));
         var tree = new MerkleTree();
         tree.setItems(b.transactions());
         b.merkleRoot(tree.getRootHash());
@@ -319,10 +324,12 @@ class SupplyCommitmentTest {
         return new UncleRef(orphan.hash(), orphan.difficulty(), orphan.transactions().get(0).to());
     }
 
-    /** A mined (but not yet applied) next block on {@code engine}'s tip carrying {@code uncles}. */
+    /** A mined (but not yet applied) next block on {@code engine}'s tip carrying {@code uncles}.
+     *  The coinbase pays the supply-aware dispatched reward (see {@link #mineCoinbaseOnly}). */
     private static BlockImpl mineNephewCandidate(NetworkParameters params, ChainEngine engine,
             AtomicLong clock, PublicAddress miner, List<UncleRef> uncles) {
         long height = engine.height() + 1;
+        long parentSupply = engine.headerAt(engine.height()).supply();
         var b = (BlockImpl) BlockImpl.builder().id((int) height)
             .timestamp(clock.addAndGet(params.desiredBlockTimeSec() * 1000L))
             .difficulty(engine.difficulty())
@@ -330,7 +337,8 @@ class SupplyCommitmentTest {
             .uncles(new ArrayList<>(uncles))
             .supply(SupplyStamp.next(engine, height, engine.difficulty(), uncles))
             .build();
-        b.addTransaction(Transaction.of(miner, new TransactionAmount(params.miningReward(height))));
+        b.addTransaction(Transaction.of(miner,
+            new TransactionAmount(params.miningReward(height, parentSupply))));
         var tree = new MerkleTree();
         tree.setItems(b.transactions());
         b.merkleRoot(tree.getRootHash());
@@ -528,5 +536,227 @@ class SupplyCommitmentTest {
             assertEquals(entry.getValue(), local.headerAt(entry.getKey()).supply(),
                 "height " + entry.getKey() + "'s restored supply must equal its pre-pop value exactly");
         }
+    }
+
+    /**
+     * 008-decaying-supply-target T017 (FR-021, SC-006, SC-007, G6): a reorg whose window straddles
+     * BOTH the decay-start height and a decay-epoch boundary restores target, supply and reward
+     * exactly, with no rollback code involved — the target is a pure function of height, so the
+     * popped-to header already carries everything. The combined reward-continuity bound is
+     * asserted explicitly as its two separately named terms: the curve's interpolation term
+     * (≤ 1 base unit, the 004 bound) plus at most one per-epoch decay step
+     * ({@code perEpochReductionBound}) of headroom for the boundary the window spans.
+     */
+    @Test
+    void reorgAcrossADecayEpochBoundaryRestoresTargetSupplyAndRewardExactly() {
+        // The decay-active fixture: decay starts at height 10, one epoch every 5 blocks, so
+        // heights 10..16 cross the start AND the first boundary. Uncle headroom between
+        // genesisDifficulty and minDifficulty (mirrors reorgRestoresCommittedSupplyStructurally),
+        // and an explicit small maxReorgDepth the reorg genuinely exercises.
+        NetworkParameters params = CurveActiveNetwork.decayActiveTestnet().toBuilder()
+            .genesisDifficulty(5).minDifficulty(3)
+            .maxReorgDepth(8)
+            .build();
+        int depth = params.maxReorgDepth();
+        long decayStart = params.supplyTargetSchedule().startHeight();
+        long firstBoundary = decayStart + params.supplyTargetSchedule().epochBlocks();
+        long reductionBound = params.supplyTargetSchedule().perEpochReductionBound();
+        assertTrue(decayStart <= 10 && firstBoundary <= 16,
+            "fixture sanity: the window below must straddle the decay start and an epoch boundary");
+
+        AtomicLong clock = new AtomicLong(1_000_000L);
+        LedgerSnapshot snapshot = new LedgerSnapshot("t", 0, params.chainId());
+        ChainEngine local = ChainEngine.boot(params, TestNodeStores.inMemory(), snapshot)
+            .clock(clock::get).build();
+
+        // Shared prefix up to just before the decay start (heights 2..9).
+        List<Block> prefix = new ArrayList<>();
+        for (int i = 0; i < decayStart - 2; i++) {
+            prefix.add(mineCoinbaseOnly(params, local, clock, PublicAddress.random()));
+        }
+        long forkHeight = local.height();
+        assertTrue(forkHeight < decayStart, "the fork point must sit before the decay start");
+        long forkSupply = local.headerAt(forkHeight).supply();
+        Block forkBlockBefore = local.blockAt(forkHeight);
+
+        ChainEngine peer = ChainEngine.boot(params, TestNodeStores.inMemory(), snapshot)
+            .clock(clock::get).build();
+        for (Block b : prefix) {
+            assertEquals(ExecutionStatus.SUCCESS, peer.addBlock(b));
+        }
+
+        // Branch A -- local's suffix: crosses the decay start (10) and the epoch boundary (15).
+        // Capture the block objects themselves plus each coinbase reward: the pre-reorg branch's
+        // paid rewards, replayable later onto a fresh engine for the pop+replay exactness proof.
+        Map<Long, Long> branchARewards = new HashMap<>();
+        List<Block> branchABlocks = new ArrayList<>();
+        for (int i = 0; i < depth; i++) {
+            BlockImpl block = mineCoinbaseOnly(params, local, clock, PublicAddress.random());
+            branchABlocks.add(block);
+            branchARewards.put((long) block.id(),
+                block.transactions().get(0).amount().amount());
+        }
+        assertTrue(local.headerAt(local.height()).supply() > 0, "branch A commits supply");
+
+        // Branch B -- the peer's heavier suffix: one block longer, alternating uncle inclusion,
+        // crossing the same decay heights.
+        for (int i = 1; i <= depth + 1; i++) {
+            List<UncleRef> uncles;
+            if (i % 2 == 0) {
+                BlockImpl orphan = orphanSiblingOfTip(params, peer, clock, PublicAddress.random(),
+                    params.minDifficulty());
+                uncles = List.of(refOf(orphan));
+            } else {
+                uncles = List.of();
+            }
+            BlockImpl nephew = mineNephewCandidate(params, peer, clock, PublicAddress.random(), uncles);
+            assertEquals(ExecutionStatus.SUCCESS, peer.addBlock(nephew));
+        }
+        assertTrue(peer.totalWork().compareTo(local.totalWork()) > 0, "the peer branch must be heavier");
+
+        // Capture branch A's committed supplies before the pop -- they must be restored exactly.
+        Map<Long, Long> suppliesBefore = new HashMap<>();
+        for (long h = forkHeight; h <= local.height(); h++) {
+            suppliesBefore.put(h, local.headerAt(h).supply());
+        }
+
+        ChainSynchronizer.Result result = new ChainSynchronizer(local).syncFrom(new EnginePeer(peer));
+
+        assertEquals(ChainSynchronizer.Result.REORGED, result);
+        assertEquals(peer.height(), local.height());
+        assertEquals(peer.tipHash(), local.tipHash());
+
+        // (1) The target is restored exactly, everywhere in the window: it is a pure function of
+        // height, identical on both branches and after the pop (G6 -- there is no target state to
+        // roll back, which is WHY no rollback code exists).
+        for (long h = forkHeight; h <= local.height(); h++) {
+            assertEquals(params.supplyTargetSchedule().targetAt(h), params.supplyTargetAt(h),
+                "the live target at height " + h + " must be the pure height function's value");
+        }
+
+        // (2) The fork-point block is the exact SAME object -- never popped, never recomputed.
+        assertSame(forkBlockBefore, local.blockAt(forkHeight),
+            "the fork-point block must be untouched by the reorg");
+        assertEquals(forkSupply, local.headerAt(forkHeight).supply());
+
+        // (3) Supply restored/re-derived exactly: the adopted branch's committed supplies equal an
+        // independently walked issuance sum from the fork point (the shared formula, walked here
+        // by the test -- FR-007), and the popped branch's supplies come back byte-identical on
+        // replay (pop+replay restores, no rollback code involved).
+        long running = forkSupply;
+        for (long h = forkHeight + 1; h <= local.height(); h++) {
+            Block block = local.blockAt(h);
+            running = Math.addExact(running,
+                Issuance.minted(params, h, running, block.difficulty(), block.uncles()));
+            assertEquals(running, local.headerAt(h).supply(),
+                "height " + h + " committed supply must equal the independently recomputed sum");
+        }
+        // (3b) Pop + REPLAY: branch A's exact blocks, replayed onto a fresh fork-state engine
+        // after the reorg, re-derive identical supplies and identical rewards at every height --
+        // target, supply and reward are pure functions, so replaying across the boundary (either
+        // direction) restores them exactly. No rollback code exists to get this wrong; the
+        // determinism IS the rollback.
+        ChainEngine replay = ChainEngine.boot(params, TestNodeStores.inMemory(), snapshot)
+            .clock(clock::get).build();
+        for (Block b : prefix) {
+            assertEquals(ExecutionStatus.SUCCESS, replay.addBlock(b));
+        }
+        for (Block b : branchABlocks) {
+            assertEquals(ExecutionStatus.SUCCESS, replay.addBlock(b),
+                "branch A's height-" + b.id() + " block must replay cleanly after the reorg");
+            assertEquals(suppliesBefore.get((long) b.id()), replay.headerAt(b.id()).supply(),
+                "replayed height " + b.id() + " must commit exactly its pre-pop supply");
+            assertEquals(branchARewards.get((long) b.id()),
+                replay.blockAt(b.id()).transactions().get(0).amount().amount(),
+                "replayed height " + b.id() + " must pay exactly its pre-pop reward");
+        }
+
+        // (4) The combined reward-continuity bound, its two terms stated separately: at any height
+        // both branches carried a block, the paid rewards differ by at most
+        //   (curve interpolation) <= 1 base unit  +  (one per-epoch decay step) <= reductionBound,
+        // the +decay-step term being the headroom a reorg window spanning an epoch boundary can
+        // contribute. Either term alone is named in the failure message.
+        for (Map.Entry<Long, Long> entry : branchARewards.entrySet()) {
+            long h = entry.getKey();
+            long branchBReward = local.blockAt(h).transactions().get(0).amount().amount();
+            long absDiff = Math.abs(entry.getValue() - branchBReward);
+            assertTrue(absDiff <= 1 + reductionBound,
+                "reward at height " + h + " differs by " + absDiff + " across the reorg: over the "
+                    + "combined bound (curve interpolation <= 1 base unit) + (one per-epoch decay "
+                    + "step <= " + reductionBound + ")");
+        }
+    }
+
+    /**
+     * 008-decaying-supply-target T020 (FR-020, SI-6): the supply check against the DECAYED target
+     * still runs in the pre-PoW structural pass, reading only the parent header — so a block whose
+     * committed supply was computed as if the target had not decayed (what a decay-unaware miner
+     * would stamp) is rejected on the supply verdict even when its proof of work is ALSO invalid.
+     * If the target evaluation had become a post-PoW check, the same block would surface
+     * INVALID_NONCE first; if it had become a ledger-reading check, an empty-ledger engine could
+     * not decide it at all. Both orderings are pinned here.
+     */
+    @Test
+    void theDecayedTargetSupplyCheckStillRunsBeforeProofOfWorkAndReadsNoLedger() {
+        NetworkParameters params = CurveActiveNetwork.decayActiveTestnet();
+        AtomicLong clock = new AtomicLong(1_000_000L);
+        // Deliberately an EMPTY ledger: the supply check must need nothing from it.
+        InMemoryLedger ledger = new InMemoryLedger();
+        ChainEngine engine = ChainEngine.boot(params, TestNodeStores.mixing(ledger, new InMemoryChainStore()),
+                new LedgerSnapshot("t", 0, params.chainId()))
+            .clock(clock::get).build();
+
+        // Honest chain past the decay start and the first epoch boundary (start 10, epoch 5,
+        // so decayed territory begins at height 16).
+        for (int i = 0; i < 15; i++) {
+            mineCoinbaseOnly(params, engine, clock, PublicAddress.random());
+        }
+        long height = engine.height() + 1;
+        assertTrue(height > params.supplyTargetSchedule().startHeight()
+                + params.supplyTargetSchedule().epochBlocks(),
+            "fixture sanity: the forged block below sits in decayed territory");
+
+        // A decay-unaware stamp: the expected supply computed against the PEAK target (what a
+        // miner ignorant of the schedule would commit).
+        long parentSupply = engine.headerAt(engine.height()).supply();
+        long peakTarget = params.supplyTarget();
+        long decayUnawareExpected = Math.addExact(parentSupply,
+            Math.max(params.minerRevenueFloor(),
+                rhizome.core.blockchain.EmissionCurve.build(peakTarget,
+                        params.emissionCoefficient(), params.emissionTableSteps())
+                    .raw(parentSupply, peakTarget)));
+
+        // Same block twice: supply correct / supply decay-unaware -- and BOTH with an INVALID
+        // nonce (never mined). The supply verdict must win in both cases: the structural supply
+        // check runs before PoW, so an invalid block cannot burn CPU to reach a supply verdict
+        // (DoS armor ordering, WHITEPAPER 3.5).
+        var decayUnaware = (BlockImpl) BlockImpl.builder().id((int) height)
+            .timestamp(clock.addAndGet(params.desiredBlockTimeSec() * 1000L))
+            .difficulty(engine.difficulty()).lastBlockHash(engine.tipHash())
+            .supply(decayUnawareExpected).build();
+        decayUnaware.addTransaction(Transaction.of(PublicAddress.random(),
+            new TransactionAmount(decayUnawareExpected - parentSupply)));
+        var tree = new MerkleTree();
+        tree.setItems(decayUnaware.transactions());
+        decayUnaware.merkleRoot(tree.getRootHash());
+        decayUnaware.nonce(SHA256Hash.of(new byte[32])); // structurally shaped, cryptographically invalid
+
+        assertEquals(ExecutionStatus.INVALID_SUPPLY, engine.addBlock(decayUnaware),
+            "a decay-unaware committed supply must be rejected pre-PoW (INVALID_SUPPLY, not "
+                + "INVALID_NONCE) -- the target evaluation cannot become a post-PoW surface");
+
+        // Positive control: the correctly stamped block DOES mine through and apply.
+        BlockImpl honest = (BlockImpl) BlockImpl.builder().id((int) height)
+            .timestamp(decayUnaware.timestamp())
+            .difficulty(engine.difficulty()).lastBlockHash(engine.tipHash())
+            .supply(SupplyStamp.next(engine, height, engine.difficulty())).build();
+        honest.addTransaction(Transaction.of(PublicAddress.random(),
+            new TransactionAmount(params.miningReward(height, parentSupply))));
+        var honestTree = new MerkleTree();
+        honestTree.setItems(honest.transactions());
+        honest.merkleRoot(honestTree.getRootHash());
+        honest.nonce(Miner.mineNonce(honest.hash(), honest.difficulty(), params.powAlgorithm()));
+        assertEquals(ExecutionStatus.SUCCESS, engine.addBlock(honest));
+        assertEquals(height, engine.height());
     }
 }

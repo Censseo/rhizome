@@ -128,6 +128,19 @@ template, the corresponding checked-in `.wasm` must be rebuilt to match.
   wallet keys are generated and kept in the browser, the node never sees a private key.
 
 ## Recent Changes
+- 008-decaying-supply-target: the emission target becomes a function of height. `S*(h)`
+  (`SupplyTargetSchedule` in lib-core) holds at the pinned peak until a scheduled decay-start
+  height, then decays geometrically per epoch to a pinned floor. The recurrence is tabulated at
+  construction, so `targetAt` is an array read (the `E_f`-iteration bound still holds, now slack);
+  only a calibration past 65 536 epochs falls back to iterating. Degenerate constants refuse at
+  construction, the `decayStartHeight == 0` sentinel included — the other four must state their
+  zeros there, so a forgotten start height cannot silently mint at the peak forever.
+  `EmissionCurve` gains `raw(supply, liveTarget)`, which evaluates the existing peak-generated
+  table at a scaled argument rather than regenerating it — checked narrowing, so its domain is
+  bounded by `SupplyTargetSchedule.maxEvaluableSupply()`. `Issuance`, `ChainEngine`, `HeaderChain`
+  and `BlockAssembler` are unchanged — the target reads only height, so reorg reversal stays
+  structural. Creates a per-block burn obligation (published, not enforced; feature 08 discharges
+  it). No coin destroyed, no persisted state, no wire change, no new dependency.
 - 005-miner-revenue-floor: miner revenue floor `R_min` (`NetworkParameters.minerRevenueFloor`,
   800 base units on mainnet, build-refused if non-positive). The emission curve's single clamp
   site becomes `max(R_min, raw(S))` instead of `max(0, raw(S))`, so a curve-active block's

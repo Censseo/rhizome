@@ -303,6 +303,74 @@ class DashboardApiTest {
     }
 
     @Test
+    void theDecayedEmissionSurfacePublishesTheLiveTargetAcrossEveryRoute() throws Exception {
+        // 008 T034 (SC-009): on a decay-active profile mined past the first epoch boundary, NO
+        // published surface may report the peak as "the target" — and the new fields must be
+        // present with the contracted types on both /info and /stats.
+        NetworkParameters decayParams = CurveActiveNetwork.decayActiveTestnet().toBuilder()
+            .powAlgorithm(PowAlgorithm.SHA256).genesisDifficulty(4).build();
+        Harness decay = bootHarness(decayParams);
+        var schedule = decayParams.supplyTargetSchedule();
+        for (int i = 0; i < schedule.startHeight() + schedule.epochBlocks(); i++) {
+            assertEquals(rhizome.core.mempool.ExecutionStatus.SUCCESS,
+                decay.node().submitBlock(mineNextOn(decay.engine(), decayParams)));
+        }
+        long tipHeight = decay.engine().height();
+        long tipSupply = decay.engine().tipSupply().supply();
+        assertTrue(tipHeight > schedule.startHeight() + schedule.epochBlocks(),
+            "sanity: the tip sits in decayed territory");
+        long liveTarget = decayParams.supplyTargetAt(tipHeight + 1);
+        assertTrue(liveTarget != decayParams.supplyTarget(),
+            "sanity: the live target differs from the peak here");
+
+        for (String route : new String[] {"http://x/info", "http://x/stats"}) {
+            JSONObject surface = new JSONObject(body(callOn(decay.servlet(),
+                HttpRequest.get(route).build())));
+            JSONObject emission = surface.getJSONObject("emission");
+            assertEquals(liveTarget + "", emission.getString("target"),
+                route + ": target must be the live S*(h) for the next block, never the peak");
+            assertEquals(decayParams.supplyTarget() + "", emission.getString("peakTarget"),
+                route + ": peakTarget carries the peak");
+            assertEquals(decayParams.decayStartHeight() + "",
+                emission.getString("decayStartHeight"));
+            // Null-vs-value semantics: the harness chain commits supply and the curve governs,
+            // so all three figures are present strings (never null, never zeroed).
+            assertFalse(emission.isNull("distanceToTarget"), route);
+            assertFalse(emission.isNull("progressBps"), route);
+            assertFalse(emission.isNull("obligation"), route);
+            assertTrue(emission.get("obligation") instanceof String, route);
+            assertEquals("0", emission.getString("burned"), route);
+        }
+
+        // The schedule route never had a "target" key: its peak is correctly named supplyTarget,
+        // and the decay object + sampleHeight are present.
+        JSONObject scheduleRoute = new JSONObject(body(callOn(decay.servlet(),
+            HttpRequest.get("http://x/emission").build())));
+        assertFalse(scheduleRoute.has("target"),
+            "/emission names its peak supplyTarget and must not grow a misleading alias");
+        assertTrue(scheduleRoute.getJSONObject("decay").length() == 8);
+        assertTrue(scheduleRoute.has("sampleHeight"));
+    }
+
+    @Test
+    void theDashboardToleratesANodeThatOmitsTheNewEmissionFields() throws Exception {
+        // T034, contracts/emission-api.md section 3 "Older node tolerance": the page renders
+        // against a node predating 008 — obligation/peakTarget absent, the peak-era behaviour
+        // preserved. The guards are part of the served asset, asserted here at the same level
+        // as the rest of the asset checks (the page itself has no build step to unit-test).
+        HttpResponse js = call(HttpRequest.get("http://x/dashboard/app.js").build());
+        String app = body(js);
+        assertTrue(app.contains("em.obligation !== null && em.obligation !== undefined"),
+            "the obligation tile must guard the field's absence (older node)");
+        assertTrue(app.contains("em.peakTarget !== null && em.peakTarget !== undefined"),
+            "the target tile must guard peakTarget's absence (older node)");
+        assertTrue(app.contains("BigInt(em.distanceToTarget) < 0n"),
+            "a negative distance is conveyed as text, never by colour alone");
+        assertTrue(app.contains("decayEpochOf"),
+            "the /emission browser cache is keyed by the decay-epoch index");
+    }
+
+    @Test
     void statsCarriesTheIdenticalEmissionObjectAndAnUnchangedMiningReward() throws Exception {
         // /stats adds the same emission fragment /info serves — written by the same writer, so
         // the two routes cannot drift — while the pre-existing miningReward field keeps its

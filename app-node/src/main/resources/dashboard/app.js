@@ -97,14 +97,33 @@ async function submitWire(wire) {
 
 const App = { stats: null, features: null, manifest: null };
 
-// /emission is immutable for the life of the node (profile constants + curve shape), so it is
-// fetched ONCE per page load and cached for the session — deliberately NOT on the 5-second
-// poll. A failed fetch is not cached: this page renders the chart as unavailable, and the next
-// page load retries (FR-020 — degrade, never throw).
+// /emission was immutable for the life of the node; since the decaying supply target (008) its
+// samples are drawn at the live target, so the payload changes once per DECAY EPOCH. The cache
+// is keyed by that epoch index — computed from the payload's own decay constants and
+// sampleHeight (absent on a node predating 008: then the payload really is immutable and the
+// behaviour is exactly the old once-per-session fetch) — and still deliberately NOT fetched on
+// every 5-second poll. A failed fetch is not cached: this page renders the chart as
+// unavailable, and the next poll retries (FR-020 — degrade, never throw).
 let emissionScheduleCache = null;
 
-async function emissionSchedule() {
-  if (emissionScheduleCache) return emissionScheduleCache;
+function decayEpochOf(schedule, height) {
+  if (!schedule || !schedule.decay || !(schedule.decay.startHeight > 0) || !height) return 0;
+  const d = schedule.decay;
+  // STRICTLY less-than, mirroring SupplyTargetSchedule.epochIndexAt: the node rebuilds its
+  // memo the moment height reaches startHeight and stamps that height into sampleHeight, so a
+  // `<=` here would read the cached payload as epoch 0 forever while the live height already
+  // reads 1 — the comparison below would never match and the page would re-fetch /emission on
+  // every 5-second poll for a whole epoch.
+  return height < d.startHeight ? 0
+    : Math.floor((height - d.startHeight) / d.epochBlocks) + 1;
+}
+
+async function emissionSchedule(currentHeight) {
+  if (emissionScheduleCache
+      && decayEpochOf(emissionScheduleCache, currentHeight)
+          === decayEpochOf(emissionScheduleCache, emissionScheduleCache.sampleHeight)) {
+    return emissionScheduleCache;
+  }
   const schedule = await api('/emission');
   emissionScheduleCache = schedule;
   return schedule;
@@ -116,9 +135,14 @@ function scale() { return BigInt(App.stats ? App.stats.decimalScaleFactor : 1); 
 function fmtCoins(baseUnits) {
   const s = scale();
   const v = BigInt(baseUnits);
-  const whole = v / s;
-  const frac = (v % s).toString().padStart(s.toString().length - 1, '0').replace(/0+$/, '');
-  return whole.toLocaleString('fr-FR') + (frac ? ',' + frac : '');
+  // 008: a negative distance is a real, expected figure (the target can sit below supply once
+  // the decay is engaged), so the formatting must survive the sign instead of emitting a
+  // mangled "-1,-2345"-style string from a negative remainder.
+  const neg = v < 0n;
+  const a = neg ? -v : v;
+  const whole = a / s;
+  const frac = (a % s).toString().padStart(s.toString().length - 1, '0').replace(/0+$/, '');
+  return (neg ? '-' : '') + whole.toLocaleString('fr-FR') + (frac ? ',' + frac : '');
 }
 
 /** display string ("12,5" or "12.5") -> base units BigInt. */
@@ -420,8 +444,9 @@ function renderDashboard() {
         el('tbody', null, rows)));
 
       // The figures come from /stats's emission fragment; the schedule (chart shape) arrives
-      // separately, once per session. Both degradation paths end in text, never in a throw.
-      emissionSchedule().then(schedule => {
+      // separately, re-fetched only when the decay epoch turns over. Both degradation paths end
+      // in text, never in a throw.
+      emissionSchedule(s.height).then(schedule => {
         curveBody.replaceChildren(...curveContents(s.emission, schedule));
       }).catch(() => {
         curveBody.replaceChildren(...curveContents(s.emission, null));
@@ -443,9 +468,12 @@ function renderDashboard() {
 const EMISSION_UNAVAILABLE = 'indisponible';
 
 /**
- * The emission tiles: circulating supply, target and distance to target, from /stats's
- * emission fragment. Every state is conveyed textually in the sub-label (never by colour
- * alone), and a figure the chain cannot support shows {@link EMISSION_UNAVAILABLE}.
+ * The emission tiles: circulating supply, live target (with the peak as secondary text), the
+ * distance to the live target and the burn obligation, from /stats's emission fragment. Every
+ * state is conveyed textually in the sub-label (never by colour alone), and a figure the chain
+ * cannot support shows {@link EMISSION_UNAVAILABLE}. The obligation/peak fields may be absent
+ * on a node predating 008 — the page renders without them, exactly as it already tolerates a
+ * missing emission key (contracts/emission-api.md §3).
  */
 function emissionTiles(em) {
   if (!em) {
@@ -457,11 +485,33 @@ function emissionTiles(em) {
   const supplyTile = ['Offre en circulation',
     em.supply !== null ? fmtCoins(em.supply) : EMISSION_UNAVAILABLE,
     em.supply !== null ? ruleLabel : ruleLabel + ' · offre non engagée'];
-  const targetTile = ['Cible d’émission', fmtCoins(em.target), ruleLabel];
-  const distanceTile = ['Distance à la cible',
-    em.distanceToTarget !== null ? fmtCoins(em.distanceToTarget) : EMISSION_UNAVAILABLE,
-    em.distanceToTarget !== null ? 'restante avant la cible' : 'non convergente vers la cible'];
-  return [supplyTile, targetTile, distanceTile];
+  // The LIVE target is the figure that governs the next block; the peak is secondary text.
+  const peakShown = em.peakTarget !== null && em.peakTarget !== undefined
+    ? fmtCoins(em.peakTarget) : null;
+  const targetSub = peakShown !== null
+    ? (em.decayStartHeight > 0
+      ? 'cible vivante (décroissance programmée) · pic : ' + peakShown
+      : 'cible vivante · pic : ' + peakShown)
+    : ruleLabel;
+  const targetTile = ['Cible d’émission',
+    em.target !== null && em.target !== undefined ? fmtCoins(em.target) : EMISSION_UNAVAILABLE,
+    targetSub];
+  let distanceTile;
+  if (em.distanceToTarget === null || em.distanceToTarget === undefined) {
+    distanceTile = ['Distance à la cible', EMISSION_UNAVAILABLE, 'non convergente vers la cible'];
+  } else if (BigInt(em.distanceToTarget) < 0n) {
+    // Negative distance, conveyed as TEXT — never by colour alone (spec §Accessibility).
+    distanceTile = ['Distance à la cible', fmtCoins(em.distanceToTarget),
+      'l’offre dépasse la cible (décroissance engagée)'];
+  } else {
+    distanceTile = ['Distance à la cible', fmtCoins(em.distanceToTarget),
+      'restante avant la cible'];
+  }
+  const obligationTile = ['Obligation de brûlage',
+    em.obligation !== null && em.obligation !== undefined
+      ? fmtCoins(em.obligation) : EMISSION_UNAVAILABLE,
+    'brûlage dérivé de ce bloc — rien n’est détruit (brûlé : ' + (em.burned ?? '0') + ')'];
+  return [supplyTile, targetTile, distanceTile, obligationTile];
 }
 
 /**
@@ -517,13 +567,17 @@ function emissionChart(em, schedule) {
 
   const id = 'emission-chart-' + (++emissionChartSeq);
   const pct = Number((supply * 10000n) / target) / 100;
-  const name = 'Courbe d’émission : offre, cible et position actuelle';
-  const desc = 'Offre en circulation ' + fmtCoins(supply) + ' unités de base ; cible '
+  // The dashed line tracks the LIVE target (S*(h)) — the same figure the tiles and the subsidy
+  // are measured against — so the plot and the reported marker cannot disagree. The accessible
+  // name/description states the position relative to that live target (spec §Accessibility),
+  // and progress past 100 % is a real state once the target decays below supply.
+  const name = 'Courbe d’émission : offre, cible vivante et position actuelle';
+  const desc = 'Offre en circulation ' + fmtCoins(supply) + ' unités de base ; cible vivante '
     + fmtCoins(target) + ' ; subvention du prochain bloc ' + fmtCoins(subsidy)
-    + ' ; position à ' + pct.toLocaleString('fr-FR') + ' % de la cible.';
+    + ' ; position à ' + pct.toLocaleString('fr-FR') + ' % de la cible vivante.';
   const summary = el('p', { class: 'muted curve-summary', id: id + '-summary' },
-    'Offre ' + fmtCoins(supply) + ' · cible ' + fmtCoins(target) + ' · subvention prochaine '
-    + fmtCoins(subsidy) + ' · à ' + pct.toLocaleString('fr-FR') + ' % de la cible');
+    'Offre ' + fmtCoins(supply) + ' · cible vivante ' + fmtCoins(target) + ' · subvention prochaine '
+    + fmtCoins(subsidy) + ' · à ' + pct.toLocaleString('fr-FR') + ' % de la cible vivante');
 
   // Positioned statically: the whole chart is rebuilt every poll, so a CSS transition could
   // never animate the marker (a freshly inserted element renders at its final transform) —
@@ -545,7 +599,7 @@ function emissionChart(em, schedule) {
   svg.append(marker);
 
   const caption = el('p', { class: 'muted curve-caption' },
-    'trait plein : subvention selon l’offre · pointillé : cible · losange : position actuelle');
+    'trait plein : subvention selon l’offre · pointillé : cible vivante · losange : position actuelle');
 
   return [svg, summary, caption];
 }

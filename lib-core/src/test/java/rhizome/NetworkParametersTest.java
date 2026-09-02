@@ -81,6 +81,29 @@ class NetworkParametersTest {
         double secondsPerYear = 365.25 * 86_400.0;
         long tauBlocks = (long) (20.0 * secondsPerYear / blockTime);
 
+        // 008-decaying-supply-target (T027): the decay schedule is cadence-relative like
+        // everything else on this path. The decay-start height IS tau (20 years at the shipped
+        // cadence) and the epoch is ONE QUARTER of a year -- both denominated in BLOCKS via
+        // desiredBlockTimeSec (365-day years, the shipped convention), so a future cadence
+        // change forces the decay calibration to be revisited alongside the geometric epoch and
+        // the curve's tau (FR-037). The shipped profile carries the calibration only from the
+        // feature's final activation step (T045), so until then the guard reads a calibrated
+        // twin; once T045 lands the twin IS cleanMainnet() and this code is unchanged.
+        NetworkParameters decayed = p.supplyTargetSchedule().isScheduled() ? p : p.toBuilder()
+            .decayStartHeight(126_144_000L).decayEpochBlocks(1_576_800L)
+            .decayNum(799L).decayDen(800L).supplyTargetFloor(1_498_962_290_000L).build();
+        double secondsPerYear365 = 365.0 * 86_400.0;
+        long decayStartExpected = Math.round(20.0 * secondsPerYear365 / blockTime);
+        assertTrue(Math.abs(decayed.decayStartHeight() - decayStartExpected)
+                <= decayStartExpected / 1000,
+            "decayStartHeight must be 20 years at THIS cadence (recompute from "
+                + "desiredBlockTimeSec), was " + decayed.decayStartHeight() + " vs "
+                + decayStartExpected);
+        long epochExpected = Math.round(secondsPerYear365 / blockTime / 4.0);
+        assertTrue(Math.abs(decayed.decayEpochBlocks() - epochExpected) <= epochExpected / 1000,
+            "the decay epoch must be one quarter-year at THIS cadence, was "
+                + decayed.decayEpochBlocks() + " vs " + epochExpected);
+
         long s0 = p.genesisSupply();
         long sStar = p.supplyTarget();
         long c = p.emissionCoefficient();
@@ -152,17 +175,18 @@ class NetworkParametersTest {
             "supply at tau should have covered a substantial majority of the S0->S* gap, was "
                 + (fractionOfGapCovered * 100) + "%");
 
-        // Floored crossover: the coarse stride above lands a single stride past the point where
-        // the reward first clamps to exactly R_min (near S*, k grows to ~S/(1000c) while the
-        // reward has shrunk to a few hundred base units, so one stride can leap tens of millions
-        // of base units). Refine with a binary search on the same monotone function to land on
-        // the EXACT smallest supply at which the floored reward is exactly R_min -- still running
-        // the real curve, never hand-derived.
-        long lo = lastSupplyAboveFloor; // miningReward(height, lo) > floor
-        long hi = firstFloorSupply;     // miningReward(height, hi) == floor
+        // Floored crossover (peak-target era): the coarse stride above lands a single stride past
+        // the point where the reward first clamps to exactly R_min. Refine with a binary search
+        // on the same monotone function to land on the EXACT smallest supply at which the floored
+        // reward is exactly R_min -- still running the real curve, never hand-derived. 008: the
+        // search is pinned at a PRE-DECAY height, because the crossover the calibration record
+        // publishes is the peak-target one; past H_d the crossover becomes a moving quantity
+        // (the live target pulls raw below R_min sooner), covered by the floor's G4 sweep.
+        long lo = s0;                    // miningReward(activation, S0) > floor
+        long hi = sStar;                 // miningReward(activation, S*) == floor
         while (hi - lo > 1) {
             long mid = lo + (hi - lo) / 2;
-            if (p.miningReward(height, mid) > floor) {
+            if (p.miningReward(activationHeight, mid) > floor) {
                 lo = mid;
             } else {
                 hi = mid;
@@ -187,11 +211,11 @@ class NetworkParametersTest {
         EmissionCurve rawCurve = EmissionCurve.build(sStar, c, p.emissionTableSteps());
         long rawLo = hi;     // raw(rawLo) > 0 (it is just under R_min, not yet truncated)
         long rawHi = sStar;  // raw(sStar) == 0 exactly (ln(S*/S*) == 0)
-        assertTrue(rawCurve.raw(rawLo) > 0 && rawCurve.raw(rawHi) == 0,
+        assertTrue(rawCurve.raw(rawLo, sStar) > 0 && rawCurve.raw(rawHi, sStar) == 0,
             "the terminal-supply search must genuinely bracket the truncation point");
         while (rawHi - rawLo > 1) {
             long mid = rawLo + (rawHi - rawLo) / 2;
-            if (rawCurve.raw(mid) > 0) {
+            if (rawCurve.raw(mid, sStar) > 0) {
                 rawLo = mid;
             } else {
                 rawHi = mid;
@@ -269,10 +293,10 @@ class NetworkParametersTest {
         NetworkParameters mainnet = NetworkParameters.cleanMainnet();
         EmissionCurve curve = EmissionCurve.build(mainnet.supplyTarget(), mainnet.emissionCoefficient(),
             mainnet.emissionTableSteps());
-        long expected = Math.max(mainnet.minerRevenueFloor(), curve.raw(mainnet.genesisSupply()));
+        long expected = Math.max(mainnet.minerRevenueFloor(), curve.raw(mainnet.genesisSupply(), mainnet.supplyTarget()));
 
         assertEquals(expected, mainnet.miningReward(2, mainnet.genesisSupply()),
-            "height 2's coinbase must equal max(minerRevenueFloor, curve.raw(genesisSupply))");
+            "height 2's coinbase must equal max(minerRevenueFloor, curve.raw(genesisSupply, mainnet.supplyTarget()))");
         assertTrue(expected > 0, "the calibrated curve subsidy must be strictly positive");
         assertNotEquals(mainnet.miningReward(2), expected,
             "the geometric one-arg value must not be what height 2 pays under the curve");
@@ -568,9 +592,66 @@ class NetworkParametersTest {
         // negative number -- the floor lives at the clamp site, not inside the curve.
         EmissionCurve curve = EmissionCurve.build(
             CURVE_SUPPLY_TARGET, CURVE_EMISSION_COEFFICIENT, CURVE_EMISSION_TABLE_STEPS);
-        assertTrue(curve.raw(parentSupply) < 0,
-            "raw must stay signed (negative) above S*, was " + curve.raw(parentSupply));
-        assertTrue(curve.raw(CURVE_SUPPLY_TARGET * 10) < 0);
+        assertTrue(curve.raw(parentSupply, CURVE_SUPPLY_TARGET) < 0,
+            "raw must stay signed (negative) above S*, was " + curve.raw(parentSupply, CURVE_SUPPLY_TARGET));
+        assertTrue(curve.raw(CURVE_SUPPLY_TARGET * 10, CURVE_SUPPLY_TARGET) < 0);
+    }
+
+    /**
+     * 008-decaying-supply-target T026 (FR-028, FR-031, FR-032, FR-034, SC-005): the mainnet decay
+     * calibration must equal the published record (research.md §Decision 3 -- the single source
+     * T002 checked in; contracts/supply-target-schedule.md §8 cross-links it) and the record's
+     * burn-flow figure must re-derive from the shipped constants INCLUDING the floor's own tail
+     * issuance, so the record states the net supply trajectory rather than the target's alone.
+     */
+    @Test
+    void theMainnetDecayCalibrationMatchesThePublishedRecord() {
+        // Until the feature's final activation step (T045) the shipped profile stays at the
+        // sentinel; the calibrated twin below IS cleanMainnet() once T045 lands, so this test
+        // reads identically on both sides of activation.
+        NetworkParameters p0 = NetworkParameters.cleanMainnet();
+        NetworkParameters p = p0.supplyTargetSchedule().isScheduled() ? p0 : p0.toBuilder()
+            .decayStartHeight(126_144_000L).decayEpochBlocks(1_576_800L)
+            .decayNum(799L).decayDen(800L).supplyTargetFloor(1_498_962_290_000L).build();
+        var schedule = p.supplyTargetSchedule();
+
+        // The published constants (research.md §Decision 3's single-source table).
+        assertEquals(126_144_000L, schedule.startHeight());
+        assertEquals(1_576_800L, schedule.epochBlocks());
+        assertEquals(799L, schedule.num());
+        assertEquals(800L, schedule.den());
+        assertEquals(1_498_962_290_000L, schedule.floor());
+        assertEquals(p.supplyTarget(), schedule.peak());
+
+        // The derived constants, measured by the normative iteration: E_f = 555 (the closed
+        // form's 554 is the documented off-by-one -- research.md §Decision 3's correction note)
+        // and H_f = H_d + 555 x E = 1 001 268 000. D = ceil(c x ln(den/num)) = 30.
+        assertEquals(555L, schedule.epochsToFloor(),
+            "epochsToFloor must equal the exact iteration's value (555, not the closed form's "
+                + "554 -- research.md §Decision 3)");
+        assertEquals(1_001_268_000L, schedule.floorArrivalHeight(),
+            "floor arrival must equal H_d + E_f x E");
+        assertEquals(30L, schedule.perEpochReductionBound(),
+            "the per-epoch reduction bound must equal ceil(c x ln(den/num)) = ceil(29.706)");
+
+        // The record's burn flow: for supply to track the target down, the chain must destroy
+        // (target fall) + (floor's own tail issuance) per year -- the TARGET's fall alone would
+        // leave the net trajectory drifting upward under the floor. Both terms re-derive from
+        // the shipped constants; their sum is the published ~2 003 538 PDN/year.
+        double secondsPerYear365 = 365.0 * 86_400.0;
+        long blocksPerYear = Math.round(secondsPerYear365 / p.desiredBlockTimeSec());
+        long epochsPerYear = blocksPerYear / schedule.epochBlocks();
+        long targetFallPerYear = Math.round((double) schedule.peak()
+            * (schedule.den() - schedule.num()) / schedule.den()
+            * epochsPerYear) / 10_000L;
+        assertEquals(1_498_962L, targetFallPerYear,
+            "the target's initial fall rate must match the published 1 498 962 PDN/year");
+        long floorMintingPerYear = p.minerRevenueFloor() * blocksPerYear / 10_000L;
+        assertEquals(504_576L, floorMintingPerYear,
+            "the floor's own tail issuance must match the published 504 576 PDN/year");
+        assertEquals(2_003_538L, targetFallPerYear + floorMintingPerYear,
+            "the burn required for supply to track the target must equal the record's "
+                + "~2 003 538 PDN/year -- target fall PLUS floor minting, the net trajectory");
     }
 
     @Test
@@ -667,7 +748,7 @@ class NetworkParametersTest {
     /** Asserts the floor invariant at a single supply: reward >= R_min and reward == max(R_min, raw). */
     private static void assertFlooredReward(NetworkParameters p, EmissionCurve curve,
             long height, long floor, long supply) {
-        long raw = curve.raw(supply);
+        long raw = curve.raw(supply, p.supplyTargetAt(height));
         long reward = p.miningReward(height, supply);
         assertTrue(reward >= floor,
             "reward " + reward + " fell below the floor " + floor + " at supply=" + supply

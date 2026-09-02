@@ -52,9 +52,9 @@ class EmissionCurveTest {
         long stride = 37; // prime stride: thorough without walking every one of ~2M values
 
         long previousSupply = 1;
-        long previousRaw = curve.raw(previousSupply);
+        long previousRaw = curve.raw(previousSupply, SUPPLY_TARGET);
         for (long supply = 1 + stride; supply <= SUPPLY_TARGET + overshoot; supply += stride) {
-            long raw = curve.raw(supply);
+            long raw = curve.raw(supply, SUPPLY_TARGET);
             assertTrue(previousRaw >= raw,
                 "raw() must be monotone non-increasing: raw(" + previousSupply + ")=" + previousRaw
                     + " < raw(" + supply + ")=" + raw);
@@ -73,7 +73,7 @@ class EmissionCurveTest {
         // unambiguous.
         long terminalSupply = -1;
         for (long supply = stepPosition(1); supply < SUPPLY_TARGET; supply++) {
-            if (curve.raw(supply) == 0) {
+            if (curve.raw(supply, SUPPLY_TARGET) == 0) {
                 terminalSupply = supply;
                 break;
             }
@@ -83,11 +83,11 @@ class EmissionCurveTest {
             + "somewhere below the supply target");
         // The pin is exact: the base unit immediately below still pays something, and the
         // terminal point itself is exactly zero — not "close to zero", not negative.
-        assertTrue(curve.raw(terminalSupply - 1) > 0,
+        assertTrue(curve.raw(terminalSupply - 1, SUPPLY_TARGET) > 0,
             "the base unit immediately below the terminal supply must still pay a positive reward");
-        assertEquals(0, curve.raw(terminalSupply));
+        assertEquals(0, curve.raw(terminalSupply, SUPPLY_TARGET));
         // Deterministic: re-evaluating the same point again yields the identical pin.
-        assertEquals(0, curve.raw(terminalSupply));
+        assertEquals(0, curve.raw(terminalSupply, SUPPLY_TARGET));
     }
 
     @Test
@@ -108,7 +108,7 @@ class EmissionCurveTest {
 
         long previous = Long.MAX_VALUE; // no supply can produce a raw() above this as a starting bound
         for (long supply : supplies) {
-            long raw = assertDoesNotThrow(() -> curve.raw(supply),
+            long raw = assertDoesNotThrow(() -> curve.raw(supply, SUPPLY_TARGET),
                 "raw() must be total across the whole long domain, including near Long.MAX_VALUE");
             assertTrue(raw < 0, "raw(" + supply + ") must be strictly negative above the supply "
                 + "target, was " + raw);
@@ -124,7 +124,7 @@ class EmissionCurveTest {
 
         for (int i = 1; i <= STEPS; i++) {
             long supplyAtStep = stepPosition(i);
-            assertEquals(curve.tableValue(i), curve.raw(supplyAtStep),
+            assertEquals(curve.tableValue(i), curve.raw(supplyAtStep, SUPPLY_TARGET),
                 "raw() at exactly S_" + i + " (" + supplyAtStep + ") must equal the generated "
                     + "table entry, with no interpolation error at the boundary itself");
         }
@@ -139,7 +139,7 @@ class EmissionCurveTest {
         // Including exactly 0 — an empty-genesis chain must still evaluate, not throw.
         long[] belowFloorSupplies = {0, 1, domainFloor / 2, domainFloor - 1};
         for (long supply : belowFloorSupplies) {
-            assertEquals(firstStepValue, curve.raw(supply),
+            assertEquals(firstStepValue, curve.raw(supply, SUPPLY_TARGET),
                 "below the domain floor, raw(" + supply + ") must hold the first step's value "
                     + "(the monotone below-floor extension)");
         }
@@ -171,7 +171,7 @@ class EmissionCurveTest {
             Long.MAX_VALUE,
         };
         for (long supply : sampleSupplies) {
-            assertEquals(first.raw(supply), second.raw(supply),
+            assertEquals(first.raw(supply, SUPPLY_TARGET), second.raw(supply, SUPPLY_TARGET),
                 "raw(" + supply + ") must be bit-identical across independent constructions");
         }
     }
@@ -202,7 +202,7 @@ class EmissionCurveTest {
         // divergence should move the reward the most across [S0, S*] -- measured live against the
         // real curve, not hardcoded from research.md's rounded figure, so a calibration change
         // (S*, c or N) is caught here too, not just approximated.
-        long r0 = mainnetCurve.raw(MAINNET_GENESIS_SUPPLY);
+        long r0 = mainnetCurve.raw(MAINNET_GENESIS_SUPPLY, MAINNET_SUPPLY_TARGET);
 
         // research.md Decision 6: worst-case 120-block supply divergence between two competing
         // tips, conservatively including full-difficulty uncle/nephew issuance on top of the base
@@ -236,15 +236,15 @@ class EmissionCurveTest {
         // exactly 0) does NOT hold across this sweep, but "<= 1" (never 2 or more -- never a
         // *large* jump) does, which is what FR-014 actually guards against.
         for (long anchor = MAINNET_GENESIS_SUPPLY; anchor <= upperBound; anchor += stride) {
-            long base = mainnetCurve.raw(anchor);
+            long base = mainnetCurve.raw(anchor, MAINNET_SUPPLY_TARGET);
 
-            long up = mainnetCurve.raw(anchor + deltaS);
+            long up = mainnetCurve.raw(anchor + deltaS, MAINNET_SUPPLY_TARGET);
             assertTrue(Math.abs(base - up) <= 1,
                 "reward discontinuity at anchor=" + anchor + ", anchor+deltaS=" + (anchor + deltaS)
                     + ": raw()=" + base + " vs " + up + " differ by more than 1 base unit");
 
             // anchor >= S0 > deltaS, so anchor - deltaS is always positive here -- no guard needed.
-            long down = mainnetCurve.raw(anchor - deltaS);
+            long down = mainnetCurve.raw(anchor - deltaS, MAINNET_SUPPLY_TARGET);
             assertTrue(Math.abs(base - down) <= 1,
                 "reward discontinuity at anchor=" + anchor + ", anchor-deltaS=" + (anchor - deltaS)
                     + ": raw()=" + base + " vs " + down + " differ by more than 1 base unit");
@@ -252,10 +252,10 @@ class EmissionCurveTest {
 
         // At S0 exactly -- the theoretical worst point per the derivative argument above -- the
         // divergence is 0, matching research.md's ~0.16-base-unit (rounds to 0) estimate exactly.
-        long baseAtS0 = mainnetCurve.raw(MAINNET_GENESIS_SUPPLY);
-        assertEquals(baseAtS0, mainnetCurve.raw(MAINNET_GENESIS_SUPPLY + deltaS),
+        long baseAtS0 = mainnetCurve.raw(MAINNET_GENESIS_SUPPLY, MAINNET_SUPPLY_TARGET);
+        assertEquals(baseAtS0, mainnetCurve.raw(MAINNET_GENESIS_SUPPLY + deltaS, MAINNET_SUPPLY_TARGET),
             "at S0 itself the 120-block-reorg divergence must round to exactly 0 base units");
-        assertEquals(baseAtS0, mainnetCurve.raw(MAINNET_GENESIS_SUPPLY - deltaS),
+        assertEquals(baseAtS0, mainnetCurve.raw(MAINNET_GENESIS_SUPPLY - deltaS, MAINNET_SUPPLY_TARGET),
             "at S0 itself the 120-block-reorg divergence must round to exactly 0 base units");
     }
 
@@ -276,5 +276,82 @@ class EmissionCurveTest {
         assertTrue(!overflow.getMessage().contains("generated emission table entry"),
             "the failure must come from the interpolation-overflow guard, not the entry-fit check: "
                 + overflow.getMessage());
+    }
+
+    /**
+     * 008-decaying-supply-target, T016 (research.md Decision 1 — the measurement that justified
+     * the design): evaluating the PEAK-generated table at the scaled argument
+     * {@code floor(S x peak / T)} must agree with a table REGENERATED for {@code T} to within
+     * <b>±1 base unit</b> at every point that stresses the two tables' truncation disagreement:
+     * every step boundary of both tables (a unit either side), the target neighbourhood, the
+     * negative branch, and a dense seeded-random sweep up to {@code 1.9 x peak}. The two rules
+     * are two equally legitimate integer definitions differing by at most one base unit; this
+     * test pins that the shipped one never disagrees with the regenerated reference by more.
+     */
+    @Test
+    void theScaledArgumentEvaluationAgreesWithARegeneratedTableToWithinOneBaseUnit() {
+        long peak = SUPPLY_TARGET; // 1_000_003 — deliberately not divisible by STEPS, like mainnet
+        // Ten ratios went into the published measurement; these five span its range on this
+        // test-scale peak (0.999 down to 0.111), including the exact halves research.md
+        // measured as agreeing everywhere.
+        long[] targets = {
+            peak * 999 / 1000,
+            peak * 9 / 10,
+            peak / 2,
+            peak * 5 / 9,
+            peak / 9,
+        };
+
+        java.util.TreeSet<Long> points = new java.util.TreeSet<>();
+        java.util.Random random = new java.util.Random(0x008L); // seeded: failures reproduce
+        for (long target : targets) {
+            EmissionCurve live = EmissionCurve.build(peak, COEFFICIENT, STEPS);
+            EmissionCurve regenerated = EmissionCurve.build(target, COEFFICIENT, STEPS);
+
+            // Every step boundary of BOTH tables, a unit either side (boundary effects).
+            for (int i = 1; i <= STEPS; i++) {
+                long peakStep = stepPosition(i);
+                long targetStep = i * (target / STEPS);
+                points.add(peakStep); points.add(peakStep - 1); points.add(peakStep + 1);
+                points.add(peakStep - 2); points.add(peakStep + 2);
+                if (targetStep > 0) {
+                    points.add(targetStep); points.add(targetStep - 1); points.add(targetStep + 1);
+                    points.add(targetStep - 2); points.add(targetStep + 2);
+                }
+            }
+            // The target neighbourhood: where the scaled argument crosses 1.
+            for (long d = -5; d <= 5; d++) {
+                long near = target + d;
+                if (near > 0) {
+                    points.add(near);
+                }
+            }
+            // The negative branch (within the measured 1.9x domain) and random supplies.
+            points.add(target + 1); points.add(target + 1_000);
+            points.add(peak + peak / 2); points.add(peak * 19 / 10);
+            for (int k = 0; k < 2_000; k++) {
+                points.add(random.nextLong(peak * 19 / 10) + 1);
+            }
+            // Below-floor extension both ways (0 included — an empty-genesis chain evaluates).
+            points.add(0L); points.add(1L);
+
+            long maxAbsDiff = 0;
+            long argMax = -1;
+            for (long supply : points) {
+                long liveValue = live.raw(supply, target);
+                long reference = regenerated.raw(supply, target);
+                long absDiff = Math.abs(liveValue - reference);
+                assertTrue(absDiff <= 1,
+                    "raw(" + supply + ", " + target + ") = " + liveValue
+                        + " disagrees with the table regenerated at the live target (" + reference
+                        + ") by " + absDiff + " base units -- over the published +/-1 bound");
+                if (absDiff > maxAbsDiff) {
+                    maxAbsDiff = absDiff;
+                    argMax = supply;
+                }
+            }
+            assertTrue(maxAbsDiff <= 1,
+                "target " + target + ": max disagreement " + maxAbsDiff + " at supply " + argMax);
+        }
     }
 }

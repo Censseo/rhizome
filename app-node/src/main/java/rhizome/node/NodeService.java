@@ -82,6 +82,62 @@ public final class NodeService {
         // Built here, not as a field initializer: the accessors capture `engine`, which the
         // compiler cannot prove initialized before the constructor body assigns it.
         this.statsWindows = new StatsWindowService(engine::height, this::block);
+        // The /emission schedule memo (008 T032): ONE entry, keyed by decay-epoch index, built
+        // for the boot height and replaced only when the index changes (see
+        // {@link #noteAppliedHeight} / {@link #emissionSchedulePayload}). Size 1, deterministic
+        // eviction — the constitution's bounded-cache requirement.
+        // Seeded from the ENGINE's tip, not height 1: the block-applied listener never fires
+        // for the stored tip loaded at boot, so a fixed height-1 seed would serve a stale
+        // peak-target schedule (and defeat the dashboard's epoch cache) until the next block.
+        long bootHeight = Math.max(1, engine.height());
+        this.appliedHeightObserved = bootHeight;
+        this.appliedEpochObserved = EmissionApi.decayEpochIndexOf(engine.params(), bootHeight);
+        this.emissionMemoEpoch = this.appliedEpochObserved;
+        this.emissionMemo = EmissionApi.schedulePayload(engine.params(), bootHeight);
+    }
+
+    // -- /emission schedule memo (008 T032) -----------------------------------------------------
+    // 007 memoized this payload once per process because it was chain-state-free. The moving
+    // target makes it height-dependent, so the memo is now keyed by decay-epoch index: the
+    // apply path publishes the latest applied height's index here (two volatile writes under
+    // the engine's listener, no rebuild under the lock), and the /emission route swaps the
+    // single entry when the index has changed — at most once per quarter-year at the shipped
+    // calibration, never on a profile at the 0 sentinel (constant index, today's behaviour).
+    // Per-request serialization and per-request curve dispatch stay at zero.
+    private volatile byte[] emissionMemo;
+    private volatile long emissionMemoEpoch;
+    private volatile long appliedHeightObserved;
+    private volatile long appliedEpochObserved;
+
+    /** The apply path's cheap hook: records the latest applied height and its decay-epoch
+     *  index. Called from the engine's block-applied listener (under the consensus lock), so
+     *  it must stay two volatile writes — the payload rebuild itself happens lazily, outside
+     *  any lock, in {@link #emissionSchedulePayload}. */
+    public void noteAppliedHeight(long height) {
+        this.appliedHeightObserved = height;
+        this.appliedEpochObserved = EmissionApi.decayEpochIndexOf(engine.params(), height);
+    }
+
+    /**
+     * The memoized {@code GET /emission} payload — rebuilt at most once per decay-epoch index
+     * change, served from the single memo entry otherwise. No consensus lock is taken: the
+     * epoch index arrives from {@link #noteAppliedHeight}'s volatile, and a concurrent rebuild
+     * is benign (both products are correct payloads for the same epoch; the last write wins and
+     * {@code sampleHeight} self-describes whichever was drawn).
+     */
+    public byte[] emissionSchedulePayload() {
+        long observed = appliedEpochObserved;
+        if (observed != emissionMemoEpoch) {
+            byte[] rebuilt = EmissionApi.schedulePayload(engine.params(), appliedHeightObserved);
+            emissionMemo = rebuilt;
+            emissionMemoEpoch = observed;
+            return rebuilt;
+        }
+        // Read AFTER the epoch comparison, never before it: the rebuilding thread writes
+        // emissionMemo and only then emissionMemoEpoch, so a reader that has already seen the
+        // new epoch is guaranteed to see the payload paired with it. Reading the array first
+        // could hand back the PREVIOUS epoch's bytes while claiming the current epoch's key.
+        return emissionMemo;
     }
 
     /**

@@ -268,11 +268,6 @@ public final class NodeApi {
         int maxBlockBody = node.params().maxBlockSizeBytes() + 1024;
         DashboardAssets dashboard = DashboardAssets.load();
         DocsAssets docs = DocsAssets.load();
-        // Built once, here: every /emission input is a NetworkParameters constant, so the body
-        // is identical for the life of the process — each request just re-wraps the memoized
-        // bytes in a fresh response (never a shared HttpResponse: a served body buffer is
-        // consumed by the write).
-        final byte[] emissionSchedule = EmissionApi.schedulePayload(node);
 
         RoutingServlet routing = RoutingServlet.builder(reactor)
             // ---- embedded dashboard SPA ----
@@ -297,8 +292,11 @@ public final class NodeApi {
             .with(GET, "/features", req -> guarded(() -> DashboardApi.features(node, sse)))
             // Chain-state-free constants + curve samples: no consensus lock, no store read, so
             // it is plain `ok` like /difficulty — but it MUST be classified in RoutePolicy all
-            // the same (RoutePolicyCompletenessTest fails until it is).
-            .with(GET, "/emission", req -> ok(EmissionApi.emissionSchedule(emissionSchedule)))
+            // the same (RoutePolicyCompletenessTest fails until it is). 008 T032: the payload
+            // is memoized on the service (one entry keyed by decay-epoch index); this call
+            // serves the memoized bytes and is where the at-most-once-per-epoch rebuild fires,
+            // off the consensus lock, preserving 007's zero-per-request-serialization property.
+            .with(GET, "/emission", req -> ok(EmissionApi.emissionSchedule(node.emissionSchedulePayload())))
             .with(GET, "/blocks", req -> offload(blocking, () -> whenNotReorging(node, () -> ExplorerApi.blocks(node, req))))
             .with(GET, "/block", req -> offload(blocking, () -> whenNotReorging(node, () -> ExplorerApi.block(node, req))))
             .with(GET, "/transaction", req -> offload(blocking, () -> ExplorerApi.findTransaction(node, req)))

@@ -246,20 +246,27 @@ quantities must not become JS numbers); heights, counts and basis points are JSO
 is a string (`"curve"` | `"geometric"`).
 
 **The shared `emission` fragment** (one writer in `EmissionApi`, nested identically under
-`/info` and `/stats` so the two routes cannot drift). Ten fields: `rule` (the rule governing the
+`/info` and `/stats` so the two routes cannot drift). Thirteen fields: `rule` (the rule governing the
 **next** block), `activationHeight` (`0` = never), `supply` (the tip header's committed value —
 JSON `null` when not committed, `"0"` is a legal committed value and is never conflated with
 absence), `subsidy` (the **next** block's subsidy, dispatched through the consensus
 `miningReward(height + 1, supply)` — verifiable from this response alone; distinct from
 `/stats.miningReward`, which keeps its pre-existing meaning: the subsidy the **tip's** coinbase
-paid), `target` (`S*`), `distanceToTarget` (signed `target − supply`; `null` when supply is absent
-**or** the curve does not govern the next block — a chain the curve does not govern is not
-converging on the target), `progressBps` (unclamped integer basis points of `supply/target` — may
-legitimately exceed `10000`; nullable under the same conditions as `distanceToTarget`), `floor`
-(`R_min`, reported beside the subsidy so a flat tail is recognisable as a floor), `burned` (always
-`"0"` — total native coin destroyed by consensus; zero by absence of a mechanism, not absence of a
-counter; no burn-debt field ships because none is defined yet), and `decimalScaleFactor` (base
-units per display unit, present so the fragment is self-describing).
+paid), `target` (**the live `S*(h)` for the next block**, not the peak — 008 repointed it so a
+consumer that keeps reading `target` always gets the number that actually governs), `peakTarget`
+(the constant `S*_peak` — the figure that moved aside), `decayStartHeight` (`H_d`; `0` = never),
+`distanceToTarget` (signed `S*(h) − supply`; **may be negative** once the decayed target falls
+below supply; `null` when supply is absent **or** the curve does not govern the next block — a
+chain the curve does not govern is not converging on the target), `progressBps` (unclamped integer
+basis points of `supply/S*(h)` — may legitimately exceed `10000`, and keeps growing past it as the
+target decays; nullable under the same conditions as `distanceToTarget`), `obligation` (the next
+block's derived burn obligation, `max(0, −raw(supply, S*(h)))` — `"0"` when the curve governs and
+the raw value is non-negative, positive once the target is below supply, `null` when the curve
+does not govern; **published only, never enforced** — no coin is destroyed, and no cumulative
+obligation or burn-debt field ships), `floor` (`R_min`, reported beside the subsidy so a flat tail
+is recognisable as a floor), `burned` (always `"0"` — total native coin destroyed by consensus;
+zero by absence of a mechanism, not absence of a counter; feature 08 supplies the mechanism), and
+`decimalScaleFactor` (base units per display unit, present so the fragment is self-describing).
 
 **`/info`** (A-15's classification unchanged: per-IP cost 1, `PEER_PROTOCOL`, **no reorg-window
 gate, never 503**) sources `height` and `emission.supply` from **one** compound consensus-lock
@@ -273,19 +280,28 @@ and peer pruning probes read them by name).
 stationary dashboard poll takes no extra consensus lock for it. Its classification (cost
 `STATS_WINDOW`, `READ_BUDGET`, A-14 503) is unchanged.
 
-**`GET /emission`** — the chain-state-free schedule read: network name, `rule` (the schedule's
+**`GET /emission`** — the schedule read: network name, `rule` (the schedule's
 *policy*: `"curve"` when the profile schedules the curve at all), `activationHeight`,
-`supplyTarget`, `coefficient`, `steps`, `floor`, `genesisSupply` (`null` on an unpinned profile),
-`decimalScaleFactor`, and `samples` — **exactly 64** entries on a curve-scheduling profile,
-**exactly 0** otherwise (an empty array is the statement "this chain is not curve-governed", not a
-failure). Sample `i` sits at `i × ⌊(S* + S*/4) ÷ 64⌋`, so the last sample lies above `S*` and the
-flat `R_min` tail is visible; every sampled subsidy passes through the single clamp site
-(`miningReward(activationHeight, supply)`), so the served curve is exactly what a miner is paid —
-never negative, never below the floor. Classification: `get("/emission", 1)` — per-IP cost 1, **no
-guards, no aggregate budget, no consensus lock, no chain state**; the response is identical for the
-life of the process. A verification test (`EmissionApiTest`) asserts every served sample equals a
-direct evaluation of the same profile's dispatch, so the published curve can never drift from the
-paid schedule.
+`supplyTarget` (the **peak** — correctly named; the live target is the fragment's `target`),
+`coefficient`, `steps`, `floor`, `genesisSupply` (`null` on an unpinned profile),
+`decimalScaleFactor`, `decay` (008: the eight decay constants — `startHeight`, `epochBlocks`,
+`num`, `den`, `targetFloor`, `epochsToFloor`, `floorArrivalHeight`, `perEpochReductionBound` —
+all decimal strings, so a consumer can reproduce the whole schedule without a second endpoint),
+`sampleHeight` (008: the height the samples were drawn at — named so a consumer never has to
+infer which live target the samples reflect), and `samples` — **exactly 64** entries on a
+curve-scheduling profile, **exactly 0** otherwise (an empty array is the statement "this chain is
+not curve-governed", not a failure). Sample `i` sits at `i × ⌊(S* + S*/4) ÷ 64⌋`, so the last
+sample lies above `S*` and the flat `R_min` tail is visible; every sampled subsidy passes through
+the single clamp site (`miningReward(sampleHeight, supply)` — evaluated against the **live
+target** at `sampleHeight`), so the served curve is exactly what a miner is paid at that height —
+never negative, never below the floor. Classification: `get("/emission", 1)` — per-IP cost 1,
+**no guards, no aggregate budget, no consensus lock, no chain state read on the route**; the
+payload is memoized as **one entry keyed by decay-epoch index** (size 1, replaced only when the
+index changes — on a profile at the `0` sentinel the index is constant and the payload is
+identical for the life of the process, exactly 007's behaviour), so per-request serialization and
+per-request curve dispatch stay at zero. A verification test (`EmissionApiTest`) asserts every
+served sample equals a direct evaluation of the same profile's dispatch, and that the memo is
+replaced across an epoch boundary and served from the memo within one.
 
 **`/blocks`** gains `supply` on each summary entry — emitted only when committed (`>= 0`), with
 the same decimal-string encoding `Block.Serializer.writeJsonBody` applies, so a chain that commits
