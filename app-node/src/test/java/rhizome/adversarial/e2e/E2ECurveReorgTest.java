@@ -54,13 +54,16 @@ class E2ECurveReorgTest {
      * profile pays a constant {@code R_min} — which would make this file's crossing and
      * repeated-reorg proofs vacuous: with a flat reward, reusing the losing block's own coinbase
      * and re-deriving {@code miningReward} are indistinguishable, so the very drift E2E-74 exists
-     * to catch could not show up. {@code c = 1300} gives {@code table[1] = 901}: above the floor,
-     * and below {@code supplyTarget} so the first block still leaves the branch un-crossed.
+     * to catch could not show up. It must ALSO satisfy the burn feature's construction guard G-4
+     * ({@code c <= the lowest supply target} — here the peak, no decay): {@code S* = 4000},
+     * {@code c = 3000} gives {@code table[1] = 2079}: above the floor, below the peak so the first
+     * block still leaves the branch un-crossed, and the second block from there crosses
+     * (2079 + 1996 >= 4000).
      */
     private static NetworkParameters crossableProfile() {
         return TestNetwork.FAST.toBuilder()
-            .supplyTarget(1000L)
-            .emissionCoefficient(1300L)
+            .supplyTarget(4000L)
+            .emissionCoefficient(3000L)
             .emissionTableSteps(2)
             .emissionCurveHeight(1)
             .build();
