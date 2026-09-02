@@ -286,6 +286,41 @@ class NetworkParametersTest {
             "strided supply " + stridedSupply + " diverges " + (relativeDivergence * 100)
                 + "% from the literal per-block supply " + literalSupply + " over " + literalBlocks
                 + " blocks, exceeds the 0.1% per-stride design bound (research.md Decision 7)");
+
+        // Burn-funded reward manipulation stays unprofitable (009 T048; research.md Decision 9):
+        // on the branch where burning supply RAISES the subsidy (S >= S*) the reward's
+        // responsiveness |dR/dS| times the relaxation time tau = S*/c must stay below 1 — the
+        // subsidy rise a burn buys lasts ~tau blocks at |dR/dS| per unit burned, so a product
+        // >= 1 would let an attacker cycle burn -> subsidy faster than the curve relaxes. A
+        // property of the CALIBRATION, asserted here, not a comment.
+        double relaxation = (double) sStar / c;
+
+        // (a) The DISPATCHED reward: the floor clamps the whole mirrored branch at the shipped
+        // calibration, so its slope is exactly 0 — the burn cannot move the subsidy at all.
+        long preDecay = activationHeight; // pinned pre-decay: the crossover the record publishes
+        long step = Math.max(1L, sStar / 1_000L);
+        for (long floored = sStar; floored <= 4 * sStar; floored = Math.addExact(floored + step, 0)) {
+            assertEquals(floor, p.miningReward(preDecay, floored),
+                "the mirrored branch must stay floored at the shipped calibration, supply="
+                    + floored);
+            if (floored > 3 * sStar) {
+                break; // the flat region is proven; the loop documents it without running to 4x
+            }
+        }
+
+        // (b) The RAW curve underneath: its slope on the mirrored branch times tau stays below 1
+        // for any supply, so the property survives even a future recalibration that moves the
+        // floor. Slope measured exactly, by integer differences over a ~0.1% step.
+        double rawSlopeScale = (double) step;
+        for (long probe = sStar + 1; probe <= 4 * sStar; probe = Math.multiplyExact(probe, 3) / 2) {
+            long r1 = rawCurve.raw(probe, sStar);
+            long r2 = rawCurve.raw(Math.addExact(probe, step), sStar);
+            double slope = Math.abs((double) (r2 - r1)) / rawSlopeScale;
+            assertTrue(slope * relaxation < 1.0,
+                "|dR/dS| x relaxation = " + (slope * relaxation) + " at supply " + probe
+                    + " -- burn-funded reward manipulation would be profitable (research.md "
+                    + "Decision 9)");
+        }
     }
 
     @Test
