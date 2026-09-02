@@ -180,7 +180,9 @@ final class DashboardApi {
         // above (window.height()/window.tipSupply() are one captured tip view) — so a stationary
         // dashboard poll takes no extra consensus lock for it, and the fragment is byte-identical
         // to the one /info serves (EmissionApi's single writer, spec FR-013).
-        EmissionApi.writeEmissionFragment(sink, params, window.height(), window.tipSupply());
+        EmissionApi.writeEmissionFragment(sink, params, new EmissionApi.TipView(
+            window.height(), window.tipSupply(), window.parentSupply(), window.tipDifficulty(),
+            window.tipUncles()));
         sink.endObject();
         return json(sink);
     }

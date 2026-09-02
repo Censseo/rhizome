@@ -1109,26 +1109,41 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
     }
 
     /**
-     * The tip's {@code (height, supply)} pair, read under <b>one</b> lock acquisition — the
-     * {@link #nextBlockTimestamp} shape. Every emission-observability surface reports these two
-     * figures together, and reading them as {@code height()} + {@code headerAt(...)} would let a
-     * reorg land between the two calls and serve a torn pair (the same class of read node-api
-     * A-14 exists to prevent). {@code supply} is the tip header's committed value, or
-     * {@link BlockImpl#SUPPLY_ABSENT} on a chain that commits none — the sentinel is passed
-     * through, never coerced to {@code 0}.
+     * The tip's compound emission view, read under <b>one</b> lock acquisition — the
+     * {@link #nextBlockTimestamp} shape. Every emission-observability surface reports these
+     * figures together, and reading them as separate accessors would let a reorg land between
+     * the calls and serve a torn view (the same class of read node-api A-14 exists to prevent).
+     *
+     * <p>009 T058 widened it to carry everything the tip block's <b>burned</b> figure needs:
+     * the parent header's committed supply and the tip's difficulty/uncles (the
+     * {@link Issuance#minted} inputs), so {@code burned = parent.supply + minted(tip) −
+     * tip.supply} is recoverable from this one view without a second acquisition. Still ONE
+     * lock acquisition: the tip and its parent are two array reads under the same hold, so
+     * {@code /info} keeps its per-IP cost 1 outside the A-14 503 class, and the no-tear
+     * guarantee holds for the whole fragment.
+     *
+     * <p>{@code supply} is the tip header's committed value, or {@link BlockImpl#SUPPLY_ABSENT}
+     * on a chain that commits none — the sentinel is passed through, never coerced to {@code 0}.
+     * {@code parentSupply} is {@link BlockImpl#SUPPLY_ABSENT} at genesis (no parent) or when the
+     * parent commits none.
      */
     public TipSupply tipSupply() {
         lock.lock();
         try {
             long h = store.height();
-            return new TipSupply(h, store.headerAt(h).supply());
+            BlockHeader tip = store.headerAt(h);
+            long parentSupply = h > GenesisBlock.GENESIS_ID
+                ? store.headerAt(h - 1).supply()
+                : BlockImpl.SUPPLY_ABSENT;
+            return new TipSupply(h, tip.supply(), parentSupply, tip.difficulty(), tip.uncles());
         } finally {
             lock.unlock();
         }
     }
 
-    /** The compound tip read of {@link #tipSupply()}: both fields from one chain view. */
-    public record TipSupply(long height, long supply) {}
+    /** The compound tip read of {@link #tipSupply()}: every field from one chain view. */
+    public record TipSupply(long height, long supply, long parentSupply, int difficulty,
+                            List<UncleRef> uncles) {}
 
     /** Exclusive upper bound of pruned block bodies ({@code 0} = archive node). See {@link ChainStore#prunedBelow()}. */
     public long prunedBelow() {

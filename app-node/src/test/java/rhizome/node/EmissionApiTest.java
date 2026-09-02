@@ -99,9 +99,10 @@ class EmissionApiTest {
         JSONObject emission = new JSONObject(getBody(h.servlet()));
 
         assertEquals(Set.of("network", "rule", "activationHeight", "supplyTarget", "coefficient",
-                "steps", "floor", "genesisSupply", "decimalScaleFactor", "samples",
-                "decay", "sampleHeight"),
-            emission.keySet(), "the schedule carries exactly its twelve contracted fields");
+                "steps", "floor", "burnShareNum", "burnShareDen", "genesisSupply",
+                "decimalScaleFactor", "samples", "decay", "sampleHeight"),
+            emission.keySet(), "the schedule carries exactly its fourteen contracted fields "
+                + "(009 T061 added the two pinned burn-share constants)");
         assertEquals(h.params().networkName(), emission.getString("network"));
         assertEquals("curve", emission.getString("rule"));
         assertEquals(h.params().emissionCurveHeight(), emission.getLong("activationHeight"));
@@ -299,13 +300,20 @@ class EmissionApiTest {
         }
     }
 
-    /** Writes the fragment directly and parses it back -- the single-writer contract's own seat. */
+    /** Writes the fragment directly and parses it back -- the single-writer contract's own seat.
+     *  The parent supply defaults to absent (burned "0"); the 4-arg overload states it. */
     private JSONObject fragment(NetworkParameters params, long height, long tipSupply) {
+        return fragment(params, height, tipSupply, rhizome.core.block.BlockImpl.SUPPLY_ABSENT);
+    }
+
+    private JSONObject fragment(NetworkParameters params, long height, long tipSupply,
+            long parentSupply) {
         JsonSink sink = JsonSink.create(512);
         // The fragment always nests inside a served root object (that is how /info and /stats
         // write it), so the helper mirrors that shape.
         sink.beginObject();
-        EmissionApi.writeEmissionFragment(sink, params, height, tipSupply);
+        EmissionApi.writeEmissionFragment(sink, params, new EmissionApi.TipView(height, tipSupply,
+            parentSupply, 4, java.util.List.of()));
         sink.endObject();
         return new JSONObject(new String(sink.toByteArray(), java.nio.charset.StandardCharsets.UTF_8))
             .getJSONObject("emission");
@@ -349,10 +357,82 @@ class EmissionApiTest {
         assertEquals(params.burnObligation(height + 1, supply) + "",
             em.getString("obligation"),
             "the obligation is the per-block derived figure, positive here");
+        // 009 rewrite of the two 007/008 locking assertions (T054): burned reports the tip
+        // block's destroyed amount, burnDebt the carried stock. This fragment's tip burned
+        // nothing (the parent supply is absent in this shape), so burned reads "0" — a real
+        // per-block figure, not the old defined constant.
         assertEquals("0", em.getString("burned"),
-            "burned stays the defined constant — nothing is destroyed by this feature");
-        assertFalse(em.has("burnDebt") || em.has("cumulativeObligation"),
-            "no cumulative obligation or burn-debt field ships (FR-018, research Decision 4)");
+            "this tip destroyed nothing — a per-block figure that happens to be 0");
+        assertEquals(rhizome.core.blockchain.Burn.debt(params, height + 1, supply,
+                params.miningReward(height + 1, supply)) + "",
+            em.getString("burnDebt"),
+            "burnDebt reports the carried stock the next block may consume");
+        // The distinction that survives 009: per-block and stock, never a counter.
+        assertFalse(em.has("cumulativeObligation") || em.has("cumulativeBurned")
+                || em.has("totalBurned") || em.has("totalBurn"),
+            "no CUMULATIVE burn field ships — a counter is not header-derivable and could not "
+                + "reverse structurally on a reorg (research.md Decision 1)");
+    }
+
+    @Test
+    void burnedReportsTheTipBlocksDestroyedAmountAndBurnDebtTheCarriedStock() throws Exception {
+        // The 009 T054 rewrite of the 007/008 locks, with a tip that REALLY burned: the burned
+        // figure is recovered from two headers (parent.supply + minted(tip) - tip.supply) and
+        // burnDebt is the carried stock for the NEXT block.
+        NetworkParameters params = decayActive();
+        long height = schedulePastFirstEpoch(params);
+        long parentSupply = 900_000L;
+        long fee = 1_000L;                       // the tip's eligible flow
+        long minted = params.miningReward(height, parentSupply);
+        long burned = rhizome.core.blockchain.Burn.burned(params, height, fee,
+            rhizome.core.blockchain.Burn.debt(params, height, parentSupply, minted));
+        assertTrue(burned > 0, "fixture sanity: the tip really burned");
+        long tipSupply = parentSupply + minted - burned;
+
+        JSONObject em = fragment(params, height, tipSupply, parentSupply);
+        assertEquals(burned + "", em.getString("burned"),
+            "burned is the tip block's destroyed amount, recovered from the two headers");
+        long nextDebt = rhizome.core.blockchain.Burn.debt(params, height + 1, tipSupply,
+            params.miningReward(height + 1, tipSupply));
+        assertEquals(nextDebt + "", em.getString("burnDebt"),
+            "burnDebt is the next block's carried debt");
+        assertFalse(em.has("cumulativeBurned") || em.has("totalBurned"),
+            "still no cumulative field: per-block and stock, never a counter");
+    }
+
+    @Test
+    void burnDebtIsNullWhereTheCurveDoesNotGovernAndZeroWhereNothingIsOwed() throws Exception {
+        // 009 T055 (ADR-012 §3): absence stays null, never 0 — a chain the curve does not
+        // govern carries NO debt figure; where the curve governs and nothing is owed the figure
+        // exists and reads exactly "0".
+        NetworkParameters geometric = NetworkParameters.testnet().toBuilder()
+            .powAlgorithm(PowAlgorithm.SHA256).genesisDifficulty(4).build();
+        JSONObject off = fragment(geometric, 1, 900_000L);
+        assertTrue(off.isNull("burnDebt"),
+            "the curve does not govern the next block: no debt figure at all — null, not 0");
+
+        // Curve governing, supply at/below the live target: the figure exists, exactly "0".
+        NetworkParameters active = CurveActiveNetwork.curveActiveTestnet().toBuilder()
+            .powAlgorithm(PowAlgorithm.SHA256).genesisDifficulty(4).build();
+        JSONObject belowTarget = fragment(active, 1, 500_000L, 500_000L);
+        assertEquals("0", belowTarget.getString("burnDebt"),
+            "the curve governs and nothing is owed: a real 0, never null");
+    }
+
+    @Test
+    void theEmissionRoutePublishesTheBurnShareConstants() throws Exception {
+        // 009 T057 (FR-035): the pinned share constants join the published schedule so an
+        // independent implementer can reproduce the burn rule from this route alone (ADR-012
+        // §1). They are height-invariant, so the decay-epoch memo key is unaffected.
+        Harness h = curveActiveHarness();
+        JSONObject emission = new JSONObject(getBody(h.servlet()));
+        assertEquals(h.params().burnShareNum() + "", emission.getString("burnShareNum"),
+            "the pinned share numerator, decimal string");
+        assertEquals(h.params().burnShareDen() + "", emission.getString("burnShareDen"),
+            "the pinned share denominator, decimal string");
+        assertEquals(NetworkParameters.cleanMainnet().burnShareNum() + "",
+            emission.getString("burnShareNum"),
+            "the published share must equal the shipped mainnet constant");
     }
 
     @Test

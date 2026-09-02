@@ -469,11 +469,16 @@ const EMISSION_UNAVAILABLE = 'indisponible';
 
 /**
  * The emission tiles: circulating supply, live target (with the peak as secondary text), the
- * distance to the live target and the burn obligation, from /stats's emission fragment. Every
- * state is conveyed textually in the sub-label (never by colour alone), and a figure the chain
- * cannot support shows {@link EMISSION_UNAVAILABLE}. The obligation/peak fields may be absent
- * on a node predating 008 — the page renders without them, exactly as it already tolerates a
- * missing emission key (contracts/emission-api.md §3).
+ * distance to the live target, the burn obligation, the tip block's destroyed amount and the
+ * carried burn debt, from /stats's emission fragment. Every state is conveyed textually in the
+ * sub-label (never by colour alone), and a figure the chain cannot support shows
+ * {@link EMISSION_UNAVAILABLE}. The obligation/peak fields may be absent on a node predating
+ * 008, the burn/debt fields on one predating 009 — the page renders without them, exactly as it
+ * already tolerates a missing emission key (contracts/emission-fragment.md §3).
+ *
+ * <p>009: a burn of 0 and an unavailable figure are visually AND textually distinct — 0
+ * (rendered "0") states "nothing was destroyed / nothing is owed"; indisponible states "this
+ * node cannot tell you". The two are never conflated (FR-028).
  */
 function emissionTiles(em) {
   if (!em) {
@@ -510,8 +515,28 @@ function emissionTiles(em) {
   const obligationTile = ['Obligation de brûlage',
     em.obligation !== null && em.obligation !== undefined
       ? fmtCoins(em.obligation) : EMISSION_UNAVAILABLE,
-    'brûlage dérivé de ce bloc — rien n’est détruit (brûlé : ' + (em.burned ?? '0') + ')'];
-  return [supplyTile, targetTile, distanceTile, obligationTile];
+    'plafond dérivé pour le prochain bloc'];
+  // 009: the tip block's destroyed amount — a real figure now. "0" is a statement
+  // ("nothing was destroyed"), indisponible is a different one ("cannot tell you").
+  const burnedTile = ['Brûlé (dernier bloc)',
+    em.burned !== null && em.burned !== undefined ? fmtCoins(em.burned) : EMISSION_UNAVAILABLE,
+    BigInt(em.burned ?? '0') > 0n
+      ? 'détruit par le dernier bloc'
+      : 'rien n’a été détruit par le dernier bloc'];
+  // 009: the carried debt — the stock standing between supply and the live target. null
+  // (the curve does not govern the next block) is indisponible; "0" is "nothing is owed".
+  let debtTile;
+  if (em.burnDebt === null || em.burnDebt === undefined) {
+    debtTile = ['Dette de brûlage', EMISSION_UNAVAILABLE,
+      'la courbe ne gouverne pas le prochain bloc'];
+  } else if (BigInt(em.burnDebt) > 0n) {
+    debtTile = ['Dette de brûlage', fmtCoins(em.burnDebt),
+      'brûlage restant pour rejoindre la cible'];
+  } else {
+    debtTile = ['Dette de brûlage', fmtCoins(em.burnDebt),
+      'aucun brûlage dû : l’offre est à ou sous la cible'];
+  }
+  return [supplyTile, targetTile, distanceTile, obligationTile, burnedTile, debtTile];
 }
 
 /**
