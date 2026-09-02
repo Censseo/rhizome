@@ -774,7 +774,8 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
                     byte[] newRoot = stateAccumulator.applyBlock(height2, collectStateChanges(block, touched, height2));
                     if (!java.util.Arrays.equals(newRoot, b.stateRoot().toBytes())) {
                         stateAccumulator.revertBlock(height2);
-                        Executor.rollbackBlock(block, ledger, contractProcessor, boxProcessor, height2, params);
+                        Executor.rollbackBlock(block, ledger, contractProcessor, boxProcessor, height2,
+                            params, parent.supply());
                         revertStateDomains(height2);
                         return INVALID_STATE_ROOT;
                     }
@@ -784,7 +785,8 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
                     // cannot verify. Accepting it blindly would fork this node from every validating
                     // node (audit M6: state-root validation must not depend on local configuration),
                     // so refuse a block whose committed state we are unable to check.
-                    Executor.rollbackBlock(block, ledger, contractProcessor, boxProcessor, b.id(), params);
+                    Executor.rollbackBlock(block, ledger, contractProcessor, boxProcessor, b.id(),
+                        params, parent.supply());
                     revertStateDomains(b.id());
                     return INVALID_STATE_ROOT;
                 }
@@ -901,7 +903,10 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
             store.beginBlockCommit();
             boolean popped = false;
             try {
-                Executor.rollbackBlock(tip, ledger, contractProcessor, boxProcessor, height, params);
+                // The parent's committed supply feeds the journal-less burn re-derivation
+                // (009 T041): the parent is this pop's own chain context, read before it moves.
+                Executor.rollbackBlock(tip, ledger, contractProcessor, boxProcessor, height, params,
+                    store.headerAt(height - 1).supply());
                 // Stage the nonce reversals BEFORE the pop so they flush in the same atomic batch
                 // as the height decrement (audit perf: per-sender fsync) — derived purely from the
                 // popped tip, so on a failed pop they are discarded, as they were previously never

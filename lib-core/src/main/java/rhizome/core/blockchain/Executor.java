@@ -822,21 +822,37 @@ public final class Executor {
      * most recently applied one (used by {@code popBlock} during reorgs).
      */
     public static void rollbackBlock(Block block, Ledger ledger, ContractProcessor processor,
-                                     long height, NetworkParameters params) {
+                                      long height, NetworkParameters params) {
         rollbackBlock(block, ledger, processor, null, height, params);
     }
 
     /** As above, also reversing the block's box transactions via the {@link BoxProcessor}. */
     public static void rollbackBlock(Block block, Ledger ledger, ContractProcessor processor,
                                      BoxProcessor boxProcessor, long height, NetworkParameters params) {
+        rollbackBlock(block, ledger, processor, boxProcessor, height, params, BlockImpl.SUPPLY_ABSENT);
+    }
+
+    /**
+     * The rollback the engine drives, with the parent block's committed supply supplied for the
+     * journal-less burn re-derivation (009 T041). Package-private, and deliberately NOT a wider
+     * public signature: the parent supply is an already-validated chain fact only the caller
+     * holds ({@code popBlock} reads it from the store; the state-root reject sites hold the
+     * parent header), the public forms stay exactly as they were, and no caller can silently
+     * skip it — the engine is the only producer of reorgs. {@code rollbackBlock} itself gains no
+     * parameter on its public face (registry anti-pattern; data-model.md §8).
+     */
+    static void rollbackBlock(Block block, Ledger ledger, ContractProcessor processor,
+                              BoxProcessor boxProcessor, long height, NetworkParameters params,
+                              long parentSupply) {
         undoBlock(block, ledger,
             processor == null ? ContractProcessor.NONE : processor,
-            boxProcessor == null ? BoxProcessor.NONE : boxProcessor, height, params);
+            boxProcessor == null ? BoxProcessor.NONE : boxProcessor, height, params, parentSupply);
     }
 
     /** As {@link #rollbackBlock}, with both domains guaranteed non-null. */
     private static void undoBlock(Block block, Ledger ledger, ContractProcessor processor,
-                                  BoxProcessor boxProcessor, long height, NetworkParameters params) {
+                                  BoxProcessor boxProcessor, long height, NetworkParameters params,
+                                  long parentSupply) {
         // The ledger's own undo journal, recorded by executeBlock, is the exact inverse of every
         // ledger mutation the block applied — no arithmetic re-derivation from the transaction,
         // no receipts walk, no mirrors to keep in sync (audit: one undo protocol, and a journal
@@ -914,6 +930,35 @@ public final class Executor {
         }
 
         long coinbaseAmount = coinbase.amount().amount();
+
+        // The burn's journal-less re-derivation (009 T041), reverted FIRST — the burn was the
+        // LAST ledger op the forward pass applied (after uncles), so it is the first to undo.
+        // Every input here is already validated and block- or caller-carried: `minted` is
+        // re-derived from the block's OWN coinbase amount and uncle refs exactly as the uncle
+        // mirror below does (the established no-new-input pattern), and `parentSupply` is the
+        // parent's committed supply the popping engine holds. `Burn.rederive` is then the
+        // header-only identity: burned = parent.supply + minted - block.supply. The public
+        // rollbackBlock forms pass SUPPLY_ABSENT and skip this mirror — only a curve-active
+        // burning block can carry a burn, and such a pop always runs through the engine.
+        if (params.emissionCurveActiveAt(height)
+                && parentSupply != BlockImpl.SUPPLY_ABSENT
+                && block.supply() != BlockImpl.SUPPLY_ABSENT) {
+            long baseUncleReward =
+                Math.multiplyExact(coinbaseAmount, params.uncleRewardNum()) / params.uncleRewardDen();
+            long baseNephewReward = coinbaseAmount / params.nephewRewardDivisor();
+            long mintedFromBlock = coinbaseAmount;
+            for (rhizome.core.block.UncleRef ref : block.uncles()) {
+                int deficit = block.difficulty() - ref.difficulty();
+                mintedFromBlock = Math.addExact(mintedFromBlock,
+                    scaleRewardToWork(baseUncleReward, deficit));
+                mintedFromBlock = Math.addExact(mintedFromBlock,
+                    scaleRewardToWork(baseNephewReward, deficit));
+            }
+            long burned = Burn.rederive(parentSupply, mintedFromBlock, block.supply());
+            if (burned > 0) { // > 0 guard mirrors the forward pass: a zero burn recorded no op
+                ledger.deposit(miner, new TransactionAmount(burned));
+            }
+        }
 
         // Exact inverse of payUncleRewards. That path scales each reward to the uncle's PROVEN
         // work — base >>> (nephewDifficulty - ref.difficulty()) via scaleRewardToWork (audit C1) —
