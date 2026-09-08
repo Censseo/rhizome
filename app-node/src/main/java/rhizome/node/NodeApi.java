@@ -289,6 +289,10 @@ public final class NodeApi {
             // reorg can land between, so an in-progress reorg must 503 rather than let a stale
             // height's parent lookup throw (testnet campaign S5's failure mode, applied here).
             .with(GET, "/stats", req -> offload(blocking, () -> whenNotReorging(node, () -> DashboardApi.stats(node))))
+            // Same wrapping as /stats: a pure text projection of the identical cached window, so
+            // it needs the same reorg-window guard (avoids a torn height/parent-header read) and
+            // the same worker-pool offload (the window recompute decodes STATS_WINDOW blocks).
+            .with(GET, "/metrics", req -> offload(blocking, () -> whenNotReorging(node, () -> DashboardApi.metrics(node))))
             .with(GET, "/features", req -> guarded(() -> DashboardApi.features(node, sse)))
             // Chain-state-free constants + curve samples: no consensus lock, no store read, so
             // it is plain `ok` like /difficulty — but it MUST be classified in RoutePolicy all

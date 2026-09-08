@@ -71,7 +71,7 @@ done
 # d'un wrapper : stop.sh peut donc signaler proprement.
 launch() {
   local i=$1
-  local env_vars=(RHIZOME_NETWORK=devnet RHIZOME_PORT="$(node_port "$i")"
+  local env_vars=(RHIZOME_NETWORK="$NETWORK" RHIZOME_PORT="$(node_port "$i")"
     RHIZOME_DATA="$(data_dir "$i")" RHIZOME_ALLOW_PRIVATE_PEERS=true)
   # Plafond de tas : le lanceur JVM le lit dans APP_NODE_OPTS, l'image native le prend en
   # argument (SubstrateVM consomme -Xmx avant main ; RhizomeNode.main ignore argv de toute

@@ -58,6 +58,9 @@ def docPages = [
     [slug: 'boxes',        group: 'Applicatif',      source: 'docs/boxes/spec.md'],
     [slug: 'wallet',       group: 'Clients',         source: 'docs/wallet/spec.md'],
     [slug: 'dashboard',    group: 'Clients',         source: 'docs/dashboard/spec.md'],
+    [slug: 'testnet',      group: 'Déploiement',     source: 'docs/testnet/spec.md'],
+    [slug: 'operations',   group: 'Déploiement',     source: 'docs/operations/spec.md'],
+    [slug: 'runbooks',     group: 'Déploiement',     source: 'docs/operations/runbooks.md'],
 ]
 
 def stagedDocsRoot = layout.buildDirectory.dir('generated/docs-resources')

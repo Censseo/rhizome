@@ -125,6 +125,34 @@ class LedgerSnapshotTest {
     }
 
     @Test
+    void theStagingAllocationMatchesThePinnedGenesisSupplyExactly() throws IOException {
+        // Same lockstep guarantee as theShippedAllocationMatchesThePinnedGenesisSupplyExactly,
+        // for the staging profile's own artifact: staging() inherits cleanMainnet()'s pinned
+        // genesisSupply unchanged (only chainId/networkName/difficulty floor/allocation differ),
+        // so the shipped rhizome-staging.json total must match that inherited pin exactly, and
+        // its chainId must match staging()'s own chainId (4), not mainnet's.
+        LedgerSnapshot artifact = SnapshotLoader.fromResource("genesis/rhizome-staging.json");
+
+        assertEquals(NetworkParameters.staging().genesisSupply(), artifact.totalSupply());
+        assertEquals(NetworkParameters.staging().chainId(), artifact.chainId());
+        // Provenance honesty (contracts/genesis-allocation-format.md §1): staging's shipped
+        // allocation is its own authored artifact, never mainnet's ("genesis-allocation:staging"),
+        // so a staging launch never claims to carry the real mainnet allocation.
+        assertEquals("genesis-allocation:staging", artifact.source());
+
+        // Unlike mainnet's artifact -- whose entire allocation deliberately sits on the
+        // unspendable all-zero address -- staging needs SPENDABLE funds (a faucet key, a cold
+        // reserve key) or a faucet service would have nothing to hand out. Assert at least one
+        // non-zero-address entry is strictly positive, so a future edit that accidentally moves
+        // the whole allocation back onto PublicAddress.empty() (mainnet's shape) fails loudly.
+        boolean hasSpendableBalance = artifact.balances().entrySet().stream()
+            .anyMatch(e -> !e.getKey().equals(PublicAddress.empty()) && e.getValue().amount() > 0);
+        assertTrue(hasSpendableBalance,
+            "staging's allocation must fund at least one spendable (non-all-zero) address, or "
+                + "a faucet built on it would have nothing to hand out");
+    }
+
+    @Test
     void resourceLoadingCarriesTheSameGuardsAsFileLoading() throws Exception {
         // Depth guard: fromResource runs the identical bracket-depth scan as fromFile, so a
         // classpath resource cannot bypass the recursive-parse stack-overflow guard.
@@ -189,6 +217,16 @@ class LedgerSnapshotTest {
         assertEquals(0L, empty.totalSupply());
         assertEquals(0, empty.size());
         assertEquals(testnet.chainId(), empty.chainId());
+
+        // (4) Sibling arm for the staging profile: no file path, staging() declares its own
+        // shipped resource (distinct from mainnet's), so forBoot must resolve THAT artifact —
+        // same total as mainnet (staging inherits cleanMainnet()'s genesisSupply unchanged) but
+        // its own chainId (4) and its own source label.
+        NetworkParameters staging = NetworkParameters.staging();
+        LedgerSnapshot fromStagingResource = SnapshotLoader.forBoot(Optional.empty(), staging);
+        assertEquals("genesis-allocation:staging", fromStagingResource.source());
+        assertEquals(staging.genesisSupply(), fromStagingResource.totalSupply());
+        assertEquals(staging.chainId(), fromStagingResource.chainId());
     }
 
     /** Resolves the compiled test-resources directory via a real checked-in fixture, so the

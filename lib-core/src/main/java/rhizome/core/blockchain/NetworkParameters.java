@@ -1149,4 +1149,80 @@ public final class NetworkParameters {
             .burnShareDen(2L)
             .build();
     }
+
+    /**
+     * The mainnet-faithful public staging network (chantier 0, phase 1): a real, multi-VM,
+     * publicly reachable network exercised to rehearse mainnet's launch before mainnet itself
+     * exists. Unlike {@link #testnet()} and {@link #devnet()} — which each restate every
+     * constant explicitly so a future mainnet retune can never silently drag them along —
+     * {@code staging()} deliberately does the opposite: it derives from
+     * {@code cleanMainnet().toBuilder()} and changes only its own identity, allocation and
+     * difficulty floor, so every other knob follows mainnet's tuning by construction rather than
+     * by a second, driftable copy of the same constants. PUFFERFISH2, {@code
+     * desiredBlockTimeSec(5)}, {@code maxFutureBlockTimeSec(15)}, {@code medianTimeWindow(60)},
+     * {@code minFee(10)}, {@code maxReorgDepth(120)}, {@code difficultyLookback(60)}, the
+     * emission curve's activation height, the decay schedule and the burn share are therefore
+     * all mainnet's, unchanged — this profile exists to test mainnet's tuning, not to diverge
+     * from it.
+     */
+    public static NetworkParameters staging() {
+        return cleanMainnet().toBuilder()
+            .chainId(4)
+            .networkName("rhizome-staging")
+            // genesisDifficulty / minDifficulty: the one deliberate consensus deviation from
+            // mainnet, and the reason this campaign needs its own floor rather than mainnet's 16.
+            // Pufferfish2Benchmark measured on this development box (16 cores, shared devbox,
+            // 2026-09-06, genesis costs cost_t=0/cost_m=8): single-thread 18.331 ms/hash =~ 54.6
+            // H/s, and 16 threads together only reach 2.548 ms/hash aggregate =~ 392.4 H/s (a
+            // ~7.2x speedup over 16x, i.e. ~45% efficiency — sub-linear because Pufferfish2 is
+            // memory-hard). Mining is single-threaded PER NODE PROCESS (BlockProducer runs
+            // Miner.mineNonce on one dedicated thread), so one node's own hashrate is ~54.6 H/s
+            // regardless of its host's core count — only the number of separate miner processes
+            // K, spread across however many campaign VMs, raises the network's aggregate
+            // hashrate. Even a generous K=32 (e.g. 4 VMs x 8 miner processes) gives H_total ~=
+            // 1747 H/s, so the campaign's equilibrium difficulty d* = log2(H_total *
+            // desiredBlockTimeSec) ~= log2(8735) ~= 13.1 — BELOW mainnet's floor of 16. Shipping
+            // mainnet's floor here would pin the retarget loop at its minimum for the whole
+            // campaign (it never adapts; blocks would land every ~20 minutes instead of ~5
+            // seconds) — exactly the defect a past local campaign ("campaign 7") hit and had to
+            // work around by lowering difficulty. A floor of 8 sits below the equilibrium
+            // difficulty of any plausible deployment topology, from a single miner process per
+            // VM through dozens of miner processes spread across several VMs, so the retarget
+            // loop keeps room to move in both directions for the length of the campaign.
+            //
+            // LOAD-BEARING: genesisDifficulty is part of the genesis block's hash preimage
+            // (GenesisBlock.build passes it to BlockImpl.builder().difficulty(...)), so it can
+            // never change once this profile's genesis is published without forcing every
+            // operator to wipe their data directory. Before that publication — before this
+            // profile's genesis artifact is published for a real public launch —
+            // Pufferfish2Benchmark MUST be re-run on the actual campaign VMs (this box's number
+            // is a development placeholder, not a measurement of the campaign hardware) and this
+            // floor re-derived by the same margin rule, lowered or raised accordingly.
+            .genesisDifficulty(8)
+            .minDifficulty(8)
+            // Its own pinned allocation artifact (built in phase 2 of this workflow; not built
+            // here) — deliberately not mainnet's, so a staging launch never claims to carry the
+            // real allocation. genesisSupply itself stays inherited from cleanMainnet() above
+            // (1,000,000,000,000 base units) unchanged, so the emission curve, the revenue floor
+            // and the burn schedule are bit-identical to mainnet's; only the allocation differs.
+            .genesisSnapshotResource("genesis/rhizome-staging.json")
+            .build();
+    }
+
+    /**
+     * Resolves a network profile by its configured name — the single source of truth for the
+     * name-to-profile mapping, so callers that need to turn an operator-supplied network name
+     * into a profile (the node's {@code RHIZOME_NETWORK} parser, standalone tools) share one
+     * switch instead of each keeping a copy that can drift out of sync.
+     */
+    public static NetworkParameters byName(String name) {
+        return switch (name.toLowerCase(java.util.Locale.ROOT)) {
+            case "mainnet" -> cleanMainnet();
+            case "testnet" -> testnet();
+            case "devnet" -> devnet();
+            case "staging" -> staging();
+            default -> throw new IllegalArgumentException(
+                "network must be one of mainnet, testnet, devnet, staging — was: " + name);
+        };
+    }
 }

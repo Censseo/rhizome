@@ -1,0 +1,130 @@
+# systemd unit for a Rhizome node, built as the GraalVM native binary (see ../../app-node/
+# Dockerfile for the equivalent container build — this unit assumes the SAME binary, installed
+# on bare metal or a VM instead of run in a container).
+#
+# NOT VALIDATED AGAINST A LIVE systemd: this file was authored on a box with no active service
+# manager (`command -v systemctl` / `systemd-analyze` both failed) — see this task's report for
+# what that means for the review below. It was checked by hand, directive by directive, against
+# systemd.service(5)/systemd.exec(5)/systemd.kill(5) syntax; it was NOT run through
+# `systemd-analyze verify`, and no unit here has been enabled or started.
+#
+# Install:
+#   install -o root -g root -m 0644 rhizome-node.service /etc/systemd/system/rhizome-node.service
+#   useradd --system --no-create-home --shell /usr/sbin/nologin rhizome   # once, if absent
+#   install -d -o root -g root -m 0750 /etc/rhizome
+#   install -o root -g rhizome -m 0640 node.env.example /etc/rhizome/node.env   # then edit it
+#   systemctl daemon-reload
+#   systemctl enable --now rhizome-node.service
+#
+# ExecStart below assumes the binary lands at /usr/local/bin/rhizome-node — the same absolute
+# path app-node/Dockerfile's runtime stage COPYs it to, so the same install step (copy the
+# GraalVM native-image output of `./gradlew :app-node:nativeImage`, i.e.
+# app-node/build/native/rhizome-node) works whether the target is this unit or that image.
+
+[Unit]
+Description=Rhizome node
+Documentation=https://github.com/rhizome/rhizome
+# Node makes outbound HTTP(S) requests to configured/discovered peers at boot (RHIZOME_PEERS,
+# PEX) — wait for a real route, not just link-up, or early sync rounds just fail and retry.
+After=network-online.target
+Wants=network-online.target
+# Circuit breaker (belongs on [Unit], not [Service], since systemd 230 — a [Service]-section
+# StartLimitIntervalSec=/StartLimitBurst= is deprecated compat syntax): if the unit cannot stay
+# started across 5 attempts inside 10 minutes, stop trying and surface the unit as failed
+# instead of restarting forever against a persistent misconfiguration.
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+
+# All RHIZOME_* configuration lives here — see node.env.example for the full, commented list.
+# No leading "-": a missing env file is a misconfiguration, not a silent default-mainnet boot
+# (RHIZOME_NETWORK unset already fails closed inside NodeConfig — see its Javadoc on
+# parseNetwork — but requiring the file too means an operator who forgot to stage it gets a
+# unit that refuses to start, not one that starts on the wrong network).
+EnvironmentFile=/etc/rhizome/node.env
+
+ExecStart=/usr/local/bin/rhizome-node
+
+# Restart posture: crash-only recovery, not a deliberate `systemctl stop`/`stop` exit (which
+# systemd never restarts regardless of this setting). RestartSec is not zero — a node that
+# crashes at boot (bad env, corrupt RocksDB WAL) should not spin the CPU and hammer configured
+# peers in a tight loop while an operator is looking at the journal.
+Restart=on-failure
+RestartSec=5s
+
+# --- shutdown -----------------------------------------------------------------------------
+# RhizomeNode.close() (its shutdown-hook target, registered in main()) runs an ORDERED unwind
+# under a real time budget, not a fire-and-forget close: stop accepting new HTTP work and drain
+# the eventloop (join budget 35s, bounded by the 30s peer-body-read deadline), drain the API
+# worker pool (30s), drain the network sync scheduler (45s, bounded by the same 30s peer-read
+# deadline plus margin), THEN close the RocksDB stores under the engine lock so no writer can
+# be mid-native-call when the column-family handles close. Worst case that is roughly 110s
+# before the stores even begin to close — TimeoutStopSec below must clear that with real
+# margin, or systemd SIGKILLs the process mid-unwind and a RocksDB WAL replay (not a clean
+# close) is what greets the next boot.
+#
+# KillSignal is left at its systemd default (SIGTERM) deliberately spelled out here so the
+# intent is not silently dependent on that default: SIGTERM is exactly what
+# Runtime.addShutdownHook wires node::close to, both for a plain JVM run and for the GraalVM
+# native image (native-image registers the same POSIX signal handler unless explicitly told
+# not to, which this project's nativeImage Gradle task does not do).
+KillSignal=SIGTERM
+# KillMode deliberately LEFT AT ITS DEFAULT (control-group), not set to "mixed": mixed sends
+# SIGTERM to the main process but SIGKILL to every other process left in the cgroup as soon as
+# the main process exits, which is fine here since there is only ever the one process — but
+# "mixed" reads, at a glance, like a request for a FASTER teardown, and the whole point of this
+# unit is the opposite: give close() its full budget. Do not "helpfully" tighten this.
+TimeoutStopSec=180s
+# Never let a stuck close() hang `systemctl restart`/reboot indefinitely; 180s already exceeds
+# the ~110s worst-case unwind above by a real margin without being unbounded.
+
+# --- data directory -------------------------------------------------------------------------
+# StateDirectory is systemd's answer to "give this unit ONE writable directory under
+# ProtectSystem=strict, owned by the service user, created and permissioned automatically" —
+# it materialises /var/lib/rhizome-node (mode 0750, owned by User=/Group= below) before
+# ExecStart runs and exports $STATE_DIRECTORY, but this unit points RHIZOME_DATA at the
+# literal path in node.env.example rather than relying on that variable, so the same env file
+# also works for a manual (non-systemd) run of the binary.
+StateDirectory=rhizome-node
+StateDirectoryMode=0750
+
+User=rhizome
+Group=rhizome
+
+# --- resource limits ------------------------------------------------------------------------
+# RocksDB (lib-persistence) opens one file handle per live SST file across all column families;
+# a distro's compiled-in default (512, or systemd's own DefaultLimitNOFILE) is comfortably
+# exceeded well before a testnet chain grows large. Generous, not unlimited — an unlimited
+# LimitNOFILE defeats systemd's own accounting and just moves the failure mode from "clean
+# refusal" to "mystery EMFILE deep inside a native call".
+LimitNOFILE=262144
+
+# --- hardening (baseline posture, not a maximal one — see the note at the bottom) -----------
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+# Everyday, low-risk hardening that is safe for essentially any long-running daemon and needs
+# no behavioural knowledge of this specific binary — unlike the items deliberately left out,
+# noted below.
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+RemoveIPC=yes
+# Deliberately NOT set: SystemCallFilter= (a syscall allowlist needs to be derived from the
+# actual native-image binary's behaviour — JNI calls into librocksdbjni in particular can need
+# syscalls a naive "@system-service" filter blocks, and getting this wrong turns into a
+# mysterious EPERM deep in a native write rather than a clean refusal) and
+# MemoryDenyWriteExecute= (a GraalVM native image is AOT-compiled with no JIT, so this should
+# be safe in principle, but neither could be exercised against the real binary on this box —
+# see this task's report). Add both after testing against a real deployment, not before.
+
+[Install]
+WantedBy=multi-user.target

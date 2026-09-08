@@ -67,6 +67,37 @@ final class TestNetwork implements AutoCloseable {
         .emissionCurveHeight(1)
         .build();
 
+    /**
+     * Real-PoW twin of {@link #FAST}: {@link PowAlgorithm#PUFFERFISH2} instead of a SHA-256 stand
+     * in, for the handful of scenarios whose subject is the real algorithm itself (grinding cost,
+     * cross-algorithm rejection) rather than consensus around it. Every other network-level test
+     * mines {@link #FAST}'s SHA-256 deliberately — Pufferfish2 is memory-hard and slow by design,
+     * so a suite that does not need it should not pay for it.
+     *
+     * <p>Inherits {@link #FAST}'s genesis Pufferfish2 costs unchanged ({@code cost_t=0},
+     * {@code cost_m=8} — {@code NetworkParameters}'s own defaults, matching
+     * {@code Pufferfish2Benchmark}'s {@code GENESIS} fixture), so the throughput figures below
+     * apply directly to the difficulty bounds chosen here. Two independent measurements on this
+     * development box converge: {@code Pufferfish2Benchmark#probe} times the same
+     * {@code cost_t=0/cost_m=8} hash in isolation, and {@code NetworkParameters#staging()}'s
+     * javadoc records 18.331 ms/hash single-thread (2026-09-06, 16-core shared devbox) for the
+     * identical costs, driving its own difficulty floor by the same reasoning applied here.
+     * {@code Miner.mineNonce} runs single-threaded (mirroring {@code BlockProducer}, which mines
+     * on one dedicated thread), so a JUnit worker sees that per-hash cost directly, not the
+     * pool's aggregate throughput — at ~18 ms/hash, {@link #FAST}'s existing {@code
+     * maxDifficulty(16)} would let a runaway retarget demand up to 2^16 hashes, ~15 minutes, for
+     * one worst-case block. This profile tightens both bounds instead of reusing {@link #FAST}'s:
+     * a ceiling of 8 caps the worst case at 2^8 = 256 hashes (a few seconds), and a floor of 4
+     * keeps the expected case at 2^4 = 16 hashes (a small fraction of a second) rather than
+     * {@link #FAST}'s 3, which would be free with SHA-256 but is not free here.
+     */
+    static final NetworkParameters PUFFERFISH = FAST.toBuilder()
+        .powAlgorithm(PowAlgorithm.PUFFERFISH2)
+        .genesisDifficulty(4)
+        .minDifficulty(4)
+        .maxDifficulty(8)
+        .build();
+
     /** How long a scenario waits for a network-wide condition before calling it a failure. */
     static final long PATIENCE_MS = 30_000;
 

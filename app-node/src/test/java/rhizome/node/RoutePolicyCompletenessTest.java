@@ -85,8 +85,8 @@ class RoutePolicyCompletenessTest {
     @Test
     void theRouteCountIsWhatWeThinkItIs() throws Exception {
         // A blunt tripwire for a bulk edit that adds or drops routes wholesale.
-        assertEquals(42, registeredRoutes().size());
-        assertEquals(42, RoutePolicy.ROUTES.size());
+        assertEquals(43, registeredRoutes().size());
+        assertEquals(43, RoutePolicy.ROUTES.size());
     }
 
     @Test
@@ -136,8 +136,8 @@ class RoutePolicyCompletenessTest {
         // if one changes, it changes because someone decided to change it.
         assertEquals(15, count(RoutePolicy.Guard.PEER_PROTOCOL),
             "the P2P surface exempt from the Host allowlist");
-        assertEquals(11, count(RoutePolicy.Guard.READ_BUDGET),
-            "9 original consensus-lock reads plus /boxes and /tokens");
+        assertEquals(12, count(RoutePolicy.Guard.READ_BUDGET),
+            "9 original consensus-lock reads plus /boxes, /tokens and /metrics (same cache as /stats)");
         assertEquals(7, count(RoutePolicy.Guard.TOKEN),
             "exactly the POST routes; reads are gated only under protectReads");
         assertEquals(4, count(RoutePolicy.Guard.SPA_SHELL),

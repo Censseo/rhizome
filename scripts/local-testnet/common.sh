@@ -7,6 +7,37 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BASE_DIR="${RHIZOME_TESTNET_DIR:-$ROOT/.testnet}"
 BASE_PORT="${RHIZOME_TESTNET_BASE_PORT:-3000}"
 
+# Profil réseau : source UNIQUE des constantes de consensus (chainId, bornes de difficulté,
+# fenêtres temporelles, ...) qu'un nœud lancé par ce harnais utilise ET que les batteries lisent,
+# au lieu que chacune en recopie sa propre copie à la main (le défaut que corrige ce bloc — voir
+# tools/ProfileDump.java pour la provenance de profiles/*.env). RHIZOME_TESTNET_NETWORK bascule
+# le profil, en suivant la même convention que RHIZOME_TESTNET_NODES ci-dessous.
+#
+# Échec IMMÉDIAT et EXPLICITE si le profil demandé n'a pas d'artefact checké : retomber
+# silencieusement sur devnet masquerait exactement la dérive que ce mécanisme existe pour
+# détecter (une batterie qui continue sous le mauvais profil ne prouve plus rien).
+NETWORK="${RHIZOME_TESTNET_NETWORK:-devnet}"
+PROFILE_FILE="$ROOT/scripts/local-testnet/profiles/$NETWORK.env"
+if [[ ! -f "$PROFILE_FILE" ]]; then
+  echo "ERREUR: aucun profil pour le réseau '$NETWORK' ($PROFILE_FILE introuvable)" >&2
+  echo "        réseaux connus : $(ls "$ROOT/scripts/local-testnet/profiles" | sed 's/\.env$//' | tr '\n' ' ')" >&2
+  exit 1
+fi
+# shellcheck source=/dev/null
+source "$PROFILE_FILE"
+
+# Lit une clé du profil chargé. Échoue fort si absente : une clé manquante dans profiles/*.env
+# est une régression de ProfileDump (ou un artefact qu'on a oublié de régénérer), pas une valeur
+# qu'un appelant doit deviner à zéro.
+profile_get() {
+  local key=$1
+  if [[ -z "${!key+x}" ]]; then
+    echo "ERREUR: le profil '$NETWORK' ($PROFILE_FILE) ne définit pas $key" >&2
+    return 1
+  fi
+  printf '%s' "${!key}"
+}
+
 # Binaire de nœud : natif (GraalVM) par défaut depuis la campagne 3. Un nœud natif démarre en
 # quelques dizaines de ms et occupe ~3-4× moins de mémoire qu'une JVM — c'est ce qui rend 30
 # nœuds tenables sur une seule machine. RHIZOME_TESTNET_NATIVE=0 retombe sur installDist
@@ -87,6 +118,18 @@ ensure_jdk25() {
 node_port() { printf '%d' "$((BASE_PORT + $1))"; }
 node_url()  { printf 'http://127.0.0.1:%s' "$(node_port "$1")"; }
 
+# Résout le premier argument « nœud » d'un appel HTTP : s'il ressemble déjà à une URL
+# (http:// ou https://, ex. un nœud derrière un relais TLS ou hors de ce testnet local), on la
+# garde TELLE QUELLE ; sinon on le traite comme un index dans l'anneau, exactement comme avant
+# (`node_url`). Rétrocompatible par construction : tout appelant qui passait un index continue
+# de recevoir exactement ce qu'il recevait.
+resolve_base_url() {
+  case "$1" in
+    http://*|https://*) printf '%s' "$1" ;;
+    *) node_url "$1" ;;
+  esac
+}
+
 # URL utilisée pour SEEDER un nœud — délibérément `localhost`, pas `127.0.0.1`.
 # Un nœud s'annonce en `http://localhost:<port>` (NodeConfig.selfUrl), et
 # PeerUrls.canonicalize normalise la casse mais NE RÉSOUT PAS le nom : `127.0.0.1:4704` et
@@ -152,17 +195,21 @@ else:
 ' <<<"$json" "$key" 2>/dev/null || true
 }
 
-# /stats d'un nœud, vide si le nœud ne répond pas.
+# /stats d'un nœud, vide si le nœud ne répond pas. `$1` accepte un index OU une URL (resolve_base_url).
 node_stats() {
-  curl -sf --max-time 3 "$(node_url "$1")/stats" 2>/dev/null || true
+  curl -sf --max-time 3 "$(resolve_base_url "$1")/stats" 2>/dev/null || true
 }
 
-# Présente le nœud `peer` au nœud `i` via /add_peer.
+# Présente le nœud `peer` au nœud `i` via /add_peer. `i` accepte un index OU une URL. `SUITE_TOKEN`
+# (posé par suite-common.sh, vide sinon — d'où le `:-` : ce fichier est aussi sourcé par
+# start.sh/stop.sh/status.sh/monitor.sh, qui ne le déclarent jamais) et `CURL_TLS_OPTS` suivent la
+# même convention que post_json/get_json.
 add_peer() {
   local i=$1 peer=$2
-  curl -sf --max-time 5 -X POST -H 'X-Rhizome-Request: 1' \
+  local auth=(); [[ -n "${SUITE_TOKEN:-}" ]] && auth=(-H "Authorization: Bearer ${SUITE_TOKEN:-}")
+  curl -sf --max-time 5 -X POST -H 'X-Rhizome-Request: 1' "${auth[@]}" "${CURL_TLS_OPTS[@]}" \
     -d "{\"url\":\"$(node_seed_url "$peer")\"}" \
-    "$(node_url "$i")/add_peer" >/dev/null 2>&1 || true
+    "$(resolve_base_url "$i")/add_peer" >/dev/null 2>&1 || true
 }
 
 # Amorce le PEX sur la plage [lo..hi].

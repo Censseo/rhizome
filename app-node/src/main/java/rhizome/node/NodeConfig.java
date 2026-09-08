@@ -148,8 +148,14 @@ public record NodeConfig(
         return fromEnv(System::getenv);
     }
 
-    /** Safety headroom above the deepest history the engine reads, when pruning. */
-    private static final int PRUNE_MARGIN = 128;
+    /**
+     * Safety headroom above the deepest history the engine reads, when pruning. Package-private
+     * (not {@code private}) so {@code TestnetProfileMirrorTest} can recompute the exact same
+     * {@code RHIZOME_PRUNE} safe floor {@link #parseKeepBlocks} enforces, rather than hand-copying
+     * this constant a second time next to the one already mirrored in
+     * {@code scripts/local-testnet/tools/ProfileDump.java}.
+     */
+    static final int PRUNE_MARGIN = 128;
 
     /**
      * Retention (in blocks) for this node, from {@code RHIZOME_PRUNE}: absent/0 = archive
@@ -278,16 +284,19 @@ public record NodeConfig(
      * node on MAINNET without a word — wrong chain, wasted mining, mainnet peers dialled — while
      * every other config variable already fails fast on a typo (audit B-4). Fail-unsafe defaults
      * are the one kind of default this node does not get to have.
+     *
+     * <p>Delegates the actual name-to-profile resolution to {@link NetworkParameters#byName},
+     * the single source of truth for that mapping, so this parser only owns the env-var-specific
+     * concerns: the absent/blank default and the {@code RHIZOME_NETWORK}-flavoured error message.
      */
     static NetworkParameters parseNetwork(String raw) {
         String name = raw == null || raw.isBlank() ? "mainnet" : raw.trim();
-        return switch (name.toLowerCase(java.util.Locale.ROOT)) {
-            case "mainnet" -> NetworkParameters.cleanMainnet();
-            case "testnet" -> NetworkParameters.testnet();
-            case "devnet" -> NetworkParameters.devnet();
-            default -> throw new IllegalArgumentException(
-                "RHIZOME_NETWORK must be one of mainnet, testnet, devnet — was: " + raw);
-        };
+        try {
+            return NetworkParameters.byName(name);
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException(
+                "RHIZOME_NETWORK must be one of mainnet, testnet, devnet, staging — was: " + raw, e);
+        }
     }
 
     private static String trimmed(String raw) {

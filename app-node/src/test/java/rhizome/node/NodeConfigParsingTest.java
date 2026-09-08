@@ -57,9 +57,13 @@ class NodeConfigParsingTest {
             NodeConfig.parseNetwork(" TestNet ").chainId());
         assertEquals(rhizome.core.blockchain.NetworkParameters.devnet().chainId(),
             NodeConfig.parseNetwork("devnet").chainId());
+        assertEquals(rhizome.core.blockchain.NetworkParameters.staging().chainId(),
+            NodeConfig.parseNetwork("staging").chainId());
         assertThrows(IllegalArgumentException.class, () -> NodeConfig.parseNetwork("testnett"));
         assertThrows(IllegalArgumentException.class, () -> NodeConfig.parseNetwork("main"));
         assertThrows(IllegalArgumentException.class, () -> NodeConfig.parseNetwork("regtest"));
+        // A near-miss typo on the newer profile must be refused the same way (audit B-4).
+        assertThrows(IllegalArgumentException.class, () -> NodeConfig.parseNetwork("stagingg"));
     }
 
     @Test
@@ -114,7 +118,8 @@ class NodeConfigParsingTest {
         java.util.Map<String, rhizome.core.blockchain.NetworkParameters> networks = java.util.Map.of(
             "", rhizome.core.blockchain.NetworkParameters.cleanMainnet(),
             "testnet", rhizome.core.blockchain.NetworkParameters.testnet(),
-            "devnet", rhizome.core.blockchain.NetworkParameters.devnet());
+            "devnet", rhizome.core.blockchain.NetworkParameters.devnet(),
+            "staging", rhizome.core.blockchain.NetworkParameters.staging());
 
         for (var entry : networks.entrySet()) {
             String networkName = entry.getKey();

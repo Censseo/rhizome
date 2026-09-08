@@ -47,7 +47,7 @@ aggregate token-bucket gate that sheds with HTTP 429 *before* doing the work.
 |---|---|
 | **P2P protocol** (stay open even with `RHIZOME_API_TOKEN`) | `/block`, `/blocks`, `/block_count`, `/headers`, `/sync`, `/total_work`, `/difficulty`, `/peers`, `/orphan`, `/state/snapshot/info`, `/state/snapshot/chunk` |
 | **Operator / state-changing** (gated by `RHIZOME_API_TOKEN`) | `/add_peer`, `/add_transaction`, `/add_transaction_json`, `/submit`, `/call_readonly`, `/scan/register`, `/scan/deregister` |
-| **Explorer / query** | `/transaction`, `/address_txs`, `/wallet`, `/mempool`, `/stats`, `/info`, `/features`, `/contract`, `/logs`, `/logs/stream` |
+| **Explorer / query** | `/transaction`, `/address_txs`, `/wallet`, `/mempool`, `/stats`, `/metrics`, `/info`, `/features`, `/contract`, `/logs`, `/logs/stream` |
 | **Boxes** | `/box`, `/boxes`, `/scan/boxes`, `/scan/list` |
 | **Tokens** | `/token`, `/tokens`, `/token_balance` |
 | **State** | `/state`, `/state/proof` |
@@ -60,7 +60,7 @@ aggregate token-bucket gate that sheds with HTTP 429 *before* doing the work.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `RHIZOME_NETWORK` | `mainnet` | `mainnet`, `testnet` (low difficulty, `minFee = 0`) or `devnet`; any other value is **refused at startup** |
+| `RHIZOME_NETWORK` | `mainnet` | `mainnet`, `testnet` (low difficulty, `minFee = 0`), `devnet`, or `staging` (mainnet-faithful public rehearsal network, chain id 4, real Pufferfish2 PoW, its own pinned genesis at `genesis/rhizome-staging.json` — `genesisDifficulty`/`minDifficulty = 8`, a documented development-box placeholder to be re-measured on the real campaign VMs before a real public launch); any other value is **refused at startup** |
 | `RHIZOME_PORT` | `3000` | HTTP API port |
 | `RHIZOME_BIND_ADDRESS` | `127.0.0.1` | bind address; binding a public address additionally requires `RHIZOME_API_TOKEN` or `RHIZOME_ALLOW_OPEN_API=true` |
 | `RHIZOME_API_TOKEN` | — | bearer token gating state-changing/operator routes |
@@ -324,6 +324,43 @@ the same decimal-string encoding `Block.Serializer.writeJsonBody` applies, so a 
 no supply produces summaries with no `supply` key at all. Cost is zero marginal: the handler
 already decodes each block in the range; route cost, `BLOCKS_RANGE_MAX` cap, read-budget guard and
 the 410-below-watermark behaviour are unchanged.
+
+### A-17 — OpenMetrics-style scrape endpoint *(implemented)*
+
+`GET /metrics` is a text-format projection of the **same** per-tip `StatsWindowService.StatsWindow`
+cache `/stats` reads — no new instrumentation, no new counters, no extra consensus-lock
+acquisition. It is guarded **exactly like `/stats`**: identical cost (`DashboardApi.STATS_WINDOW`,
+the same cache-driven weight `/stats` carries), the same `READ_BUDGET` aggregate gate, the same
+A-14 reorg-window gate (**503 while a reorg is in progress**, for the same tear-safety reason —
+the handler reads height and the tip's parent supply together), and the same `RHIZOME_PROTECT_READS`
+treatment: it is a plain browser/scraper-reachable read (not `PEER_PROTOCOL`), so with
+`RHIZOME_PROTECT_READS=true` it is gated behind `RHIZOME_API_TOKEN` like every other non-shell
+route, and stays open otherwise. A stationary scraper poll costs the read budget nothing beyond
+what `/stats` already costs.
+
+Response is `Content-Type: text/plain; charset=utf-8` (via `ApiResponses.text`, `X-Content-Type-Options:
+nosniff`), one `# TYPE <name> gauge` line plus one `<name> <value>` line per metric. Values follow
+`/stats`'s own null-vs-value convention: a figure the chain's state cannot support is **omitted**
+rather than fabricated as `0` or `-1` (the text exposition format has no null). Metric names
+(`DashboardApi.metrics`):
+
+| Metric | Meaning |
+|---|---|
+| `rhizome_height` | tip block count |
+| `rhizome_difficulty` | current difficulty |
+| `rhizome_total_work` | cumulative chain work, as a float (the exact `BigInteger` detail stays `/stats`-only) |
+| `rhizome_peers` | known-peer count |
+| `rhizome_mempool_size` | mempool transaction count |
+| `rhizome_avg_block_interval_ms` | average interval over the stats window |
+| `rhizome_last_block_timestamp_seconds` | tip block timestamp, converted from epoch **milliseconds** to the OpenMetrics **seconds** convention |
+| `rhizome_reorg_in_progress` | `1`/`0` |
+| `rhizome_degraded` | `1`/`0` — operator-visible degraded marker (e.g. a failed reorg restore) |
+| `rhizome_sync_rounds_without_progress` | sync health counter |
+| `rhizome_sync_peers_banned` | peers the last sync round skipped as banned |
+| `rhizome_sync_eclipsed` | `1`/`0` |
+| `rhizome_pruned_below` | prune watermark |
+| `rhizome_supply_base_units` | tip committed supply — **omitted** on a chain that has not committed a supply |
+| `rhizome_max_reorg_depth` | configured reorg-depth bound |
 
 ## Known limits (accepted, not defects)
 

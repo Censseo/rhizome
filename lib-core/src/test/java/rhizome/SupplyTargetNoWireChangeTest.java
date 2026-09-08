@@ -69,7 +69,7 @@ class SupplyTargetNoWireChangeTest {
         // height, so the short-circuit governs there), and the geometric value on testnet.
         for (NetworkParameters params : new NetworkParameters[] {
                 NetworkParameters.cleanMainnet(), NetworkParameters.testnet(),
-                NetworkParameters.devnet()}) {
+                NetworkParameters.devnet(), NetworkParameters.staging()}) {
             var peakCurve = rhizome.core.blockchain.EmissionCurve.build(params.supplyTarget(),
                 params.emissionCoefficient(), params.emissionTableSteps());
             long[] supplies = {0, 1, params.genesisSupply() > 0 ? params.genesisSupply() : 5_000_000L};

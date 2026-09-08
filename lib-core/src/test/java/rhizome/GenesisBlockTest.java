@@ -277,6 +277,77 @@ class GenesisBlockTest {
     }
 
     /**
+     * FAMILY GENESIS-04 — cross-network replay: with a SECOND pinned network now shipping its
+     * own genesis snapshot ({@code NetworkParameters.staging()}, chainId 4, alongside mainnet's
+     * chainId 1), the chain-id guard that {@code chainIdMismatchRejected} already locks for a
+     * single pinned network must also stop one pinned network's REAL, correctly-formed shipped
+     * snapshot from booting the other's genesis — in both directions, and before any ledger
+     * seeding. This matters more than an arbitrary wrong-chainId snapshot would: staging inherits
+     * {@code genesisSupply} unchanged from {@code cleanMainnet()} (see
+     * {@code NetworkParameters#staging()}), so a naive supply-only check could not tell the two
+     * apart on totals alone — the guard has to be keyed on chain identity, not on whether the
+     * numbers happen to line up, and it has to fire BEFORE the pinned-total check (GENESIS-01/02)
+     * ever gets a chance to notice a coincidental match.
+     *
+     * <p>Complements {@code StagingGenesisTest#stagingGenesisHashDiffersFromMainnets}, which
+     * proves each network booted from ITS OWN snapshot yields a distinct genesis hash; this test
+     * proves the stronger, adjacent property that a snapshot cannot even be swapped between the
+     * two networks in the first place.
+     */
+    @Test
+    void aPinnedNetworksShippedSnapshotNeverBootsAnotherPinnedNetworksGenesis() throws IOException {
+        NetworkParameters mainnet = NetworkParameters.cleanMainnet();
+        NetworkParameters staging = NetworkParameters.staging();
+        assertNotEquals(mainnet.chainId(), staging.chainId(),
+            "the two pinned networks must actually have distinct chain ids for this test to mean anything");
+
+        LedgerSnapshot mainnetSnapshot = SnapshotLoader.fromResource("genesis/rhizome-mainnet.json");
+        LedgerSnapshot stagingSnapshot = SnapshotLoader.fromResource("genesis/rhizome-staging.json");
+        assertEquals(mainnet.chainId(), mainnetSnapshot.chainId());
+        assertEquals(staging.chainId(), stagingSnapshot.chainId());
+
+        // Direction 1: staging booting mainnet's real, shipped snapshot -- refused by the
+        // chain-id guard, GenesisBlock.build's FIRST check, before any construction or seeding.
+        IllegalArgumentException stagingWithMainnet = assertThrows(IllegalArgumentException.class,
+            () -> GenesisBlock.build(staging, mainnetSnapshot));
+        assertTrue(stagingWithMainnet.getMessage().contains("chainId"),
+            "expected the chain-id guard's message, got: " + stagingWithMainnet.getMessage());
+        assertTrue(stagingWithMainnet.getMessage().contains(Integer.toString(mainnetSnapshot.chainId())),
+            "expected the snapshot's own chainId (1) in the message: " + stagingWithMainnet.getMessage());
+        assertTrue(stagingWithMainnet.getMessage().contains(Integer.toString(staging.chainId())),
+            "expected staging's chainId (4) in the message: " + stagingWithMainnet.getMessage());
+
+        MapLedger stagingLedger = new MapLedger();
+        assertThrows(IllegalArgumentException.class,
+            () -> GenesisBlock.initChain(stagingLedger, staging, mainnetSnapshot, null));
+        assertTrue(stagingLedger.map.isEmpty(),
+            "a cross-network snapshot must never seed any wallet before the chain-id guard fires");
+
+        // Direction 2: mainnet booting staging's real, shipped snapshot -- symmetric refusal.
+        IllegalArgumentException mainnetWithStaging = assertThrows(IllegalArgumentException.class,
+            () -> GenesisBlock.build(mainnet, stagingSnapshot));
+        assertTrue(mainnetWithStaging.getMessage().contains("chainId"),
+            "expected the chain-id guard's message, got: " + mainnetWithStaging.getMessage());
+        assertTrue(mainnetWithStaging.getMessage().contains(Integer.toString(stagingSnapshot.chainId())),
+            "expected the snapshot's own chainId (4) in the message: " + mainnetWithStaging.getMessage());
+        assertTrue(mainnetWithStaging.getMessage().contains(Integer.toString(mainnet.chainId())),
+            "expected mainnet's chainId (1) in the message: " + mainnetWithStaging.getMessage());
+
+        MapLedger mainnetLedger = new MapLedger();
+        assertThrows(IllegalArgumentException.class,
+            () -> GenesisBlock.initChain(mainnetLedger, mainnet, stagingSnapshot, null));
+        assertTrue(mainnetLedger.map.isEmpty(),
+            "a cross-network snapshot must never seed any wallet before the chain-id guard fires");
+
+        // Not vacuous: each network's OWN snapshot still boots that network's genesis cleanly and
+        // the two resulting genesis blocks are distinct -- the guard above only refuses the
+        // cross-wiring, not genesis construction generally.
+        Block mainnetGenesis = GenesisBlock.build(mainnet, mainnetSnapshot);
+        Block stagingGenesis = GenesisBlock.build(staging, stagingSnapshot);
+        assertNotEquals(mainnetGenesis.hash(), stagingGenesis.hash());
+    }
+
+    /**
      * FAMILY GENESIS — US2/SC-002/SC-003: an auditor with nothing but the published mainnet
      * allocation artifact, the pinned S0, and the documented genesis-commitment formula
      * (FR-008: {@code SHA-256(chainId || snapshotCommitment)}, unchanged by this feature)

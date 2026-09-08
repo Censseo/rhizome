@@ -1,0 +1,36 @@
+# Trims the build context for app-node/Dockerfile (built with the repo root as context — see
+# that file's header comment for why a multi-module Gradle build needs the whole tree). Mirrors
+# .gitignore's build-artifact entries plus the agent/spec working directories and local-testnet
+# harness, none of which the `nativeImage` Gradle task reads.
+
+.git/
+.github/
+
+# Gradle/JVM build output — rebuilt fresh inside the image; shipping a stale build/ would let a
+# host-side artifact leak into (or shadow) what the container build produces.
+**/build/
+**/bin/
+.gradle/
+.metals/
+.fake/
+*.class
+hs_err_pid*.log
+replay_pid*.log
+bench*.txt
+
+# Local data / secrets — never belong in an image layer.
+app-node/data/
+/data/
+.env
+.testnet/
+scripts/local-testnet/keys/
+
+# Agent/spec working directories — not read by any Gradle task.
+.claude/
+.opencode/
+.specforge/
+ideas/
+specs/
+
+# GraalVM native-image output from a host-side build, if one was run outside the container.
+/rhizome-node

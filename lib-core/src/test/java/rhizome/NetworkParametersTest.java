@@ -818,7 +818,8 @@ class NetworkParametersTest {
         // inherited through toBuilder(), so a future mainnet retuning cannot silently move a
         // derived profile's monetary policy (and vice versa).
         for (NetworkParameters p : java.util.List.of(NetworkParameters.cleanMainnet(),
-                NetworkParameters.testnet(), NetworkParameters.devnet())) {
+                NetworkParameters.testnet(), NetworkParameters.devnet(),
+                NetworkParameters.staging())) {
             assertTrue(p.burnShareDen() > 0, p.networkName() + ": G-1");
             assertTrue(p.burnShareNum() >= 0, p.networkName() + ": G-2");
             assertTrue(p.burnShareNum() < p.burnShareDen(),
@@ -929,5 +930,99 @@ class NetworkParametersTest {
                         + " at height " + h + ", supply " + supply + " (S*(h)=" + sStar + ")");
             }
         }
+    }
+
+    // --- Staging network profile (chantier 0, phase 1) ---
+
+    /**
+     * Reflectively enumerates every declared instance field of {@link NetworkParameters} and
+     * compares {@code staging()} against {@code cleanMainnet()} through each field's public
+     * fluent accessor -- so this test cannot silently go stale when a new field is added, the way
+     * a hand-written list of "the fields staging changes" would. {@code staging()}'s own javadoc
+     * states it derives from {@code cleanMainnet().toBuilder()} and touches only its identity,
+     * allocation resource and difficulty floor; this is the machine-checked proof of that claim.
+     */
+    @Test
+    void stagingDeviatesFromMainnetOnlyInTheDeclaredSet() throws ReflectiveOperationException {
+        NetworkParameters mainnet = NetworkParameters.cleanMainnet();
+        NetworkParameters staging = NetworkParameters.staging();
+
+        // emissionCurve and supplyTargetSchedule are derived, eagerly-built tables
+        // (@Getter(AccessLevel.NONE) on emissionCurve -- no accessor to even reflect through;
+        // supplyTargetSchedule keeps a manual same-named accessor). Both types are plain final
+        // classes with identity equals(), never overridden, so two independently-built instances
+        // are never Objects.equals() even when constructed from bit-identical inputs -- a raw
+        // field diff would report a false "differs" on EVERY profile pair, not just staging vs.
+        // mainnet. Excluded from the reflective diff below; probed behaviourally afterward instead.
+        java.util.Set<String> excludedDerivedFields =
+            java.util.Set.of("emissionCurve", "supplyTargetSchedule");
+
+        java.util.Set<String> differingFields = new java.util.TreeSet<>();
+        for (java.lang.reflect.Field field : NetworkParameters.class.getDeclaredFields()) {
+            int modifiers = field.getModifiers();
+            if (java.lang.reflect.Modifier.isStatic(modifiers) || field.isSynthetic()) {
+                continue;
+            }
+            String name = field.getName();
+            if (excludedDerivedFields.contains(name)) {
+                continue;
+            }
+            // @Accessors(fluent = true): the accessor method's name equals the field's name.
+            java.lang.reflect.Method accessor;
+            try {
+                accessor = NetworkParameters.class.getMethod(name);
+            } catch (NoSuchMethodException e) {
+                fail("declared field '" + name + "' has no public fluent accessor of the same "
+                    + "name -- either add one or add the field to excludedDerivedFields above "
+                    + "with a documented reason");
+                return;
+            }
+            accessor.setAccessible(true);
+            Object mainnetValue = accessor.invoke(mainnet);
+            Object stagingValue = accessor.invoke(staging);
+            if (!java.util.Objects.equals(mainnetValue, stagingValue)) {
+                differingFields.add(name);
+            }
+        }
+
+        assertEquals(
+            java.util.Set.of("chainId", "networkName", "genesisSnapshotResource",
+                "genesisDifficulty", "minDifficulty"),
+            differingFields,
+            "staging() must deviate from cleanMainnet() in exactly its declared identity, "
+                + "allocation-resource and difficulty-floor fields -- nothing more, nothing less");
+
+        // Behavioural probe for the two excluded derived fields: staging() does not touch
+        // supplyTarget/emissionCoefficient/emissionTableSteps or any of the five decay constants,
+        // so the curve and the decay schedule must agree with mainnet's at every sampled point,
+        // even though the two NetworkParameters instances each hold their own freshly-built,
+        // never-`.equals()`-able table object.
+        assertEquals(mainnet.supplyTarget(), staging.supplyTarget());
+        assertEquals(mainnet.emissionCoefficient(), staging.emissionCoefficient());
+        assertEquals(mainnet.emissionTableSteps(), staging.emissionTableSteps());
+        long[] probeHeights = {0L, 1L, 2L, 1_000L, mainnet.emissionCurveHeight(),
+            mainnet.decayStartHeight(), mainnet.decayStartHeight() + mainnet.decayEpochBlocks(),
+            mainnet.supplyTargetSchedule().floorArrivalHeight(), Long.MAX_VALUE};
+        for (long height : probeHeights) {
+            assertEquals(mainnet.supplyTargetAt(height), staging.supplyTargetAt(height),
+                "supplyTargetSchedule must agree behaviourally with mainnet's at height " + height);
+        }
+        long[] probeSupplies = {0L, 1L, mainnet.genesisSupply(), mainnet.supplyTarget() / 2,
+            mainnet.supplyTarget(), mainnet.supplyTarget() * 2};
+        for (long supply : probeSupplies) {
+            assertEquals(mainnet.miningReward(mainnet.emissionCurveHeight() + 1, supply),
+                staging.miningReward(staging.emissionCurveHeight() + 1, supply),
+                "emissionCurve must agree behaviourally with mainnet's at supply " + supply);
+        }
+
+        // The three shipped test/dev profiles pairwise-distinct chainId, plus staging's own,
+        // locks the identifier that keeps signatures from replaying across networks.
+        assertNotEquals(NetworkParameters.cleanMainnet().chainId(), NetworkParameters.testnet().chainId());
+        assertNotEquals(NetworkParameters.cleanMainnet().chainId(), NetworkParameters.devnet().chainId());
+        assertNotEquals(NetworkParameters.cleanMainnet().chainId(), NetworkParameters.staging().chainId());
+        assertNotEquals(NetworkParameters.testnet().chainId(), NetworkParameters.devnet().chainId());
+        assertNotEquals(NetworkParameters.testnet().chainId(), NetworkParameters.staging().chainId());
+        assertNotEquals(NetworkParameters.devnet().chainId(), NetworkParameters.staging().chainId());
+        assertEquals(4, NetworkParameters.staging().chainId());
     }
 }

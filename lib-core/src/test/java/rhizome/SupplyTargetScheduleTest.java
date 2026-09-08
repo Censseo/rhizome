@@ -364,7 +364,8 @@ class SupplyTargetScheduleTest {
         // would now refuse their construction outright. That they build at all is the assertion.
         for (NetworkParameters params : new NetworkParameters[] {
                 NetworkParameters.cleanMainnet(), NetworkParameters.testnet(),
-                NetworkParameters.devnet(), CurveActiveNetwork.curveActiveTestnet(),
+                NetworkParameters.devnet(), NetworkParameters.staging(),
+                CurveActiveNetwork.curveActiveTestnet(),
                 CurveActiveNetwork.decayActiveTestnet()}) {
             SupplyTargetSchedule schedule = params.supplyTargetSchedule();
             if (schedule.isScheduled()) {

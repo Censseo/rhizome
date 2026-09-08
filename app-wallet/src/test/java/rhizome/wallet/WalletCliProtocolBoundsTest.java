@@ -17,7 +17,7 @@ import rhizome.core.token.TokenId;
  *
  * <p>Reading from a single instance is only sound while these bounds are network-invariant. This
  * class is the proof obligation for that: it asserts every bound the CLI takes is identical
- * across mainnet, testnet and devnet. If a future network diverges, this test fails and the CLI
+ * across mainnet, testnet, devnet and staging. If a future network diverges, this test fails and the CLI
  * has to learn which network it is talking to — which is exactly the conversation that should
  * happen, rather than the wallet quietly refusing transactions the node would have accepted, or
  * signing ones it will reject.
@@ -25,7 +25,8 @@ import rhizome.core.token.TokenId;
 class WalletCliProtocolBoundsTest {
 
     private static final List<NetworkParameters> NETWORKS = List.of(
-        NetworkParameters.cleanMainnet(), NetworkParameters.testnet(), NetworkParameters.devnet());
+        NetworkParameters.cleanMainnet(), NetworkParameters.testnet(), NetworkParameters.devnet(),
+        NetworkParameters.staging());
 
     @Test
     void everyBoundTheCliReadsIsTheSameOnEveryNetwork() {

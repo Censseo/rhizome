@@ -9,6 +9,7 @@ import rhizome.core.serialization.JsonSink;
 import rhizome.core.serialization.JsonSink.Key;
 
 import static rhizome.node.ApiResponses.json;
+import static rhizome.node.ApiResponses.text;
 
 /**
  * Browser-facing dashboard endpoints: the embedded SPA assets (with their
@@ -76,6 +77,8 @@ final class DashboardApi {
     // -- JsonSink size hints (see class javadoc) -----------------------------------------------
     private static final int STATS_SIZE_HINT = 1024;
     private static final int FEATURES_SIZE_HINT = 192;
+    // 15 metric lines, each carrying a "# TYPE ... gauge" comment line above the sample.
+    private static final int METRICS_SIZE_HINT = 1024;
 
     private DashboardApi() {}
 
@@ -185,6 +188,60 @@ final class DashboardApi {
             window.tipUncles()));
         sink.endObject();
         return json(sink);
+    }
+
+    /**
+     * OpenMetrics/Prometheus-scrapeable projection of the SAME per-tip {@link
+     * StatsWindowService.StatsWindow} cache /stats reads — a pure text rendering of values
+     * /stats already exposes, so a scraper's poll costs the read budget nothing beyond what
+     * /stats already costs: no new instrumentation, no new counters, no extra locking.
+     *
+     * <p>Null-vs-value follows /stats's own convention ({@code degraded}/{@code stateRoot}):
+     * a figure the chain's state cannot support is omitted rather than fabricated as {@code 0}
+     * or {@code -1} — {@code rhizome_supply_base_units} is absent on a chain that has not
+     * committed a supply (the OpenMetrics analogue of a JSON {@code null}, since the text
+     * exposition format has no null).
+     */
+    static HttpResponse metrics(NodeService node) {
+        long height = node.blockCount();
+        var params = node.params();
+        // Same cache /stats reads (gated by tip height in NodeService) — a stationary scrape
+        // re-decodes nothing.
+        var window = node.statsWindow(STATS_WINDOW);
+        long spanBlocks = height - window.windowStart();
+        long avgIntervalMs = spanBlocks > 0 ? (window.lastTs() - window.firstTs()) / spanBlocks : 0;
+
+        StringBuilder out = new StringBuilder(METRICS_SIZE_HINT);
+        gauge(out, "rhizome_height", height);
+        gauge(out, "rhizome_difficulty", node.difficulty());
+        // Exact BigInteger detail stays only on /stats; here it is a float, as scrapers expect.
+        gauge(out, "rhizome_total_work", node.totalWork().doubleValue());
+        gauge(out, "rhizome_peers", node.knownPeers().size());
+        gauge(out, "rhizome_mempool_size", node.mempoolSize());
+        gauge(out, "rhizome_avg_block_interval_ms", avgIntervalMs);
+        // Block timestamps are epoch milliseconds; the OpenMetrics convention is seconds.
+        gauge(out, "rhizome_last_block_timestamp_seconds", window.lastTs() / 1000.0);
+        gauge(out, "rhizome_reorg_in_progress", node.isReorgInProgress() ? 1 : 0);
+        gauge(out, "rhizome_degraded", node.degradedState() != null ? 1 : 0);
+        gauge(out, "rhizome_sync_rounds_without_progress", node.syncHealth().roundsWithoutProgress());
+        gauge(out, "rhizome_sync_peers_banned", node.syncHealth().peersSkippedBanned());
+        gauge(out, "rhizome_sync_eclipsed", node.syncHealth().eclipsed() ? 1 : 0);
+        gauge(out, "rhizome_pruned_below", node.prunedBelow());
+        if (window.tipSupply() != BlockImpl.SUPPLY_ABSENT) {
+            gauge(out, "rhizome_supply_base_units", window.tipSupply());
+        }
+        gauge(out, "rhizome_max_reorg_depth", params.maxReorgDepth());
+        return text(out.toString());
+    }
+
+    private static void gauge(StringBuilder out, String name, long value) {
+        out.append("# TYPE ").append(name).append(" gauge\n")
+            .append(name).append(' ').append(value).append('\n');
+    }
+
+    private static void gauge(StringBuilder out, String name, double value) {
+        out.append("# TYPE ").append(name).append(" gauge\n")
+            .append(name).append(' ').append(value).append('\n');
     }
 
     /**

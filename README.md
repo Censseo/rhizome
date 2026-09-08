@@ -22,15 +22,21 @@ Configured via environment variables:
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `RHIZOME_NETWORK` | `mainnet` | `mainnet` (supply-targeted emission curve active from height 1 — genesis pays no coinbase, so height 2 is the first paid block and it's already curve-governed — with the supply target decaying to half from height 126,144,000, one quarter-year epoch, 0.4991 %/year), `testnet` (low difficulty, 90 s target, curve never active — the legacy geometric schedule governs every block; built for tests driving controlled clocks) or `devnet` (low difficulty on mainnet's real 5 s target, curve active from height 1 like mainnet — use this for a local node you actually run and watch; the decay is scheduled only on mainnet). Anything else is **refused at startup**: a typo must not silently start you on mainnet |
+| `RHIZOME_NETWORK` | `mainnet` | `mainnet` (supply-targeted emission curve active from height 1 — genesis pays no coinbase, so height 2 is the first paid block and it's already curve-governed — with the supply target decaying to half from height 126,144,000, one quarter-year epoch, 0.4991 %/year), `testnet` (low difficulty, 90 s target, curve never active — the legacy geometric schedule governs every block; built for tests driving controlled clocks), `devnet` (low difficulty on mainnet's real 5 s target, curve active from height 1 like mainnet — use this for a local node you actually run and watch; the decay is scheduled only on mainnet) or `staging` (a public, multi-VM dress rehearsal of mainnet's own tuning — chain id 4; `PUFFERFISH2` PoW, the real 5 s target, fee floor, emission curve activation height, decay schedule and burn share are all inherited unchanged from mainnet, so this network exercises mainnet's actual launch parameters. Only the identity, a separate pinned genesis allocation (`genesis/rhizome-staging.json`, deliberately not mainnet's, so a staging launch never claims to carry the real allocation) and the difficulty floor diverge: `genesisDifficulty`/`minDifficulty` are pinned at 8, a **development-box placeholder** sized for an early campaign topology, not a measurement of real campaign hardware — it must be re-measured on the actual campaign VMs and the floor re-derived before any real public launch, since the genesis difficulty is baked into the genesis block's hash and can never change afterward without every operator wiping their data directory). Anything else is **refused at startup**: a typo must not silently start you on mainnet |
 | `RHIZOME_PORT` | `3000` | HTTP API port |
 | `RHIZOME_BIND_ADDRESS` | `127.0.0.1` | HTTP API bind address. Loopback by default; binding a public address additionally requires `RHIZOME_API_TOKEN`, or `RHIZOME_ALLOW_OPEN_API=true` to accept that `/add_peer` and the other operator routes are open to the network |
 | `RHIZOME_API_TOKEN` | — | when set, state-changing/operator routes (`/add_peer`, `/scan/register`, `/scan/deregister`, `/add_transaction`, `/submit`, `/call_readonly`) require `Authorization: Bearer <token>`; P2P protocol endpoints stay open. Note: with a token set, gossip peers must also present it on `/submit` and `/add_transaction` — set `RHIZOME_PEER_TOKEN` on every node of the deployment so outbound peer traffic authenticates |
+| `RHIZOME_ALLOW_OPEN_API` | — | explicit opt-in to a non-loopback bind with **no** `RHIZOME_API_TOKEN` set — a pure-relay posture where `/add_peer` and every other operator route is open to the network. Prefer setting a token; this exists for relays that intentionally carry no privileged surface |
 | `RHIZOME_PEER_TOKEN` | — | bearer token for *outbound* peer-to-peer requests (gossip `/submit` & `/add_transaction`, PEX fetch/announce, sync GETs), sent **only to the peers of `RHIZOME_PEERS` and only over `https://`** — the peer registry is fed by unauthenticated `/add_peer`/PEX, so gossip-learned or cleartext-http peers never receive the secret. Required when your nodes gate ingest with `RHIZOME_API_TOKEN` (configure those peers with `https://` URLs), otherwise cross-node pushes are refused (401) and gossip stops converging. Never logged |
 | `RHIZOME_DATA` | `./data` | RocksDB data directory |
+| `RHIZOME_PRUNE` | — (archive) | keep only the most recent N block bodies instead of every one. Refused at startup below the safe floor — the deepest history the engine may still need to read (reorg window, uncle depth, difficulty/median-timestamp windows) plus a safety margin — so a misconfiguration fails fast at boot rather than mid-reorg |
+| `RHIZOME_SYNC` | — | `snap` on an **empty** data directory adopts a peer's verified state snapshot at a buried pivot instead of replaying full history from genesis, falling back to a normal full sync if no configured peer offers a usable one |
+| `RHIZOME_SNAPSHOT_EVERY` | `17280` (~1 day at 5 s blocks) | blocks between state-snapshot materialisations, `0` = never. Not to be confused with `RHIZOME_SNAPSHOT` below, which is the one-time genesis balance file, not the recurring state snapshot |
 | `RHIZOME_SNAPSHOT` | per-network (below) | path to a `LedgerSnapshot` JSON file seeding the genesis; overrides the network's default when set. Unset default is per network: mainnet loads its shipped, provisional allocation artifact (a pinned, non-zero genesis supply `S₀`, checked against whatever snapshot is loaded); testnet and devnet default to an empty snapshot, unchanged. Devnet's emission curve is calibrated against mainnet's `S₀` (both activate the curve from height 1), so a devnet run with the default empty genesis mints against an uncalibrated `S₀ = 0`; point `RHIZOME_SNAPSHOT` at the mainnet allocation artifact for mainnet-faithful reward figures |
 | `RHIZOME_MINER` | — | reward address (enables block production) |
+| `RHIZOME_VOTE` | `0` (abstain) | this miner's vote on the votable economic parameters, an integer in `[-2, 2]`: `±1` votes `storageFeeFactor`, `±2` votes `minValuePerByte`. Refused at startup outside that range, so a typo cannot mint blocks consensus itself would reject as an invalid vote |
 | `RHIZOME_PEERS` | — | comma-separated initial peers |
+| `RHIZOME_ALLOW_PRIVATE_PEERS` | `false` | opt out of the SSRF filter that otherwise refuses loopback/private-IP peers learned via PEX (local dev and devnets only). Configured seed peers (`RHIZOME_PEERS`) bypass the filter regardless |
 | `RHIZOME_ADVERTISE` | — | public URL advertised to peers; must be an `http(s)` URL with a host (a malformed value used to silently break self-pairing refusal, PEX and the `Host` allowlist) |
 | `RHIZOME_PROTECT_READS` | `false` | with `RHIZOME_API_TOKEN`, extends the bearer gate to **every** route (reads included) — the private-node/private-explorer switch. The static SPA/docs shell (`/`, `/dashboard/*`, `/docs/*`) stays open so a browser can load the explorer; the SPA's own API fetches carry the token. Peering then requires every peer to present the token (see `RHIZOME_PEER_TOKEN`), so this suits private clusters, not public relays |
 | `RHIZOME_TRUST_XFF` | `false` | key rate limits, push-strike tables and scan ownership on the first `X-Forwarded-For` hop instead of the socket address — required behind a reverse proxy. The hop is accepted only as an IP literal (parsed without any DNS lookup, so a spoofed header cannot stall the event loop). **Dangerous when the port is directly reachable** — clients could spoof the header to evade per-IP limits; enable only when the socket can solely be reached from the trusted proxy |
@@ -60,6 +66,39 @@ RHIZOME_NETWORK=devnet RHIZOME_MINER=<address> ./gradlew :app-node:run
 Snapshot spools (`rhizome-snapshot-*.chunks`) live under `$RHIZOME_DATA/snapshots` — not the
 OS temp dir, which is commonly a tmpfs — and stale spools from an unclean shutdown are swept
 at startup.
+
+## Join the public staging testnet
+
+`RHIZOME_NETWORK=staging` (see the table above) exists to rehearse a real launch: a public,
+multi-VM network running mainnet's actual tuning — same PoW, same 5 s target, same fee floor,
+same emission curve and decay schedule, same burn share — before mainnet itself exists. It is
+a **dress rehearsal, not a permanent network**: its difficulty floor is a development-box
+placeholder pending re-measurement on real campaign hardware, and once its genesis is
+published it cannot be retuned without every operator wiping their data directory, so treat it
+as disposable infrastructure that may be reset or replaced.
+
+`scripts/local-testnet/deploy/` has the artifacts for standing up a node on real infrastructure
+instead of a laptop: a systemd unit (`rhizome-node.service`, plus `node.env.example` for the
+`RHIZOME_*` variables it loads), the container build (`app-node/Dockerfile`), and an nginx
+reverse-proxy template (`nginx-rhizome.conf.example`) for TLS termination in front of a
+loopback-bound node — read its header comment before enabling `RHIZOME_TRUST_XFF`, since an
+`X-Forwarded-For` proxy config that appends instead of overwrites defeats that flag entirely.
+Before trusting a node you're about to peer with (yours or someone else's),
+`scripts/local-testnet/deploy/verify-genesis.sh` checks its `/info` chain id/network name and
+its block-1 hash against values you supply, so a misconfigured or wrong-network peer is caught
+before it ever reaches your `RHIZOME_PEERS`.
+
+A standalone faucet for handing out staging-network test coins lives under
+`scripts/local-testnet/faucet/` (`faucet.py`, stdlib-only Python, plus its own `README.md`) —
+deliberately not a node route or a dashboard page, so mainnet binaries never carry a code path
+for holding a signing key. It gates drips behind a hashcash-style proof-of-work challenge,
+a per-address cooldown and a daily budget.
+
+Be aware this tooling is freshly built and has not yet been exercised on a real multi-machine
+deployment — the systemd unit and nginx template were authored and reviewed by hand on a box
+with no live `systemd`/`nginx` to check them against (their own header comments say so), and no
+public staging network is live yet. Treat all of the above as a starting point to validate on
+your own infrastructure, not a turnkey, already-proven deployment.
 
 ## Dashboard
 

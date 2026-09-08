@@ -98,9 +98,9 @@ The two are complements, not substitutes. A component test can prove a rule and 
 assembled node never reaches it; a network test can prove the node held its chain and never tell
 you which rule saved it.
 
-The distribution is deliberate and worth stating, because "173 DEFENDED" reads as if it were
-uniform: of the 198 catalogued scenarios, **135** rest at component level, **14** at the surface,
-**46** reach the network, and 3 are residuals with no proof by definition. The network figure is the `E2E`
+The distribution is deliberate and worth stating, because "263 DEFENDED" reads as if it were
+uniform: of the 276 catalogued scenarios, **158** rest at component level, **11** at the surface,
+**103** reach the network, and 4 are residuals with no proof by definition. The network figure is the `E2E`
 family plus the scenarios elsewhere that gained a second, network-level proof. Component level
 dominates on purpose — it is the only level that can name the gate that refused — but a rule with
 no network proof anywhere is a rule nobody has watched an assembled node apply.
@@ -185,6 +185,7 @@ catalogue is never run as one suite.
 | POW-05 | Sustain a timestamp-compression campaign across several retarget windows to drive difficulty out of its bounds and price honest miners out. | A3 | BOUNDED | `lib-core/src/test/java/rhizome/adversarial/TimestampAttackTest.java#aSustainedMinimalTimestampCampaignMovesDifficultyOnlyAtTheBoundedRate` |
 | POW-06 | Mine under one PoW cost schedule and have it verified under another, across an upgrade boundary. | A3 | DEFENDED | `lib-core/src/test/java/rhizome/PowUpgradeTest.java#blockAfterBoundaryMinedWithOldCostsIsRejected`, `lib-core/src/test/java/rhizome/PowUpgradeTest.java#blockBeforeBoundaryMinedWithNewCostsIsRejected` |
 | POW-07 | Feed the PoW entry point out-of-range cost parameters to trigger a remote arithmetic fault. | A2 | DEFENDED | `lib-crypto/src/test/java/rhizome/crypto/PowCostsTest.java#pufferfishEntryPointRejectsOverflowingCostT`, `lib-crypto/src/test/java/rhizome/crypto/PowCostsTest.java#pufferfishEntryPointRejectsOutOfRangeCostM` |
+| POW-08 | Flood a validator with structurally invalid blocks (a forged merkle root, say) hoping the node still pays the full memory-hard PoW hash before refusing each one, turning a cheap-to-produce fault into a CPU-exhaustion amplifier. | A1 | DEFENDED | `lib-core/src/test/java/rhizome/adversarial/PufferfishCostAttackTest.java#cheapGateRejectionIsOrdersOfMagnitudeFasterThanPayingForMemoryHardPow` |
 
 ## TIME — timestamps
 
@@ -195,6 +196,7 @@ catalogue is never run as one suite.
 | TIME-03 | Push a boundary block's timestamp far out to drag the next window's difficulty down — the classic time-warp. | A3 | DEFENDED | `lib-core/src/test/java/rhizome/HeaderChainTest.java#inflatedBoundaryTimestampNoLongerDragsDifficultyDown` |
 | TIME-04 | Mine blocks faster than the consensus cadence floor allows, out-producing the rest of the network. | A4 | DEFENDED | `lib-core/src/test/java/rhizome/MinBlockTimeTest.java#rejectsBlockTooCloseToParent` |
 | TIME-05 | Stamp a pooled transaction far in the future so it sits in the pool as permanently fresh junk. | A1 | DEFENDED | `lib-core/src/test/java/rhizome/AdmissionParityTest.java#futureNonceAgrees`, `lib-core/src/test/java/rhizome/MemPoolTest.java#parkedTransactionsExpireAfterTheTtl` |
+| TIME-06 | Benefit from a victim node's own wall clock running ahead of real time, so it accepts a block an aligned peer refuses as too far in the future. | A6 | BOUNDED | `lib-core/src/test/java/rhizome/adversarial/ClockDriftAttackTest.java#aDriftedClockAcceptsWhatAnAlignedClockRejectsUntilRealTimeCatchesUp` |
 
 ## MERKLE — transaction commitment
 
@@ -373,6 +375,7 @@ check is a boot-time equality composed with guards those suites already exercise
 | GENESIS-01 | Boot a pinned network from a snapshot whose total differs from `S₀` by one base unit — misconfiguration or a swapped/served file — hoping the divergence is accepted and only surfaces later as an opaque genesis-hash mismatch or a silent fork. | A6 | DEFENDED | `lib-core/src/test/java/rhizome/GenesisBlockTest.java#aSnapshotWhoseTotalDiffersFromThePinnedGenesisSupplyRefusesBoot` |
 | GENESIS-02 | Keep the snapshot's total equal to the pin but change its distribution between restarts, hoping the pinned-total check alone is mistaken for full genesis integrity and the commitment re-verification is skipped or ordered after it. | A6 | DEFENDED | `lib-core/src/test/java/rhizome/GenesisBlockTest.java#thePinChecksTheTotalAndTheCommitmentBindsTheDistribution` |
 | GENESIS-03 | Edit the shipped mainnet allocation artifact without updating the pinned constant (or vice versa), shipping a network definition whose own default genesis input disagrees with its own consensus constant. | A6 | DEFENDED | `lib-core/src/test/java/rhizome/LedgerSnapshotTest.java#theShippedAllocationMatchesThePinnedGenesisSupplyExactly` |
+| GENESIS-04 | Boot one pinned network's real, correctly-formed shipped snapshot against another pinned network's parameters (`staging()` against mainnet's snapshot, or the reverse), hoping the chain-id guard is skipped for a snapshot that is otherwise well-formed and pinned — sharpened by `staging()` inheriting `genesisSupply` unchanged from `cleanMainnet()`, so the pinned-total check alone cannot tell the two apart — letting the wrong network's genesis boot silently rather than refusing before a single wallet is seeded. | A6 | DEFENDED | `lib-core/src/test/java/rhizome/GenesisBlockTest.java#aPinnedNetworksShippedSnapshotNeverBootsAnotherPinnedNetworksGenesis` |
 
 ## REORG — fork choice, finality, synchronisation
 
@@ -618,6 +621,11 @@ activation dispatch in `EmissionActivationGateTest`.
 | E2E-86 | Fabricate a block whose OWN declared header supply field (not the parent's) is a wire-legal extreme value (near `Long.MAX_VALUE`, or disconnected from the real parent) and post it to `/submit`, hoping that self-declared field is ever fed into `EmissionCurve.raw()` as an argument (only the already-validated parent value is), rather than producing nothing worse than a clean comparison mismatch. | A1 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EEmissionCurveTest.java#aWireLegalExtremeSelfDeclaredSupplyFieldNeverFeedsTheCurveArithmeticAndOnlyMismatchesCleanly` |
 | E2E-87 | Mine a real node across a decay-epoch boundary (008's `SupplyTargetSchedule`), hoping the boundary block pays anything other than the stepped target's reward or the pre-boundary block anything other than the peak's, then join a fresh peer and let it sync the whole history from scratch, hoping the replayed chain converges on different blocks or commits different supplies at any height across the boundary. | A3 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2ETargetDecayTest.java#aRealNodeMinesAcrossADecayEpochBoundaryAndAPeerSyncsTheHistoryFromScratch` |
 | E2E-88 | Run a real mining node with live fee flow through the supply-target crossing under a crossable curve profile — the blocks burn once supply passes the target — and join a fresh peer, hoping the node's published `burned` figure is a cumulative lie or a per-poll fabrication, the carried `burnDebt` ever negative, or the peer converges on a different history than the burning node mined. | A3 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EBurnTest.java#aRealNodeBurnsLiveFeesAcrossTheCrossingAndAPeerConvergesOnTheIdenticalHistory` |
+| E2E-89 | Mine and sync a real, assembled `PUFFERFISH2` network -- a second node admitted as a peer and converging over real HTTP, then a third, fresh node with no prior state performing a genuine full sync from scratch -- hoping the proof of work only ever gets checked through `Block.verifyNonce`'s own algorithm dispatch, or that a syncing peer merely trusts the bytes a peer served rather than independently re-deriving the memory-hard hash over each block's own preimage; and, separately, boot a real `staging()` node with no snapshot override configured, hoping its genesis silently diverges from the published pinned identity once real node assembly, boot wiring and the classpath-resource fallback sit between the constant and the check, rather than a single in-process `GenesisBlock.build` call. | A3 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EPufferfishNetworkTest.java#aRealTwoNodePufferfish2NetworkConvergesAndAFreshThirdNodeSyncsAndReverifiesTheHistory`, `app-node/src/test/java/rhizome/adversarial/e2e/E2EPufferfishNetworkTest.java#aRealStagingNodeWithNoConfiguredSnapshotBootsToThePublishedPinnedGenesis` |
+| E2E-90 | Flood a real Pufferfish2 node's `/submit` route on both sides of the PoW gate -- one arm cheaply rejectable on a forged parent link before any hash is ever computed, the other honest in every cheap field and wrong only in a provably-unmined nonce -- hoping the cheap arm still pays for the memory-hard hash at least once underneath the rejection, or that either flood leaves the node degraded or unable to keep mining honestly afterward. | A1 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EPufferfishFloodTest.java#floodingSubmitWithCheapAndPowInvalidPufferfishBlocksLeavesTheNodeHealthyAndStillAbleToMine` |
+| E2E-91 | Configure two real, honestly-run nodes with a SKEWED (not permanently split) `consensusV2Height`, then offer the same under-floor-fee block -- built through whichever node still considers it honest -- to both, hoping the node whose own activation height has already passed accepts it anyway, the still-lagging node's honest block gets silently adopted by the stricter node (directly or through a real peer sync round), or either node ends up degraded by the honest disagreement. | A0 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EActivationSkewTest.java#nodesWithSkewedConsensusV2HeightsDivergeExactlyAtTheEarlierBoundaryAndTheStricterNodeNeverAdoptsTheRefusedBlock` |
+| E2E-92 | Post a block whose timestamp sits just past `maxFutureBlockTimeSec`'s bound at a real node's `/submit` route -- genuinely mined after the timestamp is stamped, so real proof of work and real merkle/state roots, invalid only in its timestamp -- hoping the real HTTP/consensus boundary accepts it, costs the node anything on refusal, or treats an otherwise-identical block just inside the same bound any differently. | A3 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EFutureWindowTest.java#aFutureTimestampedBlockJustPastTheBoundaryIsRejectedForFreeWhileOneJustInsideIsAccepted` |
+| E2E-93 | Serve a real victim node, over a real socket through a hostile peer that otherwise looks honest, a headers-only run whose final header is future-stamped just past the same bound, hoping the lie survives real parsing and real deadlines long enough to move the victim's tip or cost it anything. | A2 | DEFENDED | `app-node/src/test/java/rhizome/adversarial/e2e/E2EFutureWindowTest.java#aHostilePeerServingAFutureStampedFinalHeaderNeverMovesTheVictimsTipAndLeavesItHealthy` |
 
 ---
 
@@ -629,9 +637,67 @@ taken.
 
 | ID | Scenario | Why |
 |----|----------|-----|
-| E2E-89 | A GraalVM native-image binary of the node resolving the embedded genesis resource identically to the JVM build, and failing cleanly (not crashing, not silently substituting a different genesis) if the reachability-metadata entry for that classpath resource is ever stripped from `app-node/src/main/resources/META-INF/native-image/`. | `native-image` is not installed in this development environment (confirmed in `WHITEPAPER.md`), so no test that actually builds and runs the native binary can execute here. This is future work once a GraalVM SDK is available on the box that runs this suite -- see `./gradlew :app-node:nativeImage`'s own guard for the same absence. Reserved id, bumped again as the CURVE E2E test plan claimed E2E-61..86 for real proven scenarios (completing that plan's full scope except CURVE-09, redundant with E2E-64 and documented as merged rather than implemented, and CURVE-20, an infra gap the plan itself deferred): the next new `E2E` scenario added to the table above should take the next dense id (E2E-88 was taken by 009's burn E2E on 2026-09-02, bumping this reservation to E2E-89), not reuse this one, since this row is intentionally excluded from the family's dense-numbering check (`AdversarialProtocolTest` only counts rows in the main scenario table, which this "why" column's shorter row shape structurally excludes it from). |
+| E2E-94 | A GraalVM native-image binary of the node resolving the embedded genesis resource identically to the JVM build, and failing cleanly (not crashing, not silently substituting a different genesis) if the reachability-metadata entry for that classpath resource is ever stripped from `app-node/src/main/resources/META-INF/native-image/`. | `native-image` is not installed in this development environment (confirmed in `WHITEPAPER.md`), so no test that actually builds and runs the native binary can execute here. This is future work once a GraalVM SDK is available on the box that runs this suite -- see `./gradlew :app-node:nativeImage`'s own guard for the same absence. Reserved id, bumped again as the CURVE E2E test plan claimed E2E-61..86 for real proven scenarios (completing that plan's full scope except CURVE-09, redundant with E2E-64 and documented as merged rather than implemented, and CURVE-20, an infra gap the plan itself deferred): the next new `E2E` scenario added to the table above should take the next dense id (E2E-88 was taken by 009's burn E2E on 2026-09-02; E2E-89..91 were taken by three concurrent sibling scenarios on 2026-09-07; E2E-92 and E2E-93 were taken by the future-timestamp-window `/submit`/header-sync E2E pair the same day, bumping this reservation to E2E-94), not reuse this one, since this row is intentionally excluded from the family's dense-numbering check (`AdversarialProtocolTest` only counts rows in the main scenario table, which this "why" column's shorter row shape structurally excludes it from). |
 
 ## Change log
+
+- **2026-09-07** — POW-08 for the pre-PoW gate ordering CONS-10 already locks by status code
+  (`BlockUnclesTest#blocksOwnPowIsVerifiedBeforeUncleWork`), proven this time by an actual cost
+  measurement rather than only a rejection status: `PufferfishCostAttackTest` runs
+  `ChainEngine.addBlock` under PoW cost parameters cranked well past genesis (`cost_m=11`, ~150-250
+  ms per genuine Pufferfish2 hash) and times a cheap pre-PoW rejection (a forged merkle root)
+  against a PoW-only rejection (a structurally valid block whose sole fault is its nonce). The
+  cheap path stays >=20x faster every run, which a same-order-of-magnitude regression in the gate
+  ordering could not produce; both rejections also leave the chain height unmoved (refusal is
+  free).
+
+- **2026-09-07** — E2E-92 and E2E-93 for `maxFutureBlockTimeSec`'s network-level enforcement, split
+  the same way the supply commitment's E2E-34/E2E-35 pair is: a genuinely re-mined block whose
+  timestamp alone sits past the bound at a real node's `/submit` route (E2E-92, A3 -- real PoW is
+  required since `ChainEngine.addBlock`'s copy of the check only runs after the nonce is verified
+  against the rest of the block), and a hostile peer serving a real victim a headers-only run whose
+  final header is future-stamped past the bound (E2E-93, A2 -- no PoW needed, since
+  `HeaderChain.validate` reaches `TIMESTAMP_IN_FUTURE` before it ever re-hashes that header,
+  cheapest-first). Both proofs assert the exact rejection status and that refusal was free (tip and
+  height unmoved), and both also prove the boundary's other side: an otherwise-identical
+  block/header stamped just inside the bound is accepted. `E2EFixtures#build` gained a
+  timestamp-adjust overload for this — the adjustment lands before merkle/state-root stamping and
+  before the nonce is mined, so the timestamp is the only thing wrong with the resulting block.
+  E2E-89..91 were taken concurrently by three sibling scenarios (a real two/three-node Pufferfish2
+  network proof, a Pufferfish `/submit` flood, and a consensusV2/curve activation-height skew
+  proof); the reserved native-image gap id moves to E2E-94.
+
+- **2026-09-07** — A mainnet-faithful `staging()` network profile (`NetworkParameters.staging()`,
+  chainId 4, PUFFERFISH2, every knob inherited from `cleanMainnet()` except a lowered PoW floor
+  calibrated to the campaign's real measured hashrate and its own pinned allocation artifact
+  `genesis/rhizome-staging.json`) makes four scenarios provable for the first time that a
+  synthetic testnet profile could not reach honestly:
+  - **TIME-06** (`TIME`, new family member, A6, `BOUNDED`) — a victim node whose own wall clock
+    runs ahead of real time accepts, until real time catches up, a block an aligned peer refuses
+    as too far in the future. `ClockDriftAttackTest` hand-builds two `staging()`-rooted engines
+    sharing one funded genesis keypair (the pinned genesis-supply check and `AdversarialChain`'s
+    per-build fresh keypair both rule out the obvious fixtures here) and gives each its own clock
+    seam, proving the bound is exactly `maxFutureBlockTimeSec`.
+  - **E2E-89** (`E2E`, A3, `DEFENDED`) — a real two-node Pufferfish2 network converging over real
+    HTTP, its blocks' nonces independently re-derived via `Crypto` rather than trusted through
+    `Block.verifyNonce`'s own dispatch, then a third fresh node performing a genuine full sync and
+    passing the identical re-check on its own locally-synced blocks; plus a real `staging()` node
+    with no snapshot override booting to the published, pinned genesis hash through the real
+    assembly/boot path rather than a bare `GenesisBlock.build` call.
+  - **E2E-90** (`E2E`, A1, `DEFENDED`) — flooding a real Pufferfish2 node's `/submit` route with
+    cheaply-rejectable and PoW-only-invalid blocks stays cheap and leaves the node able to mine
+    honestly afterward; the cheap arm's budget is calibrated against the same run's own measured
+    real-PoW-gate cost rather than a fixed constant, so the bound holds across hardware.
+  - **GENESIS-04** (`GENESIS`, A6, `DEFENDED`) — with a second pinned network now shipping its own
+    genesis snapshot, one pinned network's real snapshot never boots another's genesis in either
+    direction, even though `staging()` inherits `genesisSupply` unchanged from `cleanMainnet()` and
+    so cannot be told apart from mainnet by the pinned-total check alone; the chain-id guard fires
+    first, before any wallet is seeded.
+
+  The "Running the protocol" scenario/proof-level counts are recomputed against the tree rather
+  than incremented — they had drifted since the `SUPPLY` family's commit and had not tracked the
+  `FLOOR`, `DECAY`, `BURN` and `GENESIS` families or the `E2E-61..93` range — now 276 catalogued
+  (263 `DEFENDED`, 9 `BOUNDED`, 4 `RESIDUAL`; 158 component, 11 surface, 103 network).
 
 - **2026-09-02** — New `BURN` family (BURN-01..07) and E2E-88 for the native coin burn
   (branch `009-native-coin-burn`). The burn is derived — recoverable from two headers and clamped

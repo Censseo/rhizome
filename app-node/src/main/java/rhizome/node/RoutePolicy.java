@@ -143,6 +143,11 @@ final class RoutePolicy {
         get("/dashboard/*", 1, Guard.SPA_SHELL),
         get("/docs/*", 1, Guard.SPA_SHELL),
         get("/stats", DashboardApi.STATS_WINDOW, Guard.READ_BUDGET),
+        // Same cache, same cost as /stats: a pure text-rendering projection of the identical
+        // per-tip StatsWindow, so it costs the read budget nothing beyond what /stats already
+        // costs. Browser/scraper-reachable like /stats (not PEER_PROTOCOL), so it stays
+        // Host-checked when an allowlist is configured.
+        get("/metrics", DashboardApi.STATS_WINDOW, Guard.READ_BUDGET),
         get("/features", 1),
         // The /features shape: a constants read with no chain state behind it — per-IP cost 1,
         // no guards, no aggregate budget (007-emission-observability).

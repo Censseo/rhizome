@@ -1,0 +1,101 @@
+# systemd unit for a staging-testnet faucet — TEMPLATE, NOT WIRED TO A REAL SCRIPT.
+#
+# ****************************************************************************************
+# OPEN UNCERTAINTY, flagged rather than guessed silently: as of this file's authoring, NO
+# faucet.py (or any faucet implementation, under any name) exists anywhere in this repository
+# — verified with `find . -iname '*faucet*'` and a content grep for faucet/airdrop/drip across
+# *.py/*.md/*.sh, both empty. `scripts/local-testnet/tools/` holds attack/scan tooling
+# (chainscan.py, hostile_peer.py, wasmgen.py, ...) but nothing that dispenses funds. This unit
+# is therefore a template for the day that script exists, built from what the rest of the
+# deployment already fixes (the wallet CLI's `send` subcommand — app-wallet's WalletCli — is
+# the only funds-moving primitive the repo currently has, and any faucet.py would presumably
+# wrap it or reimplement the same signed-transaction path against a node's /add_transaction).
+# EVERY path/flag below is a documented GUESS, not a verified interface. Do not enable this
+# unit as-is.
+# ****************************************************************************************
+#
+# Also NOT VALIDATED AGAINST A LIVE systemd — see rhizome-node.service's header for why
+# (no systemctl/systemd-analyze on the authoring box) and what review was possible instead
+# (hand-check against systemd.service(5)/systemd.exec(5) syntax).
+#
+# Once a real faucet.py exists, expect to revisit at least:
+#   - ExecStart's script path and flag names (guessed below from this repo's existing Python
+#     tools' argument conventions, e.g. wasmgen.py/chainscan.py take a node URL positionally)
+#   - whether it needs a funded keyfile path (FAUCET_KEYFILE below assumes app-wallet's keygen
+#     format, generated via `./gradlew :app-wallet:run --args="keygen <keyfile>"`) and how
+#     that secret should reach the process — an EnvironmentFile pointing at a path is the
+#     pattern used here, consistent with node.env.example, but a real faucet handling a funded
+#     key may warrant systemd's LoadCredential= instead (keeps the key out of the process
+#     environment entirely); revisit once the real script's expectations are known
+#   - rate-limiting / per-address drip amount flags, and whether the script wants its own
+#     listen port or should live behind the same nginx-rhizome.conf.example reverse proxy
+
+[Unit]
+Description=Rhizome staging-testnet faucet (TEMPLATE — see header, not wired to a real script)
+Documentation=https://github.com/rhizome/rhizome
+# The faucet talks to a Rhizome node over HTTP to submit funding transactions — it must not
+# start racing a node that is not there yet. Same-host convention assumed (After=, not a
+# network dependency on a remote node); adjust if faucet and node run on separate hosts.
+After=network-online.target rhizome-node.service
+Wants=network-online.target
+Requires=rhizome-node.service
+# Circuit breaker (belongs on [Unit], not [Service], since systemd 230): if the unit cannot
+# stay started across 5 attempts inside 10 minutes, stop trying rather than restart forever.
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+
+# FAUCET_NODE_URL, FAUCET_KEYFILE, FAUCET_LISTEN_PORT, FAUCET_DRIP_AMOUNT, FAUCET_RATE_LIMIT —
+# guessed names, matching this repo's RHIZOME_*-style all-caps-with-underscores convention.
+# No real faucet.py to confirm these flag/variable names against — see the header.
+EnvironmentFile=/etc/rhizome/faucet.env
+
+# Guessed install path, matching rhizome-node.service's /usr/local/bin convention. A Python
+# script (not a compiled binary) is assumed because every existing tool in
+# scripts/local-testnet/tools/ is Python and this repo has no Rust/Go toolchain in play here.
+ExecStart=/usr/bin/python3 /opt/rhizome/faucet/faucet.py \
+    --node "${FAUCET_NODE_URL}" \
+    --keyfile "${FAUCET_KEYFILE}" \
+    --listen-port "${FAUCET_LISTEN_PORT}"
+
+Restart=on-failure
+RestartSec=5s
+
+# A faucet has no RocksDB/native-store unwind to wait for (unlike rhizome-node.service) — a
+# plain HTTP-serving Python process should stop promptly on SIGTERM. Left at a still-generous
+# value rather than systemd's 90s default purely for symmetry with the node unit; tighten once
+# the real script's shutdown behaviour (does it hold any in-flight signing operation open?) is
+# known.
+KillSignal=SIGTERM
+TimeoutStopSec=30s
+
+# Faucet holds a funded private key (FAUCET_KEYFILE) — deliberately its OWN system user, not
+# shared with `rhizome` (the node's user in rhizome-node.service), so a compromise of one
+# process's filesystem access does not automatically expose the other's secret.
+User=rhizome-faucet
+Group=rhizome-faucet
+StateDirectory=rhizome-faucet
+StateDirectoryMode=0750
+
+LimitNOFILE=65536
+
+# Same baseline hardening posture as rhizome-node.service — see that unit's trailing comment
+# for what is deliberately left out and why.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+RemoveIPC=yes
+
+[Install]
+WantedBy=multi-user.target

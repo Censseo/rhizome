@@ -34,5 +34,18 @@ specs/
 # privée n'a rien à faire dans l'historique du dépôt.
 scripts/local-testnet/keys/
 
+# Même règle pour le faucet (scripts/local-testnet/faucet/) : ni la clé jetable que
+# suite-faucet.sh génère pour ses propres cas, ni un état persisté qu'un opérateur testerait
+# localement, n'ont leur place ici — voir faucet/README.md pour où la clé RÉELLE doit vivre
+# (jamais dans ce dépôt, même chiffrée).
+scripts/local-testnet/faucet/keys/
+scripts/local-testnet/faucet/*.key
+scripts/local-testnet/faucet/*state*.json
+
 # Environnement local de shell — peut contenir des secrets ; jamais dans le dépôt.
 .env
+
+# Octets compilés des outils Python de scripts/local-testnet/ (faucet.py, tools/*.py) : un
+# artefact d'exécution, jamais du code source.
+__pycache__/
+*.pyc

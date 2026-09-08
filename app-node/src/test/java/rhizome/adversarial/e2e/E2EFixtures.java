@@ -109,13 +109,29 @@ final class E2EFixtures {
      * the node must <em>refuse</em>, which have to hold the block in order to offer it.
      */
     static Block build(RhizomeNode node, PublicAddress miner, Transaction... transactions) {
+        return build(node, miner, java.util.function.LongUnaryOperator.identity(), transactions);
+    }
+
+    /**
+     * As {@link #build}, but passing the engine's floor-computed timestamp through
+     * {@code timestampAdjust} before it is stamped onto the block — the one site {@link #build}
+     * sets it, before the merkle root, the state root and the proof of work are all computed over
+     * it. Everything downstream of that stamp (the merkle root, the state root, the nonce
+     * {@code Miner.mineNonce} solves) is therefore computed against the <em>adjusted</em>
+     * timestamp, exactly as an attacker forging a future- or past-timestamped-but-otherwise-honest
+     * block would produce: a block that is fully valid — real PoW, correct merkle and state roots
+     * — except for its timestamp. {@link #build} delegates here with the identity operator so its
+     * existing callers, and {@link #mint}'s, are unaffected.
+     */
+    static Block build(RhizomeNode node, PublicAddress miner,
+            java.util.function.LongUnaryOperator timestampAdjust, Transaction... transactions) {
         NetworkParameters params = node.engine().params();
         long height = node.engine().height() + 1;
         long parentSupply = node.engine().headerAt(node.engine().height()).supply();
 
         BlockImpl block = (BlockImpl) BlockImpl.builder()
             .id((int) height)
-            .timestamp(node.engine().nextBlockTimestamp(System.currentTimeMillis()))
+            .timestamp(timestampAdjust.applyAsLong(node.engine().nextBlockTimestamp(System.currentTimeMillis())))
             .difficulty(node.engine().difficulty())
             .lastBlockHash(node.engine().tipHash())
             .build();

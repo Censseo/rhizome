@@ -24,6 +24,8 @@ truth: what each area does, what it owns, and which invariants must never regres
 | [node-api](node-api/spec.md) | HTTP surface, env config, token auth, CSRF/rebinding gates, aggregate budgets, published monetary state, live emission target, per-block burned & carried burn debt | `app-node` | Draft |
 | [dashboard](dashboard/spec.md) | Embedded zero-dependency web UI — 6 pages, browser key custody, live-target emission tiles, burn tiles & curve plot | `app-node/resources/dashboard` | Draft |
 | [wallet](wallet/spec.md) | CLI wallet, encrypted keystore, chain-id pin, local signing | `app-wallet` | Draft |
+| [testnet](testnet/spec.md) | The `staging` network profile — mainnet-faithful pinned genesis, difficulty floor, and the operator path from a bare host to a chain-verified, funded node | `lib-core/blockchain`, `scripts/local-testnet/deploy` | Draft |
+| [operations](operations/spec.md) | Running node(s) as a real deployment — profile selection, reverse-proxy/TLS hardening, telemetry surfaces, disk/pruning, key custody, token rotation, upgrade procedure, and incident runbooks | `app-node`, `scripts/local-testnet` | Draft |
 | [crypto](crypto/spec.md) | Ed25519, Pufferfish2 PoW, hashes | `lib-crypto` | Draft |
 | [platform](platform/spec.md) | Java 25 toolchain, Gradle wrapper, dependency pins & rationale, native image, lint gate | *(build-wide)* | Draft |
 | [adversarial](adversarial/spec.md) | The exploit-scenario catalogue every domain is tested against — each scenario names its proof, machine-checked by `AdversarialProtocolTest` | *(test-wide)* | Active |

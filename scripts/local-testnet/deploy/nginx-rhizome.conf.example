@@ -1,0 +1,121 @@
+# Example nginx reverse-proxy config: TLS termination in front of a Rhizome node bound to
+# loopback (RHIZOME_BIND_ADDRESS=127.0.0.1, RHIZOME_PORT=3000 — see node.env.example).
+#
+# NOT VALIDATED AGAINST A LIVE nginx: `command -v nginx` on the authoring box found nothing
+# (the repo's own scripts/local-testnet/tools/tls_proxy.py notes the same: "Aucun de
+# nginx/caddy/socat/stunnel n'est installé sur cette machine" — none of nginx/caddy/socat/
+# stunnel is installed here). This file was reviewed by hand against nginx's documented
+# directive syntax, not run through `nginx -t`. Run `nginx -t` yourself after installing it.
+#
+# Install (Debian/Ubuntu): apt-get install nginx; then
+#   install -o root -g root -m 0644 nginx-rhizome.conf.example /etc/nginx/sites-available/rhizome
+#   ln -s ../sites-available/rhizome /etc/nginx/sites-enabled/rhizome
+#   # fill in server_name and the ssl_certificate paths below (e.g. via certbot), then:
+#   nginx -t && systemctl reload nginx
+#
+# ============================================================================================
+# THE ONE RULE THIS FILE EXISTS TO GET RIGHT: X-Forwarded-For must be OVERWRITTEN, not
+# appended to.
+#
+# Rhizome's RHIZOME_TRUST_XFF (see node.env.example) makes the node key per-client rate
+# limits, push-strike tables and scan ownership on the FIRST hop of the X-Forwarded-For
+# header (NodeApi.resolveXffHop reads everything before the first comma) instead of the TCP
+# socket address that actually connected to it. That is only safe if THIS PROXY IS THE ONLY
+# THING THAT CAN SET THAT HEADER'S FIRST HOP — i.e. the node's port is reachable ONLY from
+# this proxy (loopback bind, or a firewall/security-group that admits only this host).
+#
+# nginx's common shorthand `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`
+# APPENDS to whatever X-Forwarded-For the client already sent (producing
+# "<client-supplied-value>, <real-client-ip>") — so the FIRST hop the node reads would still
+# be whatever an attacker put there. That defeats RHIZOME_TRUST_XFF entirely: it would look
+# like the safety condition above is met (traffic only arrives via this proxy) while actually
+# handing the attacker exactly the spoofing vector the flag is meant to close. This config
+# therefore OVERWRITES the header with nginx's own view of the client address instead:
+#     proxy_set_header X-Forwarded-For $remote_addr;
+# — discarding anything the client sent, so the first (only) hop the node ever sees is one
+# nginx itself observed. Enable RHIZOME_TRUST_XFF on the node only once you have confirmed
+# (e.g. with `ss -tlnp` — see suite-tls.sh's XFF-03 case for the pattern) that the node's port
+# is genuinely unreachable except through this proxy. README.md's own words on this flag:
+# "Dangerous when the port is directly reachable — clients could spoof the header to evade
+# per-IP limits; enable only when the socket can solely be reached from the trusted proxy."
+# ============================================================================================
+
+# Plain-HTTP listener: redirect to HTTPS only. Never proxy application traffic here — an
+# unencrypted path to the node would also carry RHIZOME_API_TOKEN bearer headers in the clear.
+server {
+    listen 80;
+    listen [::]:80;
+    server_name node.example.org;   # CHANGE ME
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    # http2 via the combined `listen ... http2;` form (not the newer standalone `http2 on;`
+    # directive, which needs nginx >= 1.25.1 — Debian bookworm's packaged nginx is 1.22.x, so
+    # the standalone form is a hard config-parse error there). If your nginx is >= 1.25.1 you
+    # may switch to `listen 443 ssl;` + a separate `http2 on;` line instead; this combined form
+    # keeps working on both.
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name node.example.org;   # CHANGE ME — must also be added to RHIZOME_ALLOWED_HOSTS
+                                     # (or match RHIZOME_ADVERTISE's host, already allowed)
+
+    # CHANGE ME — e.g. certbot-issued, or your internal CA's chain.
+    ssl_certificate     /etc/letsencrypt/live/node.example.org/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/node.example.org/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:rhizome_tls:10m;
+    ssl_session_timeout 1h;
+
+    # A submitted block can be up to the network's maxBlockSizeBytes (4 MiB as pinned in
+    # lib-core's Constants.MAX_BLOCK_SIZE_BYTES, checked against `/submit`'s own
+    # maxBlockSizeBytes+1024 cap) — sized with real headroom above that, not tight against it,
+    # since the node enforces its own exact per-route caps regardless (SMALL_BODY = 8 KiB for
+    # tx/peer announcements, maxBlockBody for /submit) and this is only nginx's outer bound so
+    # it does not buffer something unbounded before the node ever sees it.
+    client_max_body_size 8m;
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;   # matches RHIZOME_PORT in node.env.example
+        proxy_http_version 1.1;
+
+        # Host: forwarded VERBATIM (not rewritten to the upstream address) so it matches what
+        # the node's Host-allowlist / DNS-rebinding guard expects (RHIZOME_ALLOWED_HOSTS,
+        # RHIZOME_ADVERTISE) — those compare against the authority the CLIENT used, not
+        # 127.0.0.1:3000.
+        proxy_set_header Host $host;
+
+        # See the "ONE RULE" block above: OVERWRITE, never append/trust the inbound header.
+        proxy_set_header X-Forwarded-For $remote_addr;
+        # Not read by Rhizome today (grepped — no consumer), included anyway as a standard,
+        # harmless convention in case a future dashboard feature wants to know the original
+        # scheme.
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # Slow-loris-style stalls are already bounded node-side (the node applies a 30s
+        # read/write timeout per HTTP connection) — these just keep nginx's own idle connection
+        # from lingering far longer than the node would.
+        proxy_connect_timeout 10s;
+        proxy_send_timeout 30s;
+        proxy_read_timeout 30s;
+    }
+
+    # Server-sent events (contract log stream) — must NOT be buffered, or subscribers only see
+    # data in bursts whenever nginx's buffer fills instead of as each block applies, and a
+    # 30s-idle-timeout proxy would kill a quiet-but-live stream between blocks.
+    location /logs/stream {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        proxy_buffering off;
+        proxy_cache off;
+        chunked_transfer_encoding off;
+        proxy_read_timeout 1h;
+    }
+}

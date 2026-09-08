@@ -1,18 +1,22 @@
 # Plan de test — testnet local (30 nœuds natifs)
 
-> **Campagne 5 (2026-08-20).** Les campagnes 1 (10 nœuds), 2 (16 nœuds), 3 (30 nœuds, première
-> campagne native) et 4 (S11-S15) sont closes ; leurs résultats et les correctifs qu'elles ont
-> produits sont archivés en fin de document. Cette campagne rejoue S0-S15 à l'identique (30 nœuds
-> natifs, 10 mineurs, charge continue) et l'ancre en plus dans la revue adverse
-> (`docs/adversarial/spec.md`, passée de 0 à 171 scénarios catalogués depuis la campagne 4) : S16
-> et S17, nouveaux, poussent en réseau réel deux fermetures récentes du catalogue — NET-11 (score
-> de ban contre un pair réellement confirmé, pas seulement injoignable) et API-13
-> (`RHIZOME_API_TOKEN` sur un déploiement multi-nœuds, jusqu'ici hors périmètre de ce plan).
-> REORG-11/12 (minage égoïste, grinding du départage) n'a délibérément aucun nouveau scénario
-> réseau — voir le journal de cette campagne pour le raisonnement. Elle a aussi débusqué un défaut
-> d'outillage (mort silencieuse de `sim-contract.sh start` juste après le genesis) et une dérive
-> doc/code sur `RHIZOME_TESTNET_BLOCK_MS`, et reproduit à l'identique le conflit de port 3000 déjà
-> documenté par la campagne 4.
+> **Campagne 8 (2026-09-04).** Les campagnes 1 (10 nœuds), 2 (16), 3 (30, première campagne
+> native), 4 (S11-S15), 5 (ancrage sur la revue adverse, S16-S17), 6 (batterie d'exploits en
+> direct, S18-S19) et 7 (six batteries rejouables, S20-S25) sont closes ; leurs résultats et
+> correctifs sont archivés en fin de document. Cette campagne ferme le trou que la campagne 7
+> avait elle-même laissé au premier rang : la difficulté y était restée **collée à son plancher
+> sur 728 blocs sur 728**, de sorte que la boucle de retarget, la défense timewarp et les bornes
+> temporelles n'avaient jamais tourné ailleurs qu'en JUnit — et qu'aucun nœud n'avait jamais
+> rejoint la chaîne par **snap-sync** ni tourné **élagué**, alors que c'est le premier chemin
+> qu'emprunte un opérateur tiers. Elle ajoute deux batteries (**S26** `suite-pow.sh`, **S27**
+> `suite-bootstrap.sh`), deux outils (`Anvil.java`, `diffscan.py`), une **paire source/victime
+> isolée** qui donne le contrôle exact des horodatages, et une observation sur le **profil
+> `testnet`** lui-même (**S28**). Elle rejoue enfin les six batteries de la campagne 7 à
+> **difficulté non triviale**, ce qui n'avait jamais été le cas. Son constat central : le retarget
+> **régule pour de bon** — la difficulté est montée de 6 à 24 sous une cadence trop rapide, s'est
+> arrêtée net sur le plafond du profil, a ramené la cadence à la cible, puis est **redescendue**
+> quand on a coupé les trois quarts du hashrate ; et une réimplémentation indépendante du repli
+> des fenêtres est d'accord avec la chaîne sur **chaque bloc**.
 
 ## Objectif
 
@@ -53,6 +57,15 @@ binaire-là.
 
 Hors périmètre : chiffrement (https), `RHIZOME_PROTECT_READS`, snap-sync (`RHIZOME_SYNC=snap`),
 testnet multi-machines, coût de validation.
+
+> **Ce que devnet ne peut PAS exercer, par construction.** À difficulté plancher (6) le retarget,
+> la défense timewarp et les bornes de difficulté (POW/TIME) sont inertes ; et comme `devnet()`
+> démarre à supply ~0 sous une cible S\* ≈300M PDN, la dette de burn reste 0 pour toujours — donc
+> **le burn, le franchissement de cible, le plancher R_min et la décroissance (BURN/DECAY/SUPPLY/
+> FLOOR, features 008/009) ne se déclenchent jamais** sur ce réseau. Ces familles ne sont prouvées
+> qu'en JUnit (`TestNetwork.CURVE_ACTIVE`). L'analyse complète des manques est dans la section
+> « Couverture non atteinte » du journal de campagne 6, avec deux scénarios (S18 burn natif en
+> réseau réel, S19 crash `kill -9` + recovery) désormais **implémentés et exécutés**.
 
 ## Topologie
 
@@ -150,11 +163,88 @@ Variables d'override : `RHIZOME_TESTNET_NODES` (30), `RHIZOME_TESTNET_MINERS` (1
 `RHIZOME_TESTNET_NATIVE` (1), `RHIZOME_TESTNET_HEAP` (`256m`), `RHIZOME_TESTNET_BLOCK_MS`
 (25000), `RHIZOME_TESTNET_DIR` (`.testnet/`), `RHIZOME_TESTNET_BASE_PORT` (3000).
 
+### Les batteries de scénarios (campagne 7)
+
+Les scénarios S0-S19 sont des procédures manuelles ; S20-S25 sont **exécutables**. Chaque
+batterie est un script qui joue une famille du catalogue adverse contre le réseau vivant, avec
+un verdict par cas, et écrit son TSV dans `.testnet/results/`.
+
+```bash
+scripts/local-testnet/run-campaign.sh          # pré-vol + les six batteries + récapitulatif
+scripts/local-testnet/run-campaign.sh -n 2 tx  # une batterie, contre le nœud victime 2
+scripts/local-testnet/suite-tx.sh              # S20 transactions (INFL, SIG, REPLAY, POOL, CODEC, API)
+scripts/local-testnet/suite-wallet.sh          # S21 portefeuilles (WALLET-01..06, boîtes, tokens)
+scripts/local-testnet/suite-contract.sh        # S22 contrats (templates + modules adverses, VM-*)
+scripts/local-testnet/suite-chain.sh           # S23 en-têtes, oncles/GHOST, supply, explorateur
+scripts/local-testnet/suite-net.sh             # S24 transport et surface HTTP (NET-*, API-*)
+scripts/local-testnet/suite-persist.sh         # S25 arrêt propre puis SIGKILL, état applicatif
+```
+
+Trois outils les servent, dans `scripts/local-testnet/tools/` :
+
+- **`Forge.java`** — forgeur de transactions **signées**. Le wallet CLI refuse par construction
+  ce qu'une attaque doit produire (montant négatif, `chainId` étranger, `gasLimit` hors bornes,
+  nonce arbitraire) : ses garde-fous *client* masqueraient la porte de consensus qu'on veut
+  atteindre. Le forgeur signe exactement ce qu'on lui demande, avec les mêmes primitives que le
+  wallet, et imprime la transaction en JSON — la forme qu'accepte `POST /add_transaction_json`.
+  Falsifier un champ **après** signature (l'attaque « altéré sous signature ») se fait alors en
+  éditant ce JSON, sans code Java. Compilé à la demande dans `.testnet/tools/`.
+- **`wasmgen.py`** — émet les modules WASM **adverses** section par section. Les `.wasm` du dépôt
+  sont des contrats légitimes ; aucun ne porte les formes que la famille VM décrit (flottants,
+  import hors ABI, compteurs déclarés démesurés, mémoire au-delà du cap). Les tests JUnit les
+  assemblent en mémoire — pour les POSTER sur un nœud vivant il faut les mêmes octets sur disque,
+  et chaque module doit isoler **exactement une** violation, sinon le refus observé ne prouve pas
+  ce qu'on croit.
+- **`hostile_peer.py`** — un vrai pair hostile : serveur HTTP qui s'annonce à une hauteur absurde
+  et répond des corps de 50 Mo (`/peers` : un million d'entrées). C'est NET-03/NET-04 sur une
+  vraie socket plutôt que sur un double de test.
+- **`chainscan.py`** — balaye les blocs et vérifie l'identité de comptabilité GHOST
+  `supply(h) − supply(h−1) == subvention + n × (subvention/2 + subvention/32)`, paramètres lus
+  sur le nœud.
+
 > **Lancement des nœuds** : `start.sh` passe par `setsid`, de sorte qu'un nœud survit à la mort
 > du shell qui l'a lancé. Ne pas contourner `start.sh` en lançant le binaire à la main.
 >
 > **Lancement du monitor** : `setsid nohup … & disown`. Sans `nohup` il meurt avec le shell
 > appelant dans un environnement d'orchestration — deux campagnes l'ont constaté.
+
+### Les batteries de la campagne 8
+
+Deux batteries de plus, sur le même moule (un TSV par batterie, un verdict par cas), plus un
+terrain nouveau : une **paire de nœuds isolés** que la campagne pilote au bloc près.
+
+```bash
+scripts/local-testnet/suite-pow.sh        # S26 retarget, bornes temporelles, timewarp (POW-*, TIME-*, RETARGET-*)
+scripts/local-testnet/suite-bootstrap.sh  # S27 snap-sync et élagage (BOOT-*)
+```
+
+- **`Anvil.java`** — forgeur de **blocs**, ce que `Forge.java` est aux transactions. Il ne
+  fabrique **pas** un bloc de zéro : un bloc valide engage une racine d'état que rien hors du nœud
+  ne sait calculer (mesuré : un bloc forgé de toutes pièces est refusé en `INVALID_STATE_ROOT`).
+  Il **prend** un bloc réel produit par un nœud source, le re-parente sur le tip de la victime,
+  mute exactement le champ visé, puis **ré-mine le nonce**. Sans ce ré-minage toute mutation d'un
+  champ engagé dans le hash serait rejetée au dernier contrôle (`INVALID_NONCE`) et le scénario
+  « passerait » sans rien prouver — c'est la leçon de `BlockForge` (testFixtures), transposée en
+  HTTP. L'horodatage n'entrant pas dans l'état (le crédit de coinbase ne dépend que de la hauteur
+  et de la supply parente), muter le temps préserve la racine d'état du bloc source : le nœud juge
+  alors la règle temporelle, et rien d'autre. Le rejeu **sans** mutation est le témoin de la
+  batterie.
+- **`diffscan.py`** — le juge du retarget : une **réimplémentation indépendante** de
+  `DifficultyAdjustment.nextDifficulty` et de `Retarget.stepWindow` (médiane de 3 comprise),
+  confrontée bloc à bloc à ce que la chaîne a réellement accepté. Une divergence est un désaccord
+  de consensus, pas une mesure approximative. Il calcule **les deux** prédictions — borne de
+  fenêtre médiane et borne brute — et dit laquelle la chaîne a suivie : c'est ainsi que la défense
+  timewarp se mesure au lieu de se supposer.
+
+La **paire source/victime** (ports 4406/4407, deux nœuds devnet sans pairs, hors du réseau de
+campagne) existe parce que le réseau ne se laisse pas piloter : sur une chaîne minée, les
+horodatages sortent d'horloges réelles et personne ne choisit la frontière de fenêtre. La source
+mine seule (cadence 3 s, donc difficulté au plancher, donc ré-minage bon marché) et ne sert que de
+fournisseur de corps valides ; la victime n'a **pas** de mineur et n'avance que par `/submit`. La
+campagne lui impose donc le calendrier à la milliseconde et visite tout le domaine du retarget —
+plafond, plancher, pas maximal — en quelques minutes. Une conséquence à connaître : la source ne
+produit **aucun oncle** (elle est seule), et c'est ce qui rend le re-parentage licite, la supply
+d'en-tête ne dépendant de la difficulté que par les termes oncle/neveu.
 
 ### Les simulateurs
 
@@ -192,15 +282,17 @@ transactions valides, jamais un flot de doublons invalides qui ferait pénaliser
 ## Critères de réussite généraux
 
 - Tous les nœuds : `degraded == null`, `reorgInProgress == false` en régime stable.
-- Les 30 nœuds atteignent la même hauteur **et le même `tipHash`** ; les écarts > 2 blocs
+- Tous les nœuds atteignent la même hauteur **et le même `tipHash`** ; les écarts > 2 blocs
   pendant > 30 s sont des anomalies.
 - **`status.sh` affiche `tips distincts: 1`** hors fenêtre de partition. À hauteur, difficulté
   et travail égaux, deux camps sur des branches différentes sont indiscernables par tout le
   reste de `/stats`.
 - `syncEclipsed == false` et `syncRoundsWithoutProgress == 0` en régime sain (un nœud nourri
   par gossip ne fait légitimement rien en sync).
-- **Chaque nœud a exactement 18 pairs** (cap anti-éclipse, voir plus haut), sans doublon ni
-  auto-référence.
+- **Chaque nœud atteint le maillage que le cap anti-éclipse autorise**, sans doublon ni
+  auto-référence : `min(N − 1, 16 découverts + 2 seeds)` — donc 18 pairs à 30 nœuds (le cap
+  mord), et 11 pairs à 12 nœuds (maillage complet, le cap ne mord pas). Le critère est le cap,
+  pas la constante 18.
 - Un bloc miné arrive chez tous les pairs en < 10 s (gossip push).
 - L'état des contrats est **identique sur tous les nœuds d'un même tip**.
 
@@ -350,6 +442,145 @@ Notation : hauteur du nœud `i` = `h_i` (via `curl -s http://127.0.0.1:$((BASE+i
    `RHIZOME_PEER_TOKEN` sur ses pairs pour que les push `/submit`/`/add_transaction` continuent
    d'être acceptés — non vérifié en direct ici, dérivé du code (`NodeApi`/README).
 
+### S20 — Batterie « transactions » *(INFL, SIG, REPLAY, POOL, CODEC, API — `suite-tx.sh`)*
+1. `suite-tx.sh <nœud victime>` : chemins nominaux d'abord (transfert lu depuis un nœud
+   **distant**, comptabilité des frais, rafale de nonces contigus), puis les exploits — montant
+   négatif, `Long.MAX`, dépassement de solde, débordement montant+frais, `chainId` étranger,
+   montant/destinataire/nonce altérés **sous signature**, expéditeur et clé de signature
+   échangés, rejeu d'une transaction déjà minée, double dépense au même nonce, corps malformés
+   et surdimensionnés, POST cross-site et forme DNS-rebinding.
+2. **Passe si** : chaque refus porte le **statut exact** attendu (`INVALID_TRANSACTION_AMOUNT`,
+   `BALANCE_TOO_LOW`, `INVALID_CHAIN_ID`, `INVALID_SIGNATURE`, `WALLET_SIGNATURE_MISMATCH`,
+   `INVALID_TRANSACTION_NONCE`) et non un « refusé » générique ; le nonce futur est admis mais
+   **ne déplace ni solde ni nonce** tant que le trou n'est pas comblé ; et le refus est
+   **gratuit** — le nœud victime continue de produire, une transaction valide de la même source
+   passe encore, `degraded` reste `null`.
+
+### S21 — Batterie « portefeuilles » *(WALLET-01..06 — `suite-wallet.sh`)*
+1. `suite-wallet.sh` : clé **chiffrée** (passphrase-file), permissions du fichier, refus d'écrire
+   une clé en clair sans opt-in, refus d'écraser une clé existante, mauvaise passphrase,
+   enveloppe falsifiée d'un octet, marqueur d'enveloppe usurpé sur un fichier en clair,
+   épinglage `chainId` **trust-on-first-use**, bornes client (montant sous l'unité de base,
+   `gasPrice` hors bornes, somme de contrôle d'adresse), URL de nœud portant des métacaractères
+   JSON, puis le parcours complet du CLI : `box-create/update/spend/show/list` et
+   `token-mint/transfer/burn/show/balance/list`, chaque effet relu depuis un nœud distant.
+2. **Prérequis** : un nœud d'une **autre chaîne** joignable (le script attend `base+90` ;
+   `RHIZOME_NETWORK=testnet` suffit, `chainId` 2 contre 3 en devnet) — sans lui l'épinglage TOFU
+   n'est pas testable, et le cas échoue plutôt que d'être silencieusement sauté.
+3. **Passe si** : le fichier chiffré ne contient aucune clé privée en clair et est en `600` ;
+   la mauvaise passphrase et l'enveloppe falsifiée sont refusées ; un envoi vers le nœud de
+   l'autre chaîne **abandonne avant de signer** (message nommant les deux `chainId`) alors qu'une
+   lecture seule (`balance`) y reste permise ; et tous les effets box/token convergent vers le
+   nœud distant.
+
+### S22 — Batterie « contrats » *(VM-01..21, VM-16 — `suite-contract.sh`)*
+1. `suite-contract.sh` : déploiement et exécution **réels** des templates du dashboard (counter,
+   token, amm, emitter, agent_wallet, pair, router, launchpad, logtree), déterminisme du
+   `call_readonly` sur **tous** les nœuds, puis dépôt des modules adverses de `wasmgen.py`.
+2. **Passe si** : chaque template s'installe et répond ; la même lecture rend le même octet sur
+   les N nœuds ; **aucun module adverse n'est installé**, ni sur le nœud victime ni sur un nœud
+   distant ; un `gasLimit` au-dessus de `maxTxGas` est refusé **à l'admission**
+   (`GAS_LIMIT_EXCEEDED`) ; un appel vers un contrat inexistant est **débité** malgré tout.
+3. **À savoir avant de lire les verdicts** : un DEPLOY portant un module invalide est **admis au
+   mempool** — c'est une transaction bien formée et payée. Le refus tombe à l'**exécution**, et
+   se lit à l'état d'après-minage (`/contract` → `exists:false`), jamais au statut d'admission.
+   Même forme pour un `TOKEN_TRANSFER` d'un non-détenteur : admis, puis annulé en douceur, nonce
+   consommé, rien déplacé. **L'admission n'est pas une autorisation.**
+
+### S23 — Batterie « chaîne » : oncles, GHOST, supply *(UNCLE, SUPPLY, POW — `suite-chain.sh`)*
+1. `suite-chain.sh` : `chainscan.py` lit chaque bloc d'une fenêtre et vérifie le chaînage
+   `lastBlockHash`, la présence d'oncles, l'identité de récompense
+   `supply(h) − supply(h−1) == subvention + n × (subvention/2 + subvention/32)`, la difficulté,
+   puis l'explorateur (même bloc servi par deux nœuds, transaction retrouvée par `txid`,
+   historique d'adresse).
+2. **Passe si** : zéro rupture de chaînage ; **au moins un oncle** dans la fenêtre (sinon la
+   fenêtre ne prouve rien du GHOST) ; **zéro** bloc dont le delta de supply contredit
+   l'identité ; les mineurs d'oncle appartiennent au jeu configuré.
+3. Ce scénario existe parce que la campagne 6 a constaté que le plan *affirmait* la production
+   d'oncles sans qu'aucune campagne ne l'ait jamais mesurée.
+
+### S24 — Batterie « transport et surface HTTP » *(NET-01/03/04/06/10, API-07/09/12 — `suite-net.sh`)*
+1. `suite-net.sh` : lance un nœud **strict** (`base+91`, sans `RHIZOME_ALLOW_PRIVATE_PEERS`, donc
+   filtre SSRF actif — les nœuds du testnet l'ont désactivé pour se voir en 127.x) et un **pair
+   hostile** réel (`hostile_peer.py`), puis : cibles internes et métadonnées cloud en `/add_peer`,
+   schémas dégénérés, quatre orthographes du même pair, pair servant 50 Mo, 40 blocs poubelle sur
+   `/submit`, index hors bornes sur dix routes de lecture, 400 lectures en rafale, puis 400 avec
+   un `X-Forwarded-For` tournant.
+2. **Passe si** : toute cible interne et toute URL dégénérée est refusée par le nœud strict ;
+   quatre orthographes ne font qu'un pair ; le nœud survit au pair hostile et continue de
+   produire ; les blocs poubelle sont tous refusés **et** une transaction honnête de la même
+   source passe encore ; le limiteur mord (429) **et** un `X-Forwarded-For` tournant ne l'esquive
+   pas.
+
+### S25 — Batterie « persistance » : arrêt propre puis SIGKILL *(PERS, A6 — `suite-persist.sh`)*
+1. `suite-persist.sh <nœud>` : empreinte d'état (tip, racine SMT, sortie du contrat témoin,
+   solde, nonce), arrêt **propre** (SIGTERM) → redémarrage → comparaison ; puis **SIGKILL** en
+   pleine production → redémarrage → comparaison.
+2. **Passe si** : à chaque cycle la base se rouvre sans nouvelle trace de corruption, la chaîne
+   n'est **pas tronquée**, le nœud rejoint le tip du témoin et son empreinte est **identique**
+   (racine d'état et état de contrat compris), `degraded == null` — et le reste du réseau a
+   continué à produire pendant la fenêtre de mort.
+3. Complément de S19 (campagne 6), qui prouvait le SIGKILL pour le seul **grand livre** : ici
+   l'état de **contrat** et la **racine SMT** sont dans l'empreinte comparée.
+
+### S26 — Batterie « PoW et temps » : retarget, timewarp, bornes *(POW, TIME, RETARGET — `suite-pow.sh`)*
+
+1. `suite-pow.sh <nœud victime>` — quatre volets. (a) `diffscan.py` rejoue tout l'historique du
+   réseau de campagne : difficulté de chaque bloc, changements seulement en frontière + 1, pas
+   borné à `MAX_STEP_BITS = 4`, bornes `[minDifficulty, maxDifficulty]`, continuité des liens,
+   convergence des dernières fenêtres dans la bande morte. (b) Sur la paire isolée, les portes :
+   bloc sans travail (`INVALID_NONCE`), difficulté déclarée trop faible **et** trop forte
+   (`INVALID_DIFFICULTY`), horodatage au-delà de la fenêtre future (`BLOCK_TIMESTAMP_IN_FUTURE`)
+   puis **dedans** (accepté — une borne est une borne, pas un interdit), horodatage à la médiane
+   du passé (`BLOCK_TIMESTAMP_TOO_OLD`), horodatage antérieur au parent
+   (`BLOCK_TIMESTAMP_TOO_CLOSE`), chaque fois encadré d'un rejeu honnête témoin. (c) **Timewarp** :
+   une frontière de fenêtre, et une seule, est gonflée du maximum légal ; on mesure quelle règle
+   la chaîne a suivie. (d) **Balayage** : calendrier serré jusqu'au sommet, puis calendrier très
+   lâche jusqu'au plancher, avec un redémarrage au sommet pour vérifier que la difficulté est
+   **reconstruite** depuis les horodatages et non mise en cache.
+2. **Passe si** : zéro divergence entre la chaîne et la réimplémentation indépendante, zéro pas
+   hors borne, zéro changement hors frontière ; chaque rejet porte le **statut exact** attendu et
+   le témoin qui l'encadre est accepté ; la frontière gonflée **sépare** les deux règles et la
+   chaîne suit la médiane ; le balayage revient au plancher et s'y arrête ; après redémarrage la
+   difficulté et le tip sont inchangés.
+3. Ce que la batterie ne teste **pas** : une vraie dérive d'**horloge machine**. Sans `faketime`
+   (absent de la machine) on ne décale pas l'horloge d'un nœud ; seule la **règle d'en-tête** est
+   mesurée, des deux côtés de la borne. Un nœud dont l'horloge dérive au-delà de la fenêtre voit
+   ses blocs refusés par ses pairs — c'est ce que TIME-01a prouve — mais la conséquence
+   systémique (le nœud décroche du réseau) reste extrapolée.
+
+### S27 — Batterie « bootstrap » : snap-sync et élagage *(BOOT — `suite-bootstrap.sh`)*
+
+1. `suite-bootstrap.sh <nœud victime>` — un nœud neuf rejoint par `RHIZOME_SYNC=snap` depuis un
+   fournisseur qui matérialise ses instantanés (`RHIZOME_SNAPSHOT_EVERY`), puis un nœud élagué
+   (`RHIZOME_PRUNE`) rejoint le réseau de campagne, et une rétention sous le plancher de sûreté
+   est refusée au démarrage.
+2. **Passe si** : le pivot annoncé est **enterré** sous `maxReorgDepth` ; le nœud snap annonce
+   `prunedBelow = pivot + 1` ; la racine d'état du premier bloc **au-dessus** du pivot est
+   identique chez les deux (un état adopté faux aurait échoué en `INVALID_STATE_ROOT`) ; le
+   suffixe est rattrapé et le nœud suit ensuite le tip **et** la racine du fournisseur ; sous le
+   filigrane `/sync` répond **410 GONE** en portant le filigrane et la vue JSON refuse de même ;
+   au-dessus, les corps sont servis normalement ; `RHIZOME_PRUNE` sous le plancher **refuse au
+   démarrage** en nommant le plancher, et rien n'écoute ensuite ; un nœud d'archive, lui, sert
+   toujours le bloc 1 et n'annonce aucun filigrane.
+3. Deux pièges d'opérateur mesurés, pas déduits : l'instantané **ne survit pas au redémarrage**
+   (le fournisseur repart à `snapshotPivot = 0` et doit re-matérialiser), et le pivot n'est
+   adoptable que s'il est enterré sous `maxReorgDepth` — donc un `RHIZOME_SNAPSHOT_EVERY`
+   inférieur ou égal à `maxReorgDepth` n'offre **jamais** d'instantané utilisable, le pivot suivant
+   le tip de trop près.
+
+### S28 — Le profil `testnet` lui-même, sous cadence mal calibrée *(observation, pas batterie)*
+
+1. Trois nœuds `RHIZOME_NETWORK=testnet` (ports 4420-4422, 2 mineurs), producteurs cadencés à 2 s
+   alors que le profil vise **90 s** : c'est l'erreur de calibrage qu'un opérateur commet
+   naturellement en réutilisant les réglages d'un devnet. Le javadoc de `NetworkParameters.devnet()`
+   la décrit ; la campagne la **mesure**.
+2. **À retenir** : ce profil hérite de `maxDifficulty = 255` (mainnet), il n'a donc **pas** le
+   garde-fou à 24 du devnet ; sa fenêtre de retarget est de 100 blocs et sa fenêtre future de
+   120 s. Un testnet public doit être cadencé sur `desiredBlockTimeSec`, sinon la difficulté monte
+   de 4 bits par fenêtre jusqu'à ce que la cadence rejoigne la cible — ce qui est le comportement
+   **correct**, mais transforme un réseau de test en réseau lent pendant plusieurs fenêtres.
+
 ## Supervision & alertes
 
 `monitor.sh` (boucle 2 s) écrit `monitor.csv` : horodatage, nœud, hauteur, **tipHash**,
@@ -369,6 +600,562 @@ scripts/local-testnet/sim-tx.sh stop && scripts/local-testnet/sim-contract.sh st
 scripts/local-testnet/stop.sh
 rm -rf .testnet          # données RocksDB + logs + CSV + pids
 ```
+
+## Journal de résultats — campagne 8 (exécutée 2026-09-04)
+
+**Conditions.** Même HEAD que la campagne 7 (009-native-coin-burn), même machine (16 cœurs, 32 Go),
+binaire natif. Quatre terrains simultanés, délibérément séparés :
+
+| terrain | ports | profil | rôle |
+|---|---|---|---|
+| réseau de campagne | 4400-4405 | devnet, 6 nœuds / 4 mineurs | dynamique du retarget en hashrate réel, puis rejeu des six batteries de la campagne 7 |
+| paire isolée | 4406/4407 | devnet, source minant seule + victime sans mineur | contrôle exact des horodatages (S26), fournisseur d'instantanés (S27) |
+| nœuds d'appoint | 4411/4412/4413 | devnet | snap-syncé, élagué, et refusé au démarrage (S27) |
+| trio profil-testnet | 4420-4422 | **testnet**, 2 mineurs | l'erreur de calibrage d'un opérateur, mesurée (S28) |
+
+**Résultats.**
+
+| batterie | cas | verdict |
+|---|---|---|
+| `suite-pow.sh` (S26, **nouvelle**) | 29 | **29 PASS, 0 FAIL** |
+| `suite-bootstrap.sh` (S27, **nouvelle**) | 20 | **20 PASS, 0 FAIL** |
+| rejeu campagne 7 à difficulté 22-24 | 190 | **190 PASS, 0 FAIL** (tx 48, wallet 35, contract 43, chain 11, net 38, persist 15) |
+| **total** | **239** | **239 PASS, 0 FAIL** |
+
+Le rejeu compte autant que les nouveautés : les 190 cas de la campagne 7 n'avaient jamais tourné
+ailleurs qu'à la difficulté plancher 6. Ils sont rejoués ici sur une chaîne dont la difficulté vaut
+22 à 24, c'est-à-dire de 65 000 à 260 000 fois plus de travail par bloc — le PoW cesse d'être instantané,
+les blocs se disputent réellement, et rien ne bouge dans les verdicts.
+
+### Le retarget, mesuré sur 920 blocs et 46 fenêtres
+
+`diffscan.py` rejoue le repli des fenêtres à côté du nœud et compare bloc à bloc (verdict complet
+conservé dans `.testnet/results/diffscan-devnet-campagne.json`). Sur le réseau de campagne, trois
+régimes se succèdent sans qu'on touche à autre chose que le hashrate et la cadence
+du producteur :
+
+```
+montée    (4 mineurs, 2 s)   6 → 7 → 9 → 11 → 14 → 16 → 18 → 20 → 22 → 23 → 24   (plafond du profil)
+descente  (1 mineur, 20 s)   24 → 23 → 21 → 19 → 17 → 15 → 14
+remontée  (4 mineurs, 2 s)   14 → 16 → 18 → 20 → 22 → 23
+régulation (à l'équilibre)   23 ⇄ 24, la difficulté oscillant d'un bit autour de la cadence cible
+```
+
+Quinze niveaux de difficulté distincts visités, vingt-trois paliers, et **zéro divergence** : aucun bloc dont la
+difficulté ne soit celle qu'impose le repli indépendant, aucun changement hors frontière, aucun pas
+au-delà des 4 bits de `MAX_STEP_BITS`, aucune sortie de `[6, 24]`, aucune rupture de lien. La
+convergence est nette : sur les cinq dernières fenêtres de la phase de montée, la durée observée
+tient dans la bande morte (77 à 111 s pour une cible de 95 s), c'est-à-dire que la chaîne s'est
+elle-même ramenée de 1,2 s/bloc à ~5 s/bloc, la cible du profil. Le plafond `maxDifficulty = 24`
+a tenu : la difficulté s'y est arrêtée au lieu de continuer à monter sous une cadence encore trop
+rapide.
+
+**Ce que la descente prouve en propre.** C'est le sens qui compte pour un réseau public : un
+testnet perd du hashrate bien plus souvent qu'il n'en gagne, et une difficulté qui ne redescend pas
+fige la chaîne. Trois mineurs sur quatre coupés, la fenêtre suivante a mesuré 253 s pour une cible
+de 95 s et la difficulté est retombée — puis a continué de retomber, palier par palier, jusqu'à ce
+que la cadence rejoigne la cible. Le plancher, lui, n'est pas atteignable en réseau (il faudrait
+supprimer presque tout le hashrate pendant des heures) : il est mesuré sur la victime isolée, où le
+calendrier imposé fait descendre la difficulté 18 → 15 → 11 → 7 → **6, où elle s'arrête**.
+
+**Redémarrage.** Au sommet de la montée du balayage (difficulté 18, valeur non triviale), la victime
+est redémarrée : elle revient avec la **même** difficulté et le **même** tip. La difficulté est donc
+bien reconstruite depuis les horodatages stockés, jamais lue dans un cache — le défaut Pandanite qui
+avait forcé une exception codée en dur sur les blocs 536100-536200.
+
+### Timewarp : la médiane de 3, prise sur le fait
+
+Une frontière de fenêtre, et une seule, gonflée du maximum légal (+600 s, dans la fenêtre future
+donc **acceptée** par le nœud). Les deux règles divergent alors franchement :
+
+| borne de fenêtre | difficulté imposée en h=21 |
+|---|---|
+| médiane de 3 (règle du protocole) | **8** |
+| horodatage brut (règle naïve) | 6 |
+
+La chaîne a suivi la médiane. C'est la première mesure *positive* de cette défense : jusqu'ici on
+constatait qu'aucune manipulation n'était présente, ce qui ne prouve rien ; ici la manipulation est
+présente, elle est légale, et elle est sans effet. À noter le corollaire qui rend l'attaque coûteuse
+et que la batterie mesure aussi : après avoir gonflé un horodatage, le bloc suivant doit être **au
+moins aussi tardif** (`BLOCK_TIMESTAMP_TOO_CLOSE` sinon) — on ne revient pas en arrière.
+
+### Les portes temporelles, des deux côtés de la borne
+
+| cas | soumission | verdict du nœud |
+|---|---|---|
+| TIME-01a | horodatage à maintenant + 130 s | `BLOCK_TIMESTAMP_IN_FUTURE` |
+| TIME-01b | horodatage à maintenant + 110 s | **`SUCCESS`** — une borne est une borne, pas un interdit |
+| TIME-02 | horodatage à la médiane du passé | `BLOCK_TIMESTAMP_TOO_OLD` |
+| TIME-04 | horodatage antérieur au parent | `BLOCK_TIMESTAMP_TOO_CLOSE` |
+| POW-01 | travail non payé | `INVALID_NONCE` |
+| POW-02a/b | difficulté déclarée trop faible / trop forte | `INVALID_DIFFICULTY` |
+
+Chaque rejet est encadré d'un rejeu honnête accepté (`SUCCESS`) : sans ce témoin, un rejet ne
+prouve rien — il pourrait venir d'un corps mal formé refusé bien avant la règle visée.
+
+### Bootstrap : deux pièges d'opérateur, mesurés
+
+Le snap-sync fonctionne de bout en bout : pivot 593 enterré de 172 blocs, filigrane annoncé à
+`pivot + 1`, racine d'état du premier bloc au-dessus du pivot **identique** chez le fournisseur et
+chez le nouveau venu, suffixe rattrapé, puis même tip et même racine que le fournisseur. Sous le
+filigrane, `/sync` répond **410 GONE** en portant le filigrane et la vue JSON refuse de même
+(`{"error":"pruned","prunedBelow":594}`) ; au-dessus, les corps sont servis normalement. L'élagage
+fonctionne pareillement : `RHIZOME_PRUNE=248` synchronise puis jette, `RHIZOME_PRUNE=100` **refuse
+au démarrage** en nommant le plancher (`below the safe floor of 248 blocks`) et rien n'écoute
+ensuite. Un nœud d'archive, lui, sert toujours le bloc 1.
+
+Deux pièges apparaissent, qu'aucun test unitaire ne pouvait montrer :
+
+1. **L'instantané ne survit pas au redémarrage du fournisseur.** Après relance, `snapshotPivot`
+   repart à 0 et `/state/snapshot/info` répond `no snapshot materialized` jusqu'à la prochaine
+   matérialisation. Un réseau dont tous les fournisseurs redémarrent en même temps n'offre plus de
+   snap-sync tant qu'aucun n'a re-matérialisé.
+2. **`RHIZOME_SNAPSHOT_EVERY` doit dépasser `maxReorgDepth`.** La matérialisation capture le tip
+   *courant*, et un pivot n'est adoptable que s'il est enterré sous `maxReorgDepth`. Avec un
+   intervalle inférieur ou égal à cette profondeur, le pivot suit le tip de trop près et le nœud
+   n'offre **jamais** d'instantané utilisable — silencieusement. Le défaut (~1 jour de blocs) est
+   très au-dessus de la profondeur mainnet : le piège n'existe que pour l'opérateur qui « règle »
+   cette variable à la baisse.
+
+### S28 — le profil `testnet` sous cadence mal calibrée
+
+Trois nœuds `RHIZOME_NETWORK=testnet`, producteurs à 2 s pour une cible de 90 s. Le javadoc de
+`devnet()` annonçait +4 bits par fenêtre ; c'est exactement ce qui se produit, cinq fenêtres de
+suite, et `diffscan.py` (constantes du profil : fenêtre 100, cible 90 s, plafond 255) est d'accord
+avec la chaîne sur les 508 blocs (`.testnet/results/diffscan-testnet-profile.json`) :
+
+| fenêtre | observé | cible | s/bloc | difficulté |
+|---|---|---|---|---|
+| 100 | 194 s | 8 820 s | 1,98 | 6 → 10 |
+| 200 | 198 s | 8 910 s | 2,00 | 10 → 14 |
+| 300 | 198 s | 8 910 s | 2,00 | 14 → 18 |
+| 400 | 191 s | 8 910 s | 1,93 | 18 → 22 |
+| 500 | 431 s | 8 910 s | 4,35 | 22 → **26** |
+
+Trois enseignements. (a) Le comportement est **correct** — la difficulté fait exactement ce qu'on
+lui demande — mais un opérateur qui recopie les réglages d'un devnet transforme son testnet en
+réseau lent pendant plusieurs fenêtres. (b) Ce profil hérite de `maxDifficulty = 255` (mainnet) : il
+n'a **pas** le garde-fou à 24 du devnet, donc rien n'arrête la montée avant que la cadence rejoigne
+90 s. (c) La montée **résout le fork** : à difficulté 6-14 le trio vivait en égalité permanente à
+deux tips (mêmes hauteur et travail total, tip alterné à chaque bloc) et 12 blocs sur 58 portaient
+un oncle ; à partir de la difficulté 22 les trois nœuds tiennent un tip unique. Le retarget est donc
+aussi le mécanisme qui éteint la tempête de forks — et GHOST, entre-temps, créditait le travail
+orphelin.
+
+### Constats d'outillage (à ne pas rejouer)
+
+- **Un bloc forgé de toutes pièces est irrecevable.** Première tentative : construire un bloc
+  complet (coinbase exact, merkle, supply plafond moins brûlage, nonce miné) et le poster. Réponse :
+  `INVALID_STATE_ROOT` — la racine d'état engagée dans l'en-tête n'est calculable que par un nœud qui
+  détient l'accumulateur. D'où le principe de `Anvil.java` : **prendre** un bloc réel, le re-parenter
+  sur le tip de la victime, muter le seul champ visé, ré-miner. Licite parce que la source mine
+  seule (aucun oncle) : la supply d'en-tête ne dépend de la difficulté que par les termes
+  oncle/neveu.
+- **Toute mutation acceptée fait diverger la victime de la source**, d'où le re-parentage
+  systématique — sans lui, tous les cas suivants tombaient en `INVALID_LASTBLOCK_HASH` et ne
+  prouvaient rien. Même leçon que la campagne 7 sur `set -e` : un rejet à la mauvaise porte est un
+  faux positif.
+- **`/info.snapshotPivot` décrit ce que le nœud SERT, pas ce dont il est parti.** Un nœud
+  snap-syncé sans `RHIZOME_SNAPSHOT_EVERY` affiche 0 alors qu'il a bel et bien adopté un pivot ; la
+  preuve d'adoption est le filigrane (`prunedBelow = pivot + 1`). Trois assertions de la première
+  version de S27 étaient mal posées pour cette raison (et une quatrième comparait deux tips d'une
+  cible mouvante) ; corrigées, elles passent.
+- **La casse des empreintes hexadécimales n'est pas uniforme entre routes** : `/stats.stateRoot` est
+  en minuscules, `/block.stateRoot` et `/state/snapshot/info.stateRoot` en majuscules. Même piège
+  que la campagne 7 sur les identifiants de token : normaliser des deux côtés avant de comparer.
+- **`avgBlockIntervalMs` est ininterprétable sur une chaîne neuve** : l'horodatage de la genèse
+  valant 0, l'indicateur vaut ~85 000 000 000 ms tant que la genèse est dans la fenêtre. Il redevient
+  juste ensuite. À savoir quand on regarde le tableau de bord d'un réseau qui vient de démarrer.
+- **Ne pas éditer un script pendant qu'il tourne** : bash relit le fichier par offset, et le
+  récapitulatif final de `run-campaign.sh` est mort sur une erreur de syntaxe fantôme alors que le
+  fichier était valide. Les TSV, eux, étaient intacts.
+- Le tableau d'environnement du README liste **14** variables ; le nœud en lit **20**.
+  `RHIZOME_PRUNE`, `RHIZOME_SYNC`, `RHIZOME_SNAPSHOT_EVERY`, `RHIZOME_VOTE`,
+  `RHIZOME_ALLOW_PRIVATE_PEERS` et `RHIZOME_ALLOW_OPEN_API` ne sont documentées que dans les
+  `docs/*/spec.md` servis par le nœud. Ce sont précisément les leviers de bootstrap et de rétention
+  qu'un opérateur tiers cherche en premier.
+
+### Couverture non atteinte (mise à jour)
+
+Ce que la campagne 8 **ne** ferme **pas**, et qu'il faut donc encore considérer comme non éprouvé :
+
+- **La dérive d'horloge machine.** `faketime` est absent et on n'installe rien : seule la règle
+  d'en-tête est mesurée, des deux côtés de la borne. Un nœud dont l'horloge dérive au-delà de la
+  fenêtre verra ses blocs refusés (TIME-01a le prouve), mais la conséquence systémique — le nœud
+  décroche, puis raccroche après resynchronisation NTP — reste extrapolée. Sur mainnet la fenêtre
+  est de **15 s**, pas 120 : c'est là que le sujet devient sérieux.
+- **TLS et `RHIZOME_PEER_TOKEN`.** Le jeton pair n'est émis qu'en `https://` ; tout ce terrain est
+  en clair sur loopback. Un déploiement public à ingestion gatée reste non monté de bout en bout.
+- **La durée.** ~900 blocs en 1 h 15 ne disent rien de la croissance RocksDB sur des jours,
+  de la décroissance des scores de ban sur des horizons longs, ni de `REORG_TOO_DEEP` (profondeur
+  120) et des checkpoints, toujours jamais atteints.
+- **Le PoW de mainnet.** Tout ceci tourne en SHA256. `PUFFERFISH2`, son coût mémoire et son
+  plancher de difficulté 16 restent prouvés en JUnit seulement.
+- **BURN et DECAY** restent structurellement inatteignables (supply très loin de `S*`), comme en
+  campagne 6-7.
+
+## Journal de résultats — campagne 7
+
+Campagne exécutée le 2026-09-03 (base 4400), **12 nœuds natifs devnet, 4 mineurs** (0, 3, 6, 9),
+`-Xmx128m` par nœud, `RHIZOME_TESTNET_BLOCK_MS=15000` (~4 s/bloc agrégés), sur le même HEAD
+009-native-coin-burn que la campagne 6 — binaires natifs inchangés et plus récents que toute
+source Java, donc aucun rebuild. `.testnet` purgé avant lancement.
+
+Axe : non plus l'échelle du réseau mais **l'étendue des scénarios** — transactions, portefeuilles,
+contrats. Les six batteries S20-S25 remplacent la batterie *ad hoc* de la campagne 6 par de
+l'outillage rejouable (`run-campaign.sh`).
+
+### Pourquoi 12 nœuds et non 30
+
+Ce que 30 nœuds achètent — partition en deux camps égaux, saturation du cap `MAX_PER_SUBNET` — est
+déjà pinné par S3/S7/S15 et n'est pas l'objet ici. À 12 nœuds le maillage est **complet** (11 pairs
+par nœud, sous le cap de 16), ce qui rend le critère de convergence plus net, et la RAM libérée
+sert aux JVM du wallet CLI que les batteries lancent par centaines. La cadence à 15 s par mineur
+est assez lente pour tenir un tip unique en continu, assez rapide pour qu'un scénario qui attend
+une confirmation ne coûte pas une minute.
+
+### Résultats
+
+| Batterie | Périmètre | Résultat |
+|---|---|---|
+| pré-vol | convergence, maillage | **PASS** — 12/12 nœuds, écart de hauteur 0, **tip unique**, 11 pairs par nœud, `degraded` null partout |
+| S20 transactions | INFL, SIG, REPLAY, POOL, CODEC, API — nominal + exploits | **PASS** — 48/48 cas |
+| S21 portefeuilles | WALLET-01..06, clé chiffrée, TOFU, boîtes, tokens | **PASS** — 35/35 cas |
+| S22 contrats | 9 templates déployés/appelés + 10 modules adverses | **PASS** — 43/43 cas |
+| S23 chaîne | chaînage, oncles/GHOST, supply, explorateur | **PASS** — 11/11 cas |
+| S24 transport | SSRF, pair hostile, blocs poubelle, limiteur, XFF | **PASS** — 38/38 cas |
+| S25 persistance | SIGTERM puis SIGKILL, empreinte d'état | **PASS** — 15/15 cas |
+| | | **190 PASS, 0 FAIL** |
+
+Les verdicts détaillés (un par cas) sont dans `.testnet/results/*.tsv`. Trois cas ont dû être
+**récrits** avant d'être verts, et dans les trois cas c'est l'assertion qui était fausse, pas le
+nœud — voir « Constats d'outillage » : ils sont la vraie matière de cette campagne.
+
+### Le constat central : l'admission n'est pas une autorisation
+
+Quatre formes du même piège de lecture, toutes mesurées cette campagne :
+
+1. **Nonce futur** (POOL-03, déjà connu) — admis (`SUCCESS`), garé, jamais minable tant que le trou
+   n'est pas comblé. Vérifié : ni le solde ni le nonce ne bougent sur 3 blocs, et la garée sort dès
+   la séquence complétée.
+2. **DEPLOY d'un module WASM invalide** (nouveau) — admis (`SUCCESS`) : c'est une transaction bien
+   formée et payée. Le module est refusé à l'**exécution** ; `/contract` répond `exists:false` sur
+   le nœud victime **et** sur un nœud distant. Le gaz, lui, est bien débité.
+3. **TOKEN_TRANSFER par un non-détenteur** (nouveau) — admis (`SUCCESS`), puis annulé en douceur :
+   nonce consommé, **zéro token déplacé** (le destinataire reste à 250, l'attaquant à 0).
+4. **`POST /add_peer`** (nouveau) — répond **toujours** `200 {"status":"OK"}` : c'est une annonce,
+   pas une admission. Le filtre SSRF tourne dans `node.addPeer(url)` et laisse tomber la cible en
+   silence. La preuve d'un refus est le **registre** (`/peers`), jamais le code HTTP.
+
+Conséquence méthodologique, inscrite dans S22 et S24 : un scénario qui n'observe que le statut
+d'admission ne prouve rien. La preuve est l'effet sur le grand livre — ou sur le registre — après
+coup.
+
+### GHOST mesuré pour la première fois
+
+La campagne 6 avait écrit que le plan *affirmait* la production d'oncles « mais aucune campagne n'a
+jamais inspecté un `/block` pour le confirmer ni vérifié la comptabilité des récompenses en
+direct ». `chainscan.py` le fait : sur **728 blocs**, **146 oncles répartis sur 107 blocs**, **zéro**
+rupture de chaînage, et l'identité
+
+    supply(h) − supply(h−1) == subvention + n × (subvention/2 + subvention/32)
+
+vérifiée **sur chaque bloc, sans une seule exception**. Avec la subvention devnet de 131 697 unités,
+un oncle vaut exactement 69 963 unités = 65 848 (récompense d'oncle, `uncleRewardNum/Den` = 1/2)
++ 4 115 (prime de neveu, `nephewRewardDivisor` = 32). Les mineurs d'oncle relevés sont les quatre
+mineurs configurés, aucun tiers. Détail notable : ces récompenses ne passent par **aucune
+transaction coinbase** — le coinbase vaut 131 697 avec ou sans oncle ; elles n'apparaissent que dans
+la supply engagée dans l'en-tête, ce qui est exactement ce qui rend leur réversion structurelle.
+
+### Ce que les batteries ferment (manques listés par la campagne 6)
+
+- **Dépôt d'un `.wasm` malveillant sur un nœud vivant.** Les dix modules de `wasmgen.py` sont postés
+  en direct ; aucun n'est installé, sur aucun nœud. Les deux contrôles (module minimal valide, type
+  à **exactement** 1000 paramètres — la borne du cap) le sont. Le gaz débité sépare deux familles de
+  refus : ~830 à 1 100 unités quand la garde structurelle mord avant l'instanciation (pas d'export
+  `call`, compteur démesuré, import hors ABI, mémoire importée, flottants, mémoire hors cap), 10 900
+  pour le type à 1001 paramètres, et la **totalité du plafond** (200 000) pour les deux modules qui
+  forcent le parse à travailler d'abord (4 097 globals, 20 000 fonctions).
+- **Portefeuille chiffré et épinglage `chainId`.** Tout WALLET-01..06 en direct : enveloppe AES-GCM
+  sans clé en clair, fichier en `600`, mauvaise passphrase et enveloppe falsifiée refusées, pas
+  d'écrasement sans `--overwrite`, et surtout l'épingle TOFU testée contre un **vrai nœud d'une
+  autre chaîne** (`RHIZOME_NETWORK=testnet`, chainId 2) : l'envoi abandonne **avant de signer** en
+  nommant les deux chainId, alors que `balance` y reste permis.
+- **Racine d'état authentifiée.** `/state` comparé entre les 12 nœuds, **groupé par tip** : une seule
+  racine par tip. `/state/proof?domain=ledger&key=<adresse>` sert une preuve sur deux nœuds
+  différents ; une clé absente rend 404 plutôt qu'une preuve fabriquée.
+- **Limiteur de débit sous flot réel.** 400 lectures en rafale → 281 refusées en 429 ; 400 de plus
+  avec un `X-Forwarded-For` tournant → 276 refusées : l'en-tête n'est pas cru, donc il n'esquive pas
+  le limiteur. La vanne de gaz des dry-runs mord encore plus tôt : 58 des 60 `call_readonly` en
+  rafale sont délestés.
+- **Comptabilité oncle/neveu** — ci-dessus.
+
+### Deux observations à porter au catalogue
+
+**1. Les segments-point ne sont pas normalisés dans l'identité de pair.** `PeerUrls.canonicalize`
+préserve délibérément un chemin non-racine (« deux montages distincts ne doivent pas se confondre
+silencieusement ») et ne résout pas les segments `.`/`..` de la RFC 3986. Mesuré sur un nœud vivant :
+`http://localhost:4402`, `…:4402/.` et `…:4402/././.` sont **trois identités de registre pour un
+seul point d'accès**. Ce n'est **pas** une évasion de ban (le ban est clé par point d'accès,
+`PeerBanListTest#banIsKeyedByEndpointNotAddress`) et l'inflation reste bornée par le cap
+anti-éclipse par sous-réseau (mesuré : le registre plafonne à 18 = 16 découverts + 2 seeds). C'est
+de l'inflation de registre et des connexions redondantes vers un même pair, pas une primitive
+d'éviction. À arbitrer : normaliser les segments-point dans `canonicalize`, ou documenter que
+l'identité est l'URL de montage et non le point d'accès.
+
+**2. Un port hors bornes passe la validation d'URL.** `http://example.com:99999` (au-delà de 65535)
+n'est pas rejeté comme `ftp://` ou `not a url` : l'hôte est public, le schéma correct, l'entrée est
+**admise** puis évincée quand elle se révèle injoignable. Observé dans les deux états selon
+l'instant de la mesure — d'où un cas qui accepte les deux et n'exige que le retour à un registre
+vide. Impact : un créneau de registre transitoire, qui se répare seul.
+
+### Constats d'outillage (à ne pas rejouer)
+
+**1. Chaque déploiement réserve `gasLimit × gasPrice`.** Une batterie qui déploie vingt-cinq modules
+vide un portefeuille doté une seule fois ; les cas suivants sont refusés en `BALANCE_TOO_LOW` et
+chacun paie une attente de nonce qui n'arrivera jamais — la batterie a stagné quinze minutes sur ce
+mode d'échec avant correction. `suite-contract.sh` recharge donc avant chaque envoi et n'attend le
+minage **que si** la transaction a été admise.
+
+**2. La forme du refus d'un corps surdimensionné n'est pas assertable.** Selon la vitesse à laquelle
+le nœud coupe par rapport à l'envoi, `curl` voit un 400 **ou** une connexion fermée en cours
+d'écriture (code 000) — observé dans les deux sens sur un même corps de 3 Mo. L'invariant assertable
+est « refusé, jamais accepté, nœud vivant juste après », pas un code précis.
+
+**3. Une substitution de commande est un sous-shell.** Un `deploy()` qui rend son adresse par
+`stdout` et son statut par une variable globale perd le statut : `$(deploy …)` s'exécute dans un
+sous-shell. Les deux sorties passent par des globales.
+
+**4. `set -e` est le mauvais réglage pour une batterie.** `common.sh` le pose (correct pour
+start/stop) ; une batterie dont la moitié des cas provoquent délibérément un refus mourrait au
+milieu et masquerait tout ce qui suit. `suite-common.sh` fait `set +e` et chaque cas porte son
+propre verdict.
+
+**5. Un voisin peut fausser toute une campagne.** Une compilation `native-image` d'un autre
+workspace de la même machine (16 Go de RSS, charge moyenne **399**) a fait expirer des appels du
+wallet CLI et produit des échecs qui n'étaient pas ceux du nœud. À vérifier avant de conclure :
+`uptime`. Fait notable au passage — **les douze nœuds natifs ont traversé l'épisode sans broncher** :
+12/12 répondants, écart de hauteur 0, tip unique, `degraded` null, à ~50 Mo de RSS chacun.
+
+### Couverture non atteinte (mise à jour)
+
+Restent hors de portée de ce testnet, inchangé depuis la campagne 6 — mais désormais **vérifié plutôt
+qu'affirmé** : **BURN/DECAY/SUPPLY/FLOOR** (la batterie `chain` mesure `burnDebt=0`, `burned=0` : la
+dette ne peut pas naître sous une cible de ~300 M PDN), **POW/TIME** (difficulté relevée à 6 sur les
+728 blocs balayés, donc retarget, timewarp et bornes de difficulté inertes). Restent non exercés :
+**snap-sync** et **pruning**, **REORG_TOO_DEEP** et les checkpoints, le **minage égoïste/grinding**
+(exige un mineur tricheur), https/`RHIZOME_PEER_TOKEN`/`RHIZOME_PROTECT_READS`, et la **reversal
+d'un reorg à travers l'état de contrat** (S25 prouve la survie au crash, pas la réversion — S7 la
+prouve pour le grand livre). S4 et S10-S17 n'ont pas été rejoués cette campagne ; ils le restent
+tels quels.
+
+---
+
+## Journal de résultats — campagne 6
+
+Campagne exécutée le 2026-09-02 (base 4300), 30 nœuds **natifs** devnet, 10 mineurs
+(0, 3, 6, 9, 12, 15, 18, 21, 24, 27), `-Xmx128m` par nœud, sur le HEAD 009-native-coin-burn.
+Objectif : rejouer la campagne sur la revue adverse *après* l'atterrissage des features 008/009
+(cible de supply décroissante, burn natif), et pousser en réseau réel une batterie d'exploits
+tirée du catalogue (`docs/adversarial/spec.md`) au lieu de s'appuyer uniquement sur le harnais
+JUnit `E2E`. Le plancher composant `./gradlew adversarial` était **vert** avant de commencer
+(BUILD SUCCESSFUL, 2 min 30), image native reconstruite (62 Mo).
+
+> **Données d'août incompatibles — purge obligatoire.** Le premier lancement a échoué :
+> `BufferUnderflowException` dans `HeaderWire.readPrefix` au boot du nœud 0, et les autres nœuds
+> ressuscitaient l'ancienne chaîne (h≈466) depuis `.testnet/node-*`. Les répertoires RocksDB de
+> la campagne 5 (2026-08-20) datent d'avant 008/009 : le schéma de bloc persisté a changé, donc un
+> testnet **vraiment neuf** exige `rm -rf .testnet/node-*` (les clés de `scripts/local-testnet/keys/`
+> sont, elles, indépendantes de la chaîne et réutilisables). C'est un nouveau constat : les
+> campagnes précédentes rejouaient sur un schéma stable. Une fois purgé, les 30 nœuds ont démarré
+> et convergé normalement.
+
+| Scénario | Résultat | Détail |
+|---|---|---|
+| S0 convergence | **PASS** | 30/30 `/stats`, h=35 écart=0 tip unique après le premier retarget (la bouffée de fork post-genesis — 8 tips à h=10 — se résorbe une fois la difficulté sortie du plancher) |
+| S1 gossip tx | **PASS** | mempool ~7 sur les 30 nœuds à h=48, une rafale du simulateur atteint tout le réseau |
+| S2 propagation blocs | **PASS** | observateurs au même tip/hauteur que les mineurs sans pull manuel |
+| S3 PEX | **PASS** | 18 pairs par nœud (cap anti-éclipse), sans doublon |
+| S5 panne mineur | **PASS** | miner-9 arrêté, observateur node10 croît 296→302 |
+| S6 resync | **PASS** | miner-9 relancé → h=311, degraded null, reorgInProgress false |
+| S7 partition 15/15 + guérison | **PASS** | partition **étanche** (0 pair cross-camp mesuré via `/peers`) ; camp A travail=27776 vs camp B=27584 ; après **2 ponts** `/add_peer` croisés, retour à tip unique en **~40 s** ; camp B a `REORGED` sur la branche A la plus lourde ; solde miner-27 **identique** (299,1364 PDN) vu des deux ex-camps (annulation par journaux d'undo) ; **aucun ban** (`syncPeersBanned=0` partout), degraded null tout du long ; convergence finale h=274 écart=0 tip unique sur 30 |
+| S8 wallet E2E | **PASS** | 2,5 PDN via node 3 → solde identique lu sur node 29 distant ; token natif (mint 1e6 RHZT, transfert 250, soldes 999750/250 sur node 20 distant) et box natif (valeur 1 PDN, registre str, visible node 25 distant) exercés en plus |
+| S9 contrats distribués | **PASS** | `sim-contract.sh check` : 1 état par groupe de tip (compteur + token WASM), 0 divergence d'exécution |
+| **S18** burn natif *(BURN/SUPPLY/FLOOR, nouveau)* | **PASS** | supply amorcée au-dessus de la cible par snapshot ; burn capturé en direct (bloc 121 `burned=35000`, bloc 122 `burned=15000`) ; supply tirée sous son genesis ; 3 nœuds bit-à-bit + 4ᵉ nœud neuf convergent sur la chaîne brûlée. Détail plus bas |
+| **S19** crash `kill -9` + recovery *(PERS/A6, nouveau)* | **PASS** | SIGKILL d'un mineur en pleine prod ×3 : base rouverte sans corruption, non tronquée, nonce non régressé, témoin bit-à-bit (17500/0), survivants continuent. Détail plus bas |
+
+### Batterie d'exploits en réseau réel (revue adverse, nouveau pour cette campagne)
+
+Toutes les transactions sont **signées** (petit forgeur sur le classpath du wallet, `signedSend`/
+`signedContract` avec des champs arbitraires) et postées sur `/add_transaction_json` d'un nœud
+vivant, pour atteindre la vraie porte de consensus plutôt que d'être rejetées comme corps
+malformé (règle 2 du protocole). Après chaque rejet on vérifie que **le refus est gratuit** : le
+nœud victime a miné 156 → 176 pendant toute la batterie, l'attaquant n'a **pas** été banni (une tx
+valide nonce-0 ensuite = `SUCCESS`), et `degraded` est resté null.
+
+| Famille | Attaque | Statut renvoyé | Verdict |
+|---|---|---|---|
+| INFL | montant négatif (−100000) | `INVALID_TRANSACTION_AMOUNT` (400) | rejeté |
+| INFL | montant `Long.MAX` | `BALANCE_TOO_LOW` (400) | rejeté |
+| INFL | dépense > solde (100 PDN d'un compte 5 PDN) | `BALANCE_TOO_LOW` (400) | rejeté |
+| SIG | chainId=999 (rejeu inter-réseau) | `INVALID_CHAIN_ID` (400) | rejeté |
+| SIG | montant altéré sous signature (abordable) | `INVALID_SIGNATURE` (400) | rejeté |
+| SIG | destinataire altéré sous signature | `INVALID_SIGNATURE` (400) | rejeté |
+| VM | appel poison `gasLimit`=1e11 (> `maxTxGas` 5e7) | `GAS_LIMIT_EXCEEDED` (400) | rejeté |
+| POOL | nonce futur (gap, 9) | `SUCCESS` (admis mempool) | policy **sûre** : cap 1024/expéditeur, TTL parked, jamais minable tant que le trou n'est pas comblé, 0 mouvement de solde/nonce (vérifié : solde et nextNonce inchangés) |
+| CODEC/API | corps malformé sur les 5 routes POST | 400 partout | pas de crash, degraded null |
+| API (E2E-06) | POST cross-site (Origin étranger, avec **et** sans marqueur) | 403 `cross-origin request refused` | rejeté |
+| API (E2E-07) | forme DNS-rebinding (Origin==Host, sans marqueur) | 403 | rejeté |
+| API | contrôle same-origin + marqueur (dashboard légitime) | 200 `OK` | accepté |
+| CODEC | corps 12 Mo sur `/submit` | 400, coupé à ~5,5 Mo par le cap corps | borné, pas d'OOM |
+
+Note d'ordonnancement (armure DoS, WHITEPAPER §3.5) : le premier essai d'altération de montant
+(5 → 999999) est ressorti `BALANCE_TOO_LOW`, pas `INVALID_SIGNATURE` — le contrôle de solde
+précède le contrôle de signature (le moins cher d'abord). Refait avec une altération *abordable*
+(5 → 6), il atteint bien la porte de signature et ressort `INVALID_SIGNATURE`.
+
+### Constats de campagne
+
+**1. Purge des données d'août obligatoire (voir encadré ci-dessus).** Nouveau : le schéma de bloc
+persisté a changé avec 008/009, donc les répertoires RocksDB des campagnes antérieures ne se
+rejouent plus — `rm -rf .testnet/node-*` avant de lancer une campagne postérieure à un changement
+de schéma. Le conflit de port 3000 des campagnes 4/5 ne s'est **pas** manifesté cette fois, mais
+la base 4300 a été utilisée par précaution comme les deux campagnes précédentes.
+
+**2. Régime de fork transitoire à cadence rapide (déjà caractérisé, pas un défaut).** À difficulté
+plancher (6) avec 10 mineurs, le réseau vit avec 4-5 tips distincts, écart ≤ 3-4, qui se résorbent
+en continu ; il atteint le tip unique de façon **répétée** (h=35, h=176, et 2× pendant la guérison
+S7) sans le tenir en permanence sous production plancher. Jamais de divergence durable, jamais
+`REORG_TOO_DEEP`, jamais `degraded`. Les frappes `+34 (served an invalid chain)` observées sous
+charge sont la pénalité d'une branche qui perd une course de fork ; elles décroissent et ne
+composent **jamais** en ban pour un nœud honnête (`syncPeersBanned=0` en fin de campagne sur les
+30 nœuds) — l'interlock déjà documenté par S16/NET-11 et `BanDiscoveryPartitionAttackTest`.
+
+**3. La batterie d'exploits confirme en réseau réel ce que le catalogue prouve au composant.**
+Chaque rejet observé porte le **statut exact** attendu (pas un « refusé » générique) et le refus
+est gratuit (le nœud victime a continué à miner, l'attaquant n'a pas été pénalisé). Le seul
+`SUCCESS` — le nonce futur (POOL) — est l'admission mempool bornée d'une tx non-minable, pas un
+vol : solde et nonce confirmés inchangés. C'est le complément « network » des preuves « component »
+INFL/SIG/VM/CODEC/API et « E2E » du harnais JUnit.
+
+### Couverture non atteinte — ce que cette campagne (et ce plan) ne teste PAS
+
+Analyse post-campagne, classée par nature du manque. Elle existe pour que la prochaine campagne
+sache où se trouve la frontière, et pour ne pas laisser « 30 nœuds, tout PASS » se lire comme une
+couverture qu'il n'a pas. Deux propositions de scénarios (S18, S19) en sortent, listées en fin.
+
+**A. Le burn 008/009 sur le binaire natif — était un trou, désormais couvert par S18.**
+`devnet()` hérite `supplyTarget = 2 997 924 580 000` (≈300M PDN) et démarre à une supply ~0, donc
+`debt = max(0, supply − S*(h))` reste **0 pour toujours** en régime normal (il faudrait miner ~100M
+blocs pour croiser S\*) : le burn/décroissance ne se déclenche jamais sur un devnet *ordinaire*.
+**Correction d'une affirmation trop forte d'une version antérieure de cette section** : le burn
+*est* prouvé au niveau réseau — `E2EBurnTest` (E2E-88) fait tourner de **vrais** `RhizomeNode`
+(RocksDB sur disque, sockets loopback, threads producteur/sync, in-JVM) prémine au-dessus de la
+cible et vérifie `burned > 0` puis un pair neuf convergeant bit-à-bit. Ce qui manquait vraiment,
+c'était la preuve sur le **binaire natif** (SubstrateVM) et sur des **processus OS** séparés — fermé
+par **S18** (voir ci-dessous) en amorçant la supply au-dessus de la cible par un snapshot genesis.
+Reste hors testnet : **DECAY-01..04** (la décroissance par époque exige `decayStartHeight > 0`, que
+devnet met à 0 ; testable seulement via un profil dédié) et la reversal d'un reorg à travers un bloc
+brûlant en direct (BURN-05, structurelle, prouvée au composant).
+
+**B. Intestable par construction sur devnet (difficulté au plancher).**
+- **POW / TIME / difficulté** : devnet colle la difficulté à 6, donc le retarget, la défense
+  timewarp (median-time-past), les bornes de difficulté et la fenêtre `maxFutureBlockTimeSec` ne
+  sont jamais sollicités en direct. Toute la famille POW/TIME vit en JUnit.
+- **UNCLE / GHOST** : le plan *prétend* que la répartition régulière des mineurs produit des oncles,
+  mais aucune campagne n'a jamais inspecté un `/block` pour confirmer des références d'oncle ni
+  vérifié la comptabilité des récompenses oncle/neveu en direct. Assertion non mesurée à ce jour.
+
+**C. Dans le plan, mais non rejoués cette campagne (S0-S3, S5-S9 seuls exécutés).**
+Non exécutés : **S4** (churn 31ᵉ nœud), **S10** (sémantique des alertes monitor), **S11-S15**
+(P1-P5 : pair perdu en reorg, éclipse observable, hôte partagé, dashboard 503 en reorg, départage
+strict), **S16/S17** (pair confirmé menteur NET-11 / API-token multi-nœuds API-13, remplacés cette
+fois par la batterie d'exploits). Rejouables tels quels — voir campagnes 4/5 pour le détail.
+
+**D. Absent du plan entièrement (aucun scénario ne les touche).**
+- **PERS / cohérence au crash (adversaire A6)** : ~~aucun `kill -9`~~ **fermé par S19** (voir
+  ci-dessous). Un harnais de kill dur existait déjà (`ProcessHarness.destroyForcibly`) mais servait
+  au boot genesis ; E2E-17 ne prouve qu'un restart *gracieux*. S19 ajoute le SIGKILL d'un mineur
+  **en pleine production** ×3, avec preuve de recovery (base rouverte sans corruption, non tronquée,
+  nonce non régressé, témoin bit-à-bit).
+- **Pruning** (`RHIZOME_PRUNE`) : jamais lancé ; pas de vérif qu'un nœud élagué sert le watermark et
+  **refuse** l'historique jeté (E2E-31).
+- **Snap-sync** (`RHIZOME_SYNC=snap`) : hors périmètre assumé, mais c'est un vrai chemin de bootstrap
+  (E2E-24/32/40/41) prouvé seulement en JUnit.
+- **Racine d'état authentifiée (STATE)** : la campagne compare l'état *applicatif* des contrats
+  (`statecheck.py`), jamais la racine SMT `/state` ni les preuves `/state/proof` entre nœuds.
+- **Dépôt d'un `.wasm` malveillant sur un nœud vivant** : en direct, seul l'over-gas a été tenté.
+  Les rejets float/SIMD/GC/table/mémoire (`WasmAdversarialTest`) sont deploy-time et ne passent
+  jamais par un vrai `/add_transaction` ici.
+- **Rate-limiting / flood (NET)** : `RateLimiter` et caps par sous-réseau sous flot réel
+  multi-adresses — E2E-16 est JUnit ; aucun scénario réseau.
+- **REORG_TOO_DEEP / checkpoints** : la partition S7 est peu profonde ; `maxReorgDepth` et le rejet
+  par checkpoint ne sont pas exercés en direct.
+- **Wallet chiffré / TOFU chain-id (WALLET)** : tout est fait en `--plaintext`. Le pinning chain-id
+  (trust-on-first-use), le prompt de passphrase, le warning URL non-sécurisée — non testés en direct.
+
+**E. Un finding de cette campagne rend un GAP du catalogue obsolète.**
+`docs/adversarial/spec.md` déclare **E2E-89 (GAP)** avec pour raison « native-image n'est pas
+installé dans cet environnement ». C'est **faux depuis cette campagne** : l'image native a été
+construite (62 Mo) et 30 nœuds natifs ont tourné. La résolution de la ressource genesis pinnée *sur
+le binaire natif* (lien E2E-37/48) est désormais *fermable* mais reste non testée (devnet a un
+genesis non-pinné, sans ressource). À réévaluer dans le catalogue — non modifié ici : reclasser un
+GAP machine-vérifié est une décision qui mérite son propre commit, pas un effet de bord de campagne.
+
+**F. Hors périmètre, assumé et correct (rappel).**
+https/TLS, `RHIZOME_PEER_TOKEN` (https-only), `RHIZOME_PROTECT_READS`, multi-machines, minage
+égoïste/grinding REORG-11/12 (exige un mineur tricheur que le binaire stock n'est pas — documenté).
+
+### S18 — Burn natif en réseau réel *(BURN, SUPPLY, FLOOR — exécuté 2026-09-02)*
+
+**But** : prouver que le burn de 009 se déclenche sur le **binaire natif** (SubstrateVM), pas
+seulement dans le harnais JUnit `E2EBurnTest`. `devnet` ne croise jamais S\* par lui-même (voir
+l'encadré du Périmètre), donc on **amorce la supply au-dessus de la cible** par un snapshot genesis :
+`devnet` a un `genesisSupply` non-pinné, donc son contrôle de boot n'exige aucun total particulier.
+
+1. Forger une clé `premine`, écrire un snapshot devnet (chainId 3) où cette adresse détient
+   `supplyTarget + 1 000 000 000` base units (2 998 924 580 000), lancer 3 nœuds natifs
+   (`RHIZOME_SNAPSHOT=<ce fichier>`, node 0 mineur, `RHIZOME_BLOCK_INTERVAL_MS=2000`).
+2. Le tip démarre au-dessus de la cible : `emission.burnDebt > 0` (mesuré 1 000 000 800), `burned=0`
+   tant qu'aucun flux de frais ne remplit le pool.
+3. Créer le pool : soumettre en rafale des transactions **payant des frais** depuis le portefeuille
+   premine (nonces contigus, admis en un bloc), le mineur crédite les frais → le bloc brûle
+   `min(⌊pool × 1/2⌋, debt)`.
+
+**Résultat (PASS)** : burn **capturé en direct** — bloc à hauteur 121 `burned=35000` (7 tx × frais
+10000 ÷ 2), bloc 122 `burned=15000` ; le champ API `burned` porte bien le montant **du bloc-tip**
+(par-bloc, jamais cumulatif) ; la supply a été tirée **sous** son genesis (2 998 924 578 400 <
+2 998 924 580 000) sous pression de frais — le mécanisme de destruction réduit la supply native, sur
+le binaire d'opérateur. Les 3 nœuds convergent **bit-à-bit** sur la chaîne brûlée (même tip, même
+supply committée, même `burnDebt`), et un **4ᵉ nœud neuf** reconstruit l'historique brûlé à
+l'identique (tip et supply égaux au mineur) — l'assertion d'`E2E-88` rejouée sur processus natifs.
+*Non couvert ici* : la reversal d'un reorg **à travers** un bloc brûlant (BURN-05) — orchestrer une
+égalité de fork sur un réseau mono-mineur n'est pas déterministe ; elle reste prouvée par
+`BurnAttackTest#aReorgAcrossABurningBlockRestoresSupplyAndLedgerExactly` et est structurelle
+(`burned` re-dérivable de deux en-têtes, aucun code de rollback).
+
+### S19 — Crash `kill -9` + recovery *(PERS, adversaire A6 — exécuté 2026-09-02)*
+
+**But** : la seule classe d'adversaire du catalogue (A6, *process kill*) que ce plan ne touchait pas
+en réel. `stop.sh` est un arrêt *gracieux* (flush propre) ; E2E-17 prouve un restart gracieux. Ni
+l'un ni l'autre ne teste un SIGKILL **en pleine production** (recovery d'une écriture potentiellement
+déchirée : WriteBatch atomique + WAL RocksDB).
+
+1. Réseau natif 6 nœuds / 3 mineurs, chaîne à hauteur réelle (≈350, données persistées).
+2. Doter un portefeuille **témoin** qui reçoit une fois et n'émet jamais (solde et nonce doivent
+   être invariants à travers les crashs).
+3. `kill -9` le PID d'un **mineur** en pleine production, ×3 à des hauteurs/nœuds différents ;
+   après chaque mort, relancer par `start.sh -n <i>` sur son propre répertoire de données.
+
+**Résultat (PASS)** : sur les 3 crashs, chaque nœud a **rouvert sa base RocksDB sans corruption**
+(0 ligne `corrupt`/`BufferUnderflow`/`FATAL`/`failed to open`), est revenu **non tronqué**
+(hauteur ≥ hauteur pré-crash, puis rattrapage), `degraded == null`, `reorgInProgress == false` ;
+le nonce n'a **jamais régressé** (pas de rejeu possible) ; le solde du témoin est resté
+**bit-à-bit identique** (17500 base units, nonce 0) lu depuis le nœud ressuscité ; et les 5 nœuds
+survivants ont continué à croître pendant chaque fenêtre de mort (la chaîne survit à la perte d'un
+mineur). L'atomicité WriteBatch + WAL de RocksDB tient sous SIGKILL au pire moment.
+
+---
 
 ## Journal de résultats — campagne 5
 
