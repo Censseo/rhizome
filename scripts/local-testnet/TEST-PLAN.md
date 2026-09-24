@@ -601,6 +601,110 @@ scripts/local-testnet/stop.sh
 rm -rf .testnet          # données RocksDB + logs + CSV + pids
 ```
 
+## Plan — campagne 11 : clôture des sept manques listés en campagnes 9/10
+
+Les journaux de campagne 9 et 10 répètent, à l'identique, sept lacunes. Ce plan les ordonne par
+dépendance plutôt que par ordre d'apparition : certaines sont prérequises à d'autres, et deux
+d'entre elles sont des décisions déjà assumées ailleurs dans ce dépôt, pas des manques à combler
+avant un testnet public.
+
+### Phase 0 — Durcir l'outillage avant de le rejouer en vrai (ferme #6, prérequis de #1/#2)
+
+`tunnels.sh` et `partition.sh` portent chacun, dans leur propre en-tête, la mention qu'ils n'ont
+**jamais tourné contre du matériel réel** — la campagne 10 a validé la *technique* (tunnel SSH
+bidirectionnel) mais via des scripts ad hoc (`fix-private-peers.sh`, `reset-chain-data.sh`,
+`add-local-peers.sh`), pas ces fichiers. Les rejouer sans premier essai à blanc serait imprudent :
+`partition.sh` se qualifie lui-même de « script le plus dangereux de ce harnais » (une règle non
+révoquée retire silencieusement et définitivement un seed d'un réseau public).
+
+1. Peupler un `inventory.tsv` réel (gitignored — jamais commité, seul `.example` l'est) à partir
+   de la topologie de campagne 10 (3 VM OVH en `role=seed` + 2 bancs d'essai locaux en `role=peer`).
+2. `tunnels.sh up` puis `check` contre cet inventaire — vérifier la résolution 13000+index et
+   `/stats` à travers chaque tunnel. Puis **injecter une panne** : `kill -9` un process `ssh -N`
+   en cours de route et vérifier ce que le script documente comme non vérifié — la détection d'un
+   tunnel mort (`ServerAliveInterval`/`CountMax`) plutôt qu'un blocage silencieux qui se lirait
+   comme « nœud DOWN » côté harnais.
+3. `partition.sh apply` sur un **hôte jetable**, pas les 3 seeds — vérifier séparément les trois
+   garde-fous : le watchdog `systemd-run` supprime bien la table si on tue ce script en plein
+   milieu (`kill -9` du process appelant) ; le `trap EXIT` guérit sur `Ctrl-C` ; `apply` refuse
+   catégoriquement un index `role=seed`.
+4. Une fois les deux essais concluants, retirer le bandeau « NON EXERCÉ CONTRE DU MATÉRIEL RÉEL »
+   des en-têtes et documenter les résultats ici avant de passer à la phase 1.
+
+Cette phase ne touche à aucun hôte de production ni aux 3 seeds de campagne — elle peut se faire
+sur un hôte jetable indépendant.
+
+### Phase 1 — Campagne 11 elle-même : soak + charge + coupure réelle (ferme #1, #2, #3, prépare #4)
+
+Reprend la topologie de campagne 10 (3 VM OVH + 2 bancs d'essai locaux), pilotée cette fois par
+l'outillage versionné validé en phase 0.
+
+**J0 — mise en place.**
+- Purger les 3 VM depuis la genèse avec `RHIZOME_ALLOW_PRIVATE_PEERS=true` déjà posé dans
+  `node.env` dès le premier démarrage (le correctif était découvert *pendant* la campagne 10 ;
+  cette fois il est connu d'avance).
+- `tunnels.sh up` + `check` (pré-vol obligatoire).
+- Démarrer `sim-tx.sh` et `sim-contract.sh` en continu contre au moins deux nœuds distincts —
+  jamais fait contre un déploiement réel jusqu'ici (campagne 10 n'avait que du minage organique).
+- Démarrer `monitor.sh` (alarmes StaleTip/DiskLow/SeedDisagreement) pointé sur les 5 nœuds via les
+  ports de contrôle des tunnels.
+
+**J1 à J3–J7 — soak réel (ferme #3).** Aucune intervention hors incident. Mesurer croissance
+RocksDB/jour et décroissance des scores de ban sur plusieurs jours — la mesure que le chantier 3
+vise et qu'une fenêtre de quelques dizaines de minutes ne peut pas donner.
+
+**Un jour choisi en cours de soak — coupure réelle (ferme #1).** Avec le garde-fou n°3 de
+`partition.sh` (jamais de seed partitionné), l'axe disponible avec 5 hôtes est locaux-vs-VM —
+exactement l'axe WAN que la campagne 10 a mesuré *sain* ; cette fois on le coupe puis on le guérit,
+deux essais distincts :
+- une coupure **courte** (sous ~13 min au rythme observé de campagne 10, donc sous
+  `maxReorgDepth`=120 blocs) : la guérison doit être automatique dès la levée de la règle ;
+- une coupure **longue** (délibérément au-dessus du seuil) : `REORG_TOO_DEEP` attendu côté camp
+  isolé, guérison par la procédure déjà rodée en campagne 10 (purge + relance) — cette fois
+  documentée comme procédure plutôt que découverte par accident, à verser dans
+  `docs/operations/runbooks.md` RB-01.
+- `partition.sh status` avant/après chaque coupure pour confirmer pose et absence de règle
+  résiduelle.
+
+**Fin de soak — checkpoint (ferme #4, chantier 0.4).** Avant de planifier la publication elle-même,
+vérifier où ce mécanisme est censé vivre dans ce dépôt — rien trouvé pour l'instant qui aille
+au-delà de `verify-genesis.sh` (qui vérifie la genèse, pas un checkpoint de hauteur) : **chantier
+0.4 reste à spécifier**, pas seulement à exécuter. Ne pas improviser un format ici ; le poser
+d'abord comme question de conception séparée une fois la hauteur/l'historique de cette campagne
+disponibles comme donnée d'entrée.
+
+**Sortie attendue.** Nouvelle section journal (« campagne 11 ») dans ce fichier ; en-têtes
+`tunnels.sh`/`partition.sh` mis à jour ; `runbooks.md` RB-01 gagne sa première coupure réseau
+physique réelle documentée (pas seulement single-host).
+
+### Phase 2 — Multi-région (ferme #5)
+
+Ne dépend d'aucun nouvel outillage — `inventory.tsv`/`tunnels.sh`/`partition.sh` sont déjà
+génériques par hôte, seules de nouvelles lignes d'inventaire (région/hébergeur différents)
+seraient nécessaires. Dépend en revanche d'un provisioning hors de portée de cette session
+(≥1 hôte dans une région/chez un hébergeur distinct des 3 VM OVH actuelles) : **à demander**,
+pas à planifier plus finement tant que l'accès n'existe pas. Une fois obtenu, la mesure elle-même
+est simple : écart de propagation d'un même bloc entre un seed EU et un seed hors-EU.
+
+### Phase 3 — BURN/DECAY en réseau réel (ferme #7 — priorité basse, décision de chantier 0.5)
+
+Structurellement hors d'atteinte sur `devnet`/`staging` tels que calibrés aujourd'hui (supply de
+départ loin de `S*`, donc `debt` toujours nul). Deux options pour plus tard, à trancher séparément
+de ce plan — toucher au calibrage de genèse d'un profil est consensus-critique
+(cf. CLAUDE.md, WHITEPAPER.md) et ne doit pas être décidé comme sous-produit d'une campagne réseau :
+(a) un profil dédié dont la genèse démarre proche de `S*`, ou (b) accepter la couverture JUnit
+(`TestNetwork.CURVE_ACTIVE`) comme suffisante jusqu'à l'approche de mainnet. **Recommandation : ne
+pas bloquer un testnet public là-dessus** — ce dépôt le traite déjà comme une lacune assumée de
+chantier 0.5, pas une régression.
+
+### Ce qui gate réellement un testnet public
+
+Phases 0 et 1 sont les seules qui conditionnent l'ouverture à du trafic réel : un réseau public
+subira de vraies coupures et de la vraie charge dès le premier jour, et ni l'une ni l'autre n'a
+encore été exercée pour de vrai. Phases 2 et 3 sont des risques à porter, déjà nommés comme tels
+ailleurs dans ce dépôt (`docs/operations/spec.md`, « Known limits ») — pas des conditions
+bloquantes.
+
 ## Journal de résultats — campagne 9 (staging, exécutée 2026-09-22)
 
 **Contexte.** Première campagne sur le profil `staging` (chainId 4, `rhizome-staging`, Pufferfish2,
