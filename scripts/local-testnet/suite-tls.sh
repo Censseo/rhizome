@@ -100,8 +100,19 @@ PROXY_B_PORT=$((BASE_PORT + 95)); NODE_B_PORT=$((BASE_PORT + 96))
 NODE_TOKEN_PORT=$((BASE_PORT + 97))
 NODE_PROTECT_PORT=$((BASE_PORT + 98))
 NODE_PEERTOK_PORT=$((BASE_PORT + 99))
-TLSPEER_CONFIGURED_PORT=$((BASE_PORT + 100))
-TLSPEER_GOSSIP_PORT=$((BASE_PORT + 101))
+# +100/+101 (4600/4601 sous le profil staging, BASE_PORT=4500) collidaient avec le service faucet
+# de longue durée (chantier 5, scripts/local-testnet/faucet/faucet.py) lancé à la main sur le port
+# 4600 contre ce même réseau : le port était bien occupé, mais par un serveur HTTP qui ne parle pas
+# le protocole pair-à-pair (pas de /peers, /add_peer, /total_work) — donc RHIZOME_PEERS pointait vers
+# un port ouvert mais muet plutôt que fermé. `wait_port` réussissait (TCP accepte), tls_peer.py lui-
+# même échouait au démarrage (`Address already in use`, jamais visible dans les logs du nœud), et
+# chaque round PeerDiscovery contre ce pair se soldait par un échec silencieux — "seed ... unreachable;
+# keeping the trusted anchor" — reproductible à l'identique sur 3 lancements, y compris un lancement
+# vérifié "propre" par un `ss`/`ps` qui s'est révélé lui-même cassé (ss absent de ce shell, la
+# vérification ne trouvait donc jamais rien). +110/+111 (4610/4611) sont hors de toute plage connue
+# (réseau staging 4500-4505, pow 4406/4407, net BASE_PORT+91/92, clock BASE_PORT+94/95, faucet 4600).
+TLSPEER_CONFIGURED_PORT=$((BASE_PORT + 110))
+TLSPEER_GOSSIP_PORT=$((BASE_PORT + 111))
 
 API_TOKEN="suite-tls-api-token"
 PEER_TOKEN="suite-tls-peer-token"
@@ -195,6 +206,29 @@ trap cleanup EXIT
 #        toute requête via le relais essuie un 403 host-not-allowed, mesuré en prototype) -----
 rm -rf "$BASE_DIR/tls-node-a" "$BASE_DIR/tls-node-b" "$BASE_DIR/tls-node-token" \
        "$BASE_DIR/tls-node-protect" "$BASE_DIR/tls-node-peertok"
+
+# Les DEUX cibles pair-TLS d'abord, avant tout nœud : NODE_PEERTOK ci-dessous boote avec
+# RHIZOME_PEERS pointé sur TLSPEER_CONFIGURED_PORT, et PeerDiscovery écarte un seed après
+# MAX_FAILURES=3 échecs SANS jamais le retenter (lib-net/PeerDiscovery.java:34,172-174) — trouvé
+# en vérification (campagne 9, run 1) : la cible ne démarrait qu'APRÈS le wait_up de tous les
+# nœuds auxiliaires (plusieurs dizaines de secondes), donc NODE_PEERTOK avait déjà épuisé ses
+# trois essais et banni définitivement le seed avant que quiconque écoute sur ce port —
+# NET-08-configured-reached à 0 requêtes sur toute la fenêtre de 45 s, pas un défaut de
+# PeerTokenPolicy. La cible gossip, elle, réussissait déjà : démarrée au même endroit qu'avant,
+# mais présentée au nœud bien plus tard via /add_peer (donc toujours déjà en écoute quand le
+# nœud la découvre — jamais de fenêtre de course). Journaux purgés AVANT de démarrer les
+# processus (pas après) : $TLS_DIR survit d'une exécution à l'autre (seuls les certificats y
+# sont réutilisés s'ils existent déjà), donc un journal d'une campagne précédente doit
+# disparaître avant que NET-08 ne compte ses lignes, jamais après — sans quoi une requête
+# légitime de CE run pourrait être purgée avec le résidu.
+rm -f "$TLS_DIR/configured-headers.log" "$TLS_DIR/gossip-headers.log"
+start_py tls-peer-configured "$TOOLS/tls_peer.py" "$TLSPEER_CONFIGURED_PORT" \
+  "$TLS_DIR/tlspeer-cert.pem" "$TLS_DIR/tlspeer-cert.key" "$TLS_DIR/configured-headers.log"
+start_py tls-peer-gossip "$TOOLS/tls_peer.py" "$TLSPEER_GOSSIP_PORT" \
+  "$TLS_DIR/tlspeer-cert.pem" "$TLS_DIR/tlspeer-cert.key" "$TLS_DIR/gossip-headers.log"
+wait_port "$TLSPEER_CONFIGURED_PORT" 20 || true
+wait_port "$TLSPEER_GOSSIP_PORT" 20 || true
+
 launch_node "$NODE_A_PORT" "$BASE_DIR/tls-node-a" tls-node-a \
   "" RHIZOME_ALLOWED_HOSTS="127.0.0.1:$PROXY_A_PORT"
 launch_node "$NODE_B_PORT" "$BASE_DIR/tls-node-b" tls-node-b \
@@ -225,17 +259,8 @@ start_py tls-proxy-a "$TOOLS/tls_proxy.py" "$PROXY_A_PORT" "$NODE_A_PORT" \
   "$TLS_DIR/proxy-cert.pem" "$TLS_DIR/proxy-cert.key"
 start_py tls-proxy-b "$TOOLS/tls_proxy.py" "$PROXY_B_PORT" "$NODE_B_PORT" \
   "$TLS_DIR/proxy-cert.pem" "$TLS_DIR/proxy-cert.key"
-# Journaux purgés AVANT de démarrer les processus (pas après) : $TLS_DIR survit d'une exécution
-# à l'autre (seuls les certificats y sont réutilisés s'ils existent déjà), donc un journal d'une
-# campagne précédente doit disparaître avant que NET-08 ne compte ses lignes, jamais après —
-# sans quoi une requête légitime de CE run pourrait être purgée avec le résidu.
-rm -f "$TLS_DIR/configured-headers.log" "$TLS_DIR/gossip-headers.log"
-start_py tls-peer-configured "$TOOLS/tls_peer.py" "$TLSPEER_CONFIGURED_PORT" \
-  "$TLS_DIR/tlspeer-cert.pem" "$TLS_DIR/tlspeer-cert.key" "$TLS_DIR/configured-headers.log"
-start_py tls-peer-gossip "$TOOLS/tls_peer.py" "$TLSPEER_GOSSIP_PORT" \
-  "$TLS_DIR/tlspeer-cert.pem" "$TLS_DIR/tlspeer-cert.key" "$TLS_DIR/gossip-headers.log"
-wait_port "$TLSPEER_CONFIGURED_PORT" 20 || true
-wait_port "$TLSPEER_GOSSIP_PORT" 20 || true
+# Les cibles pair-TLS (tls-peer-configured/tls-peer-gossip) sont déjà démarrées plus haut, AVANT
+# le lancement des nœuds — voir le commentaire daté là-bas pour le pourquoi (MAX_FAILURES PEX).
 
 PROXIES_UP=1
 for _ in $(seq 1 30); do

@@ -1,0 +1,53 @@
+# Inventaire multi-machines — chantier 2 (voir TEST-PLAN.md). Un TSV, une ligne par nœud.
+#
+# Exercé contre du matériel réel (3 VM OVH + 2 nœuds locaux via tunnel SSH) en campagne 10 — voir
+# TEST-PLAN.md. La colonne `advertise`/seed ci-dessous a été corrigée suite à cette campagne (le
+# filtre SSRF ne fait PAS l'exception qu'on croyait — voir la note sous `advertise`).
+#
+# Colonnes (dans cet ordre, séparées par une TABULATION — pas des espaces) :
+#
+#   ssh        cible SSH utilisable telle quelle (`ssh <ssh> ...`), ou le littéral `local`
+#              signifiant « cette machine, pas de tunnel » — voir tunnels.sh. Format attendu :
+#              soit un alias défini dans ~/.ssh/config (recommandé : porte la clé, l'utilisateur,
+#              le port SSH), soit `user@host`.
+#   p2p_ip     adresse sur laquelle le nœud BIND et par laquelle les AUTRES nœuds du même hôte ou
+#              du même LAN le joignent (souvent une IP privée/VPC). N'est PAS forcément la même
+#              chose que `ssh` (qui peut passer par une IP publique, un bastion, ou un alias).
+#   advertise  adresse publique routable à poser dans RHIZOME_ADVERTISE, ou `-` si l'hôte n'en a
+#              pas (derrière NAT, jamais annoncé). CORRIGÉ après campagne 10 (matériel réel) : le
+#              plan supposait qu'un seed configuré via RHIZOME_PEERS échappe au filtre SSRF même
+#              avec une adresse privée — FAUX. `blockPrivate` (PeerHosts.pin, RhizomeNode.java)
+#              s'applique à TOUTE tentative de connexion sortante, sans distinction d'origine :
+#              un seed `RHIZOME_PEERS` à IP privée est aussi bloqué qu'un pair appris par PEX.
+#              Un hôte à `p2p_ip` privée QUELCONQUE dans l'inventaire — seed ou pas — impose donc
+#              `RHIZOME_ALLOW_PRIVATE_PEERS=true` sur CHAQUE nœud qui doit s'y connecter, ce qui
+#              n'a de sens que sur un LAN privé de confiance (jamais en production publique). Sur
+#              un LAN entièrement privé (le cas OVH de la campagne 10), c'est donc simplement
+#              obligatoire partout ; `advertise` à `-` n'en dispense pas.
+#   role       seed | miner | peer. `seed` est une désignation lourde de conséquence :
+#              partition.sh REFUSE de partitionner tout hôte listé `seed` (garde-fou n°3, voir
+#              son en-tête) — c'est délibéré, un seed public retiré silencieusement et
+#              définitivement d'un réseau public est le pire scénario du chantier 2.
+#   port       port p2p du nœud sur cet hôte (RHIZOME_PORT). Convention locale : reprendre les
+#              ports du profil loopback (BASE_PORT+i) pour que les artefacts (logs, TSV de
+#              résultats) restent comparables entre une campagne single-host et une campagne
+#              multi-machines.
+#   heap       RHIZOME_TESTNET_HEAP-style pour CET hôte (ex. 256m) — un hôte de banc d'essai peut
+#              différer d'un seed dédié.
+#   prune      RHIZOME_PRUNE (keep-blocks) pour ce nœud, ou `-` pour laisser le défaut (pas de
+#              troncature — voir README pour la sémantique complète).
+#   reachable  yes | no | unknown — rempli APRÈS vérification manuelle (curl depuis un tiers hôte
+#              vers `advertise:port`), pas une hypothèse. `tunnels.sh check` ne le déduit PAS tout
+#              seul : un tunnel de CONTRÔLE (SSH, loopback) qui répond ne prouve rien sur la
+#              joignabilité PUBLIQUE annoncée — ce sont deux chemins réseau différents par
+#              construction (voir le plan, section adressage).
+#
+# Exemple minimal (3 seeds routables + 2 bancs d'essai NAT, la forme que le plan porte à un
+# « compte réaliste de 5 hôtes » une fois la règle « jamais de seed partitionné » appliquée) :
+#
+# ssh	p2p_ip	advertise	role	port	heap	prune	reachable
+# seed-1.example.net	10.0.1.11	203.0.113.11	seed	4500	512m	-	unknown
+# seed-2.example.net	10.0.2.11	203.0.113.12	seed	4500	512m	-	unknown
+# seed-3.example.net	10.0.3.11	203.0.113.13	seed	4500	512m	-	unknown
+# bench-a.example.net	10.0.1.21	-	peer	4500	256m	20000	unknown
+# local	127.0.0.1	-	peer	4500	256m	-	unknown

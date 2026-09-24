@@ -20,9 +20,15 @@ import rhizome.core.ledger.PublicAddress;
  * @param blockIntervalMs producer pacing target
  * @param mempoolSize    max pooled transactions
  * @param allowPrivatePeers  opt out of the SSRF host filter so the node may peer over loopback /
- *                       private IPs discovered via PEX (local dev / devnets). Off by default —
- *                       secure-by-default (audit F4); the env var RHIZOME_ALLOW_PRIVATE_PEERS=true
- *                       also forces it. Configured seed peers bypass the filter regardless.
+ *                       private IPs (local dev / devnets / private-LAN deployments). Off by
+ *                       default — secure-by-default (audit F4); the env var
+ *                       RHIZOME_ALLOW_PRIVATE_PEERS=true also forces it. Applies uniformly to
+ *                       every peer connection attempt: a configured seed peer does NOT bypass the
+ *                       filter — it is only exempt from eviction-on-failure (kept as a "trusted
+ *                       anchor"), which is not the same as being allowed to connect. A multi-node
+ *                       deployment on a private LAN therefore needs this set on every node, seeds
+ *                       included (confirmed against a real multi-VM deployment — see
+ *                       scripts/local-testnet/TEST-PLAN.md campaign 10).
  * @param bindAddress    HTTP API bind address (env RHIZOME_BIND_ADDRESS). Default 127.0.0.1 —
  *                       secure-by-default (audit H-2): peering still works for outbound sync, and a
  *                       public-facing node must opt in explicitly (bind 0.0.0.0 AND set

@@ -25,6 +25,14 @@
   camps into a mutual renewed-hourly ban in a past campaign replay). If you see ban counts
   climbing alongside this symptom, you are looking at a **different** condition — re-check
   against RB-02/RB-03 before following this runbook further.
+- **This entire symptom set was reproduced for real**, not just reasoned about from source, by
+  `scripts/local-testnet/suite-deep-reorg.sh` against `staging` (`scripts/local-testnet/TEST-PLAN.md`
+  campaign 9): two camps mined past `maxReorgDepth` (128 blocks each past a fork at height 21), a
+  cross-camp heal attempt correctly failed to reconverge, ban counts stayed at `0` on both sides,
+  `degraded` stayed `null` throughout, and both camps kept mining uninterrupted. The destructive
+  recovery below (wipe + resync) was also exercised there — a freshly wiped node came back up and
+  caught up via ordinary full sync (no snapshot provider was configured in that mini-campaign, so
+  `RHIZOME_SYNC=snap` fell back silently, per `SnapshotBootstrap`'s own documented behaviour).
 
 **Confirm**
 
@@ -151,8 +159,12 @@ round"` WARN.
   is actually in place, and that `RHIZOME_ALLOWED_HOSTS` includes the proxy's advertised hostname.
 - Seed the node with known-good peers: `RHIZOME_PEERS` (requires a restart) or `POST /add_peer`
   if the node is reachable and the request carries the bearer token when
-  `RHIZOME_API_TOKEN` is set ([node-api](../node-api/spec.md) A-2). Configured seed peers bypass
-  the private-IP filter regardless of `RHIZOME_ALLOW_PRIVATE_PEERS`.
+  `RHIZOME_API_TOKEN` is set ([node-api](../node-api/spec.md) A-2). **Configured seed peers do
+  NOT bypass the private-IP filter** — a seed at an RFC1918 address is registered as a trusted
+  anchor either way, but every actual connection to it still goes through
+  `RHIZOME_ALLOW_PRIVATE_PEERS` like any other peer, so on a private-LAN deployment the flag must
+  be set on every node, seeds included (confirmed against a real 3-VM deployment — see
+  `scripts/local-testnet/TEST-PLAN.md` campaign 10).
 
 **Verify**
 

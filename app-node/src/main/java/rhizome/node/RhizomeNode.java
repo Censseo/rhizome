@@ -117,9 +117,16 @@ public final class RhizomeNode implements AutoCloseable {
         // testnet or custom-net node left at the default (loopback) advertise URL ran with the
         // SSRF filter and DNS-pin rejection OFF — any network-reachable party could add a
         // 169.254.169.254 / RFC1918 peer that syncRound then fetches (audit F4). Secure-by-default
-        // instead: only an explicit
-        // RHIZOME_ALLOW_PRIVATE_PEERS=true opts out (for local dev/devnets peering over 127.0.0.1 or
-        // private IPs via pure PEX — configured RHIZOME_PEERS seeds already bypass the filter).
+        // instead: only an explicit RHIZOME_ALLOW_PRIVATE_PEERS=true opts out (for local dev/devnets
+        // peering over 127.0.0.1 or private IPs). CORRECTED (real multi-host campaign, staging
+        // profile): a configured RHIZOME_PEERS seed does NOT bypass this filter — PeerHosts.pin is
+        // applied uniformly to every outbound connection attempt regardless of origin. A configured
+        // seed that fails admission is kept as a "trusted anchor" in PeerDiscovery (never evicted
+        // for repeated failure the way a PEX-learned peer would be) — but that retention opens no
+        // connection by itself, so a private-IP seed still needs RHIZOME_ALLOW_PRIVATE_PEERS=true
+        // to ever actually sync/broadcast. Multi-host deployment on a private LAN (every node
+        // reaching every other by RFC1918 address) therefore requires the flag on every node, seeds
+        // included — see scripts/local-testnet/TEST-PLAN.md campaign 10.
         boolean blockPrivatePeers = !config.allowPrivatePeers();
         // Optional bearer token (env RHIZOME_PEER_TOKEN) for OUTBOUND peer-to-peer requests, gated
         // by the PeerTokenPolicy: the registry is fed by UNAUTHENTICATED /add_peer and PEX, so

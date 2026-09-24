@@ -68,7 +68,15 @@ declare -A SUITE_TIMEOUT=(
   [net]=1200            # transport/HTTP, pairs hostiles (hostile_peer.py)
   [dos]=1200            # inondation /submit bornée (RHIZOME_DOS_FLOOD_SECONDS, défaut 45 s) + mesures
   [pow]=1800            # paire isolée, retarget/timewarp sur plusieurs fenêtres de blocs
-  [bootstrap]=1800      # paire isolée, snap-sync + élagage
+  [bootstrap]=4800      # paire isolée, snap-sync + élagage — le fournisseur mine seul jusqu'à
+                         # 200 blocs, PUIS jusqu'au VRAI pivot observé + maxReorgDepth (~3820 s
+                         # combinés sous charge réelle sur cette machine PARTAGÉE, cf. le
+                         # commentaire de recalibrage daté dans suite-bootstrap.sh — deux temps :
+                         # le budget d'abord, ~8,1-8,9 s/bloc réel contre ~3,4 s supposés ; puis un
+                         # 3ᵉ lancement propre a révélé que la CIBLE elle-même supposait un pivot
+                         # exact à 200, alors que `RhizomeNode` le matérialise au premier passage
+                         # du scheduler ≥ 200, observé à 201) + les étapes 2/3 en aval (~850 s
+                         # cumulés de wait_height/wait_up).
   [tls]=1800            # 5 nœuds auxiliaires isolés, relais TLS, plusieurs cycles AUTH/XFF
   [clock]=2400          # paire isolée, faketime (extraction .deb possible) + plusieurs cycles skew
   [persist]=2700        # deux cycles arrêt/SIGKILL + redémarrage + resync, chacun jusqu'à ~990 s

@@ -49,3 +49,5 @@ scripts/local-testnet/faucet/*state*.json
 # artefact d'exécution, jamais du code source.
 __pycache__/
 *.pyc
+.staging-rehearsal/
+.testnet-deep-reorg/

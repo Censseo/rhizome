@@ -65,8 +65,12 @@ class E2ENodeResilienceTest {
             }
 
             assertTrue(accepted > 0, "the node refused every transaction in the flood");
-            assertTrue(node.engine().height() > heightBeforeFlood,
-                "the node stopped producing blocks while being flooded");
+            // A synchronous check here races BlockProducer's fixed-delay loop: if the flood itself
+            // completes faster than one block interval (plausible on a JIT-warm JVM late in a
+            // larger suite run), zero producer ticks land inside the flood's own wall-clock window
+            // even though nothing is broken. Poll with real patience instead, like awaitHeight above.
+            TestNetwork.await(() -> node.engine().height() > heightBeforeFlood,
+                () -> "the node stopped producing blocks while being flooded");
             assertFalse(node.engine().isDegraded(), "the flood left the node degraded");
 
             // The flooded transactions must actually reach the chain, not merely be accepted:

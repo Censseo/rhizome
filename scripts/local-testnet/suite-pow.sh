@@ -109,7 +109,50 @@ reset_victim() {
   return 1
 }
 
+# Le PID de la source se lit de la même façon que celui de la victime : même argv (le binaire
+# natif) pour tous les nœuds, seul RHIZOME_DATA les distingue.
+SRC_DATA="$BASE_DIR/solo-src"
+SRC_KEY="$KEYS_DIR/solo-src.key"
+source_pid() {
+  ps -eo pid,args | grep "[r]hizome-node" | awk '{print $1}' \
+    | while read -r p; do tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null \
+    | grep -q "RHIZOME_DATA=$SRC_DATA" && echo "$p"; done
+}
+
+# La source ne se réinitialise JAMAIS pendant la batterie (à la différence de la victime,
+# relancée à chaque scénario de calendrier) : `anvil()` lui demande des hauteurs croissantes tout
+# du long, donc elle doit rester vivante et continuer de miner d'un bout à l'autre. Lancée UNE
+# fois ici, avant même la partie 1 (dont `diffscan.py` prend quelques secondes) pour qu'elle ait
+# déjà de l'avance quand la partie 2 la sollicite pour de bon.
+#
+# Sans elle, `Anvil.waitForSourceBlock` trouve la connexion refusée sur :4406 et le process JVM
+# crashe aussitôt (avant même son délai de 120 s, qui ne s'applique qu'à un hôte qui répond mais
+# ne mine pas assez vite) ; `anvil()` capture alors une ligne de stack trace via `tail -1`, donc un
+# `code|body` vide — silencieusement, sans jamais atteindre la porte de consensus visée. C'est
+# exactement le symptôme observé en campagne 9 (staging) avant ce correctif : POW-CTRL-02 à
+# TIME-03a d'un coup à « obtenu ... <vide> », alors que la partie 1 (qui ne dépend pas de la
+# source) avait rendu son verdict normalement.
+reset_source() {
+  local pid; pid="$(source_pid)"
+  [[ -n "$pid" ]] && kill $pid 2>/dev/null
+  sleep 2
+  rm -rf "$SRC_DATA"
+  mkdir -p "$KEYS_DIR"
+  [[ -f "$SRC_KEY" ]] || "$WALLET_BIN" keygen "$SRC_KEY" --plaintext >/dev/null
+  local addr; addr="$("$WALLET_BIN" address "$SRC_KEY")"
+  setsid env RHIZOME_NETWORK="$NETWORK" RHIZOME_PORT=4406 RHIZOME_DATA="$SRC_DATA" \
+    RHIZOME_MINER="$addr" \
+    "$NODE_BIN" -Xmx256m > "$BASE_DIR/logs/solo-src.log" 2>&1 < /dev/null &
+  local deadline=$((SECONDS + 60))
+  while (( SECONDS < deadline )); do
+    [[ -n "$(json_get "$(curl -sf --max-time 5 "$SRC/stats" 2>/dev/null)" height)" ]] && return 0
+    sleep 1
+  done
+  return 1
+}
+
 anvil_build || { echo "compilation d'Anvil impossible" >&2; exit 1; }
+reset_source || { echo "source injoignable" >&2; exit 1; }
 
 echo "=== POW/TIME : retarget et bornes temporelles ==="
 
@@ -183,33 +226,52 @@ expect_eq POW-CTRL-05 "degraded=null reorg=false" "$(node_healthy "$VICTIM")" "n
 # --- 3. Timewarp : la borne de fenêtre est une MÉDIANE, pas un horodatage brut ---------------
 # Un seul horodatage de frontière gonflé doit rester sans effet : la médiane de 3 l'écarte.
 # On mesure les deux prédictions et on regarde laquelle la chaîne a suivie.
+#
+# La frontière visée est $LOOKBACK, pas un littéral : la fenêtre ne se ferme qu'à
+# `height % LOOKBACK == 0` (diffscan.py, même règle que ChainEngine). Un littéral "20" ne visait
+# que le devnet d'origine (lookback 20) ; sous staging (lookback 60) il ne tombe jamais sur une
+# frontière réelle et TIME-03b/c jugent alors un scan vide — silencieusement, sans le dire. Trouvé
+# en campagne 9 (staging) au moment même où le correctif du lanceur de source rendait la section
+# enfin exécutable.
 reset_victim || exit 1
 T0=$(( $(date +%s%3N) - 900000 ))           # calendrier ancré 15 min dans le passé
 STEP=1200
-for h in $(seq 2 19); do
+for h in $(seq 2 $((LOOKBACK - 1))); do
   anvil --ts-abs $((T0 + h * STEP)) >/dev/null
 done
-INFLATED=$((T0 + 20 * STEP + 600000))        # +10 min sur la SEULE frontière (h=20)
+INFLATED=$((T0 + LOOKBACK * STEP + 600000))  # +10 min sur la SEULE frontière (h=$LOOKBACK)
 R_INFLATED="$(anvil --ts-abs $INFLATED)"
-expect_reject TIME-03a SUCCESS 200 "$R_INFLATED" "frontière h=20 gonflée de +600 s (dans la fenêtre future)"
-anvil --ts-abs $((INFLATED + 1000)) >/dev/null   # h=21 : porte la difficulté recalculée
-D21="$(json_get "$(vic_get "/block?blockId=21")" difficulty)"
+expect_reject TIME-03a SUCCESS 200 "$R_INFLATED" "frontière h=$LOOKBACK gonflée de +600 s (dans la fenêtre future)"
+anvil --ts-abs $((INFLATED + 1000)) >/dev/null   # h=$LOOKBACK+1 : porte la difficulté recalculée
+D_NEXT="$(json_get "$(vic_get "/block?blockId=$((LOOKBACK + 1))")" difficulty)"
 
 WARP="$($PY "$DIFFSCAN" "$VIC" --lookback $LOOKBACK --min $DMIN --max $DMAX --genesis $DGEN)"
 warp_py() { "$PY" -c "$1" <<<"$WARP"; }
 expect_eq TIME-03b 0 "$(warp_py 'import json,sys;print(len(json.load(sys.stdin)["mismatches"]))')" \
   "la chaîne suit la règle MÉDIANE sur toute sa hauteur"
 DIVERGENT="$(warp_py 'import json,sys;d=json.load(sys.stdin)["medianVsRaw"]["divergentBoundaries"];print(json.dumps(d))')"
-expect_contains TIME-03c '"boundary": 20' "$DIVERGENT" \
-  "difficulté retenue en h=21 : $D21 — médiane vs brut: $DIVERGENT"
+expect_contains TIME-03c "\"boundary\": $LOOKBACK" "$DIVERGENT" \
+  "difficulté retenue en h=$((LOOKBACK + 1)) : $D_NEXT — médiane vs brut: $DIVERGENT"
 
 # --- 4. Le domaine complet du retarget, jusqu'au plancher ------------------------------------
-# La victime est une machine à remonter le temps : on impose un calendrier serré (montée +4 bits
-# par fenêtre) puis un calendrier très lâche (descente -4 bits par fenêtre) et on vérifie que la
-# difficulté revient exactement au plancher et s'y arrête — le clamp bas, jamais atteint en réseau.
+# La victime est une machine à remonter le temps : on impose un calendrier serré (montée) puis un
+# calendrier très lâche (descente -4 bits par fenêtre) et on vérifie que la difficulté revient
+# exactement au plancher et s'y arrête — le clamp bas, jamais atteint en réseau.
+#
+# CLIMB_STEP=310 (le calendrier le plus serré possible) forçait un +4 bits plein — le plafond
+# MAX_STEP_BITS — dès la PREMIÈRE frontière (8→12). Sous devnet (lookback 20) ce n'était qu'un
+# tiers de fenêtre à un coût PoW nul. Sous staging (lookback $LOOKBACK réel, PF2 réel), c'est
+# $((LOOKBACK - 1)) blocs qu'il faut miner POUR DE VRAI à la difficulté relevée avant que la
+# frontière suivante ne la recorrige — à 2^12 hachages/bloc (~13,3 ms/hachage), ça seul dépasse
+# l'heure. Trouvé en campagne 9 (staging) : la partie 4 n'a jamais terminé avant le timeout de la
+# batterie tant que ce calendrier datait de devnet. CLIMB_STEP=2000 vise un calendrier moins serré
+# qui ne franchit qu'UN pas (+1 bit, 8→9) : la fenêtre suivante reste minable en quelques minutes
+# (2^9, pas 2^12) tout en prouvant la même propriété — la difficulté a bougé, et elle revient
+# exactement au plancher. Affaiblissement assumé et documenté (TEST-PLAN, campagne 9) plutôt que
+# découvert à la lecture, comme le plan de mise en testnet le demande pour ce cas précis.
 reset_victim || exit 1
 T0=$(( $(date +%s%3N) - 8000000 ))
-CLIMB_STEP=310
+CLIMB_STEP=2000
 for h in $(seq 2 61); do anvil --ts-abs $((T0 + h * CLIMB_STEP)) >/dev/null; done
 D_PEAK="$(vic_difficulty)"
 PEAK_TIP="$(json_get "$(vic_get /stats)" tipHash)"
@@ -218,7 +280,7 @@ PEAK_H="$(vic_height)"
 # POW-03 en direct : redémarrage au sommet de la montée, difficulté NON triviale (≠ genèse).
 restart_victim || exit 1
 expect_eq POW-03a "$D_PEAK" "$(vic_difficulty)" \
-  "difficulté reconstruite depuis les horodatages après redémarrage (chaîne de $PEAK_H blocs, 3 frontières)"
+  "difficulté reconstruite depuis les horodatages après redémarrage (chaîne de $PEAK_H blocs)"
 expect_eq POW-03b "$PEAK_TIP" "$(json_get "$(vic_get /stats)" tipHash)" "tip identique après redémarrage"
 
 LAST_TS=$((T0 + 61 * CLIMB_STEP))

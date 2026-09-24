@@ -23,8 +23,40 @@ CSV="$SIM_DIR/tx.csv"
 WORKERS="${RHIZOME_SIM_WORKERS:-8}"
 AMOUNT="${RHIZOME_SIM_AMOUNT:-0.001}"
 FUND="${RHIZOME_SIM_FUND:-1}"
+# Frais joint à CHAQUE envoi (dotation ET boucle de travail). Sur devnet MIN_FEE=0, donc ce champ
+# reste "0.0000" et rien ne change. Sous staging MIN_FEE=10 (unités de base) : un SEND sans frais
+# (WalletCli défaut à 0 si l'argument [fee] est omis) tombe sous underMinFee (FeePolicy.java) et le
+# mempool le rejette — contrairement à un appel de contrat, qui paie par gasLimit×gasPrice et non
+# par ce champ (voir sim-contract.sh, dont le budget de gaz dépasse déjà MIN_FEE d'un facteur
+# largement suffisant). Conversion base-units -> PDN exacte : MIN_FEE est un entier, et
+# DECIMAL_SCALE_FACTOR=10000 donne toujours au plus 4 décimales, la précision qu'accepte
+# pdnBaseUnits.
+FEE="${RHIZOME_SIM_FEE:-$(awk -v mf="$(profile_get MIN_FEE)" 'BEGIN { printf "%.4f", mf / 10000 }')}"
+# FEE en unités de base, pour les gardes de solde ci-dessous (bash ne fait que de l'arithmétique
+# entière — reconvertir FEE en base units serait une perte de précision inutile, cette valeur
+# EST déjà celle dont FEE est dérivé).
+FEE_UNITS="${RHIZOME_SIM_FEE_UNITS:-$(profile_get MIN_FEE)}"
 
-sim_key()  { printf '%s/sim-%d.key' "$KEYS_DIR" "$1"; }
+# Recouvrement des mineurs financeurs : `MINERS`/`KEYS_DIR` (common.sh) supposent un réseau lancé
+# par start.sh (répartition en anneau, clés dans $ROOT/scripts/local-testnet/keys). Un réseau lancé
+# par staging-rehearsal.sh a sa PROPRE convention (K premiers nœuds séquentiels, clés sous
+# $BASE_DIR/keys/) — aucune combinaison de MINER_COUNT/NODES du calcul en anneau ne reproduit cet
+# ensemble en général. Par défaut (les deux variables absentes) rien ne change : SIM_MINERS reprend
+# MINERS et MINER_KEYS_DIR reprend KEYS_DIR, donc tout réseau start.sh existant est inaffecté.
+MINER_KEYS_DIR="${RHIZOME_SIM_MINER_KEYS_DIR:-$KEYS_DIR}"
+if [[ -n "${RHIZOME_SIM_MINERS:-}" ]]; then
+  read -ra SIM_MINERS <<< "$RHIZOME_SIM_MINERS"
+else
+  SIM_MINERS=("${MINERS[@]}")
+fi
+
+# MINER_KEYS_DIR, pas KEYS_DIR : les portefeuilles sim-N.key souffrent exactement la même
+# collision TOFU que sim-contract.key (voir sim-contract.sh) — $KEYS_DIR est partagé entre TOUS
+# les réseaux locaux, et une clé sim-N réutilisée d'une campagne devnet précédente reste épinglée
+# à son chainId. Constaté en pratique : les 4 clés sim-0..3 de cette campagne étaient déjà
+# épinglées à chainId 3, et staging (chainId 4) se faisait rejeter systématiquement au premier
+# envoi. Par défaut MINER_KEYS_DIR == KEYS_DIR (inchangé pour un réseau start.sh).
+sim_key()  { printf '%s/sim-%d.key' "$MINER_KEYS_DIR" "$1"; }
 sim_pid()  { printf '%s/sim-tx-%d.pid' "$PID_DIR" "$1"; }
 sim_addr() { "$WALLET_BIN" address "$(sim_key "$1")" 2>/dev/null; }
 
@@ -42,13 +74,13 @@ wallet_nonce() {
 
 ensure_keys() {
   local k
-  mkdir -p "$SIM_DIR" "$KEYS_DIR" "$PID_DIR"
+  mkdir -p "$SIM_DIR" "$KEYS_DIR" "$MINER_KEYS_DIR" "$PID_DIR"
   for k in $(seq 0 $((WORKERS - 1))); do
     [[ -f "$(sim_key "$k")" ]] || "$WALLET_BIN" keygen "$(sim_key "$k")" --plaintext >/dev/null
   done
 }
 
-# Dote chaque portefeuille de simulation depuis un mineur DIFFÉRENT (round-robin sur MINERS) :
+# Dote chaque portefeuille de simulation depuis un mineur DIFFÉRENT (round-robin sur SIM_MINERS) :
 # la récompense est de ~2,78 PDN par bloc, un seul mineur mettrait des minutes à financer 8
 # portefeuilles. On attend que le mineur ait le solde avant de tirer dessus — au démarrage du
 # réseau les coinbases ne sont pas encore mûres.
@@ -61,15 +93,18 @@ fund_workers() {
       echo "sim-$k déjà doté ($units unités)"
       continue
     fi
-    m="${MINERS[$((k % ${#MINERS[@]}))]}"
+    m="${SIM_MINERS[$((k % ${#SIM_MINERS[@]}))]}"
     deadline=$((SECONDS + 300))
     while :; do
       units="$(wallet_units "$m" "${MINER_ADDR[$m]}")"
-      [[ -n "$units" ]] && (( units >= FUND * 10000 )) && break
+      # Le débit réel est FUND + FEE (le SEND ci-dessous couvre les deux) : sans la marge FEE_UNITS
+      # ici, un solde tombant pile entre les deux seuils passait la garde puis se faisait refuser
+      # à l'envoi — observé en pratique sous staging (FEE=10 unités) dès le 2ᵉ tour sur un mineur.
+      [[ -n "$units" ]] && (( units >= FUND * 10000 + FEE_UNITS )) && break
       (( SECONDS > deadline )) && { echo "ERREUR: mineur $m sans solde après 5 min" >&2; return 1; }
       sleep 2
     done
-    "$WALLET_BIN" send "$(node_url "$m")" "$KEYS_DIR/miner-$m.key" "$addr" "$FUND" >/dev/null \
+    "$WALLET_BIN" send "$(node_url "$m")" "$MINER_KEYS_DIR/miner-$m.key" "$addr" "$FUND" "$FEE" >/dev/null \
       || { echo "ERREUR: dotation de sim-$k depuis le mineur $m refusée" >&2; return 1; }
     echo "sim-$k doté de $FUND PDN par le mineur $m"
   done
@@ -108,7 +143,7 @@ worker_loop() {
     addr="$(sim_addr "$target")"
     nonce0="$(wallet_nonce "$node" "$me")"
     t0=$(date +%s%3N)
-    if "$WALLET_BIN" send "$(node_url "$node")" "$(sim_key "$k")" "$addr" "$AMOUNT" \
+    if "$WALLET_BIN" send "$(node_url "$node")" "$(sim_key "$k")" "$addr" "$AMOUNT" "$FEE" \
          >"$SIM_DIR/last-$k.out" 2>&1; then
       status=SUCCESS
     else
@@ -137,11 +172,11 @@ worker_loop() {
 
 start() {
   ensure_keys
-  # Adresses des mineurs (les clés existent : start.sh les a créées).
+  # Adresses des mineurs (les clés existent : start.sh, ou RHIZOME_SIM_MINER_KEYS_DIR, les a créées).
   declare -gA MINER_ADDR
   local m k
-  for m in "${MINERS[@]}"; do
-    MINER_ADDR[$m]="$("$WALLET_BIN" address "$KEYS_DIR/miner-$m.key")"
+  for m in "${SIM_MINERS[@]}"; do
+    MINER_ADDR[$m]="$("$WALLET_BIN" address "$MINER_KEYS_DIR/miner-$m.key")"
   done
   fund_workers
   [[ -f "$CSV" ]] || echo "time,worker,node,amount,status,latency_ms" > "$CSV"

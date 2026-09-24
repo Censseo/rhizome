@@ -108,7 +108,7 @@ sim_contract_alive() {
   [[ -s "$PID_DIR/sim-contract.pid" ]] && kill -0 "$(cat "$PID_DIR/sim-contract.pid")" 2>/dev/null
 }
 
-# Instantané par nœud : taille RocksDB (octets apparents, `du -sb` sur data_dir), hauteur, et
+# Instantané par nœud : taille RocksDB (octets apparents, `du -sbL` sur data_dir), hauteur, et
 # prunedBelow/snapshotPivot de `/info` (« si présents » — la plupart des nœuds de campagne n'ont
 # ni élagage ni instantané configurés et rendent alors 0). Un FICHIER PAR NŒUD sous SCRATCH_DIR,
 # écrit par un sous-processus PARALLÈLE — comme monitor.sh/status.sh : un balayage séquentiel sur
@@ -119,7 +119,13 @@ snapshot_nodes() {
   local prefix=$1 i pids=()
   for i in $(seq 0 $((NODES - 1))); do
     (
-      size="$(du -sb "$(data_dir "$i")" 2>/dev/null | cut -f1)"
+      # -L : suit un lien symbolique si data_dir en est un (la répétition générale staging, lancée
+      # par staging-rehearsal.sh, range ses données sous data/node-N et non node-N — voir
+      # TEST-PLAN.md, section soak de la campagne 9 — un lien node-N -> data/node-N comble l'écart
+      # sans toucher la convention data_dir() partagée par tout le harnais). Sans -L, `du` sur un
+      # lien rapporte la taille du LIEN lui-même (quelques octets), jamais celle du répertoire
+      # visé — un faux zéro de croissance qui ne se serait jamais vu comme une erreur.
+      size="$(du -sbL "$(data_dir "$i")" 2>/dev/null | cut -f1)"
       h="$(height_of "$i")"
       info="$(get_json "$i" /info)"
       pb="$(json_get "$info" prunedBelow)"

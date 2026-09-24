@@ -26,11 +26,37 @@ INTERVAL="${RHIZOME_SIM_CONTRACT_INTERVAL:-5}"
 GAS_LIMIT="${RHIZOME_SIM_GAS_LIMIT:-100000}"
 GAS_PRICE="${RHIZOME_SIM_GAS_PRICE:-1}"
 FUND="${RHIZOME_SIM_CONTRACT_FUND:-5}"
+# Frais des dotations SEND depuis un mineur (fund_owner) — voir sim-tx.sh pour l'explication
+# complète. Sans ce champ, `wallet send` retombe à 0 et sous staging (MIN_FEE=10) la dotation
+# tombe sous underMinFee (FeePolicy.java) et le mempool la rejette. N'affecte PAS deploy/call :
+# ceux-ci paient par gasLimit×gasPrice, et Wallet.signedContract fixe leur `fee` à 0 quoi qu'il
+# arrive (voir Wallet.java) — un champ FEE n'aurait aucun effet sur eux.
+FEE="${RHIZOME_SIM_FEE:-$(awk -v mf="$(profile_get MIN_FEE)" 'BEGIN { printf "%.4f", mf / 10000 }')}"
+# Voir sim-tx.sh : marge en unités de base pour les gardes de solde de fund_owner ci-dessous.
+FEE_UNITS="${RHIZOME_SIM_FEE_UNITS:-$(profile_get MIN_FEE)}"
 # Les .wasm ne sont PAS dans src/main/resources/dashboard/templates (qui ne garde que
 # manifest.json, volontairement — cf. app-node/build.gradle:stageContractTemplates, qui les
 # copie à la volée dans build/generated/). La source unique checked-in est lib-vm/src/test/resources.
 TEMPLATES="$ROOT/lib-vm/src/test/resources"
-KEY="$KEYS_DIR/sim-contract.key"
+
+# Recouvrement des mineurs financeurs — voir sim-tx.sh pour l'explication complète (convention
+# start.sh vs staging-rehearsal.sh). Par défaut (les deux variables absentes) rien ne change.
+MINER_KEYS_DIR="${RHIZOME_SIM_MINER_KEYS_DIR:-$KEYS_DIR}"
+if [[ -n "${RHIZOME_SIM_MINERS:-}" ]]; then
+  read -ra SIM_MINERS <<< "$RHIZOME_SIM_MINERS"
+else
+  SIM_MINERS=("${MINERS[@]}")
+fi
+
+# Le portefeuille du simulateur lui-même vit sous MINER_KEYS_DIR, PAS sous le $KEYS_DIR partagé :
+# `$KEYS_DIR` (common.sh) est commun à TOUS les réseaux locaux lancés depuis ce dépôt (devnet,
+# staging, …). Une clé qui y survit d'une campagne devnet précédente reste TOFU-épinglée à son
+# chainId (WalletCli, trust-on-first-use) et le wallet refuse ensuite de signer contre staging —
+# "node reports chainId 4 but this keyfile is pinned to chainId 3". Sous staging, MINER_KEYS_DIR
+# pointe déjà vers les clés propres à CETTE campagne (RHIZOME_SIM_MINER_KEYS_DIR) ; y loger
+# sim-contract.key aussi lui donne la même hygiène de scope sans variable supplémentaire. Par
+# défaut MINER_KEYS_DIR == KEYS_DIR (inchangé), donc aucune régression pour un réseau start.sh.
+KEY="$MINER_KEYS_DIR/sim-contract.key"
 PIDF="$PID_DIR/sim-contract.pid"
 
 # Encodage de l'ABI des templates (templates/manifest.json) : « payload = octet de sélecteur
@@ -59,19 +85,21 @@ wait_nonce() {
 # parce qu'un seul ne gagne que ~2,78 PDN par bloc produit.
 fund_owner() {
   local me=$1 need=$2 m units got=0
-  for m in "${MINERS[@]}"; do
+  for m in "${SIM_MINERS[@]}"; do
     units="$(wallet_units 0 "$me")"
     [[ -n "$units" ]] && (( units >= need * 10000 )) && return 0
-    units="$(wallet_units "$m" "$("$WALLET_BIN" address "$KEYS_DIR/miner-$m.key")")"
+    units="$(wallet_units "$m" "$("$WALLET_BIN" address "$MINER_KEYS_DIR/miner-$m.key")")"
     # `A || B && continue` renvoie un statut d'échec quand ni A ni B ne sont vrais — sous
     # `set -e` cela tuait le script SANS un mot au premier mineur suffisamment doté.
-    if [[ -z "$units" ]] || (( units < FUND * 10000 )); then
+    # Marge FEE_UNITS : le débit réel du SEND ci-dessous est FUND + FEE (voir sim-tx.sh pour le
+    # détail de la course de bord observée sans elle).
+    if [[ -z "$units" ]] || (( units < FUND * 10000 + FEE_UNITS )); then
       continue
     fi
-    "$WALLET_BIN" send "$(node_url "$m")" "$KEYS_DIR/miner-$m.key" "$me" "$FUND" >/dev/null 2>&1 \
+    "$WALLET_BIN" send "$(node_url "$m")" "$MINER_KEYS_DIR/miner-$m.key" "$me" "$FUND" "$FEE" >/dev/null 2>&1 \
       && got=$((got + FUND))
   done
-  echo "dotation du portefeuille de contrats : $got PDN demandés à ${#MINERS[@]} mineurs"
+  echo "dotation du portefeuille de contrats : $got PDN demandés à ${#SIM_MINERS[@]} mineurs"
   local deadline=$((SECONDS + 300))
   while (( SECONDS < deadline )); do
     units="$(wallet_units 0 "$me")"
@@ -83,7 +111,7 @@ fund_owner() {
 }
 
 deploy_all() {
-  mkdir -p "$SIM_DIR" "$KEYS_DIR" "$PID_DIR"
+  mkdir -p "$SIM_DIR" "$KEYS_DIR" "$MINER_KEYS_DIR" "$PID_DIR"
   [[ -f "$KEY" ]] || "$WALLET_BIN" keygen "$KEY" --plaintext >/dev/null
   local me nonce out counter token
   me="$("$WALLET_BIN" address "$KEY")"
@@ -144,7 +172,7 @@ loop() {
         2>&1 | sed -n 's/^status: //p'); status="${status:-FAILED}"
       printf '%s,counter,%d,%s\n' "$(date +%H:%M:%S)" "$n" "$status" >> "$CSV"
     else
-      target="$("$WALLET_BIN" address "$KEYS_DIR/miner-${MINERS[$((RANDOM % ${#MINERS[@]}))]}.key")"
+      target="$("$WALLET_BIN" address "$MINER_KEYS_DIR/miner-${SIM_MINERS[$((RANDOM % ${#SIM_MINERS[@]}))]}.key")"
       status=$("$WALLET_BIN" call "$(node_url "$n")" "$KEY" "$TOKEN" "01$target$(u64le 1000)" \
         "$GAS_LIMIT" "$GAS_PRICE" 2>&1 | sed -n 's/^status: //p'); status="${status:-FAILED}"
       printf '%s,token-transfer,%d,%s\n' "$(date +%H:%M:%S)" "$n" "$status" >> "$CSV"

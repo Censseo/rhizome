@@ -318,6 +318,30 @@ mirror cannot silently drift from the source of truth it mirrors.
   own header comment (O-9) for exactly what it could and could not prove on this hardware, and
   treat this spec's "implemented" tags as "implemented and exercised in single-box degraded
   form," not "validated at multi-VM scale."
+- **Four residual risks are accepted by design, not pending fixes — an operator should expect
+  them rather than file them as bugs.** All four are catalogued and reasoned about in
+  [adversarial](../adversarial/spec.md):
+  - **`REORG-01`** — a sustained majority-hashrate attacker can rewrite recent history. Irreducible
+    in any proof-of-work chain; bounded in depth by `maxReorgDepth` (120 blocks, ≈10 min at the 5 s
+    target) the same way it is on mainnet. A low-hashrate testnet makes this *cheaper* to
+    demonstrate than mainnet ever will be — expect it to be shown off against `staging`, and do not
+    read that as a staging-specific defect.
+  - **`POOL-08`** — the account-nonce state domain grows without bound if one principal is cycled
+    through endless fresh accounts; each account ever transacted leaves one permanent leaf. Bounded
+    only economically, by `minFee` and block space, never structurally.
+  - **`PERS-06`** — there is no single atomic commit across the node's separate on-disk stores; a
+    power cut between two stores' own commits is reconciled at boot (the store left ahead of chain
+    height is rewound), not prevented outright. Ordinary process shutdown is unaffected — this is a
+    power-loss/crash concern specifically.
+  - **`E2E-60`** — a crafted resource response sized well under the node's declared cap can still
+    exhaust a *small* deployment's heap during the genesis-snapshot fallback path, because the
+    fallback buffers rather than streams. Root-caused to two independent causes (buffering
+    overhead, and `org.json`'s DOM-parse memory multiplier), partially mitigated, not eliminated —
+    do not run a node's heap sized down near the fallback path's practical ceiling on an untrusted
+    network.
+
+  None of the four block a `staging` launch; all four are why this document says "accepted," not
+  "closed."
 
 ## References
 

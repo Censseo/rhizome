@@ -16,6 +16,12 @@ set +e
 
 RESULTS_DIR="$BASE_DIR/results"
 mkdir -p "$RESULTS_DIR"
+# `start.sh` creates `$BASE_DIR/logs` for the main campaign, but a suite run standalone against
+# an externally-launched network (no start.sh in the loop — e.g. staging-rehearsal.sh) never gets
+# it: `refresh_junk` (suite-dos.sh) and the isolated-pair helpers (suite-pow.sh/suite-bootstrap.sh)
+# write there unconditionally and fail on ENOENT the first time a log line is appended. Idempotent
+# either way, so this costs nothing when start.sh already made the directory.
+mkdir -p "$BASE_DIR/logs"
 SUITE_NAME="${SUITE_NAME:-suite}"
 RESULT_FILE="$RESULTS_DIR/$SUITE_NAME.tsv"
 : > "$RESULT_FILE"

@@ -601,6 +601,616 @@ scripts/local-testnet/stop.sh
 rm -rf .testnet          # données RocksDB + logs + CSV + pids
 ```
 
+## Journal de résultats — campagne 9 (staging, exécutée 2026-09-22)
+
+**Contexte.** Première campagne sur le profil `staging` (chainId 4, `rhizome-staging`, Pufferfish2,
+genesis pinné, cible réelle de 5 s) plutôt que `devnet`/`testnet` — la répétition générale visée par
+le plan de mise en testnet public (chantiers 0 à 8). **Infrastructure : un seul hôte**, pas les
+≥3 VM/machines réelles que ce plan exige pour un lancement effectif : aucun accès multi-VM n'était
+disponible pendant cette campagne (la seule VM déjà utilisée, `seed-1`, ne répondait plus —
+`Permission denied (publickey)`). Ce qui suit est donc une répétition **single-host**, présentée
+comme telle, pas la campagne multi-machines réelle ; le chantier 2 (harnais SSH, partitions
+nftables) reste entièrement ouvert.
+
+**Conditions.** HEAD `f55e879` + les scripts de cette campagne
+(`scripts/local-testnet/staging-rehearsal.sh`, nouveau : lance des processus natifs séparés plutôt
+que `start.sh`, dont le forçage de `RHIZOME_BLOCK_INTERVAL_MS` casserait la cadence Pufferfish2 réelle
+que ce profil doit justement exercer). Binaire natif. 6 nœuds sur les ports 4500-4505, 3 mineurs
+(une clé par mineur, un seul thread de minage par nœud comme en production), 3 relais.
+
+**Calibrage (chantier 1), re-mesuré sur cette machine.** `Pufferfish2Benchmark` :
+55,0 H/s/thread (18,176 ms/hash) ; 468,4 H/s à 16 threads (speedup 8,5×, 53 % d'efficacité — scaling
+sous-linéaire attendu, PF2 est memory-hard). Cohérent avec la valeur épinglée dans le javadoc de
+`staging()`/`StagingCalibrationTest` (54,6 H/s) : `minDifficulty = 8` reste valide sur ce matériel.
+
+### La trouvaille de cette campagne : le filtre SSRF ne connaît pas les seeds
+
+La première tentative de lancement (mêmes scripts, sans le correctif ci-dessous) a tourné ~45
+minutes sans que rien ne l'indique : les 6 nœuds minaient chacun sa **propre chaîne isolée**
+(`/peers` vide partout, hauteurs et tips tous différents, hauteur grimpant normalement sur chaque
+nœud pris isolément — c'est précisément ce qui rend la panne silencieuse). Logs :
+`SecurityException: peer host 127.0.0.1 resolves to a non-routable address`.
+
+Cause, trouvée par lecture de `PeerHosts.pin` (`lib-net/.../PeerHosts.java`) et de
+`RhizomeNode.java:121-123` : `blockPrivate = !config.allowPrivatePeers()` s'applique **à toute
+tentative de connexion**, sans distinction d'origine — qu'un pair vienne de `RHIZOME_PEERS` (seed
+configuré) ou du PEX. **Ceci contredit une hypothèse écrite dans le plan lui-même** (chantier 2 :
+« les seeds de `RHIZOME_PEERS` échappent au filtre »). Ce qui est vrai : un seed injoignable reste
+inscrit comme « ancre de confiance » dans `PeerDiscovery` (`seed ... unreachable; keeping trusted
+anchor`) — mais l'inscription n'ouvre aucune connexion réelle tant que `blockPrivate` la refuse.
+Conséquence générale, pas spécifique à ce profil : **toute mise en réseau multi-nœuds sur un seul
+hôte exige `RHIZOME_ALLOW_PRIVATE_PEERS=true`**, quel que soit le profil — ce n'est pas une commodité
+de `start.sh`, c'est une nécessité fonctionnelle dès que tous les nœuds sont en loopback. Cela veut
+aussi dire que **les huit campagnes précédentes** (toutes en loopback, toutes avec ce drapeau posé)
+n'ont, elles non plus, jamais exercé le chemin filtré par défaut — seul un vrai déploiement
+multi-hôtes routables (chantier 2) le peut.
+
+Corrigé dans `staging-rehearsal.sh` (ajout de `RHIZOME_ALLOW_PRIVATE_PEERS=true` dans les variables
+d'environnement par nœud, en-tête de script mis à jour avec la correction) ; réseau arrêté, données
+et état du faucet purgés (clés conservées), relancé proprement. Convergence immédiate et confirmée :
+les 6 nœuds rapportent la même hauteur, le même `tipHash` et `peers=5` à chaque cycle depuis.
+Vérifié en direct au moment d'écrire cette entrée : hauteur 70, tip `F0F0B4ED74E9`, difficulté 8
+(plancher), `peers=5`, `avgBlockIntervalMs≈5235` — proche de la cible de 5 s — identique sur les 6
+nœuds.
+
+**Genesis.** `verify-genesis.sh` contre un mineur (`:4500`) et un relais (`:4504`) : chainId 4,
+network `rhizome-staging`, `2 OK, 0 FAIL` sur les deux — même résolution de genesis quel que soit le
+rôle du nœud. Hash de genesis lu via `GET /block?blockId=1` :
+`8CB7AD090F912D3C051B1C3FBB3FF187918843DF06301339D84C91305DF46590`.
+
+### Faucet (chantier 5), exercé pour la première fois
+
+Clé de répétition générale dédiée (jamais celle du genesis, inaccessible), financée depuis la
+coinbase d'un mineur (3 PDN, frais 0,5 PDN ≥ `minFee`). `faucet.py` lancé contre le réseau réel
+(`--pow-difficulty-bits 8` pour un temps de résolution raisonnable en test) :
+
+| cas | résultat |
+|---|---|
+| drip nominal (challenge résolu, adresse fraîche) | `200 SUCCESS`, tx minée, solde du destinataire confirmé à 1 PDN |
+| second drip, même adresse, immédiat | `429 address in cooldown` |
+| adresse malformée | `400 invalid address`, aucune transaction émise |
+| challenge invalide/rejoué | `400 invalid, expired or already-used challenge` |
+| `/status` | budget quotidien suivi correctement (`dailyBudgetSpentBaseUnits` incrémenté d'un drip, `dailyBudgetRemainingBaseUnits` cohérent) |
+
+### Télémétrie et alerte (chantier 6)
+
+`/metrics` (déjà présent dans l'arbre, jamais vérifié en direct avant cette campagne) répond avec
+les 15 jauges Prometheus attendues (`rhizome_height`, `rhizome_difficulty`, `rhizome_total_work`,
+`rhizome_peers`, `rhizome_mempool_size`, `rhizome_avg_block_interval_ms`,
+`rhizome_last_block_timestamp_seconds`, `rhizome_reorg_in_progress`, `rhizome_degraded`,
+`rhizome_sync_rounds_without_progress`, `rhizome_sync_peers_banned`, `rhizome_sync_eclipsed`,
+`rhizome_pruned_below`, `rhizome_supply_base_units`, `rhizome_max_reorg_depth`), coût identique à
+`/stats` comme conçu.
+
+`monitor.sh` étendu avec les trois alertes que le plan nommait manquantes — **StaleTip** (aucun bloc
+depuis 10× le temps de bloc visé), **DiskLow** (espace libre < 10 % sur le répertoire de données d'un
+nœud), **SeedDisagreement** (chainId, hauteur d'activation de courbe, hauteur de décroissance ou hash
+de genesis non unanimes) — et converti en alertes **par transition** (déclenchement/résolution
+seulement, pas à chaque cycle de 2 s) avec livraison webhook optionnelle
+(`RHIZOME_MONITOR_WEBHOOK_URL`, best-effort). Tourné en continu depuis le redémarrage post-correctif :
+aucune fausse alerte, ce qui est le résultat attendu sur un réseau convergé et sain.
+
+### CI (chantier 7)
+
+`.github/workflows/ci.yml` activé (copié depuis `.github/ci-workflow.yml.example`, resté inactif
+faute de permission `workflows` sur le compte qui l'avait généré) : build + suite complète sur
+push/PR vers `master`, plus revue de dépendances sur PR.
+
+### E2E-89 (chantier 4.5) — déjà fermé
+
+Vérifié avant toute autre action cette campagne : `StagingGenesisTest` contient déjà
+`nativeImageReachabilityMetadataStillCoversGenesisResources`, qui asserte que
+`reachability-metadata.json` déclare toujours `"glob": "genesis/*.json"` — exactement ce que le plan
+demandait, déjà présent dans `f55e879`. Aucune modification nécessaire.
+
+### Chantier 4 (JUnit/E2E) — l'essentiel déjà fermé, vérifié cette campagne
+
+Une entrée précédente de ce journal marquait le chantier 4 « non investigué cette campagne » ; faux,
+corrigé ici après lecture directe du code plutôt que du seul journal :
+
+- **4.1 (Pufferfish2 au niveau réseau)** — fermé : `TestNetwork.PUFFERFISH2`
+  (`app-node/.../e2e/TestNetwork.java:95`) est le jumeau réel-PoW de `FAST`, déjà utilisé par des
+  tests qui minent et vérifient en PF2.
+- **4.2 (sceau d'horloge)** — fermé, et par la voie recommandée par le plan (pas de sceau ajouté à
+  `RhizomeNode`) : `ClockDriftAttackTest#aDriftedClockAcceptsWhatAnAlignedClockRejectsUntilRealTimeCatchesUp`
+  (`lib-core/.../adversarial/ClockDriftAttackTest.java`) boote deux `ChainEngine` sur
+  `NetworkParameters.staging()`, l'un à `t`, l'autre à `t+20s`, et prouve le rejet côté horloge alignée
+  puis la reconvergence quand le temps réel rattrape l'horloge dérivée. Catalogué `TIME-06`
+  (`docs/adversarial/spec.md:199`, famille `TIME`, `BOUNDED`).
+- **4.4 (état de contrat WASM à travers un reorg réseau)** — fermé : `E2EContractTest` porte
+  désormais `aReorgReversesDeployedContractCodeAndAccumulatedStorageExactlyOnARealNode` (E2E-94,
+  `DEFENDED` dans `docs/adversarial/spec.md`), le déploiement/appel de la campagne 7 rejoué sur une
+  branche perdante.
+- **4.3 (réseau hétérogène en versions)** reste, comme prévu par le plan lui-même, hors JUnit — un
+  scénario de campagne multi-binaires, pas encore joué (bloqué sur le même manque de matériel
+  multi-machines que le chantier 2).
+
+### La deuxième trouvaille de cette campagne : `suite-pow.sh` n'avait jamais tourné jusqu'au bout
+
+Trois défauts distincts, empilés dans le même fichier, découverts en rejouant `suite-pow.sh` sous le
+vrai PF2 de `staging` pour la première fois (premier point du chantier 3) :
+
+1. **Lanceur de source manquant.** Les parties 2 à 4 (paire source/victime isolée, ports
+   4406/4407) dépendent de `Anvil --source http://127.0.0.1:4406`, mais rien dans le fichier ne
+   lançait jamais de nœud à cette adresse — un défaut présent depuis la réécriture du fichier en
+   `f55e879`, jamais joué jusqu'au bout avant cette campagne. `Anvil.waitForSourceBlock` reçoit une
+   connexion refusée, le process JVM crashe aussitôt, et le wrapper bash `anvil() { ... | tail -1; }`
+   capture une ligne de trace au lieu d'un `code|body` — d'où une cascade de ~15 échecs
+   « obtenu ... <vide> » qui se lit comme autant de bugs de consensus indépendants alors qu'il n'y en
+   a qu'un. Corrigé par l'ajout de `source_pid()`/`reset_source()`, qui lance et garde vivant un
+   mineur solo dédié (`solo-src.key`, nouvellement généré dans `keys/`) pour toute la durée de la
+   batterie. `suite-bootstrap.sh` partageait très exactement le même défaut sur le même port (voir
+   plus bas) — corrigé de la même façon, plus `RHIZOME_SNAPSHOT_EVERY=200` que `suite-pow.sh` n'a
+   aucune raison de poser.
+2. **Frontière de timewarp câblée en dur.** La partie 3 (TIME-03, défense médiane-contre-brut)
+   plaçait l'horodatage gonflé à la hauteur littérale 20 — correcte seulement sous
+   `DIFFICULTY_LOOKBACK = 20` (devnet). Sous `staging` (`DIFFICULTY_LOOKBACK = 60`), aucune fenêtre
+   ne se ferme à h=20 : le scénario entier devenait silencieusement vide (`divergentBoundaries: []`),
+   un FAIL bruyant mais pour une raison sans rapport avec la défense testée. Corrigé en
+   paramétrant la frontière sur `$LOOKBACK` au lieu du littéral.
+3. **Coût réel de `Anvil` sous PF2, non budgété.** La partie 4 (balayage complet montée/plancher)
+   imposait un calendrier assez serré pour forcer le plafond `MAX_STEP_BITS` (+4 bits, 8→12) dès la
+   première fenêtre. Sous devnet (PoW quasi gratuit, lookback 20) c'était sans conséquence. Sous
+   `staging` (PF2 réel, lookback 60), cela impose de miner pour de vrai jusqu'à 59 blocs à la
+   difficulté relevée (2¹² hachages, ~54,5 s/bloc à 13,3 ms/hachage) avant que la fenêtre suivante ne
+   corrige — plus d'une heure, très au-delà des 1800 s alloués à la batterie, et exactement le risque
+   que le plan de mise en testnet nommait déjà (« Coût horloge d'Anvil sous PF2 »). Corrigé en
+   desserrant `CLIMB_STEP` (310 → 2000 ms) pour ne franchir qu'un seul pas de +1 bit (8→9) : la
+   propriété testée (la difficulté a bougé, et revient exactement au plancher) reste prouvée, à un
+   coût réel de quelques minutes au lieu d'une heure. **Affaiblissement assumé** : cette partie ne
+   démontre plus le plafond `MAX_STEP_BITS` en une seule fenêtre sous charge réelle — documenté ici
+   plutôt que découvert à la lecture, comme le plan le demande explicitement pour ce cas.
+
+Résultat après les trois correctifs : POW-CTRL-\* et TIME-\* rendent de vrais verdicts (codes HTTP
+réels) au lieu de chaînes vides. Détail par cas et tally final, ci-dessous — premier passage complet
+de `suite-pow.sh` sous `staging`, section 4 comprise (`.testnet-staging-pow`, log complet conservé en
+tant que preuve). Le trajet jusqu'à ce résultat propre a lui-même coûté six lancements : le 4ᵉ a
+crashé en silence au milieu de la boucle de descente de la section 4 (deux process orphelins,
+`PPID=1`, aucune trace d'erreur — `suite-common.sh` pose `set +e`, ce qui exclut un échec de
+commande normal ; cause la plus probable une frontière de session externe) ; le 5ᵉ lancement a
+d'abord oublié `RHIZOME_TESTNET_BASE_PORT=4500` (repli silencieux sur le port 3000 par défaut de
+`common.sh`, `diffscan.py` refusant alors la connexion) puis, une fausse lecture de `ps -p "$!"` sur
+un process lancé par `setsid` (le PID suivi est celui du wrapper, qui sort dès qu'il a forké — pas
+celui du script réellement détaché) a fait croire que ce lancement était mort alors qu'il tournait
+toujours, d'où un 6ᵉ lancement accidentellement concurrent au même sur les mêmes ports 4406/4407.
+Nettoyé (tous les process orphelins/dupliqués tués, `.testnet-staging-pow` effacé) avant le
+relancement propre ci-dessous.
+
+| Cas | Verdict | Détail |
+|---|---|---|
+| RETARGET-01 | PASS | difficulté de chaque bloc = repli indépendant des fenêtres (847 blocs) |
+| RETARGET-02 | PASS | changements hors frontière + pas > MAX_STEP_BITS — 0 |
+| RETARGET-03 | PASS | difficulté toujours dans [8, 255] |
+| RETARGET-04 | PASS | continuité des liens parent/enfant sur toute la chaîne scannée |
+| RETARGET-05 | FAIL (résiduel matériel déclaré) | la difficulté n'a pas quitté son plancher sous cadence trop rapide — hashrate de campagne insuffisant pour y forcer un franchissement, cf. « couverture non atteinte » |
+| RETARGET-06 | PASS | échelle observée (final 8) |
+| RETARGET-12 | FAIL (résiduel matériel déclaré) | aucun palier descendant après la coupure de hashrate (0 observés) — même cause que RETARGET-05 |
+| RETARGET-07 | PASS | fenêtres récentes dans la bande morte (observé vs cible) : 5/5 |
+| POW-CTRL-01 | PASS | victime repartie de la genèse |
+| POW-CTRL-02 | PASS | rejeu honnête de 5 blocs source — 200 SUCCESS |
+| POW-CTRL-03 | PASS | hauteur de la victime après rejeu — 6 |
+| POW-01 | PASS | bloc revendiquant une difficulté qu'il n'a pas payée — 400 INVALID_NONCE |
+| POW-02a | PASS | difficulté déclarée plus faible que celle imposée par l'historique — 400 INVALID_DIFFICULTY |
+| POW-02b | PASS | difficulté déclarée plus forte que celle imposée par l'historique — 400 INVALID_DIFFICULTY |
+| TIME-01a | PASS | pré-minage au-delà de la fenêtre future (+25 s) — 400 BLOCK_TIMESTAMP_IN_FUTURE |
+| TIME-01b | PASS | pré-minage DANS la fenêtre future (+5 s), la borne est une borne pas un interdit — 200 SUCCESS |
+| TIME-02 | PASS | horodatage à la médiane du passé — 400 BLOCK_TIMESTAMP_TOO_OLD |
+| TIME-04 | PASS | horodatage antérieur au parent — 400 BLOCK_TIMESTAMP_TOO_CLOSE |
+| POW-CTRL-04 | PASS | témoin après la série de rejets — 200 SUCCESS |
+| POW-CTRL-05 | PASS | nœud de campagne intact après la série — degraded=null reorg=false |
+| TIME-03a | PASS | frontière h=60 (=`$LOOKBACK`) gonflée de +600 s, dans la fenêtre future — 200 SUCCESS |
+| TIME-03b | PASS | la chaîne suit la règle MÉDIANE sur toute sa hauteur |
+| TIME-03c | PASS | difficulté retenue en h=61 : 10 (médiane) contre 8 (brut à la frontière) — la défense timewarp tient sous le vrai lookback staging (60), pas seulement sous le 20 de devnet |
+| POW-03a | PASS | difficulté reconstruite depuis les horodatages après redémarrage (chaîne de 61 blocs) — 9 |
+| POW-03b | PASS | tip identique après redémarrage — `DB4BD309C6908B205C51F0795F13F2AB19DB74BF244AC2AAC690B1FB00B2923B` |
+| RETARGET-08 | PASS | balayage montée/descente conforme au repli indépendant |
+| RETARGET-09 | PASS | aucun pas > 4 bits, aucun changement hors frontière — échelle observée 61:8→9, 121:9→8 |
+| RETARGET-10 | PASS | descente ramenée au plancher et clampée (pic atteint : 9) |
+| RETARGET-11 | PASS | montée sous calendrier serré (pic 9 > genèse 8) |
+
+**pow: 27 PASS, 2 FAIL** — les deux FAIL sont RETARGET-05/RETARGET-12, résiduels matériels déjà
+déclarés (hashrate de campagne insuffisant pour forcer un franchissement de plancher sous cadence
+serrée), pas des régressions. C'est la première fois que cette batterie rend un verdict complet —
+section 4 (POW-03\*, RETARGET-08 à 11) comprise — sous du vrai Pufferfish2.
+
+### `suite-tls.sh` contre `staging` — un faux positif de tare matérielle, un vrai piège d'outillage
+
+Première exécution de cette batterie contre `staging` (chantier 3). Convergence immédiate sur les
+26 premiers cas (TLS-00 à AUTH-07) ; deux cas ont échoué de façon identique et reproductible sur
+trois lancements successifs : `NET-08-configured-reached` et `NET-08-configured-gets-token`
+(0 requête reçue par le pair TLS **configuré** — c.-à-d. celui de `RHIZOME_PEERS`, alors que le pair
+**appris par gossip**, même AC, même infrastructure cible, en recevait 12).
+
+Deux hypothèses posées et écartées avant la vraie cause :
+
+1. **Ordonnancement du démarrage.** Hypothèse que les cibles `tls-peer-configured`/`tls-peer-gossip`
+   démarraient après les nœuds, laissant les premiers rounds PEX pruner le seed via
+   `PeerDiscovery.MAX_FAILURES`. Fausse : lecture de `PeerDiscovery.java` — un seed est explicitement
+   **exempté** de l'éviction par échecs (`"seed {} unreachable; keeping the trusted anchor"`), c'est
+   l'inverse de l'hypothèse. Le réordonnancement appliqué par précaution (cibles démarrées avant les
+   nœuds) reste dans le fichier — défendable, mais n'a rien corrigé.
+2. **Course de port auto-infligée.** Le 2ᵉ lancement s'est révélé confondu par un vrai problème de
+   méthode : relancé immédiatement après la fin du 1ᵉʳ, avant que le port du 1ᵉʳ `tls-peer-configured`
+   ne soit relâché (`SIGKILL` ne libère pas un socket instantanément) — `Address already in use`,
+   trafic capté par un process périmé. Un 3ᵉ lancement, vérifié "propre" via `ss`/`ps` avant
+   démarrage, a produit **exactement le même résultat**.
+
+Cette dernière vérification était elle-même un faux négatif : **`ss` n'est pas installé dans ce
+bac à sable** (`bash: ss: command not found` — silencieux dans un pipeline `| grep`, donc lu à tort
+comme "rien trouvé"). La batterie le savait déjà et le documente en interne
+(`XFF-03-ss-visibility`, cas `METRIC` : *« pas de visibilité réseau fiable dans ce bac à sable,
+indicatif seulement »*) — relu trop tard. Un test de connexion socket Python direct
+(`socket.connect(('127.0.0.1', 4600))`) a confirmé le port occupé, et les logs du process
+`tls-peer-configured.py` lui-même montraient, à chaque tentative, un `OSError: [Errno 98] Address
+already in use` **dès le démarrage** — jamais visible en tête de log parce que rien ne le faisait
+échouer bruyamment ailleurs.
+
+**Cause réelle** : `TLSPEER_CONFIGURED_PORT` (`BASE_PORT + 100`, soit 4600 sous `staging`) collidait
+avec le service **faucet** (chantier 5, `faucet/faucet.py`), en service de longue durée contre le
+même réseau, lancé à la main sur `--port 4600` — un choix qui tombait par coïncidence dans la plage
+que `suite-tls.sh` réserve pour ses cibles pair-TLS isolées. Le port était donc **ouvert, mais muet**
+pour ce protocole : `wait_port` réussissait (TCP accepte), `tls_peer.py` lui-même ne démarrait
+jamais, et chaque requête `/peers`/`/add_peer`/`/total_work` du nœud atterrissait sur les gestionnaires
+HTTP du faucet plutôt que sur la cible attendue — un échec pour `PeerDiscovery`
+(`"seed ... unreachable; keeping the trusted anchor"`), sans trace côté nœud puisque la connexion
+TCP elle-même réussissait. `PeerDiscovery.java` est entièrement innocent ; aucune ligne de code
+produit n'a été touchée.
+
+**Correctif** : `TLSPEER_CONFIGURED_PORT`/`TLSPEER_GOSSIP_PORT` déplacés à `BASE_PORT + 110/111`
+(4610/4611 sous `staging`), vérifié libre par sondage direct (aucune autre batterie ni service
+connu n'occupe cette plage) avant de relancer. Le faucet, lui, n'a pas été touché — il sert
+correctement le réseau vivant (`/status` répond, budget quotidien intact), c'est le plan de ports de
+`suite-tls.sh` qui devait céder, pas l'inverse.
+
+Quatrième lancement, propre, avec le correctif :
+
+| Cas | Verdict | Détail |
+|---|---|---|
+| TLS-00-certs/truststore/nodes/proxies | PASS | AC jetables + magasin de confiance + 5 nœuds auxiliaires + 2 relais debout |
+| TLS-01-status/network/chainid | PASS | via relais de confiance, identique au direct — `rhizome-staging`, chainId 4 |
+| TLS-02-untrusted-cert-rejected | PASS | sans `--cacert` ni `-k` : échec TLS pur, certificat auto-signé non approuvé |
+| AUTH-01/02/03/03-status-ok | PASS | `/add_peer` : 401 sans jeton, 401 jeton faux, 200 + jeton correct |
+| AUTH-04-peer-protocol-open | PASS | `/peers` reste ouvert sans jeton — protocole-pair, pas de surface opérateur |
+| AUTH-05/06 | PASS | `RHIZOME_PROTECT_READS` étend le jeton à `/stats` puis le redonne avec le jeton correct |
+| AUTH-07-spa-shell-open | PASS | coquille SPA exemptée (`Guard.SPA_SHELL`) |
+| NET-08-gossip-peer-presented | PASS | pair appris par gossip présenté via `/add_peer` — 200 |
+| **NET-08-configured-reached** | **PASS** | pair configuré (`RHIZOME_PEERS`, https) contacté — 11 requêtes (0 avant le correctif) |
+| **NET-08-configured-gets-token** | **PASS** | 11/11 de ces requêtes portaient le jeton porteur |
+| NET-08-gossip-reached | PASS | pair gossip contacté (11 requêtes) — la négative suivante porte sur une vraie tentative |
+| NET-08-gossip-never-gets-token | PASS | 0/11 vers le pair gossip ne portait le jeton (`PeerTokenPolicy.tokenFor` : https configuré seulement) |
+| XFF-01-spoofing-does-not-evade | PASS | `RHIZOME_TRUST_XFF=false` : la clé du limiteur reste l'adresse socket, l'en-tête usurpé n'a aucun effet — 500/1500 refusées |
+| XFF-02-spoofing-evades | PASS | `RHIZOME_TRUST_XFF=true` : 0/1500 refusées sous charge identique — l'en-tête est cru, piège opérationnel délibéré et démontré |
+| XFF-03-unreachable-from-other-interface | PASS | connexion directe sur une autre interface refusée — le relais est le seul point d'entrée effectif |
+| TLS-FINAL-healthy-a/b/peertok | PASS | les trois nœuds auxiliaires intacts après les rafales XFF — `degraded=null reorg=false` |
+
+**tls: 27 PASS, 0 FAIL.** Le résidu méthodologique à retenir n'est pas un défaut du produit : c'est
+que **`ss` ne doit plus être utilisé pour vérifier un port libre sur cette machine** — préférer un
+test de connexion socket direct (Python) ou lire `/proc/net/tcp`, comme fait ici.
+
+### `suite-clock.sh` contre `staging` — première exécution, propre du premier coup
+
+La moitié « horloge PROCESSUS » a pu s'exécuter : `faketime` obtenu par la voie sûre documentée en
+tête de fichier (`apt-get download` + `dpkg-deb -x` dans un répertoire à nous, aucune mutation de
+`/var/lib/dpkg`, horloge système de la machine partagée jamais touchée). Un seul lancement, aucun
+défaut d'outillage rencontré cette fois — contraste net avec les sagas pow/bootstrap/tls.
+
+| Cas | Verdict | Détail |
+|---|---|---|
+| CLOCK-01 | PASS | horloge SKEW décalée de -19 s (visé ±15 s) — `faketime` agit bien sur le PROCESSUS |
+| CLOCK-02 | PASS | bloc RÉELLEMENT miné par un processus à l'horloge avancée de +15 s (< borne 15 s) — 200 SUCCESS |
+| CLOCK-03 | PASS | RocksDB reconstruit le même bloc #2 après redémarrage, horloge toujours faussée — tip identique |
+| CLOCK-04 | PASS | latence `/stats` sous horloge décalée (ActiveJ non bloqué par le décalage) — 18 ms ≤ 5000 |
+| CLOCK-05 | PASS | horloge SKEW décalée de +25 s (visé +30 s) — `faketime` agit bien sur le PROCESSUS |
+| CLOCK-06 | PASS | bloc RÉELLEMENT miné par un processus à l'horloge avancée de +30 s (> borne 15 s) — 400 `BLOCK_TIMESTAMP_IN_FUTURE` |
+| CLOCK-07 | PASS | REF reste à la genèse, non dégradé, après le refus — `degraded=null reorg=false` |
+
+**clock: 7 PASS, 0 FAIL.** Première preuve que la borne future de 15 s tient contre un processus
+`rhizome-node` réel dont `clock_gettime()` lui-même ment — pas seulement contre un champ
+d'horodatage forgé sur un processus à l'horloge intacte (ce que `suite-pow.sh`/E2E-92/93 prouvent
+déjà). Le repli CLOCK-\* METRIC/SKIP documenté dans l'en-tête du fichier (pas de réseau/cache apt
+→ moitié « attaquant » seulement) n'a pas eu à se déclencher cette fois.
+
+### `suite-bootstrap.sh` contre `staging` — exécutée de bout en bout, deux échecs de budget-temps sous contention CPU
+
+Premier passage complet de cette batterie contre `staging` depuis le correctif du défaut n°1
+(fournisseur jamais démarré, même défaut de séquencement que `suite-pow.sh`, budget porté à 3000 s
+dans `run-campaign.sh`). Les douze premiers cas (BOOT-01 à BOOT-11 : snap-sync au pivot 200,
+filigrane, 410 sous le filigrane, convergence de tip du nœud snap, refus au démarrage d'une
+rétention sous plancher) passent sans réserve.
+
+| Cas | Verdict | Détail |
+|---|---|---|
+| BOOT-01 | PASS | instantané matérialisé au pivot 200 (1 morceau(x), racine 7062D09A7FCA92A8) |
+| BOOT-02 | PASS | pivot enterré de 120 blocs sous le tip 320 (exigé: 120) |
+| BOOT-03 | PASS | filigrane = pivot + 1 : l'état adopté au pivot 200 — 201 |
+| BOOT-04 | PASS | racine d'état du bloc 201, appliquée sur l'état adopté |
+| BOOT-05 | PASS | suffixe rattrapé jusqu'à 324 (pivot 200 + 120 blocs) |
+| BOOT-06 | PASS | filigrane annoncé sous le pivot: prunedBelow=201 |
+| BOOT-07 / BOOT-07b | PASS | corps sous le filigrane: 410 GONE, y compris côté JSON |
+| BOOT-08 / BOOT-09 | PASS | même tip et même racine d'état que le fournisseur après 326 blocs |
+| BOOT-10 / BOOT-11 | PASS | `RHIZOME_PRUNE=100` refusé au démarrage (sous le plancher de 248 blocs), aucun service n'écoute ensuite |
+| **BOOT-12** | **FAIL** | nœud élagué frais à 2548, réseau à 2904 — échéance `wait_height` (300 s) atteinte avant rattrapage |
+| BOOT-13 | PASS | filigrane d'élagage annoncé: prunedBelow=2304 (rétention 248) |
+| BOOT-14 | PASS | bloc 1 jeté: 410 GONE |
+| **BOOT-15** | **FAIL** | le 410 devait porter `prunedBelow=2304` (capturé ~1,3 s plus tôt), portait `2306` |
+| BOOT-16 | PASS | au-dessus du filigrane, le corps est servi normalement (bloc 2314) |
+| BOOT-17 | PASS | le nœud élagué **converge** sur le tip du réseau — boucle de reconvergence à échéance 120 s, atteint le même tip après 119,7 s (donc a failli, lui aussi, manquer son budget) |
+| BOOT-18 / BOOT-19 | PASS | nœud d'archive (`RHIZOME_PRUNE` absent) : bloc 1 toujours servi, aucun filigrane |
+
+**bootstrap: 18 PASS, 2 FAIL.** Les deux échecs partagent une seule cause, et ce n'est pas un défaut
+de pruning. La section 3b lance le nœud élagué avec un répertoire de données **vide** contre un
+réseau `staging` déjà à la hauteur ~2900 (des heures de minage réel accumulées avant cette section
+du run), sur une machine qui hébergeait au même moment `suite-soak.sh` et un second réseau `staging`
+isolé — voir [[shared-box-load-spikes]]. BOOT-12 capture la hauteur réseau une fois (`NET_H`) puis
+attend au plus 300 s que le nœud élagué la rattrape à 2 blocs près ; sous cette contention, le
+rattrapage n'était pas fini à l'échéance (2548 contre 2904, soit 356 blocs de retard). BOOT-15
+hérite du même rattrapage encore en cours : `prunedBelow` (= tip − 248) a avancé de 2304 à 2306
+dans l'intervalle, à peine plus d'une seconde, qui sépare sa capture (juste avant BOOT-13) de la
+requête `/sync?start=1&end=1` de BOOT-15 — le nœud validait encore des blocs de rattrapage à un
+rythme bien supérieur à la cadence de minage. La preuve que ce n'est qu'un budget de temps, pas un
+défaut : BOOT-17, qui interroge en boucle pendant 120 s au lieu d'une seule fois (le commentaire du
+fichier l'explique déjà — « la cible bouge, une comparaison instantanée mesurerait la latence de
+gossip, pas la conformité ») — **passe**, mais en utilisant 119,7 des 120 s, confirmant que le
+rattrapage était réellement lent ce jour-là, pas un aléa isolé.
+
+**Corrigé dans le fichier** (même style que `suite-tls.sh`/`suite-pow.sh` : défaut de méthode de
+test, pas de produit) : l'échéance de BOOT-12 passe de 300 à 600 s, et BOOT-15/16 relisent
+`prunedBelow` juste avant de l'utiliser au lieu de réutiliser la valeur capturée pour BOOT-13.
+**Pas encore rejoué de bout en bout** cette campagne — la correction se vérifiera au prochain
+passage complet de la batterie, idéalement sur une machine moins contendue.
+
+### `suite-soak.sh` contre `staging` — trois lancements, un seul défaut de produit inexistant : tout venait du harnais
+
+Première exécution de cette batterie contre `staging` (chantier 3). Les deux premiers lancements ont
+buté sur des défauts du harnais de charge, pas du produit — chacun découvert et corrigé en cours de
+campagne :
+
+1. **Mineurs financeurs introuvables.** `sim-tx.sh`/`sim-contract.sh` supposent la convention
+   `start.sh` (mineurs en anneau, clés sous `$KEYS_DIR` partagé) ; le réseau `staging-rehearsal` a sa
+   propre convention (K premiers nœuds, clés sous son propre `keys/`). Corrigé par
+   `RHIZOME_SIM_MINERS`/`RHIZOME_SIM_MINER_KEYS_DIR`, deux variables d'environnement optionnelles —
+   absentes, le comportement `start.sh` existant est inchangé à l'identique.
+2. **Collision TOFU de chainId.** `WalletCli` épingle au premier usage le chainId du nœud contacté
+   par une clé donnée, et refuse ensuite de signer si le nœud change de chainId (protection anti-rejeu
+   inter-chaînes, volontaire). `sim-contract.key` puis les quatre `sim-N.key` des workers de
+   `sim-tx.sh` vivaient sous le répertoire de clés **partagé entre toutes les campagnes locales** de
+   ce dépôt, et avaient déjà été épinglés à `chainId 3` par une campagne `devnet` antérieure — refus
+   systématique de signer contre `staging` (`chainId 4`). Corrigé en réutilisant
+   `RHIZOME_SIM_MINER_KEYS_DIR` pour aussi scoper les clés du simulateur lui-même (aucune nouvelle
+   variable) : sous `staging`, ces clés sont fraîches, épinglées proprement dès le premier envoi.
+3. **Marge de frais omise dans les gardes de solde.** `staging` a `minFee = 10` (base units), contre
+   0 sur `devnet` d'où viennent ces scripts ; les boucles d'attente « le mineur a-t-il assez pour
+   doter ce worker » comparaient au montant brut de la dotation sans ajouter les frais du `send` qui
+   suit, laissant une fenêtre étroite où le solde passait la garde puis se faisait rejeter au vrai
+   envoi. Corrigé en ajoutant les frais comme marge des deux côtés de la garde.
+
+Troisième lancement, propre, avec les trois correctifs :
+
+| Cas | Verdict | Détail |
+|---|---|---|
+| SOAK-00-baseline | PASS | instantané pris sur 6 nœuds (6 répondants) avant la fenêtre de charge |
+| SOAK-00-monitor-started | PASS | `monitor.sh` lancé |
+| SOAK-00-tx-started / -contract-started | PASS | `sim-tx.sh` (4 workers) et `sim-contract.sh` démarrés |
+| SOAK-01-window | PASS | fenêtre de charge de 180 s écoulée sans interruption |
+| SOAK-02-stopped | PASS | `monitor.sh` et les simulateurs arrêtés proprement |
+| SOAK-03-no-degraded-episode | PASS | 0 ligne `degraded` non nulle sur 395 lignes de `monitor.csv` |
+| SOAK-GROWTH-node0..5 | METRIC | 4805–5390 o/bloc sur 23 blocs (mesure `du -sbL`, symlink RocksDB suivi correctement) |
+| SOAK-GROWTH-BOUND-node0..5 | PASS | borne large de 5 000 000 o/bloc — métrique à suivre dans le temps, pas un seuil réglé |
+| SOAK-TX-SUBMITTED / SOAK-TX-RATIO | METRIC / PASS | 28 envois, 28/28 confirmés (100 % ≥ 90) |
+| SOAK-CONTRACT-SUBMITTED / SOAK-CONTRACT-RATIO | METRIC / PASS | 6 appels, 6/6 confirmés (100 % ≥ 90) |
+| SOAK-MEMPOOL-DRAIN | PASS | mempool cumulé (tous nœuds) à 0 dans les 60 s suivant l'arrêt des simulateurs |
+| SOAK-FINAL-healthy | PASS | `degraded=null reorg=false` après la fenêtre de charge |
+
+**soak: 17 PASS, 0 FAIL.** Une seule fenêtre de 180 s — loin des jours visés par le chantier 3 pour
+la croissance RocksDB et la décroissance des scores de ban — mais premier passage propre de bout
+en bout : croissance par bloc mesurée (pas seulement bornée), confirmation de charge réelle à 100 %
+une fois le harnais correctement scopé à ce réseau, aucun épisode dégradé, pas de fuite de mempool
+apparente. Les trois défauts corrigés ci-dessus sont des défauts de harnais de test générique
+partagé entre campagnes, jamais rencontrés sur `devnet` (frais nuls, une seule campagne à la fois) —
+ils resteront latents pour quiconque relance ces scripts contre un réseau non-`devnet` sans les
+correctifs.
+
+### `suite-deep-reorg.sh` contre `staging` — `REORG_TOO_DEEP` atteint en vrai pour la première fois
+
+Aucune campagne précédente n'avait fait dépasser `maxReorgDepth` (120 blocs) aux deux camps d'une
+partition — la partition de `start.sh -p` guérit trop vite, et campagne 7/8 ne l'ont jamais tentée.
+`suite-deep-reorg.sh` tourne sur son propre réseau éphémère (`.testnet-deep-reorg`, 4 nœuds, 2
+mineurs, un par camp, cadence accélérée à 3 s — la batterie teste la **logique** de profondeur, pas
+la fidélité de cadence à 5 s de mainnet, exactement comme documenté dans son en-tête et le plan).
+Deux phases : un contrôle négatif (partition courte de 15 blocs, doit guérir), puis la partition
+réelle jusqu'à 128 blocs par camp (au-delà de l'horizon 120), suivie d'une tentative de pont
+croisé qui **doit** échouer pour être correcte, et enfin une étape meilleur-effort de récupération
+d'un nœud vidé.
+
+| Cas | Verdict | Détail |
+|---|---|---|
+| REORG-DEEP-00-campaign-up / -fork-recorded / -partitioned | PASS | 4 nœuds up, fork commun h=3, partition étanche (aucun pair hors-camp) |
+| REORG-DEEP-NEG-01/02/03 (contrôle négatif) | PASS | partition de 15 blocs/camp guérit — reconvergence sur un tip unique à h=21, les deux camps `degraded=null reorg=false` après guérison |
+| REORG-DEEP-02-fork-recorded | PASS | second point de fork h=21, juste avant la partition profonde |
+| REORG-DEEP-03-camp-a/b-depth | METRIC | 128 blocs sur chaque camp (cible 128, horizon 120) |
+| REORG-DEEP-03-camp-a/b-exceeds-horizon | PASS | 128 ≥ 121, les deux camps ont dépassé l'horizon avant la tentative de guérison |
+| REORG-DEEP-04-heal-attempted | PASS | pont croisé posé entre les deux camps à profondeur 128/128 |
+| REORG-DEEP-04-no-reconvergence | PASS | les deux camps restent scindés 120 s après le pont (tips distincts) — **résultat correct : la finalité tient au-delà de l'horizon** |
+| REORG-DEEP-04-camp-a/b-not-rewound | PASS | hauteur camp A 168→176, camp B 149→157 pendant la tentative — aucun recul |
+| REORG-DEEP-04-no-bans-camp-a/b | PASS | 0 ban de chaque côté — un refus `REORG_TOO_DEEP` répété n'accumule **aucun** score de ban, conforme à `RB-01`/`SyncDriver.PENALTY_INVALID` |
+| REORG-DEEP-04-not-degraded-a/b | PASS | `degraded=null reorg=false` sur les deux camps après le refus |
+| REORG-DEEP-04-camp-a/b-still-mining | PASS | les deux camps continuent de produire après le refus (176→177, 157→161) |
+| REORG-DEEP-05-recovery-node-up | METRIC | nœud 1 vidé puis relancé avec `RHIZOME_SYNC=snap` — up en moins de 90 s |
+| REORG-DEEP-05-recovery-synced | METRIC | **non** — h=208 (nœud reconstruit) vs h=191 (pair « gagnant » désigné) après 300 s |
+| REORG-DEEP-05-recovery-pruned-below | METRIC | vide — repli attendu sur resynchronisation complète (aucun fournisseur d'instantané dans cette mini-campagne) |
+
+**deep-reorg: 21 PASS, 0 FAIL, 5 METRIC.** La règle de profondeur elle-même est pleinement statuée
+aux phases 2/3/4, PASS sans réserve : partition courte guérit, partition profonde ne guérit **pas**,
+sans dégradation, sans faux ban, sans que le minage s'arrête d'un côté ou de l'autre — exactement le
+comportement que `docs/operations/runbooks.md` RB-01 décrit, maintenant corroboré par une exécution
+réelle plutôt que déduit du seul code. La phase 5 (récupération) est explicitement meilleur-effort
+et enregistrée en `METRIC`, jamais en `PASS`/`FAIL`, pour une raison documentée dans le script
+lui-même : le pont croisé de la phase 4 a déjà introduit chaque nœud du camp adverse dans le
+registre PEX du nœud reconstruit, qui peut donc se resynchroniser avec le camp **non désigné**
+gagnant s'il répond en premier — ce qui s'est produit ici (h=208 contre le camp A plutôt que h=191
+du camp B désigné), une preuve incidente supplémentaire de la même règle de profondeur, pas
+l'échec d'une resynchronisation ciblée. Aucune campagne locale n'a de fournisseur de snapshot
+(`RHIZOME_SNAPSHOT_EVERY` absent partout), donc `RHIZOME_SYNC=snap` retombe silencieusement sur une
+resynchronisation complète — chemin réel et pertinent puisqu'un nœud vide n'a pas de fenêtre de
+reorg à respecter, mais pas la démonstration ciblée d'adoption d'un instantané que viserait un
+suivi dédié avec un fournisseur configuré dès le départ.
+
+### Couverture non atteinte (mise à jour)
+
+- **Le multi-VM réel.** Un seul hôte, pas ≥3 machines routables entre elles — le chemin SSRF filtré
+  par défaut (`RHIZOME_ALLOW_PRIVATE_PEERS=false`) n'a donc **toujours pas** tourné pour de vrai
+  malgré la trouvaille ci-dessus : elle démontre qu'il bloque tout en loopback, pas qu'il se comporte
+  correctement entre hôtes distincts. Chantier 2 (tunnels SSH, inventaire, partitions nftables) reste
+  entièrement à faire sur du matériel réel.
+- **`suite-pow.sh` rejouée sous PUFFERFISH2** — fait cette campagne, voir la trouvaille ci-dessus ;
+  trois défauts trouvés et corrigés dans le fichier lui-même. `RETARGET-05`/`RETARGET-12` (la
+  difficulté ne quitte jamais son plancher sous la rampe de hashrate de la partie 1, faute de cœurs
+  disponibles pour dépasser durablement la cible sur cette machine partagée) restent un résidu
+  matériel déclaré, pas un défaut du harnais.
+- **`suite-bootstrap.sh`** exercée de bout en bout cette campagne, voir ci-dessus —
+  `bootstrap: 18 PASS, 2 FAIL`. Les deux échecs (BOOT-12, BOOT-15) sont un budget-temps trop court
+  pour un rattrapage réel sous contention CPU partagée, pas un défaut de pruning — la preuve étant
+  que BOOT-17 observe la convergence complète deux minutes plus tard. Corrigés dans le fichier
+  (échéance 300→600 s, relecture du filigrane juste avant usage). **Tentative de reconfirmation
+  menée, non concluante, pour une raison elle-même instructive** : un premier rejeu, lancé sans
+  fixer `RHIZOME_TESTNET_DIR`, a écrit dans le répertoire par défaut pendant que trois processus
+  `rhizome-node` d'une tentative précédente (ports 4406/4411/4412, répertoire de données déjà
+  supprimé sous leurs pieds) étaient encore vivants et squattaient ces mêmes ports fixes — le
+  nouveau lancement n'a donc pas pu s'y lier, et les vieux processus zombies ont continué à
+  répondre avec un état périmé, produisant cinq échecs inédits (BOOT-03, BOOT-07b, BOOT-17,
+  BOOT-18, BOOT-19) qui n'ont rien à voir avec le pruning : de la contamination de harnais, pas
+  une régression. Un second rejeu, cette fois avec `RHIZOME_TESTNET_DIR` correctement aligné sur
+  le répertoire des zombies pour que le `kill_node` propre à la batterie les nettoie, a bien
+  éliminé le zombie du port 4406 — mais deux autres (ports 4411/4412) survivent jusqu'à leur point
+  de nettoyage plus tardif dans le script, et surtout la machine porte au même moment **quinze**
+  processus `rhizome-node` vivants issus de batteries antérieures de cette même campagne
+  (`suite-deep-reorg.sh`, `staging-rehearsal.sh`) jamais éteints. Sous cette charge, le nœud
+  fournisseur du second rejeu minait à ~45 s/bloc au lieu des 5 s visés — atteindre le pivot
+  demanderait plusieurs heures, ce qui n'est pas rejouable dans cette session. Cette session ne
+  peut pas non plus nettoyer ces processus orphelins elle-même : `kill` sur un PID choisi à la
+  main y est refusé (`[Interfere With Workloads]`), seul le nettoyage interne propre à chaque
+  batterie (par correspondance de `RHIZOME_DATA`) fonctionne, et seulement pour ses **propres**
+  processus. **Verdict honnête** : le correctif reste non rejoué proprement ; ce que cette
+  tentative a établi à la place, c'est que la contention CPU **observée** dans le run original
+  (l'hypothèse retenue pour BOOT-12/BOOT-15) est réelle et mesurable, pas une supposition — et
+  qu'elle s'aggrave avec chaque batterie lancée sans extinction, un problème d'hygiène de session
+  distinct du code testé.
+- **`suite-tls.sh`** exercée cette campagne, voir ci-dessus — `tls: 27 PASS, 0 FAIL` après correction
+  d'une collision de port avec le faucet (chantier 5), aucun défaut produit trouvé.
+- **`suite-clock.sh`** exercée cette campagne, voir ci-dessus — `clock: 7 PASS, 0 FAIL`, aucun défaut
+  trouvé, `faketime` obtenu sans toucher l'horloge système de la machine partagée.
+- **`suite-soak.sh`** exercée cette campagne, voir ci-dessus — `soak: 17 PASS, 0 FAIL` au troisième
+  lancement, après correction de trois défauts de harnais (mineurs financeurs, collision TOFU de
+  chainId, marge de frais). Une seule fenêtre de 180 s : la croissance RocksDB et la décroissance des
+  scores de ban sur plusieurs jours, visées par le chantier 3, restent extrapolées.
+- **`suite-deep-reorg.sh`** exercée cette campagne une fois les deux suites précédentes terminées,
+  voir ci-dessus — `deep-reorg: 21 PASS, 0 FAIL, 5 METRIC`. Reste hors d'atteinte : le multi-VM réel
+  (une partition sur un seul hôte n'exerce pas de coupure réseau physique) et une démonstration
+  ciblée d'adoption d'instantané en récupération (aucune campagne locale n'a de fournisseur de
+  snapshot configuré).
+- **`suite-dos.sh`** exercée cette campagne, résultats réels : `dos: 6 PASS, 0 FAIL`. Le flot d'un
+  seul poste (489 req/s, 21728 requêtes/44,4 s) fait mordre `AdmissionControl.SUBMIT_POW_MAX_PER_SEC`
+  (20663/21728 délestées en 429), la cadence honnête ralentit (7851 → 11099 ms/bloc) sans jamais
+  dégrader ni geler le nœud (`degraded=null`, `reorg=false`, hauteur 258→262 pendant l'inondation) —
+  la mesure que le chantier 1 demandait sur ce cap, jamais faite sous PF2 réel avant cette campagne.
+- **`REORG_TOO_DEEP` en vrai.** Atteint cette campagne (voir `suite-deep-reorg.sh` ci-dessus) : les
+  deux camps d'une partition dépassent 120 blocs, le refus tient, sans dégradation ni faux ban.
+  Ce qui reste manquant est la même limite que partout ailleurs dans ce journal — une **vraie**
+  coupure réseau entre machines distinctes plutôt qu'une partition logicielle sur un seul hôte.
+- **Le point de fonctionnement de mainnet** (difficulté 16) reste hors d'atteinte sur ce matériel et
+  à cette échelle — cette campagne prouve la boucle de retarget à `minDifficulty = 8`, pas la
+  difficulté cible de mainnet.
+- **La durée.** Quelques dizaines de minutes, pas les jours du chantier 3 (`suite-soak.sh`) :
+  croissance RocksDB, décroissance des scores de ban, cadence des snapshots restent extrapolées.
+- **BURN et DECAY** restent inertes (supply de départ loin de `S*`), comme sur `devnet` — décision
+  assumée du chantier 0.5, pas une lacune de cette campagne.
+- **Checkpoint publié** (chantier 0.4) : pas encore posé, la chaîne n'a pas encore tourné assez
+  longtemps pour qu'un checkpoint ait un sens.
+- **Documentation opérateur (chantier 8).** Contrairement à l'état constaté en tête de ce plan,
+  déjà largement en place dans l'arbre au moment de rédiger cette section : la table complète des
+  20 variables `RHIZOME_*` lues par `NodeConfig` est réconciliée dans `README.md`, avec sa section
+  « Join the public staging testnet » ; `docs/operations/runbooks.md` RB-01 couvre `REORG_TOO_DEEP`
+  en détail et cite maintenant une exécution réelle plutôt qu'une déduction du seul code ; les
+  quatre résiduels assumés (`REORG-01`, `POOL-08`, `PERS-06`, `E2E-60`) sont publiés côté opérateur
+  dans `docs/operations/spec.md` (Known limits), pas seulement dans le catalogue adverse interne.
+  Ce qui reste : documenter *cette* campagne 9 elle-même dans le corps de ce plan une fois classée.
+- **Déploiement reproductible (chantier 7).** `app-node/Dockerfile` et `scripts/local-testnet/deploy/`
+  (units systemd, template nginx, `verify-genesis.sh`) existent déjà dans l'arbre — une affirmation
+  du plan de mise en testnet (« rien n'existe : ni Dockerfile, ni unit systemd ») désormais fausse ;
+  seule la CI restait à activer, fait cette campagne (voir plus haut).
+
+## Journal de résultats — campagne 10 (staging, 3 VM OVH réelles + 2 nœuds locaux, 2026-09-23)
+
+**Contexte.** Ce que la campagne 9 déclarait hors d'atteinte à répétition (« le multi-VM réel »,
+« aucun accès multi-VM n'était disponible ») : cette campagne dispose de 3 VM Proxmox OVH
+(`rhizome-seed-1/2/3`, LAN privé `10.10.10.11/12/13`, un hôte de saut) tournant le binaire natif du
+profil `staging` (chainId 4, `rhizome-staging`, Pufferfish2), plus, nouveauté demandée pour cette
+campagne, **2 nœuds supplémentaires sur ce devbox lui-même**, reliés au maillage privé par un unique
+tunnel SSH bidirectionnel plutôt que par une ouverture réseau — but explicite : vérifier que la
+convergence tient malgré la latence WAN réelle entre le devbox et l'infrastructure OVH, pas
+seulement entre machines du même LAN.
+
+**Incident 1 — le filtre SSRF, en vrai cette fois.** Les 3 VM minaient chacune sa propre chaîne
+isolée malgré `RHIZOME_PEERS` renseigné (`peers:2` annoncé, mais aucun bloc ne traversait) :
+`journalctl` a montré `SecurityException: peer host ... resolves to a non-routable address` — exactement
+la trouvaille de la campagne 9, mais cette fois sur un LAN privé routable entre machines réelles, pas
+en loopback sur un seul hôte, donc la première confirmation que le comportement décrit là-bas
+généralise à un déploiement multi-hôtes. Corrigé en ajoutant `RHIZOME_ALLOW_PRIVATE_PEERS=true` aux
+trois `node.env` puis en redémarrant (`fix-private-peers.sh`).
+
+**Incident 2 — `REORG_TOO_DEEP`, atteint par accident.** La correction de l'incident 1 n'a *pas*
+reconvergé les 3 VM : chacune avait déjà miné plus de `maxReorgDepth` (120) blocs de sa propre
+branche isolée pendant que le filtre bloquait toute synchronisation, donc chaque nœud refusait
+désormais la chaîne des deux autres (« past the reorg horizon; nothing to adopt ») — la garde
+fonctionnant exactement comme prévu, mais rendant la guérison automatique impossible. Comme
+`RHIZOME_DATA` sur staging ne contient aucune clé (`RHIZOME_MINER` est une adresse publique), la
+procédure a été : arrêter les 3 services, purger `/var/lib/rhizome-node/*` sur chacun, relancer avec
+le correctif de l'incident 1 déjà en place (`reset-chain-data.sh`). Reconvergence immédiate et propre
+depuis la genèse — hauteur, `tipHash` et `totalWork` identiques sur les 3 VM à chaque relevé depuis.
+
+**Adressage des nœuds locaux.** Un seul tunnel SSH vers `seed-1` (au travers de l'hôte de saut déjà
+utilisé pour l'accès), avec un `-L` (les nœuds locaux tirent depuis `seed-1`) et deux `-R` (`seed-1`
+peut rappeler chaque nœud local sur son propre loopback). Seule `seed-1` a eu besoin d'un changement
+de configuration (`RHIZOME_PEERS` étendu aux deux adresses forwardées) — `seed-2`/`seed-3` n'ont pas
+été touchées, exactement le schéma « un seul hôte à reconfigurer » visé par le chantier 2 pour ce
+genre d'adressage. Aucune ouverture de pare-feu entrant, aucun `GatewayPorts` requis côté VM.
+
+**Résultat — convergence à 5 nœuds, latence WAN comprise.** Relevé direct sur les 3 VM (SSH, pas via
+le tunnel, pour écarter tout artefact du tunnel lui-même) et sur les 2 nœuds locaux au même instant :
+hauteur 554 (VM) / 554-555 (locaux, écart d'un bloc — latence de propagation normale sur une chaîne
+vivante, pas une divergence), même `tipHash` sur les 3 VM. `peers` : 4 sur `seed-1` (2 VM + 2 locaux),
+2 sur `seed-2`/`seed-3`, 1-2 sur chaque nœud local.
+
+**La preuve qui compte : contribution bidirectionnelle, pas seulement pull-sync.** `BlockProducer` ne
+journalise pas de ligne dédiée au succès d'un minage local ; la vérification s'est donc faite en
+relisant le champ `to` de la transaction coinbase de chaque bloc entre les hauteurs 400 et 538 et en
+le comparant aux deux adresses des nœuds locaux
+(`00E35103…9`, `0029AD38…6`). Sur 139 blocs : **3 minés par le nœud local A** (h=475, 497, 498),
+**4 par le nœud local B** (h=496, 505, 506, 508), les 132 restants par les 3 VM. Ces 7 blocs sont
+toujours dans la chaîne canonique au dernier relevé (h≥554) — donc non seulement les nœuds locaux
+ont gagné des courses de PoW malgré la latence WAN vers les 3 VM, mais leurs blocs ont été adoptés et
+sont restés adoptés par l'ensemble du maillage. C'est la démonstration directe demandée pour cette
+campagne : la convergence tient malgré la latence, dans les deux sens.
+
+**Ce qui reste ouvert.**
+- **Reconciliation avec l'outillage du dépôt.** Cette campagne a été pilotée par des scripts ad hoc
+  (`fix-private-peers.sh`, `reset-chain-data.sh`, `add-local-peers.sh`) plutôt que par
+  `scripts/local-testnet/tunnels.sh`/`inventory.tsv` déjà prévus à cet effet par le chantier 2 — à
+  reporter dans l'outillage versionné plutôt que de rester dans un scratchpad de session.
+- **Partition physique réelle (nftables, chantier 2).** Non exercée cette campagne — seule la
+  convergence a été testée, pas la coupure. `suite-deep-reorg.sh` reste donc, comme en campagne 9,
+  validée sur partition logicielle single-host, pas sur une coupure réseau entre machines distinctes.
+- **Checkpoint publié (chantier 0.4)** : toujours pas posé.
+- **Durée et charge.** Quelques dizaines de minutes de convergence observée, pas les jours du
+  chantier 3 ; aucun générateur de charge (`sim-tx.sh`/`sim-contract.sh`) exécuté contre ce
+  déploiement réel — seul le minage organique a produit des blocs.
+- **Le point de fonctionnement de mainnet** (difficulté 16) reste hors d'atteinte : `minDifficulty=8`
+  observé (`avgBlockIntervalMs≈6486` au dernier relevé), calibré pour un hashrate agrégé bien en deçà
+  de mainnet.
+- **Trois régions distinctes (recommandation du plan, risques à porter)** : non fait — les 3 VM sont
+  chez le même hébergeur, dans ce qui semble être la même zone ; aucune mesure de propagation
+  inter-régions n'en découle.
+
 ## Journal de résultats — campagne 8 (exécutée 2026-09-04)
 
 **Conditions.** Même HEAD que la campagne 7 (009-native-coin-burn), même machine (16 cœurs, 32 Go),

@@ -255,6 +255,16 @@ tasks.register('nativeImage', Exec) {
                 .listFiles({ f -> f.name.endsWith('.jar') } as FileFilter)*.absolutePath
                 .sort().join(File.pathSeparator)
         commandLine nativeImageBin.absolutePath, '--no-fallback', '-O2',
+                // -march defaults to 'x86-64-v3' (AVX2/BMI1/BMI2/FMA baseline) — fine for the
+                // machine that runs the build, but this binary is meant to be copied onto other
+                // hosts (deploy/rhizome-node.service, the staging campaign VMs). Confirmed
+                // 2026-09-23: a v3 build refused to start on a staging VM whose Proxmox `cpu:
+                // host` config still exposed a generic/older virtual CPU ("Common KVM
+                // processor", no AVX2) — GraalVM's own startup CPU-feature check aborts with
+                // exit 1 before any application code runs. 'compatibility' targets the widest
+                // baseline so the same binary boots on any deployment target; revisit only once
+                // every real deployment host's CPU baseline is known and pinned.
+                '-march=compatibility',
                 '-cp', classpath,
                 "-H:Path=${nativeImageOut.get().asFile}",
                 '-H:Name=rhizome-node',

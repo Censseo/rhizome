@@ -3,10 +3,13 @@ package rhizome.adversarial.e2e;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.Map;
@@ -149,6 +152,64 @@ class E2EContractTest {
             E2EFixtures.mint(node, PublicAddress.random());
             assertEquals(heightBefore + 1, node.engine().height());
             assertEquals(200, RawHttp.get(port, "/block_count", Map.of()).status());
+        }
+    }
+
+    /**
+     * E2E-94 — the same deploy-then-call sequence, on a branch that loses a fork race.
+     * {@code WasmContractProcessor}'s undo journal is proven against an in-memory store elsewhere
+     * (component suites); this is the same inversion running on RocksDB, inside a real reorg driven
+     * over HTTP by a peer, with the contract's code AND its accumulated storage both having to
+     * disappear together. A revert that drops the code but leaves a stale storage entry (or the
+     * reverse) desyncs the state root from every honest peer, which is a permanent fork rather than
+     * a stuck counter.
+     */
+    @Test
+    void aReorgReversesDeployedContractCodeAndAccumulatedStorageExactlyOnARealNode() throws Exception {
+        E2EFixtures.Identity deployer = E2EFixtures.Identity.generate();
+        Path premine = E2EFixtures.premine(tempDir.resolve("premine.json"),
+            TestNetwork.FAST, Map.of(deployer, PREMINE));
+
+        try (TestNetwork network = new TestNetwork(tempDir)) {
+            RhizomeNode winner = network.node("winner")
+                .snapshot(premine).mining().blockInterval(250).start();
+            RhizomeNode loser = network.node("loser").snapshot(premine).start();
+
+            PublicAddress contract = Contracts.deriveAddress(deployer.address(), 0);
+
+            // The losing branch deploys, then calls twice across two blocks -- proving the second
+            // call reads what the first one committed, not merely that a deploy happened -- then
+            // buries both under a couple of empty blocks.
+            E2EFixtures.mint(loser, PublicAddress.random(),
+                contractTx(deployer, PublicAddress.empty(), TransactionKind.DEPLOY,
+                    counterWasm(), GAS_LIMIT, 0),
+                contractTx(deployer, contract, TransactionKind.CALL, new byte[0], GAS_LIMIT, 1));
+            E2EFixtures.mint(loser, PublicAddress.random(),
+                contractTx(deployer, contract, TransactionKind.CALL, new byte[0], GAS_LIMIT, 2));
+            E2EFixtures.mintEmpty(loser, PublicAddress.random(), 2);
+
+            assertTrue(loser.service().contractCode(contract).length > 0,
+                "the deployed code must be readable before the reorg, or this proves nothing");
+            var beforeReorg = loser.service()
+                .dryRun(PublicAddress.empty(), contract, new byte[0], 0, GAS_LIMIT)
+                .orElseThrow(() -> new AssertionError("dry-run slot unavailable"));
+            assertEquals(3L, ByteBuffer.wrap(beforeReorg.output()).order(ByteOrder.LITTLE_ENDIAN).getLong(),
+                "two real on-chain calls must have left the counter at 2, so a third (dry-run) "
+                    + "call reads back 3 -- proving the second call saw the first call's write");
+
+            TestNetwork.awaitHeight(winner, 12);
+            loser.service().addPeer(TestNetwork.urlOf(winner));
+            TestNetwork.await(() -> loser.knownPeers().contains(TestNetwork.urlOf(winner)),
+                () -> "the winning peer was never admitted");
+            TestNetwork.syncUntil(loser,
+                () -> loser.engine().blockAt(2).hash().equals(winner.engine().blockAt(2).hash()));
+
+            assertNull(loser.service().contractCode(contract),
+                "the contract outlived the branch that deployed it");
+            assertEquals(0L, loser.engine().nextNonce(deployer.address()),
+                "the nonce must be free again, or the deployer can never redeploy");
+            assertFalse(loser.engine().isDegraded(),
+                "a reorg that leaves the node degraded has not reverted cleanly");
         }
     }
 }
