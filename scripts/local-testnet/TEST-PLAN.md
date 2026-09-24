@@ -634,6 +634,33 @@ révoquée retire silencieusement et définitivement un seed d'un réseau public
 Cette phase ne touche à aucun hôte de production ni aux 3 seeds de campagne — elle peut se faire
 sur un hôte jetable indépendant.
 
+#### État (2026-09-24) — partiellement exercée depuis une session sans accès infra
+
+Cette session n'a **ni clé SSH ni agent** (`ssh-add -l` échoue, aucune `id_*` sous `~/.ssh/`) et ce
+devbox n'a **ni `nft` ni `systemd-run` installés** — les deux volets réellement « matériel réel »
+de cette phase (tunnel SSH vers un hôte distant, pose de règles nftables sur un hôte jetable) sont
+donc restés hors de portée et le bandeau des deux scripts n'a **pas** été retiré. Ce qui a pu être
+exercé pour de vrai, sans toucher à aucune infrastructure externe :
+
+- `tunnels.sh check` — chemin `local`/direct (pas le chemin tunnel SSH) exercé contre un serveur
+  HTTP jetable sur `127.0.0.1:18801` : échec correctement rapporté port fermé, succès correctement
+  rapporté port servi, sur la même invocation sans redémarrage du script.
+- `partition.sh apply` — garde-fou n°3 (refus catégorique d'un index `role=seed`) confirmé, erreur
+  levée avant tout appel système.
+- `partition.sh apply` — garde-fou n°1 (watchdog `systemd-run`) confirmé *fail-closed* même dans le
+  pire cas : sur un hôte sans `systemd-run` du tout, `apply` abandonne proprement avec « aucune
+  règle posée » plutôt que de poser des règles non protégées. Découvert involontairement (ce
+  devbox n'a pas l'utilitaire), mais c'est exactement le cas que le garde-fou doit couvrir.
+- Petit constat d'outillage, à garder à l'œil au premier run réel : `heal_host` avale toute erreur
+  (`2>/dev/null || true`) et annonce « table supprimée (ou déjà absente) » même quand `nft`
+  lui-même est absent de l'hôte — idempotence voulue, mais qui masquerait aussi un hôte mal
+  provisionné plutôt que de le signaler.
+
+**Reste à faire, par un opérateur avec accès SSH réel et un hôte jetable doté de `nft`+`systemd`** :
+les points 2 et 3 de la liste ci-dessus (tunnel SSH réel + panne injectée ; coupure nftables réelle
+sur un hôte jetable) n'ont toujours pas tourné. Une fois faits, retirer les bandeaux d'en-tête et
+compléter cette section plutôt que la réécrire.
+
 ### Phase 1 — Campagne 11 elle-même : soak + charge + coupure réelle (ferme #1, #2, #3, prépare #4)
 
 Reprend la topologie de campagne 10 (3 VM OVH + 2 bancs d'essai locaux), pilotée cette fois par
