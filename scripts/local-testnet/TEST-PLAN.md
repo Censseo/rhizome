@@ -887,6 +887,30 @@ le rythme réel. Des fourches courtes organiques (2 branches, 6-30 s) surviennen
 seules ; le seuil « 3 cycles consécutifs » du monitor les laisse la plupart du temps sous le
 radar et n'a alerté que sur les vrais événements (les 2 coupures, la scission à 3 camps de J0).
 
+**Volet smart contracts (exercé le 2026-09-28, pendant le soak).** Trois terrains, produit sans
+défaut trouvé. (a) JUnit `:lib-vm:test` vert à HEAD. (b) La batterie `suite-contract.sh` rejouée
+sur un devnet loopback frais : **43 PASS, 0 FAIL** (templates déployés et appelés, modules
+adverses refusés à l'exécution, gaz, déterminisme) — même verdict que la campagne 9. (c) Les 9
+templates déployés et exercés sur le staging RÉEL (5 nœuds, sous charge sims+monitor) — les 7
+jamais sortis du loopback y passent pour la première fois (amm, launchpad avec valeur attachée
+via Forge — le wallet CLI code value=0 en dur, agent_wallet avec flux session complet, router,
+emitter, logtree, pair avec approve/transfer_from/LP). Onze contrôles de déterminisme
+`/call_readonly` : sorties identiques 5/5 nœuds au même tip à chaque fois, valeurs exactes
+vérifiées (réserves AMM après swap avec fee 0,3 % : 362 644 calculé = trouvé). Les chemins
+d'échec sont prouvés à l'EXÉCUTION via le champ `error` de `/call_readonly` (trap sur
+sur-budget session, session révoquée, trap après sous-appel) et le rollback on-chain est
+prouvé par l'état : `router.call_then_trap` vers un `token.transfer` laisse le solde du
+destinataire inchangé sur les 5 nœuds. Note de méthode, worth keeping : le `status:` du wallet
+CLI reflète l'ADMISSION (mempool), pas le résultat d'exécution — un appel qui trappe revient
+SUCCESS à l'admission (comportement documenté de la batterie pour les DEPLOY invalides, ici
+généralisé aux CALL qui trapent) ; toute assertion sur un trap doit lire l'état ou
+`/call_readonly`, jamais le statut d'admission. Revert et valeur attachée : une tx trappée
+débite le gaz consommé (17 754 u vers le mineur) et JAMAIS la valeur attachée
+(`Executor.applyContract` : la valeur ne bouge que sur succès ; solde natif du launchpad resté
+à 100 = seul le buy réussi) — les « coins ne bougent que si les tokens bougent » du launchpad
+tiennent structurellement. Pas de route receipts exposée pour relire le gasUsed exact d'une tx
+minée : seule lacune d'observabilité rencontrée.
+
 **État du soak laissé tourner — handover.** Seeds : `systemd` `rhizome-node.service` sur
 seed-1/2/3 (ssh `rhizome@10.10.10.1x` via le saut ; env `/etc/rhizome/node.env`, dont la nouvelle
 `RHIZOME_ALLOWED_HOSTS` ; données `/var/lib/rhizome-node`, baseline 374 MB à h=280 le 2026-09-28
