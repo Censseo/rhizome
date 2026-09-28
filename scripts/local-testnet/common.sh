@@ -90,7 +90,15 @@ else
   NODE_HEAP="${RHIZOME_TESTNET_HEAP:-384m}"
 fi
 
-KEYS_DIR="$ROOT/scripts/local-testnet/keys"
+# Clés du harnais. Surchargeable : les suites signent avec ces fichiers et le wallet CLI épingle
+# chaque clé à un chainId au premier usage (TOFU) — les clés du dépôt sont donc épinglées au
+# devnet (chainId 3) par les campagnes passées, et toute suite pointée sur un autre réseau
+# (staging, chainId 4) REFUSERA de signer. RHIZOME_TESTNET_KEYS_DIR permet de pointer vers un
+# trousseau fraîchement généré pour ce réseau (même noms de fichiers), exactement comme
+# RHIZOME_SIM_MINER_KEYS_DIR le fait pour les simulateurs. NB : les suites restent calibrées
+# devnet par ailleurs (suite-tx forge avec chain=3 en dur et des frais à 0) — voir TEST-PLAN,
+# campagne 11 : le port complet des suites vers un autre profil reste à faire.
+KEYS_DIR="${RHIZOME_TESTNET_KEYS_DIR:-$ROOT/scripts/local-testnet/keys}"
 CHAIN_CHECK="$ROOT/scripts/local-testnet/chaincheck.py"
 PID_DIR="$BASE_DIR/pids"
 PY="$(command -v python3 || command -v python)"

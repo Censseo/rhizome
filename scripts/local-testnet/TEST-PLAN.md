@@ -911,6 +911,51 @@ débite le gaz consommé (17 754 u vers le mineur) et JAMAIS la valeur attachée
 tiennent structurellement. Pas de route receipts exposée pour relire le gasUsed exact d'une tx
 minée : seule lacune d'observabilité rencontrée.
 
+**Volet « reste à tester » (exécuté le 2026-09-28 après-midi, soak toujours en cours).** Chaque
+item de la liste « testable maintenant » a été couvert, produit sans défaut trouvé :
+
+- **Logs en réseau réel** : `/logs?height=` et `/logs/stream` (SSE) lus sur staging — topics
+  décodés (`before`→`after` de logtree en ordre causal au même bloc, `count` d'emitter avec le
+  compteur en data, `swap` de l'AMM), et le cas qui compte : le frame **trappé** (logtree sel 1)
+  n'a laissé **aucun** log dans son bloc — son `before` a été supprimé avec lui. Le SSE connecte,
+  annonce son retry et pousse un événement par bloc en direct.
+- **Join d'un 4ᵉ nœud** (port 13005, `RHIZOME_SYNC=snap RHIZOME_PRUNE=248`) : synchro complète
+  de ~3 500 blocs via les tunnels (~15 blocs/s, ~5 min), convergence EXACTE au tip du réseau.
+  Le snap a basculé silencieusement en full-sync — les seeds ne servaient aucun instantané :
+  `RHIZOME_SNAPSHOT_EVERY` = 17 280 blocs (~1 jour à 5 s) et les seeds redémarrent de genèse ce
+  matin-là ; comportement conforme, mais à retenir pour le testnet public (un join le premier
+  jour est un full-sync). Élagage actif : `prunedBelow` suit le tip (plancher 248 respecté),
+  `/block?blockId=1` → `{"error":"pruned"}`, `/sync?start=…` sous filigrane → **410 GONE en
+  portant le filigrane**, 200 au-dessus. Nœud arrêté et purgé après le test.
+- **Boxes** : flux complet sur staging (create avec registres i64/bytes/bool, show, list par
+  propriétaire, update topup+registres, spend) — cohérence `/box` **5/5 nœuds identiques** au
+  même tip, comptabilité exacte (spend libère 7 PDN pile, frais décomptés), livre de loyer
+  vivant (`rentPaidHeight`, `expiresAtHeight`). Au passage : `box-update` **remplace** la liste
+  entière des registres (perte des non-mentionnés, 103→93 octets) — sémantique à connaître.
+- **Tokens natifs** : mint (TSTN, 1 M, déc. 4), transfer, burn — tous minés, soldes exacts
+  (999 700/300/999 600) et `totalSupply` décrémenté par le burn (999 900), identiques sur les
+  nœuds interrogés. Piège de mesure rencontré (encore) : lire un solde avant le minage de la tx
+  suivante fausse le verdict — l'attente de nonce doit être re-ancrée avant CHAQUE envoi.
+- **Faucet contre le réseau réel** : drip nominal miné à travers le maillage multi-hôtes (1 PDN
+  confirmé on-chain), cooldown 429, adresse malformée 400, challenge à usage unique 400 au
+  rejeu, budget quotidien décompté. Un 503 sur envoi très rapproché = course de nonce entre
+  drips (le faucet ne sérialise pas ses `wallet send`) — à usage humain, sans effet ; noté.
+- **Alarmes monitor en vrai** (mini-réseau local isolé, sans seed) : StaleTip déclenché au seuil
+  EXACT (50 s = 10×5 s) après arrêt du mineur, résolu à la reprise ; alertes stall par nœud
+  dans les deux sens ; **webhook livré pour chaque transition** (triggered ET resolved, 5
+  événements). Mini-réseau démonté après.
+- **Burst DoS borné** (`suite-dos.sh` contre le banc A, nœud réel du soak) : **6 PASS, 0 FAIL** —
+  268 req/s soutenus 30 s (7 944 requêtes, 7 255 délestées en 429 : la borne
+  `AdmissionControl.SUBMIT_POW_MAX_PER_SEC`=25/s mord), nœud jamais `degraded`, **hauteur
+  4464→4469 pendant l'inondation** (production honnête continue, à 5,9 s/bloc vs 3,9 s de
+  témoin — le coût est mesurable et borné), sain et réactif après.
+- **Suites tx/wallet contre staging : bloquées, chantier identifié.** `suite-tx.sh` forge avec
+  `chain=3` (devnet) en dur et des frais à 0 (rejetés par `MIN_FEE`=10 de staging) ; les clés du
+  dépôt sont TOFU-épinglées au devnet. `common.sh` gagne `RHIZOME_TESTNET_KEYS_DIR` (surcharge
+  du trousseau, même pattern que `RHIZOME_SIM_MINER_KEYS_DIR`) — le port complet des suites vers
+  un profil arbitraire (chainId dérivé du profil, frais profilés, re-vérification des attentes
+  devnet) reste à faire et est documenté ici comme tel.
+
 **État du soak laissé tourner — handover.** Seeds : `systemd` `rhizome-node.service` sur
 seed-1/2/3 (ssh `rhizome@10.10.10.1x` via le saut ; env `/etc/rhizome/node.env`, dont la nouvelle
 `RHIZOME_ALLOWED_HOSTS` ; données `/var/lib/rhizome-node`, baseline 374 MB à h=280 le 2026-09-28
