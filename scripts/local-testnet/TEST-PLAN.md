@@ -956,6 +956,29 @@ item de la liste « testable maintenant » a été couvert, produit sans défaut
   un profil arbitraire (chainId dérivé du profil, frais profilés, re-vérification des attentes
   devnet) reste à faire et est documenté ici comme tel.
 
+**Port des suites vers un profil arbitraire + première exécution tx/wallet/net/contract sur le
+réseau réel (2026-09-28 soir).** Le port identifié plus haut a été fait et prouvé dans les deux
+sens. Ce qui a changé : `suite_fee_pdn()` dans suite-common (frais minimaux du profil au format
+PDN ; devnet = 0.0000 → comportement inchangé), `fund_from_miners` paie ses envois, les défauts
+de `sign_send` (suite-tx) et les littéraux de site dérivent de `profile_get CHAIN_ID/MIN_FEE`
+(les valeurs DÉLIBÉRÉES restent : chaîne étrangère 999, frais 5000 du TX-02, débordements),
+suite-net/contract forgent avec le chainId du profil, suite-wallet paie ses `send`/`box-*`/
+`token-*`. **Non-régression devnet : 48/35/38/43 PASS, 0 FAIL — baselines campagne 8 exactes**
+(le prérequis du nœud étranger sur :3090 pour WALLET-04 doit être démarré à part, sinon 33/1
+faute d'environnement). **Sur staging réel : 162/164** — tx 48/48, wallet 35/35 (avec le nœud
+étranger sur BASE+90=13090), net 37/38, contract 42/43. Les deux écarts, classés sans défaut
+produit : `API-12-honest-still-served` — la table de strikes PAR CLIENT (second palier documenté
+par la batterie elle-même) déleste la source juste après le flot de blocs poubelle dans le
+timing réel, là où le loopback l'évitait (reproduction isolée : l'envoi honnête passe
+parfaitement une fois la fenêtre passée) ; `VM-T04-counter-state` — l'état relu avant
+propagation de l'appel (~5 s/bloc réel vs instantané loopback). Leçons de harnais versées : ne
+jamais partager un `RHIZOME_TESTNET_DIR` entre profils (le nœud strict auxiliaire de suite-net
+plante sur les données de l'autre chaîne et sa version devnet survit en fuyard —
+arrêt par scan d'environ, pas par `pkill -f` qui s'auto-tue) ; une dérive de nonce à travers
+tunnel fait sonder `exists` à une MAUVAISE adresse (un « module installé » pouvait être un
+contrat de 1039 octets là où le module incriminé en fait 40 — toujours recouper par codeHash) ;
+les attentes de propagation restent l'unique calibration à généraliser pour réseau non-loopback.
+
 **État du soak laissé tourner — handover.** Seeds : `systemd` `rhizome-node.service` sur
 seed-1/2/3 (ssh `rhizome@10.10.10.1x` via le saut ; env `/etc/rhizome/node.env`, dont la nouvelle
 `RHIZOME_ALLOWED_HOSTS` ; données `/var/lib/rhizome-node`, baseline 374 MB à h=280 le 2026-09-28

@@ -111,14 +111,14 @@ echo "== WALLET-04 — épinglage chain-id (trust on first use) =="
 fund_from_miners "$ENC_ADDR" 10
 wait_balance "$NODE" "$ENC_ADDR" 100000 300 || echo "  (dotation partielle)"
 BOB="$(addr_of "$KEYS_DIR/tx-bob.key")"
-r="$(run send "$(node_url "$NODE")" "$ENC_KEY" "$BOB" 1 --passphrase-file "$PASS_FILE")"
+r="$(run send "$(node_url "$NODE")" "$ENC_KEY" "$BOB" 1 "$(suite_fee_pdn)" --passphrase-file "$PASS_FILE")"
 expect_contains WALLET-04-first-send "status: SUCCESS" "$(out_of "$r")" "envoi depuis une clé chiffrée"
 grep -qi "chainid" "$ENC_KEY" 2>/dev/null \
   && record WALLET-04-pin-written PASS "épingle inscrite dans le fichier de clé" \
   || record WALLET-04-pin-written PASS "épingle scellée dans la charge chiffrée (invisible en clair)"
 
 # Une attente explicite qui contredit le nœud abandonne AVANT toute signature.
-r="$(run send "$(node_url "$NODE")" "$ENC_KEY" "$BOB" 1 --expect-chain-id 2 --passphrase-file "$PASS_FILE")"
+r="$(run send "$(node_url "$NODE")" "$ENC_KEY" "$BOB" 1 "$(suite_fee_pdn)" --expect-chain-id 2 --passphrase-file "$PASS_FILE")"
 [[ "$(rc_of "$r")" != 0 ]] \
   && record WALLET-04-expect-mismatch PASS "--expect-chain-id contradictoire refusé: $(out_of "$r" | tail -1)" \
   || record WALLET-04-expect-mismatch FAIL "attente contradictoire acceptée"
@@ -126,7 +126,7 @@ r="$(run send "$(node_url "$NODE")" "$ENC_KEY" "$BOB" 1 --expect-chain-id 2 --pa
 # Le vrai scénario : le même fichier de clé pointé sur un nœud d'une AUTRE chaîne.
 if curl -sf --max-time 3 "$FOREIGN_URL/info" >/dev/null 2>&1; then
   fchain="$(json_get "$(curl -s --max-time 5 "$FOREIGN_URL/info")" chainId)"
-  r="$(run send "$FOREIGN_URL" "$ENC_KEY" "$BOB" 1 --passphrase-file "$PASS_FILE")"
+  r="$(run send "$FOREIGN_URL" "$ENC_KEY" "$BOB" 1 "$(suite_fee_pdn)" --passphrase-file "$PASS_FILE")"
   [[ "$(rc_of "$r")" != 0 ]] \
     && record WALLET-04-foreign-node PASS "nœud de la chaîne $fchain refusé par l'épingle: $(out_of "$r" | tail -1)" \
     || record WALLET-04-foreign-node FAIL "signature émise vers une AUTRE chaîne ($fchain)"
@@ -139,7 +139,7 @@ fi
 
 echo
 echo "== WALLET-05 — bornes côté client (avant tout appel réseau) =="
-r="$(run send "$(node_url "$NODE")" "$KEYS_DIR/tx-alice.key" "$BOB" 0.000001)"
+r="$(run send "$(node_url "$NODE")" "$KEYS_DIR/tx-alice.key" "$BOB" 0.000001 "$(suite_fee_pdn)")"
 [[ "$(rc_of "$r")" != 0 ]] \
   && record WALLET-05-subunit PASS "montant plus fin qu'une unité de base refusé" \
   || record WALLET-05-subunit FAIL "montant sous l'unité de base accepté"
@@ -171,7 +171,7 @@ OWNER="$(addr_of "$OWNER_KEY")"
 
 # --- boîtes de données ---
 n="$(next_nonce "$NODE" "$OWNER")"
-r="$(run box-create "$(node_url "$NODE")" "$OWNER_KEY" 1 --reg "str:campagne7" --reg "i64:42")"
+r="$(run box-create "$(node_url "$NODE")" "$OWNER_KEY" 1 --fee "$(suite_fee_pdn)" --reg "str:campagne7" --reg "i64:42")"
 BOX_ID="$(out_of "$r" | sed -n 's/^box: //p')"
 expect_contains BOX-01-create "status: SUCCESS" "$(out_of "$r")" "box-create (1 PDN verrouillé, 2 registres)"
 wait_nonce_advance "$NODE" "$OWNER" "$n" 240 || true
@@ -183,13 +183,13 @@ else
   record BOX-03-list FAIL "aucun identifiant de boîte à chercher (box-create a échoué)"
 fi
 n="$(next_nonce "$NODE" "$OWNER")"
-r="$(run box-update "$(node_url "$NODE")" "$OWNER_KEY" "$BOX_ID" --topup 1 --reg "str:maj7")"
+r="$(run box-update "$(node_url "$NODE")" "$OWNER_KEY" "$BOX_ID" --topup 1 --fee "$(suite_fee_pdn)" --reg "str:maj7")"
 expect_contains BOX-04-update "status: SUCCESS" "$(out_of "$r")" "box-update (top-up + registre)"
 wait_nonce_advance "$NODE" "$OWNER" "$n" 240 || true
 expect_contains BOX-05-updated-remote "maj7" "$(run box-show "$(node_url "$REMOTE")" "$BOX_ID")" "la mise à jour a convergé"
 n="$(next_nonce "$NODE" "$OWNER")"
 bal_before="$(balance_units "$NODE" "$OWNER")"
-r="$(run box-spend "$(node_url "$NODE")" "$OWNER_KEY" "$BOX_ID")"
+r="$(run box-spend "$(node_url "$NODE")" "$OWNER_KEY" "$BOX_ID" --fee "$(suite_fee_pdn)")"
 expect_contains BOX-06-spend "status: SUCCESS" "$(out_of "$r")" "box-spend (récupération de la valeur)"
 wait_nonce_advance "$NODE" "$OWNER" "$n" 240 || true
 bal_after="$(balance_units "$NODE" "$OWNER")"
@@ -201,14 +201,14 @@ fi
 
 # --- tokens natifs ---
 n="$(next_nonce "$NODE" "$OWNER")"
-r="$(run token-mint "$(node_url "$NODE")" "$OWNER_KEY" RZ7 "Campagne7" 1000000 2)"
+r="$(run token-mint "$(node_url "$NODE")" "$OWNER_KEY" RZ7 "Campagne7" 1000000 2 --fee "$(suite_fee_pdn)")"
 TOKEN_ID="$(out_of "$r" | sed -n 's/^token: //p')"
 expect_contains TOKEN-01-mint "status: SUCCESS" "$(out_of "$r")" "token-mint 1e6 RZ7"
 wait_nonce_advance "$NODE" "$OWNER" "$n" 240 || true
 expect_contains TOKEN-02-show-remote "RZ7" "$(run token-show "$(node_url "$REMOTE")" "$TOKEN_ID")" "token-show depuis le nœud $REMOTE"
 expect_contains TOKEN-03-balance "1000000" "$(run token-balance "$(node_url "$REMOTE")" "$TOKEN_ID" "$OWNER")" "solde initial du minteur"
 n="$(next_nonce "$NODE" "$OWNER")"
-r="$(run token-transfer "$(node_url "$NODE")" "$OWNER_KEY" "$TOKEN_ID" "$BOB" 250)"
+r="$(run token-transfer "$(node_url "$NODE")" "$OWNER_KEY" "$TOKEN_ID" "$BOB" 250 --fee "$(suite_fee_pdn)")"
 expect_contains TOKEN-04-transfer "status: SUCCESS" "$(out_of "$r")" "token-transfer 250 vers bob"
 wait_nonce_advance "$NODE" "$OWNER" "$n" 240 || true
 expect_contains TOKEN-05-recipient "250" "$(run token-balance "$(node_url "$REMOTE")" "$TOKEN_ID" "$BOB")" "solde de bob vu du nœud $REMOTE"
@@ -218,7 +218,7 @@ expect_contains TOKEN-05-recipient "250" "$(run token-balance "$(node_url "$REMO
 expect_contains TOKEN-06-holder-list "$(printf '%s' "$TOKEN_ID" | tr 'A-F' 'a-f')" \
   "$(run token-list "$(node_url "$REMOTE")" "$BOB" | tr 'A-F' 'a-f')" "token-list du détenteur"
 n="$(next_nonce "$NODE" "$OWNER")"
-r="$(run token-burn "$(node_url "$NODE")" "$OWNER_KEY" "$TOKEN_ID" 1000)"
+r="$(run token-burn "$(node_url "$NODE")" "$OWNER_KEY" "$TOKEN_ID" 1000 --fee "$(suite_fee_pdn)")"
 expect_contains TOKEN-07-burn "status: SUCCESS" "$(out_of "$r")" "token-burn 1000"
 wait_nonce_advance "$NODE" "$OWNER" "$n" 240 || true
 expect_contains TOKEN-08-supply-down "998750" "$(run token-balance "$(node_url "$REMOTE")" "$TOKEN_ID" "$OWNER")" \

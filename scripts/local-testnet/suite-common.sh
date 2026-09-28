@@ -135,10 +135,18 @@ wait_balance() {
 }
 
 # Dote `addr` depuis les mineurs (chaque mineur envoie `pdn` PDN depuis son propre nœud).
+# Frais minimaux du profil chargé, au format PDN décimal qu'attendent le wallet CLI et Forge.
+# Devnet : MIN_FEE=0 → "0.0000", comportement historique inchangé. Un profil à frais non nuls
+# (staging : 10 unités de base) exige ce montant sur CHAQUE envoi signé, sinon le mempool le
+# rejette sous underMinFee et la batterie mesurerait ses propres artefacts, pas le nœud.
+suite_fee_pdn() {
+  awk -v mf="$(profile_get MIN_FEE)" 'BEGIN { printf "%.4f", mf / 10000 }'
+}
+
 fund_from_miners() {
   local addr=$1 pdn=${2:-20} m
   for m in "${MINERS[@]}"; do
-    "$WALLET_BIN" send "$(node_url "$m")" "$KEYS_DIR/miner-$m.key" "$addr" "$pdn" >/dev/null 2>&1 || true
+    "$WALLET_BIN" send "$(node_url "$m")" "$KEYS_DIR/miner-$m.key" "$addr" "$pdn" "$(suite_fee_pdn)" >/dev/null 2>&1 || true
   done
 }
 

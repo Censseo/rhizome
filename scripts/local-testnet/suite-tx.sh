@@ -43,14 +43,19 @@ for kv in sys.argv[1:]:
     d[k] = int(v) if v.lstrip("-").isdigit() and k not in ("to","from","signingKey","signature","timestamp") else v
 print(json.dumps(d))' "$@"; }
 
-sign_send() { forge send key="$1" to="$2" amount="$3" fee="${4:-0}" chain="${5:-3}" nonce="$6" ; }
+# Frais/chainId par défaut DÉRIVÉS DU PROFIL chargé par common.sh (devnet : 0/3 — valeurs
+# historiques inchangées ; staging : 10/4). Les sites d'appel gardent leurs valeurs EXPLICITES
+# là où elles sont le sujet du cas (chaîne étrangère 999, frais 5000 du TX-02, débordements).
+PROFILE_FEE="$(profile_get MIN_FEE)"
+PROFILE_CHAIN="$(profile_get CHAIN_ID)"
+sign_send() { forge send key="$1" to="$2" amount="$3" fee="${4:-$PROFILE_FEE}" chain="${5:-$PROFILE_CHAIN}" nonce="$6" ; }
 
 echo "== chemins nominaux =="
 
 # TX-01 — le transfert de base, lu depuis un nœud QUI NE L'A PAS REÇU (gossip + convergence).
 n0="$(next_nonce "$VICTIM" "$ALICE")"
 bob_before="$(balance_units "$REMOTE" "$BOB")"
-r="$(submit_tx "$VICTIM" "$(sign_send "$ALICE_KEY" "$BOB" 25000 0 3 "$n0")")"
+r="$(submit_tx "$VICTIM" "$(sign_send "$ALICE_KEY" "$BOB" 25000 "$PROFILE_FEE" "$PROFILE_CHAIN" "$n0")")"
 expect_reject TX-01-admission SUCCESS 200 "$r" "transfert 2,5 PDN admis"
 wait_nonce_advance "$VICTIM" "$ALICE" "$n0" 240 || true
 expect_eq TX-01-remote-credit "$((bob_before + 25000))" "$(balance_units "$REMOTE" "$BOB")" \
@@ -59,7 +64,7 @@ expect_eq TX-01-remote-credit "$((bob_before + 25000))" "$(balance_units "$REMOT
 # TX-02 — comptabilité des frais : le débit de l'émetteur est montant+frais, exactement.
 n1="$(next_nonce "$VICTIM" "$ALICE")"
 alice_before="$(balance_units "$VICTIM" "$ALICE")"
-r="$(submit_tx "$VICTIM" "$(sign_send "$ALICE_KEY" "$BOB" 10000 5000 3 "$n1")")"
+r="$(submit_tx "$VICTIM" "$(sign_send "$ALICE_KEY" "$BOB" 10000 5000 "$PROFILE_CHAIN" "$n1")")"
 expect_reject TX-02-admission SUCCESS 200 "$r" "transfert 1 PDN + 0,5 PDN de frais"
 wait_nonce_advance "$VICTIM" "$ALICE" "$n1" 240 || true
 expect_eq TX-02-fee-debit "$((alice_before - 15000))" "$(balance_units "$VICTIM" "$ALICE")" \
@@ -70,7 +75,7 @@ n2="$(next_nonce "$VICTIM" "$ALICE")"
 bob_before="$(balance_units "$VICTIM" "$BOB")"
 ok=0
 for d in 0 1 2; do
-  r="$(submit_tx "$VICTIM" "$(sign_send "$ALICE_KEY" "$BOB" 1000 0 3 "$((n2 + d))")")"
+  r="$(submit_tx "$VICTIM" "$(sign_send "$ALICE_KEY" "$BOB" 1000 "$PROFILE_FEE" "$PROFILE_CHAIN" "$((n2 + d))")")"
   [[ "$r" == "200|SUCCESS" ]] && ok=$((ok + 1))
 done
 expect_eq TX-03-burst-admitted 3 "$ok" "3 nonces contigus admis"
@@ -85,7 +90,7 @@ echo "== POOL — politique de mempool =="
 # pas comblé. La preuve n'est pas le statut, c'est l'absence de mouvement de solde/nonce.
 n3="$(next_nonce "$VICTIM" "$ALICE")"
 alice_before="$(balance_units "$VICTIM" "$ALICE")"
-r="$(submit_tx "$VICTIM" "$(sign_send "$ALICE_KEY" "$BOB" 7000 0 3 "$((n3 + 5))")")"
+r="$(submit_tx "$VICTIM" "$(sign_send "$ALICE_KEY" "$BOB" 7000 "$PROFILE_FEE" "$PROFILE_CHAIN" "$((n3 + 5))")")"
 expect_reject POOL-03-parked SUCCESS 200 "$r" "nonce futur admis (garé)"
 wait_blocks "$VICTIM" 3 240 || true
 expect_eq POOL-03-no-nonce-move "$n3" "$(next_nonce "$VICTIM" "$ALICE")" "nonce inchangé après 3 blocs"
@@ -98,7 +103,7 @@ expect_eq POOL-03-no-balance-move "$alice_before" "$(balance_units "$VICTIM" "$A
 # il exige qu'aucun refus n'ait une AUTRE cause, et que la garée finisse par sortir.
 ok=0; other=""
 for d in 0 1 2 3 4; do
-  r="$(submit_tx "$VICTIM" "$(sign_send "$ALICE_KEY" "$BOB" 1000 0 3 "$((n3 + d))")")"
+  r="$(submit_tx "$VICTIM" "$(sign_send "$ALICE_KEY" "$BOB" 1000 "$PROFILE_FEE" "$PROFILE_CHAIN" "$((n3 + d))")")"
   case "$r" in
     "200|SUCCESS") ok=$((ok + 1)) ;;
     "400|INVALID_TRANSACTION_NONCE") ;;
@@ -116,7 +121,7 @@ h_before="$(height_of "$VICTIM")"
 flood_ok=0
 nf="$(next_nonce "$VICTIM" "$ALICE")"
 for d in $(seq 0 79); do
-  r="$(submit_tx "$VICTIM" "$(sign_send "$ALICE_KEY" "$BOB" 100 0 3 "$((nf + d))")")"
+  r="$(submit_tx "$VICTIM" "$(sign_send "$ALICE_KEY" "$BOB" 100 "$PROFILE_FEE" "$PROFILE_CHAIN" "$((nf + d))")")"
   [[ "${r#*|}" == "SUCCESS" ]] && flood_ok=$((flood_ok + 1))
 done
 mem="$(json_get "$(node_stats "$VICTIM")" mempool)"
@@ -130,7 +135,7 @@ echo
 echo "== REPLAY — rejeu et double dépense =="
 
 # REPLAY-01 — rejeu d'une transaction déjà minée : le nonce est consommé.
-tx_mined="$(sign_send "$ALICE_KEY" "$BOB" 3000 0 3 "$(next_nonce "$VICTIM" "$ALICE")")"
+tx_mined="$(sign_send "$ALICE_KEY" "$BOB" 3000 "$PROFILE_FEE" "$PROFILE_CHAIN" "$(next_nonce "$VICTIM" "$ALICE")")"
 nb="$(next_nonce "$VICTIM" "$ALICE")"
 submit_tx "$VICTIM" "$tx_mined" >/dev/null
 wait_nonce_advance "$VICTIM" "$ALICE" "$nb" 240 || true
@@ -139,8 +144,8 @@ expect_reject REPLAY-01-mined-tx INVALID_TRANSACTION_NONCE 400 "$(submit_tx "$VI
 
 # REPLAY-02 — double dépense : deux transactions au MÊME nonce, destinataires différents.
 nd="$(next_nonce "$VICTIM" "$ALICE")"
-first="$(sign_send "$ALICE_KEY" "$BOB" 2000 0 3 "$nd")"
-second="$(sign_send "$ALICE_KEY" "$ATT" 2000 0 3 "$nd")"
+first="$(sign_send "$ALICE_KEY" "$BOB" 2000 "$PROFILE_FEE" "$PROFILE_CHAIN" "$nd")"
+second="$(sign_send "$ALICE_KEY" "$ATT" 2000 "$PROFILE_FEE" "$PROFILE_CHAIN" "$nd")"
 expect_reject REPLAY-02-first SUCCESS 200 "$(submit_tx "$VICTIM" "$first")" "première dépense"
 expect_reject REPLAY-02-double INVALID_TRANSACTION_NONCE 400 "$(submit_tx "$VICTIM" "$second")" \
   "seconde dépense au même nonce"
@@ -153,39 +158,39 @@ echo
 echo "== INFL — arithmétique du grand livre =="
 n="$(next_nonce "$VICTIM" "$ALICE")"
 expect_reject INFL-01-negative-amount INVALID_TRANSACTION_AMOUNT 400 \
-  "$(submit_tx "$VICTIM" "$(sign_send "$ALICE_KEY" "$BOB" -100000 0 3 "$n")")" "montant négatif"
+  "$(submit_tx "$VICTIM" "$(sign_send "$ALICE_KEY" "$BOB" -100000 "$PROFILE_FEE" "$PROFILE_CHAIN" "$n")")" "montant négatif"
 expect_reject INFL-02-negative-fee INVALID_TRANSACTION_AMOUNT 400 \
-  "$(submit_tx "$VICTIM" "$(sign_send "$ALICE_KEY" "$BOB" 10000 -5000 3 "$n")")" "frais négatifs"
+  "$(submit_tx "$VICTIM" "$(sign_send "$ALICE_KEY" "$BOB" 10000 -5000 "$PROFILE_CHAIN" "$n")")" "frais négatifs"
 expect_reject INFL-03-long-max BALANCE_TOO_LOW 400 \
-  "$(submit_tx "$VICTIM" "$(sign_send "$ALICE_KEY" "$BOB" $LONG_MAX 0 3 "$n")")" "montant Long.MAX"
+  "$(submit_tx "$VICTIM" "$(sign_send "$ALICE_KEY" "$BOB" $LONG_MAX "$PROFILE_FEE" "$PROFILE_CHAIN" "$n")")" "montant Long.MAX"
 expect_reject INFL-04-overdraft BALANCE_TOO_LOW 400 \
-  "$(submit_tx "$VICTIM" "$(sign_send "$ALICE_KEY" "$BOB" 900000000 0 3 "$n")")" "dépense > solde"
+  "$(submit_tx "$VICTIM" "$(sign_send "$ALICE_KEY" "$BOB" 900000000 "$PROFILE_FEE" "$PROFILE_CHAIN" "$n")")" "dépense > solde"
 expect_reject INFL-05-sum-overflow BALANCE_TOO_LOW 400 \
-  "$(submit_tx "$VICTIM" "$(sign_send "$ALICE_KEY" "$BOB" 4611686018427387903 4611686018427387903 3 "$n")")" \
+  "$(submit_tx "$VICTIM" "$(sign_send "$ALICE_KEY" "$BOB" 4611686018427387903 4611686018427387903 "$PROFILE_CHAIN" "$n")")" \
   "montant+frais débordant un long"
 expect_reject INFL-06-zero-value SUCCESS 200 \
-  "$(submit_tx "$VICTIM" "$(sign_send "$ALICE_KEY" "$BOB" 0 0 3 "$n")")" "transfert de 0 (licite, coûte un nonce)"
+  "$(submit_tx "$VICTIM" "$(sign_send "$ALICE_KEY" "$BOB" 0 "$PROFILE_FEE" "$PROFILE_CHAIN" "$n")")" "transfert de 0 (licite, coûte un nonce)"
 wait_nonce_advance "$VICTIM" "$ALICE" "$n" 240 || true
 
 echo
 echo "== SIG — autorisation =="
 n="$(next_nonce "$VICTIM" "$ALICE")"
 expect_reject SIG-01-foreign-chain INVALID_CHAIN_ID 400 \
-  "$(submit_tx "$VICTIM" "$(sign_send "$ALICE_KEY" "$BOB" 10000 0 999 "$n")")" "rejeu inter-réseau (chainId 999)"
+  "$(submit_tx "$VICTIM" "$(sign_send "$ALICE_KEY" "$BOB" 10000 "$PROFILE_FEE" 999 "$n")")" "rejeu inter-réseau (chainId 999)"
 expect_reject SIG-02-tampered-amount INVALID_SIGNATURE 400 \
-  "$(submit_tx "$VICTIM" "$(sign_send "$ALICE_KEY" "$BOB" 10000 0 3 "$n" | tamper amount=10001)")" \
+  "$(submit_tx "$VICTIM" "$(sign_send "$ALICE_KEY" "$BOB" 10000 "$PROFILE_FEE" "$PROFILE_CHAIN" "$n" | tamper amount=10001)")" \
   "montant altéré sous signature (abordable)"
 expect_reject SIG-03-tampered-recipient INVALID_SIGNATURE 400 \
-  "$(submit_tx "$VICTIM" "$(sign_send "$ALICE_KEY" "$BOB" 10000 0 3 "$n" | tamper to="$ATT")")" \
+  "$(submit_tx "$VICTIM" "$(sign_send "$ALICE_KEY" "$BOB" 10000 "$PROFILE_FEE" "$PROFILE_CHAIN" "$n" | tamper to="$ATT")")" \
   "destinataire altéré sous signature"
 expect_reject SIG-04-tampered-nonce INVALID_SIGNATURE 400 \
-  "$(submit_tx "$VICTIM" "$(sign_send "$ALICE_KEY" "$BOB" 10000 0 3 "$n" | tamper accountNonce=$((n + 1)))")" \
+  "$(submit_tx "$VICTIM" "$(sign_send "$ALICE_KEY" "$BOB" 10000 "$PROFILE_FEE" "$PROFILE_CHAIN" "$n" | tamper accountNonce=$((n + 1)))")" \
   "nonce altéré sous signature"
 expect_reject SIG-05-sender-swap WALLET_SIGNATURE_MISMATCH 400 \
-  "$(submit_tx "$VICTIM" "$(sign_send "$ALICE_KEY" "$BOB" 10000 0 3 "$n" | tamper from="$ATT")")" \
+  "$(submit_tx "$VICTIM" "$(sign_send "$ALICE_KEY" "$BOB" 10000 "$PROFILE_FEE" "$PROFILE_CHAIN" "$n" | tamper from="$ATT")")" \
   "expéditeur remplacé, signature d'alice"
 expect_reject SIG-06-key-swap WALLET_SIGNATURE_MISMATCH 400 \
-  "$(submit_tx "$VICTIM" "$(sign_send "$ALICE_KEY" "$BOB" 10000 0 3 "$n" \
+  "$(submit_tx "$VICTIM" "$(sign_send "$ALICE_KEY" "$BOB" 10000 "$PROFILE_FEE" "$PROFILE_CHAIN" "$n" \
      | tamper signingKey="$("$PY" -c 'import json,sys;print(json.load(open(sys.argv[1]))["publicKey"])' "$ATT_KEY" 2>/dev/null || echo 00)")")" \
   "clé de signature remplacée par celle de l'attaquant"
 
@@ -194,7 +199,7 @@ echo "== CODEC / API — la porte HTTP =="
 expect_reject CODEC-01-malformed-json "" 400 "$(submit_tx "$VICTIM" '{"garbage":')" "JSON tronqué"
 expect_reject CODEC-02-empty-body "" 400 "$(submit_tx "$VICTIM" '')" "corps vide"
 expect_reject CODEC-03-unknown-kind "" 400 \
-  "$(submit_tx "$VICTIM" "$(sign_send "$ALICE_KEY" "$BOB" 1000 0 3 "$n" | "$PY" -c 'import json,sys
+  "$(submit_tx "$VICTIM" "$(sign_send "$ALICE_KEY" "$BOB" 1000 "$PROFILE_FEE" "$PROFILE_CHAIN" "$n" | "$PY" -c 'import json,sys
 d=json.load(sys.stdin); d["kind"]="NOT_A_KIND"; d["gasLimit"]=0; d["gasPrice"]=0; d["data"]=""
 print(json.dumps(d))')")" "kind de transaction inconnu"
 # Le cap de corps (JSON_TX_BODY) refuse AVANT de matérialiser la transaction. La FORME du refus
@@ -247,7 +252,7 @@ wait_blocks "$VICTIM" 1 180 || true
   || record FREE-01-victim-mines FAIL "hauteur figée à $h_before"
 n="$(next_nonce "$VICTIM" "$ALICE")"
 expect_reject FREE-02-attacker-not-banned SUCCESS 200 \
-  "$(submit_tx "$VICTIM" "$(sign_send "$ALICE_KEY" "$BOB" 1000 0 3 "$n")")" \
+  "$(submit_tx "$VICTIM" "$(sign_send "$ALICE_KEY" "$BOB" 1000 "$PROFILE_FEE" "$PROFILE_CHAIN" "$n")")" \
   "une transaction valide passe encore depuis la même source"
 expect_eq FREE-03-not-degraded "degraded=null reorg=false" "$(node_healthy "$VICTIM")" "état du nœud"
 

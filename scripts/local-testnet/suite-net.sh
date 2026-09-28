@@ -192,7 +192,7 @@ rejected="$(printf '%s' "$codes" | tr ' ' '\n' | grep -c -E '400|429')"
 expect_eq API-12-junk-blocks-rejected 40 "$rejected" "40 blocs poubelle : tous refusés (dont $shed délestés)"
 alice_n="$(next_nonce "$NODE" "$(addr_of "$KEYS_DIR/tx-alice.key")")"
 r="$(submit_tx "$NODE" "$(forge send key="$KEYS_DIR/tx-alice.key" to="$(addr_of "$KEYS_DIR/tx-bob.key")" \
-      amount=1000 fee=0 chain=3 nonce="$alice_n")")"
+      amount=1000 fee="$(profile_get MIN_FEE)" chain="$(profile_get CHAIN_ID)" nonce="$alice_n")")"
 case "${r#*|}" in
   SUCCESS) record API-12-honest-still-served PASS "une transaction honnête passe encore depuis la même source" ;;
   *)       record API-12-honest-still-served FAIL "source pénalisée au-delà du délestage: $r" ;;

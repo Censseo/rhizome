@@ -193,7 +193,7 @@ echo "== gaz (VM-17) et vannes de lecture (API-03) =="
 n="$(next_nonce "$NODE" "$OWNER")"
 expect_reject VM-G01-over-maxtxgas GAS_LIMIT_EXCEEDED 400 \
   "$(submit_tx "$NODE" "$(forge contract key="$OWNER_KEY" kind=CALL to="$COUNTER" data="" \
-      gasLimit=100000000 gasPrice=1 chain=3 nonce="$n")")" "gasLimit 1e8 > maxTxGas 5e7"
+      gasLimit=100000000 gasPrice=1 chain="$(profile_get CHAIN_ID)" nonce="$n")")" "gasLimit 1e8 > maxTxGas 5e7"
 
 # Un appel vers un contrat INEXISTANT paie quand même le gaz intrinsèque (sinon l'échec précoce
 # est un calcul gratuit).
@@ -209,7 +209,7 @@ bal_after="$(balance_units "$NODE" "$OWNER")"
 n="$(next_nonce "$NODE" "$OWNER")"
 bal_before="$(balance_units "$NODE" "$OWNER")"
 r="$(submit_tx "$NODE" "$(forge contract key="$OWNER_KEY" kind=CALL to="$COUNTER" data="" \
-      gasLimit=100 gasPrice=1 chain=3 nonce="$n")")"
+      gasLimit=100 gasPrice=1 chain="$(profile_get CHAIN_ID)" nonce="$n")")"
 if [[ "${r#*|}" == "SUCCESS" ]]; then
   wait_nonce_advance "$NODE" "$OWNER" "$n" 300 >/dev/null
   bal_after="$(balance_units "$NODE" "$OWNER")"
