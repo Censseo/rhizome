@@ -800,6 +800,111 @@ encore été exercée pour de vrai. Phases 2 et 3 sont des risques à porter, d�
 ailleurs dans ce dépôt (`docs/operations/spec.md`, « Known limits ») — pas des conditions
 bloquantes.
 
+## Journal de résultats — campagne 11 (staging, 3 VM OVH + 2 bancs locaux, J0 + coupures 2026-09-28, soak en cours)
+
+**Contexte.** Phase 1 du plan ci-dessus, pilotée par l'outillage versionné validé en phase 0 :
+`inventory.tsv` réel (3 VM OVH `role=seed`, port 3000, LAN privé 10.10.10.11/12/13, accès par
+hôte de saut + 2 bancs `role=peer` sur le devbox), purge des 3 seeds depuis la genèse sur le
+binaire HEAD, puis charge continue — `sim-tx.sh` (8 workers) et `sim-contract.sh` (compteur +
+token WASM déployés en chaîne, appels en boucle) contre les 5 nœuds, et `monitor.sh` dessus.
+Les trois « jamais fait contre un déploiement réel » du plan (ferme #2, #3, et la supervision
+sur déploiement réel) tournent depuis le J0 ; les deux coupures de ferme #1 ont été exécutées le
+jour même. Le soak lui-même est multi-jours par construction : cette entrée documente J0, les
+coupures, et l'état dans lequel le soak est laissé tourner (handover en fin d'entrée).
+
+**J0 — la topologie `-L` seule ne suffit pas : la leçon PEX de campagne 10, re-démontrée par son
+absence.** Premier câblage avec les seuls tunnels `tunnels.sh` (un `-L` par VM) : les bancs
+joignent les seeds, les seeds ne peuvent pas joindre les bancs, et le PEX empoisonne les deux
+camps — les bancs annoncent leur URL self (`localhost:13003`, joignable par personne) et
+apprennent les URL LAN `10.10.10.x` des seeds (non routables depuis le devbox) ; les seeds
+apprennent `localhost:13003/13004` et tentent de les joindre sur leur propre loopback.
+`PeerDiscovery` jette les pairs des deux côtés, chaque banc mine sa branche : le réseau se scinde
+en 3 camps en ~10 min — exactement le schéma qui avait imposé le tunnel bidirectionnel à la
+campagne 10, cette fois comme contre-expérience contrôlée (l'alerte `RÉSEAU SCINDÉ` du monitor a
+déclenché puis se résolu à la réparation). Fix, pattern campagne 10 : un tunnel `-R` dédié vers
+seed-1 (forwards 127.0.0.1:14003/14004), `RHIZOME_PEERS` de seed-1 étendu à ces deux URL,
+`RHIZOME_ADVERTISE=http://127.0.0.1:1400x` sur chaque banc (l'URL que seed-1 sait joindre ;
+les tentatives de seed-2/3 échouent sur leur propre loopback, bruit inoffensif comme en 10).
+Convergence 5/5 au même tip, stable depuis. Les `-R` restent un complément de campagne —
+`tunnels.sh` n'exprime pas encore la direction inverse (aucune colonne d'inventaire pour ça) ;
+c'est le restant de l'« à reporter dans l'outillage versionné » de campagne 10.
+
+**Trouvailles d'outillage (J0).**
+
+1. `tunnels.sh` visait `127.0.0.1:<port>` côté distant : les seeds staging bindent leur IP LAN,
+   le tunnel montait « vert » (processus vivant) et `/stats` ne répondait jamais à travers.
+   Corrigé et commité : le forward vise `p2p_ip` (colonne 3, l'adresse de BIND du nœud) ;
+   les inventaires en loopback gardent le comportement d'avant.
+2. Le garde DNS-rebinding de l'API est sensible au port : `Host: 127.0.0.1:13000` reçoit
+   `{"error":"host not allowed"}` alors que `127.0.0.1:3000` est autorisé. Chaque seed porte
+   donc `RHIZOME_ALLOWED_HOSTS=127.0.0.1:1300x` — l'autorité de contrôle locale que lui donne la
+   convention 13000+index. Sans ça, tout le harnais « curl sur loopback » est muet à travers les
+   tunnels (monitor, sims, wallet CLI), et ce sans aucun rapport avec l'état du nœud.
+3. Un `Penalized peer http://127.0.0.1:13000 +34 (served an invalid chain)` one-off du banc A
+   contre seed-1, pendant la fenêtre où le banc frais se synchronisait alors que les seeds
+   finissaient eux-mêmes de converger après leur redémarrage. Jamais reproduit sur le maillage
+   sain (zéro pénalité depuis, plusieurs heures) ; à réexaminer si ça revient. La convergence
+   s'est faite quand même au relancement suivant.
+4. Financement des sims : dotés AVANT le lancement des simulateurs depuis la clé de genèse
+   staging `hot` (allocation : 10M PDN) — 8×50 PDN (workers) + 500 PDN (portefeuille de
+   contrats), frais `MIN_FEE`, nonce attendu entre chaque envoi. Les `fund_workers`/`fund_owner`
+   des sims détectent « déjà doté » et passent : ni attente de maturité des coinbases, ni
+   dépendance aux clés de mineurs, ni faucet.
+
+**Coupure courte — guérison automatique (ferme #1, volet consensus).** 10:03:38 UTC : kill des
+4 processus ssh (3 `-L` + le `-R`). Sur cette topologie, TOUT le trafic locaux↔VM passe par là —
+c'est la coupure physique disponible, et elle est totale. Fenêtre 5,5 min : trois camps (seeds
+~6,6 s/bloc, banc A ~7,4, banc B ~7,8 — les bancs ne se voient pas entre eux sans les seeds),
+fourches ~50-60 blocs, très sous `maxReorgDepth`=120. Tunnels restaurés : même tip sur les 5
+nœuds en ≤ 45 s, `REORGED` dans les journaux des bancs. **Réserve honnête** : coupure TRANSPORT
+(SSH), pas nftables — `partition.sh` reste inutilisable sur l'axe locaux-vs-VM (garde-fou n°3 :
+jamais de règle sur un seed, délibéré et maintenu ; et le devbox n'a ni nft ni systemd-run, donc
+pas de camp rule-bearing local non plus). Le comportement de consensus visé par ferme #1 —
+fourche réelle entre machines distinctes, guérison automatique sous l'horizon, sans intervention —
+est prouvé ; le vecteur nftables de la coupure reste celui de la phase 0 (hôte jetable, camps
+sans seed).
+
+**Coupure longue — `REORG_TOO_DEEP` en vrai, puis RB-01 de bout en bout.** 10:11:03 UTC, même
+vecteur, 30 min : profondeurs de fourche ~200-260 blocs (point de fourche ~h=353), délibérément
+au-delà de l'horizon des deux côtés. À la restauration : les bancs loggent
+`past the reorg horizon; nothing to adopt` (12 et 14 lignes), refusent la chaîne seed plus lourde
+et CONTINUENT de miner leur branche — `degraded=null`, `syncPeersBanned=0` pendant tout
+l'incident : exactement la signature documentée de RB-01 (une branche au-delà de l'horizon n'est
+pas une faute ; pas de ban, par design). **Nuance opérationnelle versée au runbook** :
+`syncRoundsWithoutProgress` est resté à 0 chez les nœuds isolés — ils comptent leurs PROPRES
+blocs comme progrès de hauteur ; le symptôme fiable est la ligne « past the reorg horizon » plus
+l'écart de tip persistant, pas le compteur de stall. RB-01 déroulé tel qu'écrit : CONFIRM (les 3
+seeds unanimes h=647, tw=172544 ; bancs tw=164608/162816, minoritaires en travail cumulé, lu sur
+chemins indépendants), ACT (purge destructive des deux bancs, relance, resync complet), VERIFY
+(même tip h=675 que les seeds ~90 s après relance, `stall=0`, `degraded=null`). Première
+exécution réelle de la procédure sur une coupure multi-machines ; la récupération a coûté ~90 s.
+
+**Comportement observé hors incidents.** À 5 mineurs (3 seeds + 2 bancs) et difficulté au
+plancher 8, la cadence agrégée oscille dans 4,4-7,6 s/bloc — contre 29 s mesurés à 3 mineurs
+avant la campagne : la cible de 5 s du profil est tenue à ce hashrate, la marge du plan
+« ~13 min pour 120 blocs » était donc pessimiste, les durées de coupure ont été recalculées sur
+le rythme réel. Des fourches courtes organiques (2 branches, 6-30 s) surviennent et se résolvent
+seules ; le seuil « 3 cycles consécutifs » du monitor les laisse la plupart du temps sous le
+radar et n'a alerté que sur les vrais événements (les 2 coupures, la scission à 3 camps de J0).
+
+**État du soak laissé tourner — handover.** Seeds : `systemd` `rhizome-node.service` sur
+seed-1/2/3 (ssh `rhizome@10.10.10.1x` via le saut ; env `/etc/rhizome/node.env`, dont la nouvelle
+`RHIZOME_ALLOWED_HOSTS` ; données `/var/lib/rhizome-node`, baseline 374 MB à h=280 le 2026-09-28
+10:03 UTC). Devbox, tous détachés (`setsid`, survivent à la session) : les 3 tunnels `-L`
+(`RHIZOME_TUNNELS_DIR=<scratchpad>/campagne11/tunnels`, base 13000), le tunnel `-R`
+(pid `state/reverse-tunnel.pid`), les 2 bancs (ports 13003/13004, pids `state/bench-*.pid`),
+`sim-tx.sh` 8 workers et `sim-contract.sh` (intervalle 5 s), `monitor.sh`
+(`RHIZOME_TESTNET_DIR=<scratchpad>/campagne11/state` → `monitor.csv`, alertes dans
+`logs/monitor.log`, seuil StaleTip porté à 60×5 s car la cadence réelle dépasse la cible).
+À mesurer par la suite : `du -s /var/lib/rhizome-node` par VM (croissance/jour vs baseline),
+`syncPeersBanned` et les lignes de ban des journaux (décroissance des scores), alertes du
+monitor. Pour arrêter proprement : `sim-tx.sh stop`, `sim-contract.sh stop`, kill du monitor et
+des pids ci-dessus, `tunnels.sh down`. À ne JAMAIS faire : pointer `partition.sh` vers un
+inventaire contenant les IP de seeds, arrêter un seed hors incident, toucher à `ip rhizome_nat`.
+Dotation des sims (50 PDN/worker, 0,002 PDN brûlé par tx envoyée) : tenante plusieurs semaines à
+la cadence observée ; re-doter depuis `hot` si un soak très long épuise un worker
+(`BALANCE_TOO_LOW` dans `sim/tx.csv`).
+
 ## Journal de résultats — campagne 9 (staging, exécutée 2026-09-22)
 
 **Contexte.** Première campagne sur le profil `staging` (chainId 4, `rhizome-staging`, Pufferfish2,

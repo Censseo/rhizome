@@ -15,6 +15,9 @@
 - Height is stalled; `/stats`' `syncRoundsWithoutProgress` (or `/metrics`'
   `rhizome_sync_rounds_without_progress`) is climbing, past
   `SyncDriver.PROGRESS_WARN_ROUNDS` (6 consecutive rounds) worth of WARN log lines.
+  Field nuance (2026-09-28 campaign-11 partition): a node that keeps **mining** through the
+  split shows this counter staying `0` — its own blocks count as height progress. The reliable
+  symptom is the horizon line below plus a persistently divergent tip, not this counter.
 - The node's logs contain `"is past the reorg horizon (finality); nothing to adopt"` — the exact
   message `SyncDriver` logs for a peer whose chain the engine judged `REORG_TOO_DEEP`
   ([consensus](spec.md) C-7's finality window, `maxReorgDepth`).
@@ -33,6 +36,11 @@
   recovery below (wipe + resync) was also exercised there — a freshly wiped node came back up and
   caught up via ordinary full sync (no snapshot provider was configured in that mini-campaign, so
   `RHIZOME_SYNC=snap` fell back silently, per `SnapshotBootstrap`'s own documented behaviour).
+  Reproduced again on real multi-machine infrastructure by campaign 11 (2026-09-28): a 30-minute
+  transport cut between the three OVH seed VMs and two devbox benches drove ~200+ blocks of fork
+  depth past the horizon with `syncPeersBanned=0` and `degraded=null` on the isolated side, and
+  the recovery below was executed end-to-end on the two confirmed-minority benches (CONFIRM by
+  cumulative work across independent peers → wipe → full resync, converged in ~90 s).
 
 **Confirm**
 
