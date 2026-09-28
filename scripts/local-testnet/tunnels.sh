@@ -2,14 +2,14 @@
 # Maillage de tunnels SSH pour une campagne multi-machines — chantier 2 (voir TEST-PLAN.md et
 # inventory.tsv.example pour le format d'inventaire).
 #
-# Ce script lui-même reste NON EXERCÉ CONTRE DU MATÉRIEL RÉEL tel quel — mais la technique qu'il
-# implémente (un tunnel SSH bidirectionnel, -L pour tirer depuis un hôte distant et -R pour qu'il
-# puisse rappeler un nœud local) a été validée en campagne 10 contre 3 VM OVH réelles + 2 nœuds
-# locaux, via des scripts ad hoc plutôt que via ce fichier — voir TEST-PLAN.md. À reconcilier :
-# faire tourner CE script contre l'inventaire de cette campagne est le prochain essai réel. Reste
-# à vérifier tel quel : la gestion d'échec d'un `ssh -N` qui meurt en cours de campagne
-# (ControlMaster/ServerAliveInterval ci-dessous sont un point de départ, pas une garantie vérifiée
-# en conditions réelles).
+# Exercé contre un hôte réel en phase 0 de la campagne 11 (2026-09-25, rejeu ciblé le 2026-09-28,
+# voir TEST-PLAN.md). Vérifié : chaque tunnel sert le bon nœud distant ; `check` signale un nœud
+# gelé derrière un tunnel vivant ; un `ssh -N` tué est rapporté « aucun tunnel actif » pendant
+# que l'autre reste OK ; `up` relancé ne rouvre que le tunnel mort ; `up` vérifie chaque tunnel
+# 3 s après lancement et échoue si l'un est déjà mort (au premier run, un tunnel résiduel de
+# campagne 10 tenait le port 13001 et faisait lire seed-1 à la place du nœud B — d'où la base
+# surchargeable RHIZOME_TUNNELS_BASE). Jamais vérifié : la mort CÔTÉ DISTANT d'un tunnel
+# (ServerAliveInterval/CountMax), qui demanderait de tuer un sshd de l'hôte.
 #
 # Principe (voir le plan, section « Adressage ») : au lieu de réécrire chaque batterie pour
 # parler à N hôtes, on rend l'hypothèse « curl sur 127.0.0.1 » à nouveau VRAIE — un tunnel de
@@ -31,7 +31,9 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RUN_DIR="${RHIZOME_TUNNELS_DIR:-$ROOT/.testnet-tunnels}"
-CONTROL_BASE=13000
+# Surchargeable : en phase 0, un tunnel d'une campagne précédente tenait encore 13001 sur la
+# machine locale, et le tunnel de la ligne 1 mourait au démarrage.
+CONTROL_BASE="${RHIZOME_TUNNELS_BASE:-13000}"
 
 usage() {
   echo "usage: $0 up|check|down <inventory.tsv>" >&2
@@ -59,6 +61,7 @@ mkdir -p "$RUN_DIR"
 cmd_up() {
   local inv=$1
   local idx ssh p2p_ip advertise role port heap prune reachable cport pidfile
+  local -a started=()
   while IFS=$'\t' read -r idx ssh p2p_ip advertise role port heap prune reachable; do
     if [[ "$ssh" == "local" ]]; then
       echo "up: ligne $idx ($ssh) — pas de tunnel, adressage direct" >&2
@@ -79,8 +82,24 @@ cmd_up() {
       -L "127.0.0.1:$cport:127.0.0.1:$port" \
       "$ssh" >"$RUN_DIR/$idx.log" 2>&1 &
     echo $! > "$pidfile"
+    started+=("$idx")
     echo "up: ligne $idx ($ssh) — 127.0.0.1:$cport -> $ssh:127.0.0.1:$port (pid $!)" >&2
   done < <(read_inventory "$inv")
+
+  # Un ssh qui échoue à ouvrir son forward (port local pris, hôte injoignable) meurt en quelques
+  # secondes grâce à ExitOnForwardFailure. Sans cette vérification, up annonçait quand même le
+  # tunnel ouvert, et l'erreur n'apparaissait qu'au check suivant sous la forme « aucun tunnel actif ».
+  local fail=0
+  (( ${#started[@]} )) && sleep 3
+  for idx in "${started[@]}"; do
+    pidfile="$RUN_DIR/$idx.pid"
+    if ! kill -0 "$(cat "$pidfile")" 2>/dev/null; then
+      echo "up: ligne $idx — ÉCHEC, le tunnel est mort au démarrage : $(tail -n 2 "$RUN_DIR/$idx.log" | tr '\n' ' ')" >&2
+      rm -f "$pidfile"
+      fail=1
+    fi
+  done
+  return "$fail"
 }
 
 cmd_check() {

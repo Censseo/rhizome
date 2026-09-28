@@ -3,12 +3,15 @@
 # testnet, section « Partitions » / « Risques à porter »). Filtre le PORT P2P uniquement, dans
 # les DEUX sens, via une table nftables dédiée par hôte — jamais l'adresse (SSH doit survivre).
 #
-# ██ NON EXERCÉ CONTRE DU MATÉRIEL RÉEL. ██ Écrit pour le plan, jamais lancé — aucune VM/machine
-# multi-hôtes n'a été disponible pendant cette campagne (voir TEST-PLAN.md, « Couverture non
-# atteinte »). C'est le script le plus dangereux de ce harnais : une règle non révoquée retire
+# Exercé contre du matériel réel (phase 0 de la campagne 11, 2026-09-25, rejeu ciblé le
+# 2026-09-28, voir TEST-PLAN.md) sur un hôte jetable avec deux nœuds staging : vraie coupure
+# nftables, divergence puis reorg à la levée, et les trois garde-fous ci-dessous vérifiés un par
+# un. Deux défauts trouvés au premier run et confirmés corrigés au rejeu : apply guérissait dans
+# son propre trap dès son retour (il bloque maintenant sa durée), et un second apply refusait de
+# s'armer tant que le watchdog du premier courait (suffixe d'unité unique par apply, désarmé par
+# heal). Cela reste le script le plus dangereux de ce harnais : une règle non révoquée retire
 # silencieusement et DÉFINITIVEMENT un seed d'un réseau public. NE PAS l'utiliser contre un hôte
-# de production ou un seed public sans avoir d'abord relu et vérifié les trois garde-fous
-# ci-dessous sur un hôte jetable.
+# de production ou un seed public.
 #
 # Trois garde-fous, dont AUCUN ne suffit seul (le plan est explicite là-dessus) :
 #   1. Watchdog distant : `systemd-run --on-active=<durée>s` programmé sur CHAQUE hôte partitionné
@@ -21,9 +24,10 @@
 # Usage :
 #   partition.sh apply <inventory.tsv> <durée_s> <camp_A:ligne,ligne,...> <camp_B:ligne,ligne,...>
 #     Isole camp_A de camp_B : sur chaque hôte de camp_A, DROP entrée+sortie sur le port p2p
-#     vers/depuis le p2p_ip de chaque hôte de camp_B (et symétriquement). <durée_s> arme le
-#     watchdog distant ; ce script guérit aussi en EXIT (garde-fou n°2) — les deux doivent être
-#     redondants, pas l'un à la place de l'autre.
+#     vers/depuis le p2p_ip de chaque hôte de camp_B (et symétriquement). BLOQUE <durée_s>
+#     puis guérit. <durée_s> arme aussi le watchdog distant ; ce script guérit en EXIT
+#     (garde-fou n°2) — les deux sont redondants, pas l'un à la place de l'autre. Pour garder
+#     la main pendant la coupure : lancer en arrière-plan, puis `kill` pour guérir plus tôt.
 #   partition.sh heal <inventory.tsv>            # supprime la table sur TOUS les hôtes de l'inventaire
 #   partition.sh status <inventory.tsv>           # rapporte, hôte par hôte, si la table existe
 #
@@ -80,7 +84,14 @@ row_by_index() {
 heal_host() {
   local ssh=$1
   run_on "$ssh" nft delete table inet "$TABLE" 2>/dev/null || true
-  echo "heal: $ssh — table $TABLE supprimée (ou déjà absente)" >&2
+  # Désarme aussi les watchdogs de CE hôte : un minuteur resté armé d'un apply précédent lèverait
+  # plus tard la table d'une partition suivante avant son terme (constaté sur l'hôte jetable).
+  run_on "$ssh" systemctl stop "rhizome-partition-heal-*.timer" 2>/dev/null || true
+  if run_on "$ssh" nft list table inet "$TABLE" >/dev/null 2>&1; then
+    echo "heal: $ssh — ÉCHEC, table $TABLE toujours présente" >&2
+  else
+    echo "heal: $ssh — table $TABLE absente" >&2
+  fi
 }
 
 cmd_heal() {
@@ -129,6 +140,10 @@ cmd_apply() {
   # Garde-fou n°2 : guérir en sortie, quel que soit le chemin (succès, erreur, signal).
   trap 'echo "apply: guérison (trap EXIT)" >&2; cmd_heal "'"$inv"'"' EXIT
 
+  # Suffixe propre à cet apply : avec un nom fixe par index, un second apply lancé pendant que le
+  # watchdog du premier était encore armé ne pouvait plus créer son unité, et abandonnait.
+  local RUN; RUN="$(date +%s)"
+
   local ssh_a p2p_a port_a ssh_b p2p_b port_b
   for idx in "${campA_idx[@]}"; do
     row="$(row_by_index "$inv" "$idx")"
@@ -137,7 +152,7 @@ cmd_apply() {
     # Garde-fou n°1 : watchdog distant, indépendant de ce process. À défaut de systemd-run
     # (hôte sans systemd utilisateur/root accessible), ce script REFUSE plutôt que de
     # partitionner sans garantie de guérison — un `heal` manuel resterait le seul recours.
-    if ! run_on "$ssh_a" systemd-run --on-active="${duration}s" --unit="rhizome-partition-heal-$idx" \
+    if ! run_on "$ssh_a" systemd-run --on-active="${duration}s" --unit="rhizome-partition-heal-$RUN-$idx" \
         nft delete table inet "$TABLE" >/dev/null 2>&1; then
       echo "ERREUR: $ssh_a — impossible d'armer le watchdog systemd-run (garde-fou n°1) — abandon, aucune règle posée" >&2
       return 1
@@ -162,7 +177,7 @@ cmd_apply() {
     row="$(row_by_index "$inv" "$idx")"
     ssh_b="$(cut -f2 <<<"$row")"; port_b="$(cut -f6 <<<"$row")"
 
-    if ! run_on "$ssh_b" systemd-run --on-active="${duration}s" --unit="rhizome-partition-heal-$idx" \
+    if ! run_on "$ssh_b" systemd-run --on-active="${duration}s" --unit="rhizome-partition-heal-$RUN-$idx" \
         nft delete table inet "$TABLE" >/dev/null 2>&1; then
       echo "ERREUR: $ssh_b — impossible d'armer le watchdog systemd-run (garde-fou n°1) — abandon, aucune règle posée" >&2
       return 1
@@ -181,11 +196,14 @@ cmd_apply() {
     echo "apply: $ssh_b — isolé du camp A pour ${duration}s (watchdog + règles posées)" >&2
   done
 
-  echo "apply: partition posée sur $((${#campA_idx[@]} + ${#campB_idx[@]})) hôte(s), guérison programmée dans ${duration}s (+ trap local)" >&2
-  # L'appelant est responsable de la durée de vie de la partition (dormir/observer le réseau
-  # pendant `duration`, puis laisser ce process sortir — le trap EXIT ci-dessus guérit alors).
-  # Ce script ne bloque PAS lui-même : une batterie orchestrant plusieurs partitions successives
-  # a besoin de reprendre la main immédiatement après la pose des règles.
+  echo "apply: partition posée sur $((${#campA_idx[@]} + ${#campB_idx[@]})) hôte(s), tenue ${duration}s (watchdog distant + trap local)" >&2
+  # apply BLOQUE pendant `duration` puis sort, et le trap EXIT guérit. Une première version rendait
+  # la main tout de suite : son propre trap levait alors la partition au retour, quelques
+  # millisecondes après la pose (constaté sur l'hôte jetable, phase 0). Pour reprendre la main
+  # pendant la coupure, lancer apply en arrière-plan ; `kill` (SIGTERM) ou Ctrl-C guérit tout de
+  # suite, et un kill -9 laisse le watchdog distant guérir à l'échéance.
+  sleep "$duration" &
+  wait $!
 }
 
 [[ $# -ge 1 ]] || usage
