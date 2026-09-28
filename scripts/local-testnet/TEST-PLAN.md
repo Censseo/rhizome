@@ -661,6 +661,74 @@ les points 2 et 3 de la liste ci-dessus (tunnel SSH réel + panne injectée ; co
 sur un hôte jetable) n'ont toujours pas tourné. Une fois faits, retirer les bandeaux d'en-tête et
 compléter cette section plutôt que la réécrire.
 
+#### État (2026-09-28) — les deux volets réels ont tourné ; un rejeu ciblé a dû réparer le harnais d'abord
+
+Le « Reste à faire » ci-dessus est clos. Les points 2 et 3 ont tourné contre du matériel réel :
+hôte jetable (l'hyperviseur Proxmox du staging lui-même — jamais les VM seeds), deux nœuds
+`staging` co-hébergés (127.0.0.2:4500 / 127.0.0.3:4501, garde nftables `rhizome_phase0_guard`
+n'ayant rien laissé sortir de `lo`), pilotés depuis un devbox avec clé SSH dédiée. Deux runs,
+le second ne reprenant que ce que le premier n'avait pas mesuré honnêtement.
+
+**Run 1 (2026-09-25, `phase0.sh`) — 12 PASS / 4 FAIL, dont cinq résultats invalides à cause du
+harnais lui-même, pas des scripts.** Un tunnel SSH résiduel de campagne 10 occupait encore le
+port de contrôle local 13001 : toutes les lectures « nœud B via tunnel » interrogeaient seed-1.
+Sont donc sans valeur les FAIL T1.1, T1.3, T1.4 (tests de la ligne 1 du tunnel) et T2.2d
+(reconvergence lue contre seed-1), ainsi que le PASS T2.2b (« divergence » lue contre seed-1) —
+exactement le piège « un tunnel mort se lit comme un nœud différent » contre quoi le pré-vol
+`check` existe. Ce que ce run a prouvé pour de vrai (lectures côté hôte, non faussées) : les
+règles nftables passent bien `ssh "sudo nft …"` et la coupure est réelle — à la levée, le journal
+du nœud A montre `Synced from http://127.0.0.3:4501: REORGED -> height 18` et A/B reviennent au
+même tip ; garde-fou n°1, le watchdog `systemd-run` lève seul la table ~62 s après un `kill -9`
+du porteur ; garde-fou n°2, le `trap EXIT` guérit sur SIGINT comme sur SIGTERM ; garde-fou n°3,
+un index `role=seed` est refusé sans aucune règle posée ; enfin le tunnel 0 sert le bon nœud et
+`check` signale un nœud gelé derrière un tunnel vivant.
+
+Le run a de plus confirmé deux défauts de `partition.sh` et un de `tunnels.sh`, corrigés dans la
+foulée :
+
+1. `apply` guérissait dans son propre `trap EXIT` dès son retour — la partition ne durait pas
+   (OBS T2.1 du run 1). `apply` bloque maintenant `<durée_s>` ; pour garder la main pendant la
+   coupure, le lancer en arrière-plan puis le `kill` (un `kill -9` laisse le watchdog distant
+   guérir à l'échéance).
+2. Un second `apply` refusait de s'armer tant que le watchdog du premier courait : nom d'unité
+   systemd fixe par index (OBS T2.1b du run 1). Le nom embarque maintenant un suffixe par apply
+   (`rhizome-partition-heal-<RUN>-<idx>`) et `heal_host` désarme aussi les minuteurs restants
+   puis vérifie que la table a bien disparu — ce qui ferme aussi le « petit constat
+   d'outillage » listé en 2026-09-24 : `heal` n'annonce plus « supprimée » sans vérification.
+3. `tunnels.sh up` annonçait « ouvert » un tunnel mort au démarrage (port local déjà pris). Il
+   vérifie désormais chaque tunnel 3 s après lancement et renvoie un code d'échec ; la base des
+   ports de contrôle est surchargeable (`RHIZOME_TUNNELS_BASE`) pour ne jamais retomber sur un
+   port résiduel.
+
+**Run 2 (2026-09-28, `phase0b.sh`, rejeu ciblé) — 12 PASS / 0 FAIL.** Ports de contrôle dédiés
+23000/23001 avec pré-vol de disponibilité locale, donc lectures par tunnels prouvées cette fois
+(T1.2 : tip lu par le tunnel == tip lu en direct, pour A comme pour B) :
+
+- T1.0–T1.4 : `up` n'annonce plus de tunnel mort au démarrage ; `check` OK sur les deux tunnels ;
+  `kill -9` d'un `ssh -N` signalé (« aucun tunnel actif ») pendant que l'autre reste OK ; `up`
+  relancé ne rouvre que le tunnel mort et `check` repasse.
+- T2.1 : `apply` bloque et la partition tient (table PRESENT 10 s après la pose, process vivant).
+- T2.2 : divergence réelle — tips distincts dès +30 s (h=8 des deux côtés, hashes différents) ;
+  A et B minent chacun sa branche jusqu'à la levée (A h=17 / B h=13), lus par les tunnels
+  vérifiés, l'observation passant par 127.0.0.1 que les règles ne visent pas.
+- T2.3 : à l'échéance des 150 s, `apply` sort (rc=0), table ABSENT et zéro watchdog armé.
+- T2.4 : reconvergence en ≤ 20 s après la levée (même tip h=20 des deux côtés),
+  `REORGED -> height 20` dans le journal de B.
+- T2.5 : second `apply` lancé juste après un `kill -9` du premier — table PRESENT et 4 watchdogs
+  armés (2 orphelins + 2 neufs) : le cas T2.1b qui échouait au run 1 est fermé.
+- T2.6 : SIGTERM sur `apply` — table levée et les 4 watchdogs désarmés, orphelins compris (le
+  glob de `heal_host` ne distingue pas les siens).
+
+Les garde-fous T3.x du run 1 n'ont pas été rejoués : ils mesuraient l'hôte, pas les tunnels, et
+restent valables tels quels.
+
+**Reste non couvert, assumé** : la mort CÔTÉ DISTANT d'un tunnel (`ServerAliveInterval`/
+`ServerAliveCountMax` quand le sshd distant disparaît). La provoquer demanderait de tuer un sshd
+de l'hyperviseur — exclu du périmètre. Les bandeaux « NON EXERCÉ CONTRE DU MATÉRIEL RÉEL » sont
+retirés des deux en-têtes ; chacun liste maintenant ce qui reste non vérifié. Phase 0 considérée
+fermée pour l'ouverture publique ; la phase 1 (soak multi-jours sur les seeds) attend son feu
+vert.
+
 ### Phase 1 — Campagne 11 elle-même : soak + charge + coupure réelle (ferme #1, #2, #3, prépare #4)
 
 Reprend la topologie de campagne 10 (3 VM OVH + 2 bancs d'essai locaux), pilotée cette fois par
