@@ -13,8 +13,9 @@
 #
 # Principe (voir le plan, section « Adressage ») : au lieu de réécrire chaque batterie pour
 # parler à N hôtes, on rend l'hypothèse « curl sur 127.0.0.1 » à nouveau VRAIE — un tunnel de
-# contrôle par nœud distant, `127.0.0.1:<port de contrôle local> -> 127.0.0.1:<port du nœud sur
-# l'hôte distant>`. Le harnais existant (common.sh, les suites) continue de taper du loopback ;
+# contrôle par nœud distant, `127.0.0.1:<port de contrôle local> -> <p2p_ip>:<port du nœud sur
+# l'hôte distant>` (p2p_ip = colonne 3 de l'inventaire, l'adresse à laquelle le nœud binde — pas
+# forcément 127.0.0.1). Le harnais existant (common.sh, les suites) continue de taper du loopback ;
 # seule la RÉSOLUTION du port change. Port de contrôle local : 13000 + index de ligne dans
 # l'inventaire (0-based, en ignorant les commentaires/lignes vides) — fixe et prévisible d'une
 # campagne à l'autre pour le même inventaire.
@@ -76,14 +77,17 @@ cmd_up() {
     # ServerAliveInterval/CountMax : détecte un hôte distant mort plutôt que de laisser le
     # tunnel pendre indéfiniment ; ExitOnForwardFailure : échoue fort si le port local est déjà
     # pris, plutôt qu'un ssh qui tourne sans jamais forwarder — silencieusement inutile.
+    # Le forward vise p2p_ip (l'adresse de BIND du nœud, colonne 3 de l'inventaire) et non
+    # 127.0.0.1 : un nœud qui binde une IP privée précise (les seeds staging sur 10.10.10.x,
+    # constaté en campagne 11) ne répond pas sur le loopback de son propre hôte.
     setsid ssh -N \
       -o ExitOnForwardFailure=yes -o ServerAliveInterval=10 -o ServerAliveCountMax=3 \
       -o StreamLocalBindUnlink=yes \
-      -L "127.0.0.1:$cport:127.0.0.1:$port" \
+      -L "127.0.0.1:$cport:$p2p_ip:$port" \
       "$ssh" >"$RUN_DIR/$idx.log" 2>&1 &
     echo $! > "$pidfile"
     started+=("$idx")
-    echo "up: ligne $idx ($ssh) — 127.0.0.1:$cport -> $ssh:127.0.0.1:$port (pid $!)" >&2
+    echo "up: ligne $idx ($ssh) — 127.0.0.1:$cport -> $ssh:$p2p_ip:$port (pid $!)" >&2
   done < <(read_inventory "$inv")
 
   # Un ssh qui échoue à ouvrir son forward (port local pris, hôte injoignable) meurt en quelques
