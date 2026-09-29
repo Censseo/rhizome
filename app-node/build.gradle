@@ -265,6 +265,14 @@ tasks.register('nativeImage', Exec) {
                 // baseline so the same binary boots on any deployment target; revisit only once
                 // every real deployment host's CPU baseline is known and pinned.
                 '-march=compatibility',
+                // Heap cap (2026-09-29, campaign 11): a native image sizes its default max
+                // heap from PHYSICAL memory (~80%), so on the 6 GB staging seed VMs the boot
+                // of a 12k-block chain ballooned to 5.9 GB RSS and the OOM killer reaped the
+                // service five times in a row (seed-3, deterministic). The same reorg peaks
+                // at 830 MB RSS on an uncapped host, so 1536m bounds GC laziness with ~85%
+                // headroom over the heaviest known workload while leaving the OS and RocksDB's
+                // native side the rest of a small VM.
+                '-R:MaxHeapSize=512m',
                 '-cp', classpath,
                 "-H:Path=${nativeImageOut.get().asFile}",
                 '-H:Name=rhizome-node',

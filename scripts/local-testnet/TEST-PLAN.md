@@ -1021,6 +1021,49 @@ question devant une éclipse est désormais « quel est le load ? ».
 relancer, bancs A/B en minage solo (sync à revalider quand la charge retombera), sims stoppés,
 monitor actif, tunnels debout, tout l'état sous `.testnet/campaign11/`.
 
+**Suite et fin de l'incident (2026-09-29 après-midi) — le mystère « éclipse » refermé, un vrai
+défaut produit trouvé, seed-3 récupérée.** Trois volets.
+
+*1. L'« éclipse » n'en était pas une.* La lecture du code a refermé la matinée : (a) `GET /peers`
+**masque les seeds par design** (`PeerRegistry.publicSnapshot`, audit S-6 — elles sont
+l'infrastructure privée de l'opérateur) : le « registre vide de seeds » qui a guidé tout le
+diagnostic était un artefact d'observation ; (b) le SyncDriver loggue en DEBUG les échecs
+(`Peer unavailable`) et **rien du tout** quand le registre est vide (`n == 0` → compteurs
+publiés, silencieux) — le WARN `sync eclipsed` n'existe que pour ce cas et a bien été observé
+sur le reproducteur isolé ; (c) les bancs « muets » étaient en réalité **en pleine reorg de
+rattrapage de 12k blocs** (`/stats` répondait `{"error":"reorg in progress"}` pendant toute la
+phase) — une reorg initiale qui prend 40-100 min sous contention CPU au lieu de 13 min à vide.
+Diagnostic à retenir : avant de crier à l'éclipse, lire `/stats` jusqu'au bout et le load.
+
+*2. UNCLE-02 rendu insensible à la fenêtre — chaîne entière VERT.* `chainscan.py` réécrit : la
+subvention est lue **par bloc** depuis la coinbase (et non plus une fois au tip), et chaque
+récompense oncle/neveu est pondérée par le travail prouvé (`base >> (difficulté neveu −
+difficulté oncle)`, miroir exact d'`Executor.scaleRewardToWork`, audit C1) ; les burns (tx avec
+`from` sans `to`) sont soustraits de l'attendu. Sur la chaîne réelle complète (12 399 blocs) :
+**0 rupture de chaînage, 0 mismatch de supply** (contre 6 878 avec la supposition de subvention
+constante), 1 523 oncles sur 1 431 blocs (12,3 % des blocs), les 5 mineurs représentés comme
+mineurs d'oncles, subvention dérivant visiblement de 26 067 à 26 075 (courbe pilotée par
+l'offre). L'identité GHOST de la chaîne réelle est prouvée de bout en bout.
+
+*3. Défaut produit : le boot d'un store long explose la mémoire — OOM déterministe sur une seed
+de 6 Go.* Le redémarrage de seed-3 (premier depuis J0, chaîne 12k) a été tué 5 fois par
+l'OOM killer (RSS 5,9 Go anon sur 5,9 Go de RAM, `status=9/KILL`, systemd en échec rapide).
+Diagnostic : l'image native dimensionne son tas à ~80 % de la RAM **physique** — la rétention
+est de l'ordure non collectée, pas du live set : reconstruit avec `-R:MaxHeapSize=512m`
+(`app-node/build.gradle`), le même binaire boote **le même store** (copie exacte, 308 Mo,
+12 331 blocs) à **89 Mo de RSS** sur le devbox, là où l'ancien binaire montait à 14,5 Go de
+pic / 13,8 Go retenus. Anomalie ouverte : sur la VM elle-même, même le binaire plafonné meurt
+encore (RSS → 4 Go) sur le store « déchiré » par ses 7 crashs successifs — le couple
+(binaire plafonné + store sain copié) passe, le couple (même binaire + store natif multi-crashé)
+non ; à instruire avec les outils de mainteneur (la piste : état de plus en plus déchiré à
+chaque boot interrompu en pleine réparation). Récupération : **purge + resync incrémental**
+(3e RB-01 de la journée, procédure désormais routinière : le sync incrémental est borné en
+mémoire, RSS ~110 Mo pendant le rattrapage). **Runbook : ne pas redémarrer une seed portant un
+store long tant que ce défaut n'est pas corrigé ; le chemin sûr est purge+resync.** Les seeds
+1/2, jamais redémarrées, courent sur le binaire d'origine — leur prochain redémarrage DOIT se
+faire après déploiement du binaire plafonné (fait pour seed-3 ; à répliquer sur 1/2 sans les
+redémarrer : l'échange d'inode ne touche pas le process en cours).
+
 **État du soak laissé tourner — handover.** Seeds : `systemd` `rhizome-node.service` sur
 seed-1/2/3 (ssh `rhizome@10.10.10.1x` via le saut ; env `/etc/rhizome/node.env`, dont la nouvelle
 `RHIZOME_ALLOWED_HOSTS` ; données `/var/lib/rhizome-node`, baseline 374 MB à h=280 le 2026-09-28
