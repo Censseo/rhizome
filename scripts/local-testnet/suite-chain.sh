@@ -28,8 +28,13 @@ if [[ -z "$scan" ]]; then
   suite_summary
   exit 1
 fi
-field() { "$PY" -c 'import json,sys;d=json.loads(sys.argv[1]);v=d.get(sys.argv[2]);print(len(v) if isinstance(v,list) else (json.dumps(v) if isinstance(v,dict) else v))' "$scan" "$2"; }
-raw()   { "$PY" -c 'import json,sys;print(json.dumps(json.loads(sys.argv[1]).get(sys.argv[2])))' "$scan" "$2"; }
+# Le scan complet peut dépasser ARG_MAX sur une vraie chaîne (12k+ blocs réels vs quelques
+# centaines en loopback — mesuré : « Argument list too long » tuait chaque verdict en silence) :
+# il part dans un fichier, et les lecteurs ci-dessous reçoivent son CHEMIN, jamais son contenu.
+SCAN_FILE="$BASE_DIR/chain-scan.json"
+printf '%s' "$scan" > "$SCAN_FILE"
+field() { "$PY" -c 'import json,sys;d=json.load(open(sys.argv[1]));v=d.get(sys.argv[2]);print(len(v) if isinstance(v,list) else (json.dumps(v) if isinstance(v,dict) else v))' "$SCAN_FILE" "$2"; }
+raw()   { "$PY" -c 'import json,sys;print(json.dumps(json.load(open(sys.argv[1])).get(sys.argv[2])))' "$SCAN_FILE" "$2"; }
 
 scanned="$(field x scanned)"
 record CHAIN-00-scan PASS "$scanned blocs lus (subvention $(field x subsidy) u, $(field x perUncle) u par oncle)"

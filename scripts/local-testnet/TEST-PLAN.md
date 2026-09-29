@@ -979,6 +979,48 @@ tunnel fait sonder `exists` à une MAUVAISE adresse (un « module installé » p
 contrat de 1039 octets là où le module incriminé en fait 40 — toujours recouper par codeHash) ;
 les attentes de propagation restent l'unique calibration à généraliser pour réseau non-loopback.
 
+**suite-chain sur la chaîne réelle + journée d'incidents du 2026-09-29 (soak J+1, dégradé en
+fin de journée — lire jusqu'au bout).** `suite-chain.sh` a d'abord silencieusement rendu des
+verdicts vides sur la vraie chaîne : le scan entier (12k blocs) passait EN ARGV à python
+(« Argument list too long » — tenait sur les chaînes loopback, pas sur 12k blocs réels) —
+corrigé (scan par fichier). Après correction : **881 oncles sur 816 blocs** (GHOST réellement
+exercé sur le réseau réel, comptabilité de récompense EXACTE fenêtre courte : 0 mismatch,
+subvention courante), 0 rupture de chaînage, et les « 6 878 supply mismatches » du long
+fenêtrage déclassés : `chainscan` lit la subvention UNE fois au tip et l'applique à tout —
+invalide sur une courbe pilotée par l'offre (la subvention a bougé de 26 056 à 26 067 sur la
+fenêtre). Calibration à faire : subvention par bloc pour les profils à courbe active.
+
+**Trouvaille majeure — RB-01 ORGANIQUE, sans partition.** Au matin, le banc A était au-delà de
+l'horizon de reorg (>120 blocs de profondeur de fourche, minorité en travail, « past the reorg
+horizon; nothing to adopt » en boucle, 0 ban, `degraded=null`, 593 alertes scission cumulées) :
+PENDANT LA NUIT, sans aucune coupure, le nœud a divergé et franchi l'horizon. RB-01 n'est donc
+pas seulement le produit d'une coupure — un nœud WAN minoritaire peut s'y perdre par dérive
+organique à cette cadence. Récupération RB-01 exécutée (confirm minorité par travail cumulé →
+purge → resync). À verser au runbook : la profondeur de fourche n'est PAS l'écart de hauteur
+(56 blocs d'écart, >120 de profondeur).
+
+**Cascade opérationnelle, dans l'ordre.** (1) /tmp se désagrège par vagues sur le devbox
+(pidfiles/journaux disparaissent puis reviennent — le brief l'avait dit) : le soak a été
+relocalisé vers `.testnet/campaign11/` (couvert par le .gitignore), tunnels/pidfiles
+reconstruits depuis /proc. (2) Une charge de travail EXTERNE (suite de tests JS « vitest »,
+session parallèle — fichiers `HANDOFF-opencode.md` dans le scratchpad) a porté le load
+average à 50 puis ~100 : les nœuds locaux affamés ont vu leurs seeds « injoignables » (sondes
+en timeout), leurs fils de sync muets, et les bancs relancés n'ont JAMAIS resynchronisé —
+malgré des seeds servant `/sync` en 130 ms et des ancres correctement conservées (« keeping
+the trusted anchor »). Un affamement CPU se lit EXACTEMENT comme une éclipse réseau —
+diagnostic à retenir. (3) Le redémarrage de seed-3 pour isoler la variable a saturé SA VM au
+point d'étrangler son sshd (tempête de replay/minage) : elle est restée HS — **récupération
+manuelle requise** (console hyperviseur ou attendre la fin de tempête puis
+`systemctl restart rhizome-node` sur seed-3). (4) Les sims sont arrêtés volontairement
+(allègement) ; les bancs tournent mais minent en solo tant que la charge externe perdure.
+Leçons : ne jamais empiler de nœuds de diagnostic sur une box déjà chargée ; un nœud JVM
+« natif » de ce dépôt consomme bien plus qu'on ne croit sous contention ; et la première
+question devant une éclipse est désormais « quel est le load ? ».
+
+**État laissé (dégradé, assumé) :** seeds 1/2 saines au même tip (h≈12 350+), seed 3 HS à
+relancer, bancs A/B en minage solo (sync à revalider quand la charge retombera), sims stoppés,
+monitor actif, tunnels debout, tout l'état sous `.testnet/campaign11/`.
+
 **État du soak laissé tourner — handover.** Seeds : `systemd` `rhizome-node.service` sur
 seed-1/2/3 (ssh `rhizome@10.10.10.1x` via le saut ; env `/etc/rhizome/node.env`, dont la nouvelle
 `RHIZOME_ALLOWED_HOSTS` ; données `/var/lib/rhizome-node`, baseline 374 MB à h=280 le 2026-09-28
