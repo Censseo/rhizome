@@ -1064,23 +1064,51 @@ store long tant que ce défaut n'est pas corrigé ; le chemin sûr est purge+res
 faire après déploiement du binaire plafonné (fait pour seed-3 ; à répliquer sur 1/2 sans les
 redémarrer : l'échange d'inode ne touche pas le process en cours).
 
-**État du soak laissé tourner — handover.** Seeds : `systemd` `rhizome-node.service` sur
-seed-1/2/3 (ssh `rhizome@10.10.10.1x` via le saut ; env `/etc/rhizome/node.env`, dont la nouvelle
-`RHIZOME_ALLOWED_HOSTS` ; données `/var/lib/rhizome-node`, baseline 374 MB à h=280 le 2026-09-28
-10:03 UTC). Devbox, tous détachés (`setsid`, survivent à la session) : les 3 tunnels `-L`
-(`RHIZOME_TUNNELS_DIR=<scratchpad>/campagne11/tunnels`, base 13000), le tunnel `-R`
-(pid `state/reverse-tunnel.pid`), les 2 bancs (ports 13003/13004, pids `state/bench-*.pid`),
-`sim-tx.sh` 8 workers et `sim-contract.sh` (intervalle 5 s), `monitor.sh`
-(`RHIZOME_TESTNET_DIR=<scratchpad>/campagne11/state` → `monitor.csv`, alertes dans
-`logs/monitor.log`, seuil StaleTip porté à 60×5 s car la cadence réelle dépasse la cible).
-À mesurer par la suite : `du -s /var/lib/rhizome-node` par VM (croissance/jour vs baseline),
-`syncPeersBanned` et les lignes de ban des journaux (décroissance des scores), alertes du
-monitor. Pour arrêter proprement : `sim-tx.sh stop`, `sim-contract.sh stop`, kill du monitor et
-des pids ci-dessus, `tunnels.sh down`. À ne JAMAIS faire : pointer `partition.sh` vers un
-inventaire contenant les IP de seeds, arrêter un seed hors incident, toucher à `ip rhizome_nat`.
-Dotation des sims (50 PDN/worker, 0,002 PDN brûlé par tx envoyée) : tenante plusieurs semaines à
-la cadence observée ; re-doter depuis `hot` si un soak très long épuise un worker
-(`BALANCE_TOO_LOW` dans `sim/tx.csv`).
+**Récupération du soak (soir 2026-09-29, en cours et autonome).** Les trois laggards ont été
+remis sur le chemin sain et convergent seuls ; la soirée a définitivement élucidé la lenteur :
+**(1) le mur PoW** — un joiner revalide chaque en-tête par le hachage DUR EN MÉMOIRE
+Pufferfish2 (`HeaderChain.validate → verifyNonce → hashpass`, pile constatée par jstack sur un
+nœud JVM témoin) : sous saturation de bande passante mémoire (la charge externe du matin),
+le KDF s'effondre d'un facteur ~100 (15 blocs/s → 0,1), et le fil « muet » en état R n'est
+PAS coincé — il hache. Redevenu calme, le même joiner est repassé à ~10 blocs/s (h=1→2 326 en
+4 min). **(2) le mur wasm** — le segment h≈12,2k-13,9k porte la batterie de contrats de la
+veille ; le rejouer coûte ~550 Ko/min d'écritures par nœud (~15 blocs/min) MÊME à charge 7 :
+le rattrapage d'une chaîne dense en contrats est intrinsèquement CPU-bound (les /stats des
+bancs restent « verrouillés » pendant l'application — lecture `/proc/<pid>/io` pour suivre la
+progression, `du` est aveugle sous le seuil de flush memtable). **(3) le service des corps est
+sérialisé côté seed** : chaque tireur simultané multiplie la latence de tous (mesuré : /sync
+40 corps = 4 661 ms avec 4 tireurs, 91 ms après purge) — les rattrapages doivent être
+SÉRIALISÉS. **(4) un nœud en rattrapage ne doit jamais miner** : seed-3 a re-miné une fourche
+solo pendant son rattrapage ralenti et a franchi l'horizon de reorg (« past the reorg horizon;
+nothing to adopt ») — RB-01 organique n°2 ; récupérée par purge + resync SANS mineur
+(`#RHIZOME_MINER` dans node.env), 4e purge de la journée. Fragilité connexe : les tunnels -L
+vers une VM qui valide à fond meurent (sshd affamé) — reconstruire avec
+`ssh -F ssh_config -N -L 127.0.0.1:13002:10.10.10.13:3000 seed-3`, ou lire la hauteur par ssh
+patient (45 s). État au soir : seeds 1/2 au tip (~15,5k), seed-3 à ~12-13k en rattrapage sans
+mineur, bancs A/B à ~12-13k (stores propres, SANS mineur, binaire d'origine) — tous écrivent
+régulièrement, convergence attendue en 1-2 h sans intervention. **Reste à faire ensuite,
+dans l'ordre : (a) réactiver les mineurs** (seed-3 : éditer node.env, restart, SURVEILLER le
+RSS — boot d'un store 15k = le mur mémoire du matin ; bancs : relance avec RHIZOME_MINER,
+même surveillance), **(b) relancer les sims** (tx 8 workers + contract, dotation intacte),
+**(c) vérifier le monitor vert et le 5/5 même tip.** Premier snapshot naturel attendu vers
+h=17 280 : l'expérience snap-sync se fera seule.
+
+**Handover infra (vrai au soir 2026-09-29).** Seeds : `systemd` `rhizome-node.service`
+(ssh `rhizome@10.10.10.1x` via `bin/ssh` du dossier campagne ; env `/etc/rhizome/node.env` ;
+données `/var/lib/rhizome-node`, baseline 374 MB à h=280 le 2026-09-28 — seed-3 tourne sur
+store resynchronisé, mineur désactivé jusqu'au tip). Binaire : `d3473289…` (origine) sur
+seeds 1/2 et bancs ; `5ddd0ed2…` (plafonné 512m, commit `6f8e6ac`) sur seed-3 — **déployer le
+plafonné sur seeds 1/2 avant tout redémarrage** (copie locale : `bin/rhizome-node-orig` =
+origine, `app-node/build/native/rhizome-node` = plafonné). Devbox, tout sous
+`.testnet/campaign11/` (ssh_config + bin/ssh réparés, clés relocalisées dans `keys/`) :
+tunnels `-L` 13000/13001 (13002 à reconstruire au besoin — meurt sous validation), tunnel
+`-R` 14003/14004 (pid `state/reverse-tunnel.pid`), bancs A/B ports 13003/13004
+(`state/bench-*.pid`, SANS mineur pour l'instant — réactiver au tip), monitor actif
+(`state/monitor.csv`, `logs/monitor.log`), sims ARRÊTÉS (`sim-tx.sh`/`sim-contract.sh` à
+relancer après convergence ; dotation intacte, plusieurs semaines). Attention : le dossier
+`/tmp` du devbox reste inflammable — ne rien y mettre. À ne JAMAIS faire : pointer
+`partition.sh` vers un inventaire contenant les IP de seeds, arrêter un seed hors incident,
+toucher à `ip rhizome_nat`, redémarrer une seed portant un store long sans binaire plafonné.
 
 ## Journal de résultats — campagne 9 (staging, exécutée 2026-09-22)
 
