@@ -1093,6 +1093,44 @@ même surveillance), **(b) relancer les sims** (tx 8 workers + contract, dotatio
 **(c) vérifier le monitor vert et le 5/5 même tip.** Premier snapshot naturel attendu vers
 h=17 280 : l'expérience snap-sync se fera seule.
 
+**J+2 (2026-09-30) : le snapshot change tout — et la fission like nothing before.** La nuit a
+convergé seule : 5/5 au même tip au matin (h=17 713), la chaîne a franchi 17 280 et **le
+premier snapshot naturel existe** (88 Ko, `rhizome-snapshot-*.chunks`, 03:48). La
+récupération par purge+`RHIZOME_SYNC=snap` est mesurée : **store vide → tip en 10-11 min,
+<170 Mo** — contre 9 h de rejeu complet la veille ; trois guérisons l'ont utilisée dans la
+journée. Le boot d'un store adopté par snapshot est maigre (105→160 Mo, aucun ballonnement) :
+**le snapshot est LA cure du mur mémoire du boot** — un nœud plein qui ne peut pas redémarrer
+sur 6 Go redémarre en 2 min une fois réaligné par snap.
+
+**L'essai « 5 mineurs forts » et la fission.** Réactivation des mineurs des bancs → cadence
+réelle ~7,8 s/bloc au plancher de difficulté 8 : forks perpétuels, les seeds 2 vCPU décrochent
+(écart stable ~100 = au bord de l'horizon 120), puis **fission du réseau en deux camps de
+finalité** (horizons mutuellement dépassés, « nothing to adopt » de part et d'autre — le
+réseau ne s'auto-répare PAS ; travail cumulé mesuré des deux côtés pour désigner le
+majoritaire : 5,16M vs 5,14M). Guérison : les bancs (camp minoritaire, RB-01) par purge+snap
+vers le camp majoritaire ; retour au régime stable **3 seeds mineuses + 2 bancs valideurs**
+(la config nocturne convergée) — le régime 5-mineurs-forts n'est PAS tenable sur ce matériel
+au plancher de difficulté : conclusion pour le testnet public (des seeds plus grosses ou des
+mineurs plus lents).
+
+**Deux problèmes ouverts consignés (produit).** (1) **seed-2 : API figée ~1 h** sous service
+peer (minage 100 % CPU, journal vivant, aucune réponse HTTP — y compris en local) pendant que
+seed-1 tirait son état : candidat bug « service peer sur la boucle d'événements qui affame
+l'API » ; non résolue, la seed s'est remise à servir plus tard sans intervention. (2) **seed-1 :
+`RHIZOME_SYNC=snap` présent + répertoire vide + 3 pairs porteurs de fichiers snapshot →
+pourtant sync plaine d'emblée** (zéro ligne d'adoption au boot, et la plaine est bloquée :
+« pruned the bodies we need » — les nœuds snap-adoptés ne servent plus les vieux corps, et le
+seul store complet du réseau était celui de seed-2, figée). Seed-1 reste donc à h=1 ce soir ;
+piste mainteneur : le chemin d'offre/adoption du snapshot côté servé. Leçon générale : **un
+réseau dont tous les anciens nœuds ont snap-adopté ne peut plus servir un joiner en sync
+plaine — le snapshot n'est pas une optimisation, c'est une dépendance** (garder au moins un
+archiveur, ou réparer l'adoption).
+
+**État au clos du J+2 :** seed-3 au tip (mineuse), bancs A/B au tip (valideurs), seed-2
+vivante-minant (API remise), seed-1 à h=1 (mystère snap ci-dessus, non redémarrable sans
+purge). Chaîne h≈23 600+, cadence ~1 bloc/10-12 s à 2-3 mineurs. Sims relancés
+(8 workers + contrat), monitor vert sur les nœuds sains. Mesures J+3 : demain.
+
 **Handover infra (vrai au soir 2026-09-29).** Seeds : `systemd` `rhizome-node.service`
 (ssh `rhizome@10.10.10.1x` via `bin/ssh` du dossier campagne ; env `/etc/rhizome/node.env` ;
 données `/var/lib/rhizome-node`, baseline 374 MB à h=280 le 2026-09-28 — seed-3 tourne sur
