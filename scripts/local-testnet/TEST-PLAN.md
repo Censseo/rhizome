@@ -1131,6 +1131,31 @@ vivante-minant (API remise), seed-1 à h=1 (mystère snap ci-dessus, non redéma
 purge). Chaîne h≈23 600+, cadence ~1 bloc/10-12 s à 2-3 mineurs. Sims relancés
 (8 workers + contrat), monitor vert sur les nœuds sains. Mesures J+3 : demain.
 
+**J+3 (2026-10-01) : mesures + le « mystère snap » résolu (c'était la patience).**
+*Mesures.* Stores à h≈27 150 : seed-2 (full) 579 Mo, seed-3 (snap) 448 Mo, bancs 423-425 Mo —
+la baseline du 28/09 (374 Mo à h=280) donne **~7,6 Ko/bloc** de croissance full-node, soit
+~45 Mo/jour à la cadence moyenne (~6 260 blocs/jour observés sur 72 h de soak, drames inclus).
+Fenêtre 499 blocs : **0 oncle** (le régime stable 2-3 mineurs ne fourche plus ; le churn à 5
+mineurs était à 12,3 % — le taux d'oncles EST l'instrument de mesure de la pression de forks),
+0 rupture, 0 mismatch de supply, subvention plate à 26 058. Sims cumulés : ~47 000 tx,
+~1 850 contrats. Monitor : 3 nœuds sains à 0 alerte, seed-1/2 vus DOWN (API muettes).
+
+*Le mystère snap résolu.* Le bootstrap `RHIZOME_SYNC=snap` **valide le PoW de chaque en-tête
+de la genèse au pivot** (Pufferfish2 memory-hard) AVANT d'exister pour l'observateur : pas
+d'écouteur, pas de log, fil principal bloqué dans `SnapshotBootstrap.bootstrap` →
+`HeaderChain.validate` → `hashpass` (pile capturée par jstack sur un joiner JVM témoin).
+Mesuré : **23 min de hachage pour 17 820 en-têtes sur la JVM** (~0,73 cœur), puis adoption
+d'état et queue — joiner12 : store vide → tip 27 161 complet en ~50 min. Toutes mes fenêtres
+d'observation de 14 min avaient tué des boots EN COURS : le « refus silencieux » était une
+latence silencieuse. Deux enseignements produit : (1) le bootstrap devrait logger sa
+progression (périodicité, phase) — un opérateur ne peut pas distinguer « en cours » de
+« mort » ; (2) un chemin d'abandon précoce existe (boot de seed-1 retourné « false » en 13 min,
+probable throttling du tirage d'en-têtes, lui aussi sans log). Note d'humilité consignée au
+passage : mon sed matinal avait **supprimé** la ligne `RHIZOME_PEERS** de seed-1 (vérifiée
+désormais par grep après chaque édition d'env distant) — une partie du mystère était
+l'opérateur. seed-1 : tentative patiente finale lancée (~2 h de validation attendues sur
+2 vCPU), verdict au prochain point.
+
 **Handover infra (vrai au soir 2026-09-29).** Seeds : `systemd` `rhizome-node.service`
 (ssh `rhizome@10.10.10.1x` via `bin/ssh` du dossier campagne ; env `/etc/rhizome/node.env` ;
 données `/var/lib/rhizome-node`, baseline 374 MB à h=280 le 2026-09-28 — seed-3 tourne sur
