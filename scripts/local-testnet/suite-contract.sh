@@ -20,7 +20,10 @@ SUITE_NAME=contract
 source "$(dirname "$0")/suite-common.sh"
 
 NODE=${1:-0}
-REMOTE=$((NODES - 1))
+# Nœud des lectures « distantes » (VM-T09/T15/CTRL) : dernier de la flotte sur devnet, mais
+# sur un petit réseau réel le dernier nœud peut être le maillon faible (503 sous charge) —
+# RHIZOME_TESTNET_REMOTE_NODE permet de le pointer sur un nœud sain indépendant.
+REMOTE="${RHIZOME_TESTNET_REMOTE_NODE:-$((NODES - 1))}"
 OWNER_KEY="$KEYS_DIR/vm-owner.key"
 TEMPLATES="$ROOT/lib-vm/src/test/resources"
 ADV_DIR="$BASE_DIR/wasm-adv"
@@ -59,7 +62,11 @@ DEPLOY_ADDR=""; DEPLOY_STATUS=""; CALL_STATUS=""
 # batterie a stagné 15 min sur ce mode d'échec). On recharge donc AVANT chaque envoi.
 ensure_funds() {
   local need=$((GAS_LIMIT * GAS_PRICE * 2))
-  (( $(balance_units "$NODE" "$OWNER") >= need )) && return 0
+  # Lecture vide = nœud occupé (staging réel) : l'arithmétique (( >= need )) planterait en
+  # erreur de syntaxe et ferait échouer toute la chaîne de déploiements. Retomber sur 0 fait
+  # prendre le chemin de recharge, qui attend une vraie lecture — sûr dans les deux cas.
+  local bal; bal="$(balance_units "$NODE" "$OWNER")"; bal="${bal:-0}"
+  (( bal >= need )) && return 0
   fund_from_miners "$OWNER" 40
   wait_balance "$NODE" "$OWNER" "$need" 300
 }

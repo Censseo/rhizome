@@ -1179,6 +1179,21 @@ signature que le gel de seed-2) : ne pas juger un nœud « mort » pendant qu'un
 Passe propre finale de suite-contract : à rejouer sur environnement posé (les correctifs
 ci-dessus la rendent déterministe).
 
+**Poussée et fin de session (2026-10-01 après-midi).** `git push` explicite : 15 commits
+`e13a48d..e743bc5` poussés, puis le dossier de conception checkpoint
+(`docs/testnet/checkpoint-design-inputs.md` — les cinq contraintes mesurées + les questions
+ouvertes que le chantier 0.4 doit trancher). Deux durcissements harnass de plus, trouvés en
+repassant suite-contract sur le réseau réel : **`ensure_funds` plantait en erreur de syntaxe
+quand la lecture de sol rend vide** (`(( >= need ))`, nœud occupé) — vide = supposé sous-doté,
+chemin de recharge sûr ; **`REMOTE` est surchargeable** (`RHIZOME_TESTNET_REMOTE_NODE`) car le
+dernier nœud de la flotte est aussi le maillon faible (banc B en 503 sous charge). La passe
+propre finale de suite-contract sur staging reste **reportée à une fenêtre calme** : la session
+parallèle maintient la box à ~40 de charge (tests Maven d'un autre projet) et chaque passe
+s'est enlisée en timeouts — les correctifs ci-dessus la rendront déterministe quand la box
+respirera (à rejouer avant J+7). État réseau en fin de session : seeds 1/3 au tip et mineuses,
+seed-2 API intermittente, banc B remis seul (200), banc A en purge+snap autonome (validation
+PoW silencieuse, atterrissage attendu sous ~1 h même à charge). Le soak continue.
+
 **Handover infra (vrai au soir 2026-09-29).** Seeds : `systemd` `rhizome-node.service`
 (ssh `rhizome@10.10.10.1x` via `bin/ssh` du dossier campagne ; env `/etc/rhizome/node.env` ;
 données `/var/lib/rhizome-node`, baseline 374 MB à h=280 le 2026-09-28 — seed-3 tourne sur
