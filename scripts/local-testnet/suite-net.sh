@@ -16,6 +16,10 @@ SUITE_NAME=net
 source "$(dirname "$0")/suite-common.sh"
 
 NODE=${1:-0}
+# API-12 signe une transaction honnête après le déluge : sans cela, un BASE_DIR frais n'a pas
+# encore Forge.class, `forge` rend une chaîne vide et le POST vide vaut 400 — un artefact du
+# harnais qui a failli passer pour une pénalité de source (run staging 2026-09-29/10-01).
+forge_build
 STRICT_PORT=$((BASE_PORT + 91))
 STRICT_URL="http://127.0.0.1:$STRICT_PORT"
 HOSTILE_PORT=$((BASE_PORT + 92))
@@ -133,9 +137,14 @@ for spelling in "http://LOCALHOST:$(node_port 2)" "http://localhost:$(node_port 
 done
 sleep 2
 after="$(peers_targeting "$(node_port 2)")"
-(( ${after:-0} <= ${before:-0} )) \
-  && record NET-06-case-and-slashes PASS "casse et barres finales coalescent (entrées visant le pair : $before → $after)" \
-  || record NET-06-case-and-slashes FAIL "une orthographe de casse/barre a créé une identité de plus ($before → $after)"
+# Les quatre orthographes doivent coalescer en UNE identité canonique. La croissance autorisée
+# est 1, pas 0 : sur un réseau où le pair cible est orthographié autrement que localhost (staging :
+# les seeds sont en 127.0.0.1), la forme canonique localhost:port n'existe pas encore dans la
+# table et son ajout légitime crée une entrée — ce qui compte est que les QUATRE variantes ne
+# fassent qu'elle (devnet : croissance 0 car la forme y est déjà).
+(( ${after:-0} - ${before:-0} <= 1 )) \
+  && record NET-06-case-and-slashes PASS "casse et barres finales coalescent en une identité (entrées visant le pair : $before → $after)" \
+  || record NET-06-case-and-slashes FAIL "les orthographes casse/barres ont créé plusieurs identités ($before → $after)"
 
 # (b) Segments-point RFC 3986 : MESURÉ — ils ne coalescent PAS. `canonicalize` préserve
 # délibérément un chemin non-racine (« deux montages distincts ne doivent pas se confondre

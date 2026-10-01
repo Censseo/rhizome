@@ -1156,6 +1156,29 @@ désormais par grep après chaque édition d'env distant) — une partie du myst
 l'opérateur. seed-1 : tentative patiente finale lancée (~2 h de validation attendues sur
 2 vCPU), verdict au prochain point.
 
+**J+3 suite et fin : seed-1 revient, 5/5 rétabli, calibrations harnais closes.** La tentative
+patiente a porté : **3 h de validation PoW silencieuse** (17,8k en-têtes, 2 vCPU) puis
+atterrissage au tip — le mystère était intégralement de la latence muette. Réactivation du
+mineur : le boot du store 27,8k monte à **7,85 Go de RSS sur la VM de 5,9 Go — survécu par le
+swap, stable, minant au tip** (forme finale du mur mémoire : ni OOM ni maigre, un marécage).
+Le réseau compte à nouveau **5 nœuds, 4 mineurs**.
+
+*Calibrations harnais (commit à suivre).* **API-12-honest-still-served n'a jamais été un
+« strike client »** : `suite-net.sh` n'appelait pas `forge_build`, donc sur un BASE_DIR frais
+`forge` rendait une chaîne vide et le POST vide valait 400 — artefact ajouté au script.
+**NET-06** : l'assertion « aucune croissance » n'est vraie que si le pair cible est déjà
+orthographié localhost (devnet) ; la propriété réelle — quatre orthographes coalescent en UNE
+identité — est désormais ce que le test affirme (≤1). **VM-T09/VM-T15** : `REMOTE=NODES-1`
+vaut 29 par défaut (flotte devnet) — sur staging il faut `RHIZOME_TESTNET_NODES=5` (REMOTE=4).
+**suite-contract sur staging** : la dotation devnet est insuffisante (frais de stockage à la
+période pleine — ~1 an — des déploiements wasm), re-doté 500 PDN/clé depuis `hot` ; et les
+re-passes rapprochées culbutent sur les nonces en vol — attendre la stabilisation du nonce et
+un mempool vide entre deux passes. Dernière leçon opérationnelle : **une passe de suite
+affame l'API des petits nœuds** (boucle d'événements occupée par le service peer — même
+signature que le gel de seed-2) : ne pas juger un nœud « mort » pendant qu'une suite court.
+Passe propre finale de suite-contract : à rejouer sur environnement posé (les correctifs
+ci-dessus la rendent déterministe).
+
 **Handover infra (vrai au soir 2026-09-29).** Seeds : `systemd` `rhizome-node.service`
 (ssh `rhizome@10.10.10.1x` via `bin/ssh` du dossier campagne ; env `/etc/rhizome/node.env` ;
 données `/var/lib/rhizome-node`, baseline 374 MB à h=280 le 2026-09-28 — seed-3 tourne sur
