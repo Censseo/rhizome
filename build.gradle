@@ -50,8 +50,13 @@ subprojects {
 
     repositories {
         mavenCentral()
-        // Custom activej build (activejGroup) is served from JitPack.
-        maven { url 'https://jitpack.io' }
+        // Custom activej build (activejGroup) is served from JitPack, and ONLY from JitPack:
+        // exclusiveContent means no other repository may supply that group (dependency
+        // confusion) and JitPack may supply nothing else.
+        exclusiveContent {
+            forRepository { maven { url 'https://jitpack.io' } }
+            filter { includeGroup activejGroup }
+        }
     }
 
     dependencies {
