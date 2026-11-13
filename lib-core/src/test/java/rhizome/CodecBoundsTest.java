@@ -327,4 +327,33 @@ class CodecBoundsTest {
         tx.put("data", "00".repeat(TransactionDto.MAX_DATA));
         assertDoesNotThrow(() -> Transaction.of(tx));
     }
+
+    /**
+     * CODEC-09 — Relay-malleate a coinbase or rent-collection transaction: its signature and signing
+     * key bytes are not hashed into the txid, so non-zero junk there mints unlimited wire twins.
+     */
+    @Test
+    void selfAuthorizedTransactionsMustCarryZeroSignatureAndKeyBytes() {
+        byte[] coinbase = rhizome.core.transaction.Transaction
+            .of(rhizome.core.ledger.PublicAddress.random(), new rhizome.core.transaction.TransactionAmount(5))
+            .serialize().toBuffer();
+        TransactionDto.fromBuffer(coinbase); // clean encoding still decodes
+        byte[] junkSig = coinbase.clone();
+        junkSig[1] = 1; // first signature byte (scheme byte is offset 0)
+        assertThrows(IllegalArgumentException.class, () -> TransactionDto.fromBuffer(junkSig));
+        byte[] junkKey = coinbase.clone();
+        junkKey[1 + 64] = 1; // first signing-key byte
+        assertThrows(IllegalArgumentException.class, () -> TransactionDto.fromBuffer(junkKey));
+
+        byte[] collect = rhizome.core.transaction.TransactionImpl.builder()
+            .kind(rhizome.core.transaction.TransactionKind.BOX_COLLECT)
+            .from(rhizome.core.ledger.PublicAddress.empty()).to(rhizome.core.ledger.PublicAddress.random())
+            .amount(new rhizome.core.transaction.TransactionAmount(0))
+            .fee(new rhizome.core.transaction.TransactionAmount(0))
+            .data(new byte[32]).build().serialize().toBuffer();
+        TransactionDto.fromBuffer(collect);
+        byte[] collectJunkKey = collect.clone();
+        collectJunkKey[1 + 64] = 1;
+        assertThrows(IllegalArgumentException.class, () -> TransactionDto.fromBuffer(collectJunkKey));
+    }
 }

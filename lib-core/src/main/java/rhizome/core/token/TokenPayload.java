@@ -131,7 +131,8 @@ public final class TokenPayload {
         byte[] s = new byte[len];
         buffer.get(s);
         String value = new String(s, StandardCharsets.UTF_8);
-        if (value.getBytes(StandardCharsets.UTF_8).length != len) {
+        // Compare bytes, not lengths: a malformed sequence can be replaced by a same-length U+FFFD run.
+        if (!java.util.Arrays.equals(value.getBytes(StandardCharsets.UTF_8), s)) {
             throw new IllegalArgumentException(what + " is not valid UTF-8");
         }
         return value;

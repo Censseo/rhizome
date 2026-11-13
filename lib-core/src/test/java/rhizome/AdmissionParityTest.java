@@ -171,7 +171,7 @@ class AdmissionParityTest {
     @Test
     void contractGasBudgetCountsTowardTheFloorAgree() {
         KeyHolder sender = new KeyHolder();
-        // minerRevenue = fee + gasLimit × gasPrice: 10 reaches the floor exactly.
+        // minerRevenue = gasLimit × gasPrice (contract fee is reserved at 0): 10 reaches the floor exactly.
         assertParity(FLOORED, call(sender, FLOORED, 0, 10, 1), 1_000_000L);
         assertParity(FLOORED, call(sender, FLOORED, 0, 9, 1), 1_000_000L);
     }
@@ -199,5 +199,71 @@ class AdmissionParityTest {
         // rule, the executor as a payload rule. Both reject; the parity is what is pinned.
         KeyHolder sender = new KeyHolder();
         assertParity(NetworkParameters.testnet(), boxCreate(sender, NetworkParameters.testnet(), 0), 1_000_000L);
+    }
+
+    /**
+     * POOL-09 — Make every honest miner assemble an invalid block by filling the pool with
+     * max-gas CALLs: six at {@code maxTxGas} exceed the 5x block gas cap, which only validation
+     * enforced, so selection kept producing a block every node rejected.
+     */
+    @Test
+    void selectionNeverExceedsTheBlockGasCap() {
+        NetworkParameters p = NetworkParameters.testnet();
+        int n = (int) (p.maxBlockGas() / p.maxTxGas()) + 1;
+        MutableAccounts accounts = new MutableAccounts();
+        MemPool pool = new MemPool(p, new SignatureVerifier(), accounts, 100);
+        InMemoryLedger ledger = new InMemoryLedger();
+        for (int i = 0; i < n; i++) {
+            KeyHolder k = new KeyHolder();
+            accounts.balances.put(k.address, 1_000_000L);
+            ledger.createWallet(k.address);
+            ledger.deposit(k.address, new TransactionAmount(1_000_000L));
+            assertEquals(ExecutionStatus.SUCCESS, pool.addTransaction(call(k, p, 0, p.maxTxGas(), 0)));
+        }
+        List<Transaction> selected = pool.getTransactionsForBlock(100);
+        assertEquals(n - 1, selected.size(), "the sixth max-gas call must be left in the pool");
+        assertEquals(n, pool.size(), "skipping selects nothing away: the call stays pooled");
+
+        var b = BlockImpl.builder().id(2).timestamp(5_000L).difficulty(p.genesisDifficulty())
+            .lastBlockHash(SHA256Hash.empty()).build();
+        b.addTransaction(Transaction.of(PublicAddress.random(), new TransactionAmount(p.miningReward(2))));
+        selected.forEach(b::addTransaction);
+        assertEquals(ExecutionStatus.SUCCESS, Executor.executeBlock(b, ledger, h -> false, p,
+            null, CONTRACT_STUB, BOX_STUB, null));
+    }
+
+    /**
+     * INFL-11 — Outrank all traffic for free with a contract tx whose {@code fee} field counted as
+     * miner revenue but was never debited: both the pool and the executor refuse a non-zero fee.
+     */
+    @Test
+    void contractFeeFieldIsRefusedByPoolAndExecutor() {
+        NetworkParameters p = NetworkParameters.testnet();
+        KeyHolder k = new KeyHolder();
+        Transaction t = TransactionImpl.builder()
+            .from(k.address).to(PublicAddress.random())
+            .amount(new TransactionAmount(0)).fee(new TransactionAmount(Long.MAX_VALUE))
+            .chainId(p.chainId()).nonce(0).signingKey(k.key)
+            .kind(TransactionKind.CALL)
+            .data(new byte[] {1, 2, 3}).gasLimit(1_000).gasPrice(0)
+            .build();
+        t.sign(k.priv);
+
+        MutableAccounts accounts = new MutableAccounts();
+        accounts.balances.put(k.address, 1_000_000L);
+        MemPool pool = new MemPool(p, new SignatureVerifier(), accounts, 100);
+        assertEquals(ExecutionStatus.INVALID_TRANSACTION_AMOUNT, pool.addTransaction(t));
+        assertEquals(0, pool.size());
+
+        InMemoryLedger ledger = new InMemoryLedger();
+        ledger.createWallet(k.address);
+        ledger.deposit(k.address, new TransactionAmount(1_000_000L));
+        var b = BlockImpl.builder().id(2).timestamp(5_000L).difficulty(p.genesisDifficulty())
+            .lastBlockHash(SHA256Hash.empty()).build();
+        b.addTransaction(Transaction.of(PublicAddress.random(), new TransactionAmount(p.miningReward(2))));
+        b.addTransaction(t);
+        assertEquals(ExecutionStatus.INVALID_TRANSACTION_AMOUNT, Executor.executeBlock(b, ledger, h -> false, p,
+            null, CONTRACT_STUB, BOX_STUB, null));
+        assertEquals(1_000_000L, ledger.getWalletValue(k.address).amount(), "refusal moved no value");
     }
 }

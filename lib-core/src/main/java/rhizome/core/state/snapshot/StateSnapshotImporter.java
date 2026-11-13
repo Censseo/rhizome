@@ -49,7 +49,14 @@ public final class StateSnapshotImporter {
         try {
             for (SnapshotChunk chunk : chunks) {
                 for (SnapshotChunk.Entry e : chunk.entries()) {
-                    root = tree.update(root, StateKeys.key(chunk.domain(), e.key()), StateKeys.valueHash(e.value()));
+                    byte[] key = StateKeys.key(chunk.domain(), e.key());
+                    // A repeated key would overwrite silently (the later value wins) while importVerified
+                    // replays BOTH to the sink: the sink could end with a different value than the one the
+                    // root commits to. An honest snapshot has unique keys.
+                    if (tree.prove(root, key) != null) {
+                        throw new SnapshotVerificationException("duplicate key in snapshot after " + entries + " entries");
+                    }
+                    root = tree.update(root, key, StateKeys.valueHash(e.value()));
                     entries++;
                     if (++sinceFlush >= IMPORT_BATCH_ENTRIES) {
                         nodes.flushBatch();

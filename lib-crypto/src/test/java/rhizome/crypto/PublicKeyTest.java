@@ -78,4 +78,27 @@ class PublicKeyTest {
         assertFalse(a.equals(PublicKey.empty()));
         assertFalse(a.equals(null));
     }
+
+    /**
+     * SIG-10 — Slip a small-order key past the denylist by flipping the x sign bit (top bit of
+     * the last byte) of a listed encoding, e.g. 00..0080 or 01..0080.
+     */
+    @Test
+    void signBitVariantsOfSmallOrderEncodingsAreRejected() {
+        for (String hex : SMALL_ORDER_HEX) {
+            byte[] twin = new byte[32];
+            for (int i = 0; i < 32; i++) {
+                twin[i] = (byte) Integer.parseInt(hex.substring(2 * i, 2 * i + 2), 16);
+            }
+            twin[31] ^= (byte) 0x80;
+            assertTrue(PublicKey.of(twin).isEmpty(), "sign-bit twin accepted: " + hex);
+        }
+        byte[] zeroY = new byte[32];
+        zeroY[31] = (byte) 0x80;
+        assertTrue(PublicKey.of(zeroY).isEmpty());
+        byte[] oneY = new byte[32];
+        oneY[0] = 1;
+        oneY[31] = (byte) 0x80;
+        assertTrue(PublicKey.of(oneY).isEmpty());
+    }
 }

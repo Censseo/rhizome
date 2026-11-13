@@ -228,4 +228,17 @@ class TransactionSchemeAgilityTest {
         assertEquals(PublicAddress.empty(), tx.derivedSenderAddress());
         assertFalse(tx.senderBindingValid());
     }
+
+    /**
+     * SIG-11 — Downgrade a post-quantum transaction by copying it: {@code Transaction.of(Transaction)}
+     * dropped scheme and commitment, so the copy derived a different sender and lost its binding.
+     */
+    @Test
+    void copyingATransactionKeepsSchemeAndCommitment() {
+        TransactionImpl tx = signed(generateKeyPairTyped(), SignatureScheme.ED25519_PQC, COMMITMENT);
+        TransactionImpl copy = (TransactionImpl) Transaction.of((Transaction) tx);
+        assertEquals(SignatureScheme.ED25519_PQC, copy.scheme());
+        assertArrayEquals(COMMITMENT, copy.pqCommitment());
+        assertArrayEquals(tx.serialize().toBuffer(), copy.serialize().toBuffer());
+    }
 }

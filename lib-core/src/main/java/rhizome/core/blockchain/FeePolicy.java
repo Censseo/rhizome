@@ -26,7 +26,7 @@ public final class FeePolicy {
 
     /**
      * The revenue a miner can earn from {@code tx}: the plain fee for value/box/token ops; for
-     * a contract call the fee plus its declared gas budget ({@code gasLimit × gasPrice},
+     * a contract call its declared gas budget ({@code gasLimit × gasPrice},
      * saturating) — an upper bound on the realized {@code gasUsed × gasPrice}, deterministic at
      * block-assembly time when gasUsed is still unknown. Also the mempool's metric for the
      * admission floor and the RBF bump (NOT for selection ordering, see MemPool.priorityRate).
@@ -36,7 +36,8 @@ public final class FeePolicy {
             return tx.fee().amount();
         }
         try {
-            return Math.addExact(tx.fee().amount(), Math.multiplyExact(tx.gasLimit(), tx.gasPrice()));
+            // The fee field is not part of it: contract txs must carry fee 0 (never debited).
+            return Math.multiplyExact(tx.gasLimit(), tx.gasPrice());
         } catch (ArithmeticException overflow) {
             return Long.MAX_VALUE;
         }

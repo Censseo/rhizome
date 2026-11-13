@@ -221,6 +221,8 @@ catalogue is never run as one suite.
 | SIG-07 | Downgrade a post-quantum-committed transaction's scheme byte, stripping the commitment while keeping the signature. | A2 | DEFENDED | `lib-core/src/test/java/rhizome/TransactionSchemeAgilityTest.java#schemeDowngradeKeepsTheSignatureButBreaksTheSenderBinding`, `lib-core/src/test/java/rhizome/TransactionSchemeAgilityTest.java#forgingACommitmentBreaksTheSenderBinding` |
 | SIG-08 | Drain an arbitrary wallet through the one self-authorised transaction kind, `BOX_COLLECT`, by naming a funded sender. | A3 | DEFENDED | `lib-core/src/test/java/rhizome/BoxConsensusTest.java#maliciousBoxCollectCannotDrainAnArbitraryWallet` |
 | SIG-09 | Forge an address whose checksum hides a substituted version byte or body. | A1 | DEFENDED | `lib-core/src/test/java/rhizome/PublicAddressSchemeTest.java#checksumCoversTheVersionByte`, `lib-core/src/test/java/rhizome/PublicAddressSchemeTest.java#checksumStillCatchesBodyTypos` |
+| SIG-10 | Slip a small-order public key past the denylist by flipping the x sign bit of a listed encoding (e.g. `00..0080`, `01..0080`). | A1 | DEFENDED | `lib-crypto/src/test/java/rhizome/crypto/PublicKeyTest.java#signBitVariantsOfSmallOrderEncodingsAreRejected` |
+| SIG-11 | Strip a transaction's post-quantum scheme and commitment by passing it through `Transaction.of(Transaction)`, which dropped both and so changed the derived sender. | A2 | DEFENDED | `lib-core/src/test/java/rhizome/TransactionSchemeAgilityTest.java#copyingATransactionKeepsSchemeAndCommitment` |
 
 ## REPLAY — replay and double-spend
 
@@ -246,6 +248,8 @@ catalogue is never run as one suite.
 | INFL-08 | Exploit a floating-point reward computation so two implementations disagree and the chain splits (Pandanite §4.2). | A3 | DEFENDED | `lib-core/src/test/java/rhizome/NetworkParametersTest.java#miningRewardIsIntegerAndDeterministic` |
 | INFL-09 | Mint permanent ledger entries at zero cost with amount-0, fee-0 transfers. | A1 | DEFENDED | `lib-core/src/test/java/rhizome/ExecutorTest.java#zeroAmountDepositDoesNotCreateTheRecipientWallet`, `lib-core/src/test/java/rhizome/ExecutorTest.java#consensusFeeFloorRejectsFreeTransactionsEvenInAMinersOwnBlock` |
 | INFL-10 | Seed a genesis ledger with negative or high-bit-set balances. | A6 | DEFENDED | `lib-core/src/test/java/rhizome/LedgerSnapshotTest.java#genesisLedgerRejectsNegativeSeededBalances`, `lib-core/src/test/java/rhizome/LedgerSnapshotTest.java#rejectsUnsignedAmountsWithTheHighBitSet` |
+| INFL-11 | Outrank all traffic for free with a contract transaction whose `fee` field counts as miner revenue but is never debited (`fee = Long.MAX_VALUE`, `gasPrice = 0`). | A1 | DEFENDED | `lib-core/src/test/java/rhizome/AdmissionParityTest.java#contractFeeFieldIsRefusedByPoolAndExecutor` |
+| INFL-12 | Wrap the genesis snapshot's total supply with near-maximal balances so the pinned-total check sees a wrapped value. | A6 | DEFENDED | `lib-core/src/test/java/rhizome/LedgerSnapshotTest.java#totalSupplyThrowsInsteadOfWrapping`, `lib-core/src/test/java/rhizome/GenesisBlockTest.java#genesisCommitsSnapshotTotalSupply` |
 
 ## UNCLE — GHOST uncle rewards
 
@@ -406,6 +410,8 @@ check is a boot-time equality composed with guards those suites already exercise
 | POOL-06 | Get a transaction admitted that consensus will reject, so it poisons every candidate block and halts production network-wide. | A1 | DEFENDED | `lib-core/src/test/java/rhizome/AdmissionParityTest.java#feeFloorBoundaryAgrees`, `lib-core/src/test/java/rhizome/AdmissionParityTest.java#gasCeilingBoundaryAgrees`, `lib-core/src/test/java/rhizome/MemPoolTest.java#rejectsBoxTransactionBeforeItsActivationHeight` |
 | POOL-07 | Replace a live transaction by fee without paying more, or displace a parked one. | A1 | DEFENDED | `lib-core/src/test/java/rhizome/MemPoolTest.java#replaceByFeeRequiresAPositiveFeeToReplaceAFreeOne`, `lib-core/src/test/java/rhizome/MemPoolTest.java#replaceByFeeRefusesToReplaceAParkedTransaction` |
 | POOL-08 | Grow the account-nonce state domain without bound by cycling one principal through fresh accounts. | A1 | RESIDUAL | One permanent leaf per account that has ever transacted; the domain cannot self-prune without reopening replay. Bounded economically by the optional `minFee` floor (off by default) and by block space — WHITEPAPER §7.6. |
+| POOL-09 | Fill the pool with max-gas contract calls so every honest miner assembles a block over the block gas cap, which every node rejects, forever. | A1 | DEFENDED | `lib-core/src/test/java/rhizome/AdmissionParityTest.java#selectionNeverExceedsTheBlockGasCap` |
+| POOL-10 | Pin pool slots indefinitely with a run of transactions whose sender was drained after admission (front nonce present, so the run reads as live). | A1 | DEFENDED | `lib-core/src/test/java/rhizome/MemPoolTest.java#drainedSenderRunIsPurgedWhenABlockIsApplied` |
 
 ## VM — contract sandbox and determinism
 
@@ -445,6 +451,7 @@ check is a boot-time equality composed with guards those suites already exercise
 | STATE-04 | Poison a bootstrapping node with a tampered, truncated or padded snapshot. | A2 | DEFENDED | `lib-core/src/test/java/rhizome/StateSnapshotTest.java#tamperedFlippedByteIsRefused`, `lib-core/src/test/java/rhizome/StateSnapshotTest.java#droppedEntryIsRefused`, `lib-core/src/test/java/rhizome/StateSnapshotTest.java#smuggledExtraEntryIsRefused` |
 | STATE-05 | Offer a snapshot pivot that is unburied, out of range, or would overflow the header window. | A2 | DEFENDED | `app-node/src/test/java/rhizome/node/SnapshotBootstrapRefusalTest.java#anUnburiedPivotIsRefused`, `app-node/src/test/java/rhizome/node/SnapshotBootstrapRefusalTest.java#aPivotThatWouldOverflowTheHeaderWindowIsRefused`, `app-node/src/test/java/rhizome/node/SnapshotBootstrapRefusalTest.java#anOutOfRangeChunkCountIsRefusedBeforeAnyFetch` |
 | STATE-06 | Overwrite an existing node's local history via the bootstrap path. | A2 | DEFENDED | `app-node/src/test/java/rhizome/node/SnapshotBootstrapRefusalTest.java#aNonEmptyChainStoreIsARefusalToOverwriteLocalHistory` |
+| STATE-07 | Repeat a key inside a state snapshot so the tree absorbs the copy while the import sink is fed both. | A2 | DEFENDED | `lib-core/src/test/java/rhizome/StateSnapshotTest.java#duplicateKeyIsRefused` |
 
 ## PERS — persistence, reorg reversal, crash consistency
 
@@ -502,6 +509,8 @@ check is a boot-time equality composed with guards those suites already exercise
 | CODEC-05 | Feed an unknown or reserved enum code (transaction kind, signature scheme) to reach an unintended branch. | A2 | DEFENDED | `lib-core/src/test/java/rhizome/transaction/TransactionKindWireTest.java#unknownCodesAreRejected`, `lib-crypto/src/test/java/rhizome/crypto/SignatureSchemeTest.java#reservedAndUnknownCodesAreRejected` |
 | CODEC-06 | Break out of a JSON string with control characters, lone surrogates or invalid UTF-8 to corrupt a served document. | A1 | DEFENDED | `lib-core/src/test/java/rhizome/JsonSinkEscapingTest.java#loneSurrogatesEmbeddedMidString`, `lib-core/src/test/java/rhizome/JsonSinkEscapingTest.java#scriptTagSlashCombinationsAndFourCharAlphabetProduct` |
 | CODEC-07 | Abort a streamed decode mid-object, or exceed the streamed block cap. | A2 | DEFENDED | `lib-core/src/test/java/rhizome/BlockCodecStreamTest.java#abortsOnAStreamThatEndsMidBlock`, `lib-core/src/test/java/rhizome/BlockCodecStreamTest.java#abortsWhenTheStreamExceedsMaxBlocks` |
+| CODEC-08 | Smuggle a malformed UTF-8 token symbol whose lossy decode re-encodes to the same length, defeating a length-only validity check. | A2 | DEFENDED | `lib-core/src/test/java/rhizome/TokenModelTest.java#invalidUtf8WithSameLengthReplacementIsRefused` |
+| CODEC-09 | Relay-malleate a coinbase or `BOX_COLLECT` transaction through its unhashed signature / signing-key bytes. | A2 | DEFENDED | `lib-core/src/test/java/rhizome/CodecBoundsTest.java#selfAuthorizedTransactionsMustCarryZeroSignatureAndKeyBytes` |
 
 ## WALLET — client key handling
 
@@ -652,6 +661,18 @@ taken.
   hands out real+1 and withholds the signed transaction (09); PDN amounts reject exponent, sign
   and over-precision (10); passphrase and API-token files readable by group/other are refused
   rather than warned about (11). All four are offline unit proofs in `WalletCliHardeningAttackTest`.
+
+- **2026-11-13** — Pre-testnet hardening lot 1a (mempool, fees, low-severity sweep): POOL-09 (block
+  selection now shares `BlockGasRule` with the executor, so a pool of max-gas calls can no longer
+  yield a block `addBlock` rejects), INFL-11 (DEPLOY/CALL must carry `fee = 0` in the pool and the
+  executor; `FeePolicy.minerRevenue` no longer counts it), POOL-10 (`onBlockApplied` re-checks each
+  sender's contiguous run against the confirmed balance), SIG-10 (small-order denylist compared
+  with the sign bit masked, plus the y = 0 point), SIG-11 (`Transaction.of(Transaction)` keeps
+  scheme and commitment), INFL-12 (`LedgerSnapshot.totalSupply` sums exactly; `GenesisBlock` maps
+  the overflow to its existing signed-range refusal), STATE-07 (duplicate snapshot key refused),
+  CODEC-08 (token string UTF-8 validity compares bytes, not lengths) and CODEC-09 (coinbase must
+  carry zero signature and key bytes, `BOX_COLLECT` a zero key).
+
 - **2026-09-07** — POW-08 for the pre-PoW gate ordering CONS-10 already locks by status code
   (`BlockUnclesTest#blocksOwnPowIsVerifiedBeforeUncleWork`), proven this time by an actual cost
   measurement rather than only a rejection status: `PufferfishCostAttackTest` runs

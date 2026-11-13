@@ -68,6 +68,10 @@ final class TransactionAdmission {
         if (tx.kind().isContract() && (tx.gasLimit() < 0 || tx.gasPrice() < 0)) {
             return INVALID_TRANSACTION_AMOUNT;
         }
+        // Contract fee is reserved (mirrors Executor): never debited, so it must not buy priority.
+        if (tx.kind().isContract() && tx.fee().amount() != 0) {
+            return INVALID_TRANSACTION_AMOUNT;
+        }
         // Mirror the consensus per-transaction gas ceiling at admission so an over-cap call is never
         // pooled or relayed (it would be rejected by executeBlock anyway). Defense in depth against the
         // unbounded-consensus-gas vector; the block-wide ceiling stays a consensus-only rule.
