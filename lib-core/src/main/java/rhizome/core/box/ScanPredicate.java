@@ -59,6 +59,9 @@ public sealed interface ScanPredicate {
     int MAX_PREDICATE_DEPTH = 32;
     /** Max children of a single and/or, bounding a wide (non-deep) predicate. */
     int MAX_PREDICATE_PARTS = 64;
+    /** Max registerContains needle: substring search is O(register x needle) per box, and a 64 KiB
+     *  register against an ~4 KiB needle was ~2.4e8 compares per box, 512 boxes per scan call. */
+    int MAX_CONTAINS_NEEDLE_BYTES = 64;
 
     static ScanPredicate fromJson(JSONObject o) {
         return fromJson(o, 0);
@@ -74,8 +77,14 @@ public sealed interface ScanPredicate {
             case "owner" -> new OwnerEquals(Utils.hexStringToByteArray(o.getString("owner")));
             case "registerEquals" -> new RegisterEquals(o.getInt("index"),
                 Utils.hexStringToByteArray(o.getString("value")));
-            case "registerContains" -> new RegisterContains(o.getInt("index"),
-                Utils.hexStringToByteArray(o.getString("value")));
+            case "registerContains" -> {
+                byte[] needle = Utils.hexStringToByteArray(o.getString("value"));
+                if (needle.length > MAX_CONTAINS_NEEDLE_BYTES) {
+                    throw new IllegalArgumentException("registerContains value too long (max "
+                        + MAX_CONTAINS_NEEDLE_BYTES + " bytes)");
+                }
+                yield new RegisterContains(o.getInt("index"), needle);
+            }
             case "and" -> new And(parts(o, depth));
             case "or" -> new Or(parts(o, depth));
             default -> throw new IllegalArgumentException("unknown scan predicate: " + type);
@@ -245,14 +254,12 @@ public sealed interface ScanPredicate {
         if (needle.length == 0) {
             return 0;
         }
-        outer:
+        byte first = needle[0];
         for (int i = 0; i + needle.length <= haystack.length; i++) {
-            for (int j = 0; j < needle.length; j++) {
-                if (haystack[i + j] != needle[j]) {
-                    continue outer;
-                }
+            if (haystack[i] == first
+                && java.util.Arrays.equals(haystack, i, i + needle.length, needle, 0, needle.length)) {
+                return i;
             }
-            return i;
         }
         return -1;
     }

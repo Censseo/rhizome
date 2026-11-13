@@ -73,6 +73,24 @@ class BoxScanTest {
         assertEquals(2, page.matches().size());
     }
 
+    /** The contains needle is capped so a scan's substring search stays O(register x 64) per box. */
+    @Test
+    void registerContainsNeedleIsCappedAtParse() {
+        String ok = "ab".repeat(ScanPredicate.MAX_CONTAINS_NEEDLE_BYTES);
+        String tooLong = ok + "ab";
+        assertEquals(ScanPredicate.MAX_CONTAINS_NEEDLE_BYTES, ((ScanPredicate.RegisterContains)
+            ScanPredicate.fromJson(new org.json.JSONObject(
+                "{\"type\":\"registerContains\",\"index\":0,\"value\":\"" + ok + "\"}"))).value().length);
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class, () ->
+            ScanPredicate.fromJson(new org.json.JSONObject(
+                "{\"type\":\"registerContains\",\"index\":0,\"value\":\"" + tooLong + "\"}")));
+        // The faster compare still finds a needle at the very end and rejects a near miss.
+        DefaultBoxProcessor proc = seeded(box(alice, 0, BoxRegister.string("aaaaaaab")),
+            box(bob, 0, BoxRegister.string("aaaaaaaa")));
+        assertEquals(1, proc.scan(new ScanPredicate.RegisterContains(0, "aab".getBytes()), null, 50, 512)
+            .matches().size());
+    }
+
     @Test
     void registerEqualsAndCombinator() {
         byte[] tag = {9, 9};
