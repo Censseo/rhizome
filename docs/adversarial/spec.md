@@ -653,6 +653,17 @@ taken.
 
 ## Change log
 
+- **2026-11-13** — VM-24..VM-34, the pre-public-testnet VM hardening lot. The deploy filter became an
+  opcode allowlist (VM-24: `throw`/`try_table`/`return_call`/atomics and tag sections refused) with a
+  result-arity cap beside the param cap (VM-25). Memory determinism: a nested OOM is a `HostFault`
+  at every depth (VM-26), Chicory's shared operand stack is capped at 2^20 entries (VM-27) and
+  `emit_log` at 1 MiB per transaction (VM-28), and the stack-overflow paths saturate the shared
+  meter (VM-29). The module cache is bounded by 8 MiB of code and keyed by a SHA-256 prefix
+  (VM-30). Gas schedule: frame slots and table entries are charged (VM-31) and deployed code pays
+  the storage byte rate (VM-32). Templates: `pair.add_liquidity` pulls the optimal amounts and
+  takes `min_shares` (VM-33); token/pair/agent_wallet are non-payable and the launchpad's silent
+  returns trap (VM-34).
+
 - **2026-09-07** — POW-08 for the pre-PoW gate ordering CONS-10 already locks by status code
   (`BlockUnclesTest#blocksOwnPowIsVerifiedBeforeUncleWork`), proven this time by an actual cost
   measurement rather than only a rejection status: `PufferfishCostAttackTest` runs
