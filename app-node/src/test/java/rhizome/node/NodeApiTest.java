@@ -483,7 +483,7 @@ class NodeApiTest {
         // must not sum to unbounded lock-guarded reads and egress at cost ~1.
         var lenientPerIp = new RateLimiter(1_000_000, 60_000, 100);
         NodeService node = new NodeService(engine, mempool, AdmissionControl.builder()
-            .read(new RateLimiter(1, 3_600_000, 1)).build()); // aggregate read budget: a single unit
+            .sync(new RateLimiter(1, 3_600_000, 1)).build()); // aggregate sync budget: a single unit
         var s = NodeApi.servlet(eventloop, node, lenientPerIp);
 
         // /sync?start=1&end=1 costs 1: admitted once, then the aggregate gate sheds.
@@ -498,7 +498,9 @@ class NodeApiTest {
     void pushAbuseAccumulatesStrikesAndGetsShedEarly() throws Exception {
         // Gossip push ban-score (audit): a client spamming /add_transaction with provable junk
         // accumulates strikes and is shed with 429 BEFORE the body is decoded, for the window.
-        var node = new NodeService(engine, mempool);
+        // The per-client share of the mempool budget (10/s) is not what this test pins.
+        var node = new NodeService(engine, mempool, AdmissionControl.builder()
+            .mempoolShare(new RateLimiter(1000, 1000, 8)).build());
         var s = NodeApi.servlet(eventloop, node);
         for (int i = 0; i < PushStrikeTable.STRIKE_LIMIT; i++) {
             Transaction t = Transaction.of(sender, PublicAddress.random(), new TransactionAmount(100),
@@ -519,6 +521,51 @@ class NodeApiTest {
         assertEquals(ExecutionStatus.ALREADY_IN_QUEUE, node2.submitTransaction(t, "peer-a"));
         assertEquals(0, node2.pushStrikeCount("peer-a"), "duplicates must not strike");
         assertFalse(node2.isPushShed("peer-a"));
+    }
+
+    /**
+     * API-14 — Spray undecodable bodies at /submit and /add_transaction*: the 400 was returned
+     * before submit* ran, so junk never struck and never shed.
+     */
+    @Test
+    void undecodableBodiesStrikeAndASingleClientCannotDrainAnAggregateBucket() throws Exception {
+        var node = new NodeService(engine, mempool, AdmissionControl.builder()
+            .submitShare(new RateLimiter(1000, 1000, 8))
+            .mempoolShare(new RateLimiter(1000, 1000, 8)).build());
+        var s = NodeApi.servlet(eventloop, node);
+        for (String path : new String[] {"/submit", "/add_transaction", "/add_transaction_json"}) {
+            assertEquals(400, callWith(s, HttpRequest.post("http://x" + path).withBody(new byte[] {1, 2, 3}).build()).getCode());
+        }
+        assertEquals(3, node.pushStrikeCount("local"), "decode failures strike the client key");
+
+        // One client key may take at most 1/10 of a bucket: the third submit in the window is shed
+        // although the aggregate bucket (25/s) is nowhere near spent.
+        var shared = new NodeService(engine, mempool);
+        var s2 = NodeApi.servlet(eventloop, shared);
+        int share = AdmissionControl.SUBMIT_POW_MAX_PER_SEC / AdmissionControl.CLIENT_SHARE_DIVISOR;
+        for (int i = 0; i < share; i++) {
+            assertEquals(400, callWith(s2, HttpRequest.post("http://x/submit").withBody(new byte[] {1}).build()).getCode());
+        }
+        assertEquals(429, callWith(s2, HttpRequest.post("http://x/submit").withBody(new byte[] {1}).build()).getCode());
+    }
+
+    /**
+     * API-14 — Saturate the explorer-read bucket to cut peers off from sync (or the reverse):
+     * peer-sync routes meter against their own bucket.
+     */
+    @Test
+    void peerSyncRoutesHaveTheirOwnAggregateBucket() throws Exception {
+        var lenient = new RateLimiter(1_000_000, 60_000, 100);
+        var readSpent = NodeApi.servlet(eventloop, new NodeService(engine, mempool, AdmissionControl.builder()
+            .read(new RateLimiter(1, 3_600_000, 1)).build()), lenient);
+        assertEquals(429, callWith(readSpent, HttpRequest.get("http://x/stats").build()).getCode());
+        assertNotEquals(429, callWith(readSpent, HttpRequest.get("http://x/block?index=1").build()).getCode());
+
+        var syncSpent = NodeApi.servlet(eventloop, new NodeService(engine, mempool, AdmissionControl.builder()
+            .sync(new RateLimiter(1, 3_600_000, 1)).build()), lenient);
+        assertNotEquals(429, callWith(syncSpent, HttpRequest.get("http://x/block?index=1").build()).getCode());
+        assertEquals(429, callWith(syncSpent, HttpRequest.get("http://x/block?index=1").build()).getCode());
+        assertNotEquals(429, callWith(syncSpent, HttpRequest.get("http://x/stats").build()).getCode());
     }
 
     @Test

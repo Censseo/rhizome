@@ -136,8 +136,11 @@ class RoutePolicyCompletenessTest {
         // if one changes, it changes because someone decided to change it.
         assertEquals(15, count(RoutePolicy.Guard.PEER_PROTOCOL),
             "the P2P surface exempt from the Host allowlist");
-        assertEquals(12, count(RoutePolicy.Guard.READ_BUDGET),
-            "9 original consensus-lock reads plus /boxes, /tokens and /metrics (same cache as /stats)");
+        assertEquals(13, count(RoutePolicy.Guard.READ_BUDGET),
+            "/stats, /metrics, /transaction, /address_txs, /boxes, /tokens plus the cost-1 lock reads "
+            + "/contract, /wallet, /box, /token, /token_balance, /state, /state/proof");
+        assertEquals(6, count(RoutePolicy.Guard.SYNC_BUDGET),
+            "/sync, /headers, /blocks, /block, /orphan, /state/snapshot/chunk: their own bucket");
         assertEquals(7, count(RoutePolicy.Guard.TOKEN),
             "exactly the POST routes; reads are gated only under protectReads");
         assertEquals(4, count(RoutePolicy.Guard.SPA_SHELL),

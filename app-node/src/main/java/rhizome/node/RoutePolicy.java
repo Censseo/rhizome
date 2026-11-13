@@ -76,6 +76,13 @@ final class RoutePolicy {
          */
         READ_BUDGET,
         /**
+         * Charged against the peer-sync serving bucket (NodeService.trySyncBudget), separate from
+         * {@link #READ_BUDGET} so explorer reads and peer catch-up cannot shed each other:
+         * {@code /sync}, {@code /headers}, {@code /blocks}, {@code /block}, {@code /orphan},
+         * {@code /state/snapshot/chunk}.
+         */
+        SYNC_BUDGET,
+        /**
          * Charged against the aggregate submit budget, consumed BEFORE the {@code /submit}
          * handler decodes the block body: the decode (up to the block-size cap, ~25 000 tx
          * allocations) and the memory-hard PoW hash it triggers both run on the event-loop
@@ -152,12 +159,12 @@ final class RoutePolicy {
         // The /features shape: a constants read with no chain state behind it — per-IP cost 1,
         // no guards, no aggregate budget (007-emission-observability).
         get("/emission", 1),
-        get("/blocks", Cost.DYNAMIC, Guard.READ_BUDGET, Guard.PEER_PROTOCOL),
-        get("/block", 1, Guard.READ_BUDGET, Guard.PEER_PROTOCOL),
+        get("/blocks", Cost.DYNAMIC, Guard.SYNC_BUDGET, Guard.PEER_PROTOCOL),
+        get("/block", 1, Guard.SYNC_BUDGET, Guard.PEER_PROTOCOL),
         get("/transaction", Cost.DYNAMIC, Guard.READ_BUDGET),
         get("/address_txs", Cost.DYNAMIC, Guard.READ_BUDGET),
-        get("/contract", 1),
-        get("/wallet", 1),
+        get("/contract", 1, Guard.READ_BUDGET),
+        get("/wallet", 1, Guard.READ_BUDGET),
         get("/block_count", 1, Guard.PEER_PROTOCOL),
         get("/total_work", 1, Guard.PEER_PROTOCOL),
         get("/difficulty", 1),
@@ -165,7 +172,7 @@ final class RoutePolicy {
         get("/info", 1, Guard.PEER_PROTOCOL),
         get("/peers", 1, Guard.PEER_PROTOCOL),
         post("/add_peer", NodeApi.ADD_PEER_COST, Guard.TOKEN, Guard.PEER_PROTOCOL),
-        get("/box", 1),
+        get("/box", 1, Guard.READ_BUDGET),
         get("/boxes", NodeApi.BOXES_COST, Guard.READ_BUDGET),
         post("/scan/register", 1, Guard.TOKEN),
         post("/scan/deregister", 1, Guard.TOKEN),
@@ -173,21 +180,21 @@ final class RoutePolicy {
         // Weighted but NOT read-gated on purpose: ChainEngine.scanBoxes runs outside the consensus
         // lock behind the stamp seqlock, so it contends nothing that budget protects.
         get("/scan/boxes", NodeService.BOX_SCAN_WINDOW / 4),
-        get("/token", 1),
-        get("/token_balance", 1),
+        get("/token", 1, Guard.READ_BUDGET),
+        get("/token_balance", 1, Guard.READ_BUDGET),
         get("/tokens", NodeApi.TOKENS_COST, Guard.READ_BUDGET),
-        get("/state", 1),
-        get("/state/proof", 1),
+        get("/state", 1, Guard.READ_BUDGET),
+        get("/state/proof", 1, Guard.READ_BUDGET),
         get("/state/snapshot/info", 1, Guard.PEER_PROTOCOL),
-        get("/state/snapshot/chunk", Cost.DYNAMIC, Guard.READ_BUDGET, Guard.PEER_PROTOCOL),
+        get("/state/snapshot/chunk", Cost.DYNAMIC, Guard.SYNC_BUDGET, Guard.PEER_PROTOCOL),
         // Weighted by its bounded cursor scan, ungated for the same reason as /scan/boxes: these
         // are per-height map reads, not lock-guarded block decodes.
         get("/logs", Cost.DYNAMIC),
         get("/logs/stream", 1),
         post("/call_readonly", NodeApi.CALL_READONLY_COST, Guard.TOKEN),
-        get("/sync", Cost.DYNAMIC, Guard.READ_BUDGET, Guard.PEER_PROTOCOL),
-        get("/headers", Cost.DYNAMIC, Guard.READ_BUDGET, Guard.PEER_PROTOCOL),
-        get("/orphan", NodeApi.ORPHAN_COST, Guard.READ_BUDGET, Guard.PEER_PROTOCOL),
+        get("/sync", Cost.DYNAMIC, Guard.SYNC_BUDGET, Guard.PEER_PROTOCOL),
+        get("/headers", Cost.DYNAMIC, Guard.SYNC_BUDGET, Guard.PEER_PROTOCOL),
+        get("/orphan", NodeApi.ORPHAN_COST, Guard.SYNC_BUDGET, Guard.PEER_PROTOCOL),
         post("/add_transaction_json", NodeApi.TX_SUBMIT_COST,
             Guard.TOKEN, Guard.PUSH_SHED, Guard.MEMPOOL_BUDGET, Guard.PEER_PROTOCOL),
         post("/add_transaction", NodeApi.TX_SUBMIT_COST,

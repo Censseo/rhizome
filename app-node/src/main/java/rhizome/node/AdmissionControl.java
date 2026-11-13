@@ -84,6 +84,27 @@ final class AdmissionControl {
     static final int READ_DECODE_MAX_PER_SEC = 8_000;
 
     /**
+     * Aggregate budget for the peer-sync serving routes ({@code /sync}, {@code /headers},
+     * {@code /blocks}, {@code /block}, {@code /orphan}, {@code /state/snapshot/chunk}), kept apart
+     * from {@link #READ_DECODE_MAX_PER_SEC} so an explorer-read flood cannot starve peers' catch-up
+     * and a sync flood cannot blind the explorer (audit: shared read bucket shed everyone).
+     */
+    static final int SYNC_MAX_PER_SEC = 8_000;
+
+    /**
+     * Fraction (1/N) of any aggregate bucket one client key may consume per window. Without it a
+     * single host inside its per-IP limiter could still drain a shared bucket and shed every other
+     * client. The key is the IPv6 /48 (or the IPv4 address), see {@code NodeApi.clientShareKey}.
+     */
+    static final int CLIENT_SHARE_DIVISOR = 10;
+
+    private static final int SHARE_MAX_KEYS = 8_192;
+
+    private static RateLimiter share(int bucketPerSec) {
+        return new RateLimiter(Math.max(1, bucketPerSec / CLIENT_SHARE_DIVISOR), 1000, SHARE_MAX_KEYS);
+    }
+
+    /**
      * Cap on what one dry-run may charge the gas budget, so a caller cannot exhaust a second's
      * worth of budget with a single absurd gasLimit declaration.
      */
@@ -101,6 +122,16 @@ final class AdmissionControl {
     @lombok.Builder.Default
     private final RateLimiter read = new RateLimiter(READ_DECODE_MAX_PER_SEC, 1000, 1);
     @lombok.Builder.Default
+    private final RateLimiter sync = new RateLimiter(SYNC_MAX_PER_SEC, 1000, 1);
+    @lombok.Builder.Default
+    private final RateLimiter submitShare = share(SUBMIT_POW_MAX_PER_SEC);
+    @lombok.Builder.Default
+    private final RateLimiter mempoolShare = share(MEMPOOL_SIG_MAX_PER_SEC);
+    @lombok.Builder.Default
+    private final RateLimiter readShare = share(READ_DECODE_MAX_PER_SEC);
+    @lombok.Builder.Default
+    private final RateLimiter syncShare = share(SYNC_MAX_PER_SEC);
+    @lombok.Builder.Default
     private final Semaphore dryRunSlots = new Semaphore(MAX_CONCURRENT_DRY_RUNS);
 
     /** The production budgets. */
@@ -109,18 +140,23 @@ final class AdmissionControl {
     }
 
     /** Reserves one {@code /submit} PoW verification. */
-    boolean trySubmit() {
-        return submitPow.allow("submit");
+    boolean trySubmit(String shareKey) {
+        return submitShare.allow(shareKey) && submitPow.allow("submit");
     }
 
     /** Reserves one mempool admission (one inline Ed25519 verification). */
-    boolean tryMempoolSig() {
-        return mempoolSig.allow("tx");
+    boolean tryMempoolSig(String shareKey) {
+        return mempoolShare.allow(shareKey) && mempoolSig.allow("tx");
     }
 
     /** Reserves {@code cost} units of the lock-guarded block-decode budget. */
-    boolean tryRead(int cost) {
-        return read.allow("read", cost);
+    boolean tryRead(String shareKey, int cost) {
+        return readShare.allow(shareKey, cost) && read.allow("read", cost);
+    }
+
+    /** Reserves {@code cost} units of the peer-sync serving budget. */
+    boolean trySync(String shareKey, int cost) {
+        return syncShare.allow(shareKey, cost) && sync.allow("sync", cost);
     }
 
     /** Reserves {@code gasLimit} gas, charged at most {@link #MAX_READONLY_GAS_CHARGE}. */

@@ -357,15 +357,17 @@ public final class NodeApi {
             .with(GET, "/headers", req -> guarded(() -> SyncApi.headers(node, req)))
             .with(GET, "/orphan", req -> offload(blocking, () -> SyncApi.orphan(node, req)))
             .with(POST, "/add_transaction_json", req -> req.loadBody(JSON_TX_BODY).then(body -> offload(blocking, () -> {
-                Transaction t = Transaction.of(parseJson(body.getString(StandardCharsets.UTF_8)));
+                Transaction t = decodeOrStrike(node, clientKey(req, trustXff),
+                    () -> Transaction.of(parseJson(body.getString(StandardCharsets.UTF_8))));
                 return statusResponse(node.submitTransaction(t, clientKey(req, trustXff)));
             })))
             .with(POST, "/add_transaction", req -> req.loadBody(TX_BODY).then(body -> offload(blocking, () -> {
-                Transaction t = Transaction.of(TransactionDto.fromBuffer(body.getArray()));
+                Transaction t = decodeOrStrike(node, clientKey(req, trustXff),
+                    () -> Transaction.of(TransactionDto.fromBuffer(body.getArray())));
                 return statusResponse(node.submitTransaction(t, clientKey(req, trustXff)));
             })))
             .with(POST, "/submit", req -> req.loadBody(maxBlockBody).then(body -> offload(blocking, () -> {
-                Block block = BlockCodec.decode(body.getArray());
+                Block block = decodeOrStrike(node, clientKey(req, trustXff), () -> BlockCodec.decode(body.getArray()));
                 return statusResponse(node.submitBlock(block, clientKey(req, trustXff)));
             })))
             .build();
@@ -406,15 +408,19 @@ public final class NodeApi {
             // lock: the per-IP limiter above cannot stop a distributed flood from summing past it, so a
             // process-wide bucket bounds the total lock-guarded decode work on the event-loop thread
             // (audit 5th-pass, net Finding 2). Shed over-budget reads before they touch the store.
-            if (RoutePolicy.guarded(route, RoutePolicy.Guard.READ_BUDGET) && !node.tryReadBudget(cost)) {
+            String share = clientShareKey(request, trustXff);
+            if (RoutePolicy.guarded(route, RoutePolicy.Guard.READ_BUDGET) && !node.tryReadBudget(share, cost)) {
                 return errorJson(429, "read budget exceeded").toPromise();
+            }
+            if (RoutePolicy.guarded(route, RoutePolicy.Guard.SYNC_BUDGET) && !node.trySyncBudget(share, cost)) {
+                return errorJson(429, "sync budget exceeded").toPromise();
             }
             // Aggregate submit gate, consumed BEFORE the /submit handler decodes the block body. The
             // decode (up to maxBlockSizeBytes, ~25 000 tx allocations) and the memory-hard PoW hash it
             // triggers both run on the event-loop thread; the per-IP limiter cannot stop a distributed
             // flood from summing past it. Shedding here — rather than inside submitBlock, after the
             // decode already ran — closes the decode-before-gate asymmetry (audit S6).
-            if (RoutePolicy.guarded(route, RoutePolicy.Guard.SUBMIT_BUDGET) && !node.trySubmitBudget()) {
+            if (RoutePolicy.guarded(route, RoutePolicy.Guard.SUBMIT_BUDGET) && !node.trySubmitBudget(share)) {
                 return errorJson(429, "submit throttled").toPromise();
             }
             // Aggregate mempool-admission gate, consumed BEFORE the tx body is decoded — symmetric
@@ -422,7 +428,7 @@ public final class NodeApi {
             // the event-loop thread and never caches invalid signatures, so without an aggregate cap
             // a distributed corrupt-signature flood sums past the per-IP limiter and pins the loop
             // (audit M1).
-            if (RoutePolicy.guarded(route, RoutePolicy.Guard.MEMPOOL_BUDGET) && !node.tryMempoolSigBudget()) {
+            if (RoutePolicy.guarded(route, RoutePolicy.Guard.MEMPOOL_BUDGET) && !node.tryMempoolSigBudget(share)) {
                 return errorJson(429, "transaction throttled").toPromise();
             }
             // DNS-rebinding Host check for ALL browser-reachable requests when an allowlist is
@@ -1022,6 +1028,36 @@ public final class NodeApi {
             secret = secret.substring(0, SCAN_OWNER_MAX_CHARS);
         }
         return ScanRegistry.Owner.of(clientKey(request, trustXff), secret);
+    }
+
+    /**
+     * Runs a push-body decode; a failure records a push strike for the client before rethrowing
+     * (the 400 comes from the caller's guard). Without it junk bodies died at decode, never
+     * reached submit*, and so never struck (audit: decode failures free).
+     */
+    private static <T> T decodeOrStrike(NodeService node, String client, java.util.function.Supplier<T> decode) {
+        try {
+            return decode.get();
+        } catch (RuntimeException e) {
+            node.notePushFault(client);
+            throw e;
+        }
+    }
+
+    /**
+     * Key for the per-client share of each aggregate bucket: the IPv6 /48 (a site allocation of
+     * 2^16 /64s, so rotating /64s buys no extra share) or the IPv4 address.
+     */
+    static String clientShareKey(HttpRequest request, boolean trustXff) {
+        try {
+            java.net.InetAddress addr = clientAddress(request, trustXff);
+            if (addr != null && addr.getAddress().length == 16) {
+                return clientSubnetKey(request, trustXff);
+            }
+        } catch (RuntimeException e) {
+            // fall through to the plain key
+        }
+        return clientKey(request, trustXff);
     }
 
     private static String clientKey(HttpRequest request) {
