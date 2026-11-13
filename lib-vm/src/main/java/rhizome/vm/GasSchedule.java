@@ -76,7 +76,10 @@ public final class GasSchedule {
      * that unpriced work on every call — a CPU amplifier (audit vm F3). Bounded by MAX_CODE_SIZE.
      */
     public static final long MODULE_PARSE_BASE = 500L;
-    public static final long MODULE_PARSE_PER_BYTE = 2L;
+    // 32, not 2: GasCostBenchmark measured cold calls of distinct max-size modules at ~33x the
+    // CPU per gas of plain execution (a 250M-gas block of them ~90 s to validate); 32 brings them
+    // to ~2x. Every CALL pays it (the charge must not depend on node-local cache state).
+    public static final long MODULE_PARSE_PER_BYTE = 32L;
 
     /** Reading a data box (Ergo-style data input): cheap, base plus per copied byte. */
     public static final long BOX_READ_BASE = 100L;

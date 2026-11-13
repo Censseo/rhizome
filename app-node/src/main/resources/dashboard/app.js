@@ -1377,7 +1377,7 @@ function renderDeploy(zone, templateId) {
     const f = fileInput.files[0];
     if (f) hexArea.value = RzTx.bytesToHex(new Uint8Array(await f.arrayBuffer()));
   });
-  const gasInput = el('input', { value: '2000000' });
+  const gasInput = el('input', { value: '5000000' });
   const info = el('div', { class: 'muted', style: 'margin-top:8px' });
   const resultZone = el('div');
 
