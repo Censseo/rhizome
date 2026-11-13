@@ -5,6 +5,8 @@ import rhizome.net.RateLimiter;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static rhizome.crypto.Crypto.generateKeyPairTyped;
 
@@ -570,6 +572,97 @@ class NodeApiTest {
     }
 
     /**
+     * API-14 -- the cost-1 lock reads ({@code /contract}, {@code /wallet}, {@code /box}, {@code /token},
+     * {@code /token_balance}, {@code /state}, {@code /state/proof}) were charged to no budget at all,
+     * so an explorer flood of them bypassed the read bucket the other reads were shed by. Each must
+     * be metered: with the bucket holding a single unit, the second request is shed.
+     */
+    @Test
+    void everyCostOneLockReadIsChargedToTheReadBudget() throws Exception {
+        var lenient = new RateLimiter(1_000_000, 60_000, 100);
+        for (String path : new String[] {"/contract", "/wallet", "/box", "/token", "/token_balance",
+                "/state", "/state/proof"}) {
+            var s = NodeApi.servlet(eventloop, new NodeService(engine, mempool, AdmissionControl.builder()
+                .read(new RateLimiter(1, 3_600_000, 1)).build()), lenient);
+            assertNotEquals(429, callWith(s, HttpRequest.get("http://x" + path).build()).getCode(), path + " first");
+            assertEquals(429, callWith(s, HttpRequest.get("http://x" + path).build()).getCode(),
+                path + " must be charged to the read budget");
+        }
+    }
+
+    /**
+     * API-14 -- one client key may take only a fraction of each aggregate bucket (so it cannot shed
+     * everyone else), the fraction is never below one maximum-cost request (or a legitimate deep scan
+     * could never be admitted), and every bucket has its own share table.
+     */
+    @Test
+    void eachAggregateBucketCapsASingleClientBelowTheWholeBucket() {
+        var a = AdmissionControl.defaults();
+        int n = 0;
+        while (a.trySubmit("k") && n < 10_000) n++;
+        assertTrue(n >= 1 && n < AdmissionControl.SUBMIT_POW_MAX_PER_SEC / 2, "submit share " + n);
+        n = 0;
+        while (a.tryMempoolSig("k") && n < 10_000) n++;
+        assertTrue(n >= 1 && n < AdmissionControl.MEMPOOL_SIG_MAX_PER_SEC / 2, "mempool share " + n);
+        n = 0;
+        while (a.tryRead("k", 1) && n < 100_000) n++;
+        assertTrue(n >= 1 && n < AdmissionControl.READ_DECODE_MAX_PER_SEC / 2, "read share " + n);
+        n = 0;
+        while (a.trySync("k", 1) && n < 100_000) n++;
+        assertTrue(n >= 1 && n < AdmissionControl.SYNC_MAX_PER_SEC / 2, "sync share " + n);
+
+        // A fresh client's share still covers one maximum-cost (1000-unit) request in each bucket.
+        var b = AdmissionControl.defaults();
+        assertTrue(b.tryRead("big", 1000), "a share below one max-cost read would make deep scans unadmittable");
+        assertTrue(b.trySync("big", 1000), "likewise for sync serving");
+    }
+
+    /**
+     * API-14 -- a direct loopback client is this host (co-located peer, operator tooling) and is
+     * exempt from the per-client share; a client reached through a trusted proxy is keyed on the
+     * forwarded hop, never the loopback socket, and IPv6 clients share one key per /48.
+     */
+    @Test
+    void directLoopbackClientsAreExemptFromTheShareButForwardedHopsAreNot() throws Exception {
+        var set = io.activej.http.HttpRequest.class.getDeclaredMethod("setRemoteAddress", java.net.InetAddress.class);
+        set.setAccessible(true);
+        java.util.function.BiFunction<String, String, HttpRequest> req = (remote, xff) -> {
+            try {
+                var r = xff == null ? HttpRequest.get("http://x/").build()
+                    : HttpRequest.get("http://x/").withHeader(io.activej.http.HttpHeaders.of("X-Forwarded-For"), xff).build();
+                set.invoke(r, java.net.InetAddress.getByName(remote));
+                return r;
+            } catch (ReflectiveOperationException | java.net.UnknownHostException e) {
+                throw new IllegalStateException(e);
+            }
+        };
+        assertNull(NodeApi.clientShareKey(req.apply("127.0.0.1", null), false), "direct loopback is exempt");
+        assertNotNull(NodeApi.clientShareKey(req.apply("203.0.113.5", null), false));
+        assertNotNull(NodeApi.clientShareKey(req.apply("127.0.0.1", "203.0.113.5"), true),
+            "behind a trusted proxy the key is the forwarded hop, not the loopback socket");
+        assertEquals(NodeApi.clientShareKey(req.apply("2001:db8:1:1::1", null), false),
+            NodeApi.clientShareKey(req.apply("2001:db8:1:2::1", null), false),
+            "IPv6 clients within one /48 share a key");
+    }
+
+    /**
+     * API-15 -- operator routes ({@code /add_peer}, {@code /scan/register}, {@code /call_readonly})
+     * demand the bearer even without protectReads, while the public ingest routes stay open.
+     */
+    @Test
+    void operatorRoutesDemandTheBearerWhileIngestStaysOpenWithoutProtectReads() throws Exception {
+        var s = NodeApi.servlet(eventloop, new NodeService(engine, mempool),
+            new RateLimiter(1_000_000, 60_000, 100), null, null, "s3cret", null, false, false);
+        for (String path : new String[] {"/add_peer", "/scan/register", "/call_readonly"}) {
+            assertEquals(401, callWith(s, HttpRequest.post("http://x" + path).withBody(new byte[] {1}).build()).getCode(),
+                path + " without the bearer");
+        }
+        assertNotEquals(401, callWith(s, HttpRequest.post("http://x/submit").withBody(new byte[] {1}).build()).getCode(),
+            "/submit is open ingest");
+        assertNotEquals(401, callWith(s, HttpRequest.post("http://x/add_transaction").withBody(new byte[] {1}).build()).getCode());
+    }
+
+    /**
      * API-18 — Saturate the general worker pool with ingest, or hold the engine lock under the
      * scalar routes, to wedge explorer reads and peer sync: ingest has its own pool, and the
      * lock-taking scalar routes run on the worker pool rather than the event loop.
@@ -585,6 +678,15 @@ class NodeApiTest {
         // ...while ingest (own pool; null = inline here) is untouched: junk is a 400, not a 429.
         assertEquals(400, callWith(s, HttpRequest.post("http://x/add_transaction")
             .withBody(new byte[] {1}).build()).getCode());
+        assertEquals(400, callWith(s, HttpRequest.post("http://x/add_transaction_json")
+            .withBody(new byte[] {1}).build()).getCode(), "add_transaction_json rides the ingest pool too");
+        assertEquals(400, callWith(s, HttpRequest.post("http://x/submit")
+            .withBody(new byte[] {1}).build()).getCode(), "submit rides the ingest pool too");
+        // Every lock-taking scalar route is offloaded, not just /block_count.
+        for (String path : new String[] {"/total_work", "/difficulty", "/mempool", "/info"}) {
+            assertEquals(429, callWith(s, HttpRequest.get("http://x" + path).build()).getCode(),
+                path + " must run on the worker pool");
+        }
     }
 
     @Test
