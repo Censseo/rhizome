@@ -456,6 +456,11 @@ public final class RocksDbNodeStore extends RocksDbStore implements rhizome.core
 
         @Override
         public void append(Block block) {
+            append(block, java.util.Map.of());
+        }
+
+        @Override
+        public void append(Block block, java.util.Map<SHA256Hash, Block> uncleBodies) {
             long expected = height() + 1;
             if (block.id() != expected) {
                 throw new IllegalArgumentException(
@@ -483,11 +488,17 @@ public final class RocksDbNodeStore extends RocksDbStore implements rhizome.core
                 stagePendingLedgerInto(batch);
                 // Same atomicity for the account nonces (audit perf: per-sender fsync).
                 stagePendingNoncesInto(batch);
+                // Referenced uncle bodies ride the same batch: a crash can no longer land the
+                // block without the bodies peers syncing past it must fetch.
+                for (var e : uncleBodies.entrySet()) {
+                    batch.put(unclesCf, e.getKey().raw(), BlockCodec.encode(e.getValue()));
+                }
                 // Incremental pruning (amortised O(1)): the body that just fell out of the
                 // retention window is discarded in the same batch. Genesis is never pruned.
                 if (keepBlocks > 0) {
                     long fallsOut = expected - keepBlocks;
                     if (fallsOut > GENESIS_HEIGHT) {
+                        stageTxIndexDeletes(batch, fallsOut);
                         batch.delete(blocksCf, heightKey(fallsOut));
                         batch.put(metaCf, PRUNED_BELOW_KEY, heightKey(fallsOut + 1));
                     }
@@ -553,15 +564,53 @@ public final class RocksDbNodeStore extends RocksDbStore implements rhizome.core
             // form one contiguous key range [from, height): a single deleteRange tombstone
             // replaces an unbounded WriteBatch holding one delete per body (audit: giant prune
             // batch). The range tombstone and the watermark ride the SAME WriteBatch, so a
-            // crash cannot leave bodies deleted with a stale watermark. Headers + txindex are
-            // retained, as before.
+            // crash cannot leave bodies deleted with a stale watermark. Headers are retained.
+            // The txindex rows of the pruned bodies go first, in chunked batches (a crash between
+            // chunks leaves bodies with a partial index, and the watermark unmoved, so the next
+            // boot's catch-up simply repeats the sweep).
             try (WriteBatch batch = new WriteBatch()) {
+                int staged = 0;
+                for (long h = from; h < height; h++) {
+                    staged += stageTxIndexDeletes(batch, h);
+                    if (staged >= BULK_LOAD_BATCH_CHUNK) {
+                        db.write(writeOptions, batch);
+                        batch.clear();
+                        staged = 0;
+                    }
+                }
                 batch.deleteRange(blocksCf, heightKey(from), heightKey(height));
                 batch.put(metaCf, PRUNED_BELOW_KEY, heightKey(height));
                 db.write(writeOptions, batch);
             } catch (RocksDBException e) {
                 throw new LedgerException("Failed to prune bodies below " + height, e);
             }
+        }
+
+        /**
+         * Stages deletes of the txindex rows of the body at {@code height} (none if the body is
+         * already gone). Pruned history keeps its headers but not its tx lookups: the explorer
+         * already ignores an indexed height below {@code prunedBelow} (its body is gone), so the
+         * rows were pure unbounded growth. Replay protection past the retention window rests on
+         * the persisted account nonces, which every node enforces regardless of retention — so
+         * ONLY nonce-sequenced rows may go. Coinbase and self-authorized BOX_COLLECT skip the nonce
+         * walk (ChainEngine.checkAccountNonces): the index is their only replay guard and feeds
+         * Executor's EXPIRED_TRANSACTION verdict, so dropping them would let a pruned node accept a
+         * block an archive node rejects (a retention-dependent chain split). Those rows are kept.
+         */
+        private int stageTxIndexDeletes(WriteBatch batch, long height) throws RocksDBException {
+            byte[] body = raw(blocksCf, heightKey(height));
+            if (body == null) {
+                return 0;
+            }
+            int n = 0;
+            for (Transaction t : BlockCodec.decode(body).transactions()) {
+                if (!t.isTransactionFee()
+                        && t.kind() != rhizome.core.transaction.TransactionKind.BOX_COLLECT) {
+                    batch.delete(txIndexCf, t.hashContents().raw());
+                    n++;
+                }
+            }
+            return n;
         }
 
         @Override
@@ -579,6 +628,9 @@ public final class RocksDbNodeStore extends RocksDbStore implements rhizome.core
                     if (!t.isTransactionFee()) {
                         batch.delete(txIndexCf, t.hashContents().raw()); // copied natively — see append
                     }
+                }
+                for (rhizome.core.block.UncleRef ref : tip.uncles()) {
+                    batch.delete(unclesCf, ref.hash().raw()); // the popped block's uncle bodies go with it
                 }
                 batch.put(metaCf, HEIGHT_KEY, heightKey(height - 1));
                 // The block's ledger reversals (staged during rollbackBlock) ride the same batch as
@@ -771,7 +823,18 @@ public final class RocksDbNodeStore extends RocksDbStore implements rhizome.core
             byte[] key = longToBytes(height);
             byte[] encoded = raw(ledgerJournalCf, key);
             if (encoded == null) {
-                return false;
+                // A journal staged by the OPEN commit (the block's own, not yet appended) is not
+                // durable yet: the INVALID_STATE_ROOT rejection reverts it here. Missing it sent
+                // the rejection down the arithmetic mirrors while InMemoryLedger (which finds its
+                // journal) never exercised that path. Replay the inverses over the staging overlay
+                // and drop the staged journal -- it must not flush with the discarded block.
+                var staged = pendingLedgerJournal;
+                byte[] stagedBytes = staged == null ? null : staged.remove(height);
+                if (stagedBytes == null) {
+                    return false;
+                }
+                replayInverses(LedgerJournalCodec.decode(stagedBytes));
+                return true;
             }
             java.util.List<rhizome.core.ledger.LedgerOp> journal = LedgerJournalCodec.decode(encoded);
             if (pendingLedger != null) {
