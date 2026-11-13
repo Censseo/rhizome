@@ -76,7 +76,9 @@ Schedule ([GasSchedule.java](../../lib-vm/src/main/java/rhizome/vm/GasSchedule.j
 | `OUTPUT_BASE` / `PER_BYTE` | 5 / 1 |
 | `LOG_BASE` | 100 |
 | `CALL_BASE` | 500 |
-| `DEPLOY_BASE` / `_PER_CODE_BYTE` | 500 / 10 |
+| `DEPLOY_BASE` / `_PER_CODE_BYTE` | 500 / 256 (the storage byte rate) |
+| `FRAME_SLOT` | 1 per param+local slot of each activation |
+| `TABLE_ENTRY` | 1 per declared minimum table entry |
 | `MODULE_PARSE_BASE` / `_PER_BYTE` | 500 / 2 |
 | `BOX_READ_BASE` | 100 |
 

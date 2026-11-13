@@ -818,4 +818,311 @@ class WasmAdversarialTest {
             "one gas short must fail before serialize()/the output copy, not after");
         assertEquals(present.gasUsed() - 1, shortGas.gasUsed());
     }
+
+    // ---- opcode allowlist, result cap (lot 2 hardening) ----
+
+    private static final byte[] CALL_EXPORT = bytes(0x01, 0x04, 0x63, 0x61, 0x6C, 0x6C, 0x00, 0x00);
+
+    /** {@code ()->()} module whose only function body is {@code instrs} (no locals, trailing end added). */
+    private static byte[] oneFunctionModule(byte[] tagSection, int... instrs) {
+        ByteArrayOutputStream body = new ByteArrayOutputStream();
+        body.write(0x00);
+        body.writeBytes(bytes(instrs));
+        body.write(0x0B);
+        ByteArrayOutputStream code = new ByteArrayOutputStream();
+        code.write(0x01);
+        uleb(code, body.size());
+        code.writeBytes(body.toByteArray());
+        byte[] type = section(1, bytes(0x01, 0x60, 0x00, 0x00));
+        byte[] func = section(3, bytes(0x01, 0x00));
+        byte[] export = section(7, CALL_EXPORT);
+        byte[] codeSec = section(10, code.toByteArray());
+        return tagSection == null ? module(type, func, export, codeSec)
+            : module(type, func, tagSection, export, codeSec);
+    }
+
+    /** VM-24 — deploy a module whose opcodes escape a denylist: try_table, return_call, atomics. */
+    @Test
+    void rejectsOpcodesOutsideTheAllowlistAtDeploy() {
+        // try_table (0x1F) with an empty catch list: parses with no tag section, so only the
+        // allowlist can refuse it.
+        var tryTable = assertThrows(IllegalArgumentException.class, () -> WasmVm.validateCode(
+            oneFunctionModule(null, 0x1F, 0x40, 0x00, 0x0B)));
+        assertTrue(tryTable.getMessage().contains("TRY_TABLE"), tryTable.getMessage());
+        // return_call (0x12) self-recursion: a tail call is a frame-free loop the depth cap never sees.
+        var returnCall = assertThrows(IllegalArgumentException.class, () -> WasmVm.validateCode(
+            oneFunctionModule(null, 0x12, 0x00)));
+        assertTrue(returnCall.getMessage().contains("RETURN_CALL"), returnCall.getMessage());
+        // atomic.fence (0xFE 0x03 0x00): the threads family is not part of the contract ISA.
+        var atomic = assertThrows(IllegalArgumentException.class, () -> WasmVm.validateCode(
+            oneFunctionModule(null, 0xFE, 0x03, 0x00)));
+        assertTrue(atomic.getMessage().contains("ATOMIC"), atomic.getMessage());
+    }
+
+    /** VM-24 — a tag section (exception handling) is refused outright, and THROW with it. */
+    @Test
+    void rejectsATagSectionAndThrowAtDeploy() {
+        byte[] tags = section(13, bytes(0x01, 0x00, 0x00));      // 1 tag: attribute 0, type 0
+        byte[] throwing = oneFunctionModule(tags, 0x08, 0x00);   // throw tag 0
+        var ex = assertThrows(IllegalArgumentException.class, () -> WasmVm.validateCode(throwing));
+        assertTrue(ex.getMessage().contains("tag section"), ex.getMessage());
+        // The allowlist refuses THROW on its own too (pre-scan bypassed): defence in depth.
+        var parsed = com.dylibso.chicory.wasm.Parser.parse(throwing);
+        var guard = assertThrows(IllegalArgumentException.class,
+            () -> WasmModuleGuard.rejectNonDeterministic(parsed));
+        assertTrue(guard.getMessage().contains("THROW"), guard.getMessage());
+    }
+
+    /** VM-24 — every shipped contract template still deploys under the allowlist. */
+    @Test
+    void everyShippedContractStillDeploysUnderTheAllowlist() throws java.io.IOException {
+        for (String name : new String[] {"agent_wallet", "amm", "counter", "emitter", "launchpad",
+                "logtree", "pair", "router", "token"}) {
+            try (var in = WasmAdversarialTest.class.getResourceAsStream("/" + name + ".wasm")) {
+                WasmVm.validateCode(in.readAllBytes());
+            }
+        }
+    }
+
+    /** A {@code () -> (i32 x results)} module whose body is {@code unreachable}, exporting {@code call}. */
+    private static byte[] resultsModule(int results) {
+        ByteArrayOutputStream type = new ByteArrayOutputStream();
+        uleb(type, 1);
+        type.write(0x60);
+        uleb(type, 0);
+        uleb(type, results);
+        for (int i = 0; i < results; i++) {
+            type.write(0x7F);
+        }
+        return module(section(1, type.toByteArray()), section(3, bytes(0x01, 0x00)),
+            section(7, CALL_EXPORT), section(10, bytes(0x01, 0x03, 0x00, 0x00, 0x0B)));
+    }
+
+    /** VM-25 — declare a function type with a huge result arity so Chicory's validator goes
+     *  quadratic on repeated {@code br} to a label of that arity. */
+    @Test
+    void rejectsAFunctionTypeDeclaringTooManyResults() {
+        var ex = assertThrows(IllegalArgumentException.class,
+            () -> WasmVm.validateCode(resultsModule(WasmVm.MAX_FUNCTION_PARAMS + 1)));
+        assertTrue(ex.getMessage().contains("results"), ex.getMessage());
+        WasmVm.validateCode(resultsModule(WasmVm.MAX_FUNCTION_PARAMS)); // the cap itself deploys
+    }
+
+    // ---- memory determinism: OOM, operand stack, log bytes (lot 2 hardening) ----
+
+    private static byte[] shipped(String name) {
+        try (var in = WasmAdversarialTest.class.getResourceAsStream("/" + name + ".wasm")) {
+            return in.readAllBytes();
+        } catch (java.io.IOException e) {
+            throw new java.io.UncheckedIOException(e);
+        }
+    }
+
+    /** router.wasm input: selector 0 (forward) + a 25-byte callee address + empty payload. */
+    private static byte[] routerForwardInput() {
+        byte[] in = new byte[26];
+        in[0] = 0;
+        return in;
+    }
+
+    /** VM-26 — make a nested frame run out of JVM heap so the parent turns the OOM into a
+     *  revert, and the outcome depends on each node's heap. */
+    @Test
+    void aNestedOutOfMemoryStaysFatalAtEveryDepth() {
+        byte[] router = shipped("router");
+        GasMeter gas = new GasMeter(10_000_000);
+        // outer router -> (handler) inner router -> (handler) simulated OOM. The inner frame's
+        // OutOfMemoryError must leave vm.execute as a HostFault (an Error) so the OUTER frame's
+        // catch-all rethrows it; as a RuntimeException it became "revert" one level up.
+        assertThrows(HostFault.class, () -> vm.execute(router,
+            new MapHostState(new byte[0], routerForwardInput(), 0), gas,
+            (callee, input) -> vm.execute(router,
+                new MapHostState(new byte[0], routerForwardInput(), 0), gas,
+                (callee2, input2) -> { throw new OutOfMemoryError("simulated"); }).output()));
+    }
+
+    /** VM-27 — pile operand-stack entries across recursive frames (the stack is shared and
+     *  uncapped by Chicory) until the node's heap, not a network constant, decides the outcome. */
+    @Test
+    void theOperandStackIsCappedAtANetworkConstant() {
+        // f: push 1100 i32 constants, call f, drop them all. ~950 frames of 1100 entries pass 2^20
+        // live entries before the 1024-frame depth cap would have trapped.
+        ByteArrayOutputStream body = new ByteArrayOutputStream();
+        body.write(0x00);
+        for (int i = 0; i < 1100; i++) { body.write(0x41); body.write(0x00); }
+        body.write(0x10); body.write(0x00);
+        for (int i = 0; i < 1100; i++) { body.write(0x1A); }
+        body.write(0x0B);
+        ByteArrayOutputStream code = new ByteArrayOutputStream();
+        code.write(0x01);
+        uleb(code, body.size());
+        code.writeBytes(body.toByteArray());
+        byte[] mod = module(section(1, bytes(0x01, 0x60, 0x00, 0x00)), section(3, bytes(0x01, 0x00)),
+            section(7, CALL_EXPORT), section(10, code.toByteArray()));
+        ExecResult r = vm.execute(mod, new MapHostState(new byte[0], new byte[0], 0), new GasMeter(50_000_000));
+        assertEquals(ContractResult.Status.OUT_OF_GAS, r.status(), "operand stack cap is a full-gas trap");
+        assertEquals(50_000_000L, r.gasUsed());
+    }
+
+    /** A module calling {@code emit_log(0, 5, 0, 65536)} {@code times} times (one page of memory). */
+    private static byte[] emitLogModule(int times) {
+        ByteArrayOutputStream type = new ByteArrayOutputStream();
+        type.write(0x02);
+        type.writeBytes(bytes(0x60, 0x04, 0x7F, 0x7F, 0x7F, 0x7F, 0x00));
+        type.writeBytes(bytes(0x60, 0x00, 0x00));
+        ByteArrayOutputStream imp = new ByteArrayOutputStream();
+        imp.write(0x01);
+        imp.write(0x03); imp.writeBytes("env".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        imp.write(0x08); imp.writeBytes("emit_log".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        imp.write(0x00); imp.write(0x00);
+        ByteArrayOutputStream body = new ByteArrayOutputStream();
+        body.write(0x00);
+        for (int i = 0; i < times; i++) {
+            body.write(0x41); sleb(body, 0);
+            body.write(0x41); sleb(body, 5);
+            body.write(0x41); sleb(body, 0);
+            body.write(0x41); sleb(body, 65536);
+            body.write(0x10); uleb(body, 0);
+        }
+        body.write(0x0B);
+        ByteArrayOutputStream code = new ByteArrayOutputStream();
+        code.write(0x01);
+        uleb(code, body.size());
+        code.writeBytes(body.toByteArray());
+        return module(section(1, type.toByteArray()), section(2, imp.toByteArray()),
+            section(3, bytes(0x01, 0x01)), section(5, bytes(0x01, 0x00, 0x01)),
+            section(7, bytes(0x01, 0x04, 0x63, 0x61, 0x6C, 0x6C, 0x00, 0x01)),
+            section(10, code.toByteArray()));
+    }
+
+    /** VM-28 — emit event data without bound (1 gas/byte) to bloat retained logs and receipts. */
+    @Test
+    void cumulativeLogBytesPerTransactionAreCapped() {
+        ExecResult within = vm.execute(emitLogModule(15),
+            new MapHostState(new byte[0], new byte[0], 0), new GasMeter(50_000_000));
+        assertEquals(ContractResult.Status.OK, within.status(), "15 x 64 KiB is under the 1 MiB cap");
+        ExecResult over = vm.execute(emitLogModule(20),
+            new MapHostState(new byte[0], new byte[0], 0), new GasMeter(50_000_000));
+        assertEquals(ContractResult.Status.OUT_OF_GAS, over.status());
+        assertEquals(50_000_000L, over.gasUsed(), "the cap is a saturating full-gas trap");
+    }
+
+    /** {@code call} -> {@code call 1}; function 1 declares one local group of {@code locals} i32s. */
+    private static byte[] frameModule(int locals) {
+        byte[] f0 = bytes(0x00, 0x10, 0x01, 0x0B);               // 0 locals, call 1, end
+        byte[] f1 = bytes(0x01, locals, 0x7F, 0x0B);             // 1 group of `locals` i32, end
+        ByteArrayOutputStream code = new ByteArrayOutputStream();
+        code.write(0x02);
+        uleb(code, f0.length); code.writeBytes(f0);
+        uleb(code, f1.length); code.writeBytes(f1);
+        return module(section(1, bytes(0x01, 0x60, 0x00, 0x00)), section(3, bytes(0x02, 0x00, 0x00)),
+            section(7, CALL_EXPORT), section(10, code.toByteArray()));
+    }
+
+    /** A call-able module declaring a funcref table of {@code min} entries (max 100). */
+    private static byte[] tableModule(int min) {
+        return module(section(1, bytes(0x01, 0x60, 0x00, 0x00)), section(3, bytes(0x01, 0x00)),
+            section(4, bytes(0x01, 0x70, 0x01, min, 100)), section(7, CALL_EXPORT),
+            section(10, bytes(0x01, 0x02, 0x00, 0x0B)));
+    }
+
+    /** VM-31 — recurse through functions declaring many locals, or declare a big table, for the
+     *  flat price of the instructions: frame slots and table entries are allocated unmetered. */
+    @Test
+    void frameSlotsAndTableEntriesAreCharged() {
+        WasmVm.clearModuleCacheForTest();
+        MapHostState h = new MapHostState(new byte[0], new byte[0], 0);
+        ExecResult few = vm.execute(frameModule(1), h, new GasMeter(10_000_000));
+        ExecResult many = vm.execute(frameModule(100), h, new GasMeter(10_000_000));
+        assertEquals(ContractResult.Status.OK, many.status());
+        assertEquals(99 * GasSchedule.FRAME_SLOT, many.gasUsed() - few.gasUsed(),
+            "each extra local slot of an activation costs FRAME_SLOT");
+
+        ExecResult small = vm.execute(tableModule(1), h, new GasMeter(10_000_000));
+        ExecResult big = vm.execute(tableModule(100), h, new GasMeter(10_000_000));
+        assertEquals(ContractResult.Status.OK, big.status());
+        assertEquals(99 * GasSchedule.TABLE_ENTRY, big.gasUsed() - small.gasUsed(),
+            "each eagerly allocated table entry costs TABLE_ENTRY");
+    }
+
+    private static ExecResult runShipped(String name, byte[] input, long value) {
+        return new WasmVm().execute(shipped(name), new MapHostState(new byte[25], input, value),
+            new GasMeter(10_000_000));
+    }
+
+    /** VM-34 — attach native coin to a template call that cannot spend it (token, pair, agent
+     *  wallet), or to a launchpad path that returns silently, stranding the coin in the contract. */
+    @Test
+    void nonPayablePathsAndLaunchpadRefusalsTrapInsteadOfKeepingValue() {
+        for (String name : new String[] {"token", "pair", "agent_wallet"}) {
+            assertEquals(ContractResult.Status.REVERTED, runShipped(name, new byte[0], 1).status(),
+                name + " must trap on attached value");
+            assertEquals(ContractResult.Status.OK, runShipped(name, new byte[0], 0).status(),
+                name + " still runs without value");
+        }
+        // Non-deployer init, non-deployer withdraw and an unknown selector all trap (they returned).
+        for (byte selector : new byte[] {0, 2, 9}) {
+            assertEquals(ContractResult.Status.REVERTED,
+                runShipped("launchpad", new byte[] {selector}, 5).status(),
+                "launchpad selector " + selector + " must trap");
+        }
+    }
+
+    /** VM-32 — grow permanent state through contract code at a tenth of the storage-write price. */
+    @Test
+    void deployedCodeBytesPayTheStorageByteRate() {
+        byte[] code = shipped("counter");
+        var proc = new WasmContractProcessor(new WasmVm(), new InMemoryContractStore());
+        proc.begin();
+        var result = proc.run(rhizome.core.ledger.PublicAddress.random(),
+            rhizome.core.transaction.TransactionKind.DEPLOY, rhizome.core.ledger.PublicAddress.empty(),
+            code, 0, 10_000_000, 0);
+        assertEquals(GasSchedule.DEPLOY_BASE + (long) code.length * GasSchedule.STORAGE_WRITE_PER_BYTE,
+            result.gasUsed());
+    }
+
+    /** VM-30 — cycle distinct max-size modules through the process-wide cache (bounded by entry
+     *  count only) to pin tens of MiB, and collide the weak key hash to degrade every lookup. */
+    @Test
+    void theModuleCacheIsBoundedByBytesAndKeyedByAStrongHash() {
+        WasmVm.clearModuleCacheForTest();
+        byte[] base = oneFunctionModule(null, 0x01);
+        for (int i = 0; i < 60; i++) {
+            ByteArrayOutputStream pad = new ByteArrayOutputStream();
+            pad.write(0x01);
+            pad.write('p');
+            pad.writeBytes(new byte[200_000]);
+            byte[] padBytes = pad.toByteArray();
+            padBytes[2] = (byte) i; // make every module distinct
+            ByteArrayOutputStream mod = new ByteArrayOutputStream();
+            mod.writeBytes(base);
+            mod.writeBytes(section(0, padBytes));
+            WasmVm.validateCode(mod.toByteArray());
+            assertTrue(WasmVm.moduleCacheStatsForTest()[1] <= WasmVm.MODULE_CACHE_MAX_BYTES,
+                "cache bytes must stay under the bound");
+        }
+        long[] stats = WasmVm.moduleCacheStatsForTest();
+        assertTrue(stats[0] > 0 && stats[0] < 60, "older entries were evicted: " + stats[0]);
+        assertTrue(stats[1] > 0 && stats[1] <= WasmVm.MODULE_CACHE_MAX_BYTES);
+
+        // [0,31] and [1,0] collide under Arrays.hashCode (31*(31+a)+b); the key's hash must not.
+        byte[] a = {0, 31};
+        byte[] b = {1, 0};
+        assertEquals(java.util.Arrays.hashCode(a), java.util.Arrays.hashCode(b));
+        assertTrue(WasmVm.CodeKey.of(a).hashCode() != WasmVm.CodeKey.of(b).hashCode());
+        WasmVm.clearModuleCacheForTest();
+    }
+
+    /** VM-29 — trigger a JVM stack overflow so the VM result claims full gas while the processor,
+     *  which reports {@code meter.used()}, charges less. */
+    @Test
+    void aStackOverflowSaturatesTheSharedMeter() {
+        byte[] router = shipped("router");
+        GasMeter gas = new GasMeter(10_000_000);
+        ExecResult r = vm.execute(router, new MapHostState(new byte[0], routerForwardInput(), 0), gas,
+            (callee, input) -> { throw new StackOverflowError(); });
+        assertEquals(ContractResult.Status.OUT_OF_GAS, r.status());
+        assertEquals(10_000_000L, r.gasUsed());
+        assertEquals(10_000_000L, gas.used(), "the meter itself, not only the result, is saturated");
+    }
 }

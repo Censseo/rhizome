@@ -22,7 +22,7 @@ extern "C" {
 }
 
 #[panic_handler]
-fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }
+fn panic(_: &core::panic::PanicInfo) -> ! { core::arch::wasm32::unreachable() }
 
 /// Revert the whole call (a trap): used whenever the sale cannot deliver, so the
 /// executor rolls the buyer's attached value back with everything else.
@@ -51,20 +51,23 @@ fn is_deployer(who: &[u8; ADDR_LEN]) -> bool {
 ///   0 = init(token(25), rate(8 LE)) — once; the creator then funds the launchpad
 ///       by a plain token.transfer to its address.
 ///   1 = buy() — attach value; receive value*rate tokens or revert.
+///   2 = withdraw(to(25), amount(8)) — deployer only.
+/// Every refusal TRAPS (never a silent return): a value-bearing call that returned quietly would
+/// leave the attached coin stranded in the launchpad, whereas a trap rolls it back.
 #[no_mangle]
 pub extern "C" fn call() {
     let mut input = [0u8; 64];
     let n = unsafe { get_input(input.as_mut_ptr(), 64) };
-    if n < 1 { return; }
+    if n < 1 { fail(); }
 
     match input[0] {
         0 => {
             let mut caller = [0u8; ADDR_LEN];
             unsafe { get_caller(caller.as_mut_ptr(), ADDR_LEN as i32); }
-            if !is_deployer(&caller) { return; }
+            if !is_deployer(&caller) { fail(); }
             let mut probe = [0u8; 1];
-            if unsafe { storage_read(KEY_INIT.as_ptr(), 1, probe.as_mut_ptr(), 1) } >= 0 { return; }
-            if n < (1 + ADDR_LEN + 8) as i32 { return; }
+            if unsafe { storage_read(KEY_INIT.as_ptr(), 1, probe.as_mut_ptr(), 1) } >= 0 { fail(); }
+            if n < (1 + ADDR_LEN + 8) as i32 { fail(); }
             unsafe {
                 storage_write(KEY_TOKEN.as_ptr(), 1, input[1..1 + ADDR_LEN].as_ptr(), ADDR_LEN as i32);
                 storage_write(KEY_RATE.as_ptr(), 1, input[1 + ADDR_LEN..1 + ADDR_LEN + 8].as_ptr(), 8);
@@ -78,8 +81,8 @@ pub extern "C" fn call() {
         2 => {
             let mut caller = [0u8; ADDR_LEN];
             unsafe { get_caller(caller.as_mut_ptr(), ADDR_LEN as i32); }
-            if !is_deployer(&caller) { return; }
-            if n < (1 + ADDR_LEN + 8) as i32 { return; }
+            if !is_deployer(&caller) { fail(); }
+            if n < (1 + ADDR_LEN + 8) as i32 { fail(); }
             let mut to = [0u8; ADDR_LEN];
             let mut i = 0;
             while i < ADDR_LEN { to[i] = input[1 + i]; i += 1; }
@@ -89,7 +92,7 @@ pub extern "C" fn call() {
             let amount = u64::from_le_bytes(amt_b);
             if unsafe { transfer_value(to.as_ptr(), ADDR_LEN as i32, amount as i64) } < 0 { fail(); }
         }
-        _ => {}
+        _ => fail(),
     }
 }
 

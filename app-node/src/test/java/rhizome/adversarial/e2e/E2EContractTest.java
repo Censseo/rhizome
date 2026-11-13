@@ -43,7 +43,7 @@ class E2EContractTest {
     Path tempDir;
 
     private static final long PREMINE = 500_000_000L;
-    private static final long GAS_LIMIT = 100_000L;
+    private static final long GAS_LIMIT = 200_000L; // a counter deploy costs ~156K (code bytes at the storage byte rate)
 
     private static byte[] counterWasm() {
         try (var in = E2EContractTest.class.getResourceAsStream("/counter.wasm")) {

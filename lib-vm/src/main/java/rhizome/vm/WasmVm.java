@@ -102,6 +102,24 @@ public final class WasmVm {
     static final int HOST_BUFFER_CAP = 1024 * 1024;
 
     /**
+     * Hard cap on the operand stack (entries, 8 bytes each = 8 MiB) of one Instance, checked in the
+     * per-instruction meter. Chicory grows its {@code MStack} on demand with no limit, and recursion
+     * that leaves operands behind accumulates them across frames; without a network constant the
+     * outcome would depend on each node's {@code -Xmx}. Exceeding it is a saturating full-gas
+     * out-of-gas, like the other budgets here. A compiled contract keeps a few dozen entries live.
+     */
+    static final int MAX_OPERAND_STACK = 1 << 20;
+
+    /**
+     * Hard cap on the event-data bytes (topic + data) one transaction's whole call tree may emit.
+     * Logs cost {@link GasSchedule#PER_BYTE} (transient pricing) yet are retained in receipts and
+     * log indexes, and {@link #HOST_BUFFER_CAP} only bounds one call; a transaction could otherwise
+     * emit gas-limit-many bytes. Counted on the shared meter, discarded frames included, so the
+     * verdict is a pure function of the instruction stream. Exceeding it is a full-gas out-of-gas.
+     */
+    static final long MAX_TX_LOG_BYTES = 1024 * 1024;
+
+    /**
      * Hard cap on a module's declared table size (entries). A table's {@code initial} count forces
      * Chicory to eagerly allocate a reference array of that many entries at INSTANTIATION — before
      * the gas listener runs, so it is completely unmetered. Chicory's own limit is 10,000,000
@@ -206,34 +224,47 @@ public final class WasmVm {
      * Parsed, validated modules keyed by SHA-256 of their code. Parsing and the float/SIMD scan are
      * O(code size); caching amortises them across repeated calls to the same contract. Node-local
      * and purely a performance cache — it never changes execution results — with a bounded size so
-     * it cannot itself be a memory-growth vector.
+     * it cannot itself be a memory-growth vector: at most {@link #MODULE_CACHE_MAX_ENTRIES} entries
+     * AND {@link #MODULE_CACHE_MAX_BYTES} of code. The entry count alone was no bound — 256 modules
+     * of {@link #MAX_CODE_SIZE} pin ~64 MiB of keys plus their parsed form (several times larger).
+     * Guarded by its own monitor, as is {@link #moduleCacheBytes}.
      */
     private static final java.util.LinkedHashMap<CodeKey, WasmModule> MODULE_CACHE =
-        new java.util.LinkedHashMap<>(64, 0.75f, true) {
-            @Override
-            protected boolean removeEldestEntry(java.util.Map.Entry<CodeKey, WasmModule> eldest) {
-                return size() > 256;
-            }
-        };
+        new java.util.LinkedHashMap<>(64, 0.75f, true);
+
+    static final int MODULE_CACHE_MAX_ENTRIES = 256;
+    static final long MODULE_CACHE_MAX_BYTES = 8L * 1024 * 1024;
+
+    /** Sum of the code bytes of every key in {@link #MODULE_CACHE}; guarded by that monitor. */
+    private static long moduleCacheBytes;
 
     /**
-     * Value-equality wrapper over contract code bytes, used as the {@link #MODULE_CACHE} key. Replaces
-     * a per-call SHA-256 + hex-String of the whole module (up to MAX_CODE_SIZE) — O(code) crypto on
-     * every call, even a cache hit — with an {@code Arrays.hashCode} loop; equals only runs on a hash
-     * collision. The key never affects gas (charged unconditionally before the lookup), so this stays a
-     * pure CPU optimization with no consensus effect.
+     * Value-equality wrapper over contract code bytes, used as the {@link #MODULE_CACHE} key. The hash
+     * is the first 8 bytes of SHA-256 of the code: {@code Arrays.hashCode} (31-polynomial) is trivially
+     * collidable, and an attacker deploying colliding modules turned every lookup into full-length
+     * {@code equals} scans over a chain. The O(code) digest is already paid for — the parse charge is
+     * levied per code byte on every call. The key never affects gas, so this is a pure CPU/memory
+     * optimization with no consensus effect.
      *
      * <p>The record encapsulates its array without cloning: callers on the LOOKUP path create a
      * throwaway key over their own array, and the put path in {@link #moduleFor} stores a defensive
      * clone — one copy per cache miss, never per call — so the cache can never alias (and be corrupted
      * through) a caller-owned array.
      */
-    private record CodeKey(byte[] code) {
+    record CodeKey(byte[] code, long hash) {
+        static CodeKey of(byte[] code) {
+            try {
+                byte[] d = java.security.MessageDigest.getInstance("SHA-256").digest(code);
+                return new CodeKey(code, java.nio.ByteBuffer.wrap(d).getLong());
+            } catch (java.security.NoSuchAlgorithmException e) {
+                throw new IllegalStateException("SHA-256 unavailable", e);
+            }
+        }
         @Override public boolean equals(Object o) {
-            return o instanceof CodeKey k && java.util.Arrays.equals(code, k.code);
+            return o instanceof CodeKey k && hash == k.hash && java.util.Arrays.equals(code, k.code);
         }
         @Override public int hashCode() {
-            return java.util.Arrays.hashCode(code);
+            return Long.hashCode(hash);
         }
     }
 
@@ -293,6 +324,16 @@ public final class WasmVm {
         // current/maximum pages and reserve only what a grow will actually commit (see meter).
         Memory[] memHolder = new Memory[1];
         try {
+            // Table entries are allocated eagerly at instantiation; price them like the initial
+            // memory pages (deploy-time caps bound the count, so this is a small network constant).
+            var tables = module.tableSection();
+            if (tables != null) {
+                long entries = 0;
+                for (int i = 0; i < tables.tableCount(); i++) {
+                    entries += tables.getTable(i).limits().min();
+                }
+                gas.charge(entries * GasSchedule.TABLE_ENTRY);
+            }
             Instance instance = Instance.builder(module)
                 .withImportValues(imports)
                 .withStart(false)
@@ -306,7 +347,7 @@ public final class WasmVm {
                 // Deterministic WASM call-depth cap: traps unbounded recursion at a fixed depth
                 // on every node, replacing the JVM-stack-dependent StackOverflowError that would
                 // otherwise fork consensus (see DepthLimitedInterpreterMachine).
-                .withMachineFactory(DepthLimitedInterpreterMachine::new)
+                .withMachineFactory(inst -> new DepthLimitedInterpreterMachine(inst, gas))
                 // Meter every instruction; bulk-memory / memory.grow are charged by their
                 // runtime operand, not a flat 1, so O(N) work cannot cost O(1) gas.
                 .withUnsafeExecutionListener((instruction, stack) -> meter(instruction, stack, gas, frameAdded, memHolder))
@@ -323,11 +364,17 @@ public final class WasmVm {
             // Converting it to out-of-gas would make gasUsed depend on the local -Xmx (a large-heap
             // node completes with partial gas, a small-heap one reports full gas) and FORK consensus;
             // a crash is preferable to a fork (audit: heap-dependent gasUsed).
-            throw new IllegalStateException("host out of memory during contract execution", e);
+            // A HostFault (an Error), not an IllegalStateException: in a nested call_contract the
+            // parent's catch-all below would turn any RuntimeException into a revert, so the same
+            // transaction would revert on a small-heap node and succeed on a large one. HostFault
+            // is rethrown at every depth up to the executor's fatal path.
+            throw new HostFault("host out of memory during contract execution", e);
         } catch (StackOverflowError e) {
             // Defence in depth: recursion that somehow outran the deterministic depth cap. The exact
             // stack at which a given JVM trips is host-specific, so normalize to a deterministic
-            // full-gas out-of-gas rather than a node-local outcome.
+            // full-gas out-of-gas rather than a node-local outcome. The shared meter is saturated
+            // too: the processor reports meter.used(), which must agree with the result's gasUsed.
+            gas.exhaust();
             return ExecResult.outOfGas(gas.limit());
         } catch (Throwable e) {
             HostFault fault = HostFault.of(e);
@@ -357,6 +404,7 @@ public final class WasmVm {
                 // rewraps a real JVM StackOverflowError as ChicoryException("call stack exhausted")
                 // it must not surface with node-local gas.used() — that would fork consensus. Pin it
                 // to the same deterministic full-gas out-of-gas as the StackOverflowError catch.
+                gas.exhaust();
                 return ExecResult.outOfGas(gas.limit());
             }
             return ExecResult.reverted(gas.used(), e.getMessage());
@@ -556,7 +604,7 @@ public final class WasmVm {
             gas.charge(GasSchedule.MODULE_PARSE_BASE
                 + (long) wasmCode.length * GasSchedule.MODULE_PARSE_PER_BYTE);
         }
-        CodeKey key = new CodeKey(wasmCode);
+        CodeKey key = CodeKey.of(wasmCode);
         synchronized (MODULE_CACHE) {
             WasmModule cached = MODULE_CACHE.get(key);
             if (cached != null) {
@@ -579,9 +627,27 @@ public final class WasmVm {
             // retained key would alias the caller's array, and a caller mutating its own copy
             // after a miss would silently corrupt the key's equals/hashCode. The lookup path
             // deliberately does not clone — one copy per miss, not per call.
-            MODULE_CACHE.put(new CodeKey(wasmCode.clone()), module);
+            CodeKey stored = new CodeKey(wasmCode.clone(), key.hash());
+            if (MODULE_CACHE.put(stored, module) != null) {
+                moduleCacheBytes -= wasmCode.length; // a concurrent miss already cached this code
+            }
+            moduleCacheBytes += wasmCode.length;
+            // Evict least-recently-used entries until both the count and the byte bound hold.
+            var it = MODULE_CACHE.entrySet().iterator();
+            while ((MODULE_CACHE.size() > MODULE_CACHE_MAX_ENTRIES || moduleCacheBytes > MODULE_CACHE_MAX_BYTES)
+                    && it.hasNext()) {
+                moduleCacheBytes -= it.next().getKey().code().length;
+                it.remove();
+            }
         }
         return module;
+    }
+
+    /** Test-only: {@code {entries, code bytes}} currently held by the module cache. */
+    static long[] moduleCacheStatsForTest() {
+        synchronized (MODULE_CACHE) {
+            return new long[] {MODULE_CACHE.size(), moduleCacheBytes};
+        }
     }
 
     /**
@@ -591,6 +657,7 @@ public final class WasmVm {
     static void clearModuleCacheForTest() {
         synchronized (MODULE_CACHE) {
             MODULE_CACHE.clear();
+            moduleCacheBytes = 0;
         }
     }
 
@@ -640,6 +707,14 @@ public final class WasmVm {
     private static void meter(Instruction instruction, MStack stack, GasMeter gas, long[] frameAdded,
                               Memory[] memHolder) {
         gas.charge(GasSchedule.PER_INSTRUCTION);
+        // Chicory's operand stack is one growable long[] shared by every frame of the instance and
+        // capped by nothing but the heap: recursion that leaves values behind grows it without
+        // bound for the gas of the pushes, and a small-heap node OOMs where a large one finishes.
+        // A fixed entry cap, checked before each instruction, makes the ceiling a network constant.
+        if (stack.size() > MAX_OPERAND_STACK) {
+            gas.exhaust();
+            throw new OutOfGasException("operand stack limit exceeded (max " + MAX_OPERAND_STACK + ")");
+        }
         switch (instruction.opcode()) {
             case MEMORY_FILL, MEMORY_COPY, MEMORY_INIT, TABLE_FILL, TABLE_COPY, TABLE_INIT -> {
                 // O(N) bulk element/byte moves: charge by the runtime count operand so copying a
@@ -821,6 +896,10 @@ public final class WasmVm {
                 gas.charge(GasSchedule.LOG_BASE + ((long) topicLen + dataLen) * GasSchedule.PER_BYTE);
                 capHostBuffer(topicLen, gas);
                 capHostBuffer(dataLen, gas);
+                if (gas.addLogBytes((long) topicLen + dataLen) > MAX_TX_LOG_BYTES) {
+                    gas.exhaust();
+                    throw new OutOfGasException("log bytes per transaction exceeded (max " + MAX_TX_LOG_BYTES + ")");
+                }
                 byte[] topic = mem.readBytes(asOffset(args[0]), topicLen);
                 byte[] data = mem.readBytes(asOffset(args[2]), dataLen);
                 host.emitLog(topic, data);

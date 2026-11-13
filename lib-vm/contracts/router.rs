@@ -15,7 +15,7 @@ extern "C" {
 }
 
 #[panic_handler]
-fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }
+fn panic(_: &core::panic::PanicInfo) -> ! { core::arch::wasm32::unreachable() }
 
 const ADDR_LEN: usize = 25;
 

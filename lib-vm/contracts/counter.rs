@@ -9,7 +9,7 @@ extern "C" {
 }
 
 #[panic_handler]
-fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }
+fn panic(_: &core::panic::PanicInfo) -> ! { core::arch::wasm32::unreachable() }
 
 /// Entry point: counter at storage key [0] += 1, returned as 8 LE bytes.
 #[no_mangle]

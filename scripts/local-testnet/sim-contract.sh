@@ -23,7 +23,7 @@ SIM_DIR="$BASE_DIR/sim"
 CSV="$SIM_DIR/contract.csv"
 STATE="$SIM_DIR/contracts.env"
 INTERVAL="${RHIZOME_SIM_CONTRACT_INTERVAL:-5}"
-GAS_LIMIT="${RHIZOME_SIM_GAS_LIMIT:-100000}"
+GAS_LIMIT="${RHIZOME_SIM_GAS_LIMIT:-200000}"
 GAS_PRICE="${RHIZOME_SIM_GAS_PRICE:-1}"
 FUND="${RHIZOME_SIM_CONTRACT_FUND:-5}"
 # Frais des dotations SEND depuis un mineur (fund_owner) — voir sim-tx.sh pour l'explication

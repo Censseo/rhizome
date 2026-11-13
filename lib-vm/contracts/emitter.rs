@@ -11,7 +11,7 @@ extern "C" {
 }
 
 #[panic_handler]
-fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }
+fn panic(_: &core::panic::PanicInfo) -> ! { core::arch::wasm32::unreachable() }
 
 /// Entry point: bump a counter, then emit a log carrying the new count.
 /// topic = "count" (ASCII), data = the counter as 8 LE bytes.

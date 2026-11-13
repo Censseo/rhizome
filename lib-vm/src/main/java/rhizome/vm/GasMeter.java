@@ -11,6 +11,7 @@ public final class GasMeter {
 
     private final long limit;
     private long used;
+    private long logBytes;
 
     public GasMeter(long limit) {
         if (limit < 0) {
@@ -31,6 +32,21 @@ public final class GasMeter {
             throw new OutOfGasException("out of gas (limit " + limit + ")");
         }
         used = next;
+    }
+
+    /** Saturates the meter: {@code used} becomes the limit, with no exception (the caller reports it). */
+    public void exhaust() {
+        used = limit;
+    }
+
+    /**
+     * Adds {@code n} to the bytes of event data this execution (the whole call tree shares the
+     * meter) has emitted, and returns the running total — discarded sub-frames included, so the
+     * count is a pure function of the instruction stream.
+     */
+    long addLogBytes(long n) {
+        logBytes += n;
+        return logBytes;
     }
 
     public long used() {

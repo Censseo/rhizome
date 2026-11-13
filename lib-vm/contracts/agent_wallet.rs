@@ -13,6 +13,7 @@ extern "C" {
     fn set_output(ptr: *const u8, len: i32);
     fn emit_log(topic_ptr: *const u8, topic_len: i32, data_ptr: *const u8, data_len: i32);
     fn get_caller(out_ptr: *mut u8, out_cap: i32) -> i32;
+    fn get_value() -> i64;
     fn get_deployer(out_ptr: *mut u8, out_cap: i32) -> i32;
     fn get_input(out_ptr: *mut u8, out_cap: i32) -> i32;
     fn call_contract(addr_ptr: *const u8, addr_len: i32,
@@ -21,7 +22,7 @@ extern "C" {
 }
 
 #[panic_handler]
-fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }
+fn panic(_: &core::panic::PanicInfo) -> ! { core::arch::wasm32::unreachable() }
 
 fn fail() -> ! { core::arch::wasm32::unreachable() }
 
@@ -98,6 +99,9 @@ fn pay(token: &[u8; ADDR_LEN], to: &[u8; ADDR_LEN], amount: u64) {
 ///   5 = session_of(key(25))                      — output token(25) || remaining(8)
 #[no_mangle]
 pub extern "C" fn call() {
+    // Non-payable: nothing here can spend native coin, so value attached to any path would be
+    // stranded forever. Trap instead; the executor rolls the attached value back.
+    if unsafe { get_value() } != 0 { fail(); }
     let mut input = [0u8; 128];
     let n = unsafe { get_input(input.as_mut_ptr(), 128) };
     if n < 1 { return; }

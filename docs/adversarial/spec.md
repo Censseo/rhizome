@@ -447,6 +447,17 @@ check is a boot-time equality composed with guards those suites already exercise
 | VM-21 | Deploy a module missing the `call` export, or importing memory/table/global under a whitelisted host-function name, to install dead code or escape the bounded memory factory. | A1 | DEFENDED | `lib-vm/src/test/java/rhizome/vm/WasmAdversarialTest.java#rejectsAModuleWithoutACallExport`, `lib-vm/src/test/java/rhizome/vm/WasmAdversarialTest.java#acceptsAModuleUsingOnlyTheWhitelistedAbi` |
 | VM-22 | Force a host buffer read whose allocation size tracks local heap pressure rather than a deterministic cap, so nodes with different heaps could disagree. | A1 | DEFENDED | `lib-vm/src/test/java/rhizome/vm/WasmAdversarialTest.java#aHostBufferAtTheCapIsAllowed`, `lib-vm/src/test/java/rhizome/vm/WasmAdversarialTest.java#aHostBufferAboveTheCapIsFullGasOutOfGas`, `lib-vm/src/test/java/rhizome/vm/WasmAdversarialTest.java#theCapPathIsDeterministicRegardlessOfHeapPressure` |
 | VM-23 | Read a box's contents for less than its full serialized-size gas charge, by having the charge land after `serialize()` runs instead of before. | A1 | DEFENDED | `lib-vm/src/test/java/rhizome/vm/WasmAdversarialTest.java#boxReadChargesTheFullSerializedSizeBeforeSerializing` |
+| VM-24 | Slip an opcode past the deploy-time denylist — `throw` (one JVM stack trace per ~1 gas), `try_table`, `return_call`, an atomic op — or declare an exception-handling tag section. | A1 | DEFENDED | `lib-vm/src/test/java/rhizome/vm/WasmAdversarialTest.java#rejectsOpcodesOutsideTheAllowlistAtDeploy`, `lib-vm/src/test/java/rhizome/vm/WasmAdversarialTest.java#rejectsATagSectionAndThrowAtDeploy`, `lib-vm/src/test/java/rhizome/vm/WasmAdversarialTest.java#everyShippedContractStillDeploysUnderTheAllowlist` |
+| VM-25 | Declare a function type with a huge result arity so Chicory's validator is quadratic on repeated `br` to a label of that arity. | A1 | DEFENDED | `lib-vm/src/test/java/rhizome/vm/WasmAdversarialTest.java#rejectsAFunctionTypeDeclaringTooManyResults` |
+| VM-26 | Run a nested frame out of JVM heap so the parent's catch-all turns the OOM into a revert on small-heap nodes only — a heap-dependent outcome. | A1 | DEFENDED | `lib-vm/src/test/java/rhizome/vm/WasmAdversarialTest.java#aNestedOutOfMemoryStaysFatalAtEveryDepth` |
+| VM-27 | Pile operand-stack entries across recursive frames (Chicory's shared stack is uncapped) until the node's heap decides the outcome. | A1 | DEFENDED | `lib-vm/src/test/java/rhizome/vm/WasmAdversarialTest.java#theOperandStackIsCappedAtANetworkConstant` |
+| VM-28 | Emit event data without bound at 1 gas/byte to bloat retained logs and receipts. | A1 | DEFENDED | `lib-vm/src/test/java/rhizome/vm/WasmAdversarialTest.java#cumulativeLogBytesPerTransactionAreCapped` |
+| VM-29 | Trigger a JVM stack overflow so the VM result claims full gas while the processor reports `meter.used()` — a gas mismatch between the two. | A1 | DEFENDED | `lib-vm/src/test/java/rhizome/vm/WasmAdversarialTest.java#aStackOverflowSaturatesTheSharedMeter` |
+| VM-30 | Cycle distinct max-size modules through the process-wide module cache (bounded by entry count only) to pin tens of MiB, or collide its weak key hash to degrade every lookup. | A1 | DEFENDED | `lib-vm/src/test/java/rhizome/vm/WasmAdversarialTest.java#theModuleCacheIsBoundedByBytesAndKeyedByAStrongHash` |
+| VM-31 | Recurse through functions declaring many locals, or declare a large table, for the flat price of the instructions — frame slots and eagerly allocated table entries were unmetered. | A1 | DEFENDED | `lib-vm/src/test/java/rhizome/vm/WasmAdversarialTest.java#frameSlotsAndTableEntriesAreCharged` |
+| VM-32 | Grow permanent replicated state through deployed code at a tenth of the `storage_write` byte price. | A1 | DEFENDED | `lib-vm/src/test/java/rhizome/vm/WasmAdversarialTest.java#deployedCodeBytesPayTheStorageByteRate` |
+| VM-33 | Add lopsided liquidity to a pair so the whole offered amount is pulled while shares are minted for only the smaller leg (the excess is donated), or have the deposit mint fewer shares than the provider expected after the pool moved. | A1 | DEFENDED | `lib-vm/src/test/java/rhizome/vm/TokenPairTest.java#addLiquidityPullsOnlyTheOptimalAmounts`, `lib-vm/src/test/java/rhizome/vm/TokenPairTest.java#addLiquidityTrapsBelowMinShares` |
+| VM-34 | Attach native coin to a template call that cannot spend it (token, pair, agent wallet) or to a launchpad path that returns silently, stranding the coin in the contract. | A1 | DEFENDED | `lib-vm/src/test/java/rhizome/vm/WasmAdversarialTest.java#nonPayablePathsAndLaunchpadRefusalsTrapInsteadOfKeepingValue` |
 
 ## STATE — authenticated state and snapshots
 
@@ -689,6 +700,16 @@ taken.
   also requires the header's nonce, the one header field the hash omits) and REORG-14 (an
   INVALID_BLOCK_ID/IS_SYNCING body-apply failure on the extension path is NO_CHANGE, not a strike).
   The retarget memo also keeps its floor entry, and `SyncDriver` holds one `HeaderSynchronizer`.
+- **2026-11-13** — VM-24..VM-34, the pre-public-testnet VM hardening lot. The deploy filter became an
+  opcode allowlist (VM-24: `throw`/`try_table`/`return_call`/atomics and tag sections refused) with a
+  result-arity cap beside the param cap (VM-25). Memory determinism: a nested OOM is a `HostFault`
+  at every depth (VM-26), Chicory's shared operand stack is capped at 2^20 entries (VM-27) and
+  `emit_log` at 1 MiB per transaction (VM-28), and the stack-overflow paths saturate the shared
+  meter (VM-29). The module cache is bounded by 8 MiB of code and keyed by a SHA-256 prefix
+  (VM-30). Gas schedule: frame slots and table entries are charged (VM-31) and deployed code pays
+  the storage byte rate (VM-32). Templates: `pair.add_liquidity` pulls the optimal amounts and
+  takes `min_shares` (VM-33); token/pair/agent_wallet are non-payable and the launchpad's silent
+  returns trap (VM-34).
 
 - **2026-09-07** — POW-08 for the pre-PoW gate ordering CONS-10 already locks by status code
   (`BlockUnclesTest#blocksOwnPowIsVerifiedBeforeUncleWork`), proven this time by an actual cost

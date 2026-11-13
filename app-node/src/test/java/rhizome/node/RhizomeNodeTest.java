@@ -281,7 +281,7 @@ class RhizomeNodeTest {
             awaitHeight(node, 40, 25_000); // accumulate enough balance to cover the gas reservation
 
             int chainId = node.engine().params().chainId();
-            long gasLimit = 100_000;
+            long gasLimit = 200_000; // a counter deploy now costs ~156K (code bytes at the storage rate)
 
             long deployNonce = node.engine().nextNonce(sender);
             rhizome.core.transaction.Transaction deployTx = rhizome.core.transaction.TransactionImpl.builder()

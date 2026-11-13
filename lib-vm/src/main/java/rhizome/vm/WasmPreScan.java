@@ -95,7 +95,11 @@ final class WasmPreScan {
                 case 9 -> { if (!preScanElementSection(code, p, sectionEnd)) return; }
                 case 10 -> { if (!preScanCodeSection(code, p, sectionEnd, moduleLocals)) return; }
                 case 11 -> { if (!preScanDataSection(code, p, sectionEnd)) return; }
-                default -> { } // function/table/memory/global/start/tag/datacount: no pre-sized allocations
+                // Exception-handling tags: the only users (throw/try_table) are refused by the
+                // opcode allowlist, so a tag section can only be dead weight.
+                case 13 -> throw new IllegalArgumentException(
+                    "tag section (exception handling) is not allowed in contracts");
+                default -> { } // function/table/memory/global/start/datacount: no pre-sized allocations
             }
             p[0] = (int) sectionEnd; // skip to the next section frame
         }
@@ -239,8 +243,12 @@ final class WasmPreScan {
             if (resultCount < 0) {
                 return false;
             }
-            // No post-parse result cap exists, so only the bytes-present bound applies (Chicory
-            // presizes new ArrayList<>(resultCount); each result is a >= 1-byte LEB).
+            // Same cap as params (a huge-arity label makes Chicory's validator quadratic), then the
+            // bytes-present bound (Chicory presizes new ArrayList<>(resultCount)).
+            if (resultCount > WasmVm.MAX_FUNCTION_PARAMS) {
+                throw new IllegalArgumentException("contract function type declares too many results: "
+                    + resultCount + " (max " + WasmVm.MAX_FUNCTION_PARAMS + ")");
+            }
             requireFitsSection(resultCount, p, sectionEnd, "results in a function type");
             for (long j = 0; j < resultCount; j++) {
                 if (!skipValType(code, p, sectionEnd)) {

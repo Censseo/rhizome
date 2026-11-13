@@ -66,8 +66,12 @@ final class DepthLimitedInterpreterMachine extends InterpreterMachine {
      */
     private static final ThreadLocal<long[]> TREE_LOCALS = ThreadLocal.withInitial(() -> new long[1]);
 
-    DepthLimitedInterpreterMachine(Instance instance) {
+    /** The call tree's shared meter, charged {@link GasSchedule#FRAME_SLOT} per activation slot. */
+    private final GasMeter gas;
+
+    DepthLimitedInterpreterMachine(Instance instance, GasMeter gas) {
         super(instance);
+        this.gas = gas;
     }
 
     @Override
@@ -87,6 +91,8 @@ final class DepthLimitedInterpreterMachine extends InterpreterMachine {
         if (locals[0] + frameSlots > WasmVm.MAX_TREE_LIVE_LOCALS) {
             throw new WasmLocalsBudgetExceeded();
         }
+        // Price the allocation (before the reservation, so a trap here has nothing to unwind).
+        gas.charge(frameSlots * GasSchedule.FRAME_SLOT);
         depth[0]++;
         locals[0] += frameSlots;
         try {
