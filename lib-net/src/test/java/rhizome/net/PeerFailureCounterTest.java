@@ -93,7 +93,8 @@ class PeerFailureCounterTest {
         PeerHosts.primeCacheForTests("flip-check.test", InetAddress.getByName("203.0.113.5"));
         assertTrue(registry.add("http://flip-check.test:3000"));
         PeerHosts.primeCacheForTests("flip-check.test", InetAddress.getByName("203.0.113.6"));
-        assertTrue(bans.misbehave(PeerId.of("http://flip-check.test:3000"), 100, "203.0.113.5"));
+        // A DIFFERENT name for the same dialled endpoint, so the name mirror cannot answer for us.
+        assertTrue(bans.misbehave(PeerId.of("http://alias-of-flip-check.test:3000"), 100, "203.0.113.5"));
         assertTrue(registry.isBanned("http://flip-check.test:3000"),
             "the check keys on the admission-time IP, not a fresh resolution");
         PeerHosts.resetCacheForTests();
