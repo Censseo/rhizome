@@ -1007,6 +1007,38 @@ class WasmAdversarialTest {
         assertEquals(50_000_000L, over.gasUsed(), "the cap is a saturating full-gas trap");
     }
 
+    /** VM-30 — cycle distinct max-size modules through the process-wide cache (bounded by entry
+     *  count only) to pin tens of MiB, and collide the weak key hash to degrade every lookup. */
+    @Test
+    void theModuleCacheIsBoundedByBytesAndKeyedByAStrongHash() {
+        WasmVm.clearModuleCacheForTest();
+        byte[] base = oneFunctionModule(null, 0x01);
+        for (int i = 0; i < 60; i++) {
+            ByteArrayOutputStream pad = new ByteArrayOutputStream();
+            pad.write(0x01);
+            pad.write('p');
+            pad.writeBytes(new byte[200_000]);
+            byte[] padBytes = pad.toByteArray();
+            padBytes[2] = (byte) i; // make every module distinct
+            ByteArrayOutputStream mod = new ByteArrayOutputStream();
+            mod.writeBytes(base);
+            mod.writeBytes(section(0, padBytes));
+            WasmVm.validateCode(mod.toByteArray());
+            assertTrue(WasmVm.moduleCacheStatsForTest()[1] <= WasmVm.MODULE_CACHE_MAX_BYTES,
+                "cache bytes must stay under the bound");
+        }
+        long[] stats = WasmVm.moduleCacheStatsForTest();
+        assertTrue(stats[0] > 0 && stats[0] < 60, "older entries were evicted: " + stats[0]);
+        assertTrue(stats[1] > 0 && stats[1] <= WasmVm.MODULE_CACHE_MAX_BYTES);
+
+        // [0,31] and [1,0] collide under Arrays.hashCode (31*(31+a)+b); the key's hash must not.
+        byte[] a = {0, 31};
+        byte[] b = {1, 0};
+        assertEquals(java.util.Arrays.hashCode(a), java.util.Arrays.hashCode(b));
+        assertTrue(WasmVm.CodeKey.of(a).hashCode() != WasmVm.CodeKey.of(b).hashCode());
+        WasmVm.clearModuleCacheForTest();
+    }
+
     /** VM-29 — trigger a JVM stack overflow so the VM result claims full gas while the processor,
      *  which reports {@code meter.used()}, charges less. */
     @Test

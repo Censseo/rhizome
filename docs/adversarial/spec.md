@@ -440,6 +440,7 @@ check is a boot-time equality composed with guards those suites already exercise
 | VM-27 | Pile operand-stack entries across recursive frames (Chicory's shared stack is uncapped) until the node's heap decides the outcome. | A1 | DEFENDED | `lib-vm/src/test/java/rhizome/vm/WasmAdversarialTest.java#theOperandStackIsCappedAtANetworkConstant` |
 | VM-28 | Emit event data without bound at 1 gas/byte to bloat retained logs and receipts. | A1 | DEFENDED | `lib-vm/src/test/java/rhizome/vm/WasmAdversarialTest.java#cumulativeLogBytesPerTransactionAreCapped` |
 | VM-29 | Trigger a JVM stack overflow so the VM result claims full gas while the processor reports `meter.used()` — a gas mismatch between the two. | A1 | DEFENDED | `lib-vm/src/test/java/rhizome/vm/WasmAdversarialTest.java#aStackOverflowSaturatesTheSharedMeter` |
+| VM-30 | Cycle distinct max-size modules through the process-wide module cache (bounded by entry count only) to pin tens of MiB, or collide its weak key hash to degrade every lookup. | A1 | DEFENDED | `lib-vm/src/test/java/rhizome/vm/WasmAdversarialTest.java#theModuleCacheIsBoundedByBytesAndKeyedByAStrongHash` |
 
 ## STATE — authenticated state and snapshots
 
