@@ -103,6 +103,20 @@ public final class RhizomeNode implements AutoCloseable {
                 + "network. Set RHIZOME_API_TOKEN, bind 127.0.0.1, or set RHIZOME_ALLOW_OPEN_API=true "
                 + "for a pure P2P relay.");
         }
+        // The same exposure through a reverse proxy: the node binds loopback (so the gate above
+        // is satisfied) with no token, but is advertised / allow-listed under a public name — so a
+        // proxy fronts it and EVERY client arrives from 127.0.0.1. Without RHIZOME_TRUST_XFF they
+        // all share one rate-limit/strike/scan identity and every operator route is open to the
+        // world through the proxy.
+        if (config.apiToken().isEmpty() && isLoopbackBind(config.bindAddress())
+            && !config.allowOpenApi() && !config.trustXff() && namesNonLoopbackHost(config)) {
+            throw new IllegalStateException("refusing to start: RHIZOME_ADVERTISE / RHIZOME_ALLOWED_HOSTS "
+                + "name a non-loopback host, so a reverse proxy is presumed in front of this loopback "
+                + "bind, yet there is no RHIZOME_API_TOKEN and no RHIZOME_TRUST_XFF: every client would "
+                + "share one identity and the operator routes would be open through the proxy. Set "
+                + "RHIZOME_API_TOKEN, set RHIZOME_TRUST_XFF=true (proxy only), or set "
+                + "RHIZOME_ALLOW_OPEN_API=true to accept it.");
+        }
         // The opt-in is legitimate for a relay, but it is worth saying out loud what it buys the
         // network: anyone can POST /add_peer, so anyone chooses hosts this node will periodically
         // fetch (SSRF-filtered, bounded, evicted on failure — audit B-3).
@@ -234,7 +248,7 @@ public final class RhizomeNode implements AutoCloseable {
             // than after the socket opens — as startGossip() did — because the broadcaster takes
             // nothing but the peer set and the config, and no request can arrive before start().
             var broadcaster = new PeerBroadcaster(registry::snapshot, blockPrivatePeers,
-                peerTokenPolicy, exchange);
+                peerTokenPolicy, exchange).withOutcomeSinks(registry::recordFailure, registry::recordSuccess);
             opened.push(broadcaster::close);
 
             // Snapshot spools live with the stores, not the OS temp dir (often a tmpfs → the whole
@@ -345,6 +359,36 @@ public final class RhizomeNode implements AutoCloseable {
         }
     }
 
+    /** True when RHIZOME_ADVERTISE or RHIZOME_ALLOWED_HOSTS names a host that is not loopback. Textual
+     *  check only, never a DNS lookup. */
+    static boolean namesNonLoopbackHost(NodeConfig config) {
+        java.util.List<String> hosts = new java.util.ArrayList<>(config.extraAllowedHosts());
+        config.advertisedUrl().ifPresent(u -> {
+            try {
+                String h = java.net.URI.create(u).getHost();
+                if (h != null) {
+                    hosts.add(h);
+                }
+            } catch (RuntimeException ignored) {
+                // malformed advertise URL is refused at config parse
+            }
+        });
+        for (String raw : hosts) {
+            String h = raw.trim().toLowerCase(java.util.Locale.ROOT);
+            if (h.startsWith("[")) {
+                int close = h.indexOf(']');
+                h = close < 0 ? h : h.substring(0, close + 1);
+            } else if (h.indexOf(':') == h.lastIndexOf(':') && h.contains(":")) {
+                h = h.substring(0, h.indexOf(':')); // name:port
+            }
+            if (!h.isEmpty() && !h.equals("localhost") && !h.startsWith("127.") && !h.equals("[::1]")
+                && !h.equals("::1")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /** True when the configured bind address resolves to a loopback interface only. */
     private static boolean isLoopbackBind(String bindAddress) {
         try {
@@ -374,6 +418,16 @@ public final class RhizomeNode implements AutoCloseable {
             60L, TimeUnit.SECONDS, new java.util.concurrent.ArrayBlockingQueue<>(256),
             r -> {
                 Thread t = new Thread(r, "rhizome-api-worker");
+                t.setDaemon(true);
+                return t;
+            },
+            new java.util.concurrent.ThreadPoolExecutor.AbortPolicy());
+        // Dedicated small pool for /submit and /add_transaction*: ingest is serialised on the
+        // engine lock anyway, so more threads only let a flood occupy the general pool above.
+        var ingestWorkers = new java.util.concurrent.ThreadPoolExecutor(2, 2,
+            60L, TimeUnit.SECONDS, new java.util.concurrent.ArrayBlockingQueue<>(64),
+            r -> {
+                Thread t = new Thread(r, "rhizome-ingest-worker");
                 t.setDaemon(true);
                 return t;
             },
@@ -415,7 +469,7 @@ public final class RhizomeNode implements AutoCloseable {
         }
         HttpServer httpServer = HttpServer.builder(eventloop,
                 NodeApi.servlet(eventloop, c.service(), limiter, sseHub, c.allowedHosts(),
-                    config.apiToken().orElse(null), apiWorkers, protectReads, trustXff))
+                    config.apiToken().orElse(null), apiWorkers, ingestWorkers, protectReads, trustXff))
             .withListenAddress(new java.net.InetSocketAddress(config.bindAddress(), config.apiPort()))
             // Bound how long a connection may stall a read or write: body sizes are capped, but
             // without an inactivity deadline a client can trickle a POST body one byte at a time
@@ -455,7 +509,7 @@ public final class RhizomeNode implements AutoCloseable {
             }
 
             var discovery = new PeerDiscovery(c.registry(), config.selfUrl(), c.blockPrivatePeers(),
-                c.peerTokenPolicy(), c.exchange());
+                c.peerTokenPolicy(), c.exchange()).withAdmitter(c.service()::addPeer);
             // The sync round lives in its own driver once the graph exists; the scheduler only
             // arms below, so the driver is visible to any direct syncRound() call (tests) from
             // here on.
@@ -487,13 +541,13 @@ public final class RhizomeNode implements AutoCloseable {
                 }, "snapshot materialisation"), config.syncPeriodMs(), config.syncPeriodMs(), TimeUnit.MILLISECONDS);
             }
 
-            return new NodeRuntime(eventloop, eventloopThread, httpServer, apiWorkers, producer,
+            return new NodeRuntime(eventloop, eventloopThread, httpServer, apiWorkers, ingestWorkers, producer,
                 syncScheduler, discovery);
         } catch (Throwable t) {
             if (producer != null) {
                 producer.stop();
             }
-            stopServing(eventloop, eventloopThread, httpServer, apiWorkers);
+            stopServing(eventloop, eventloopThread, httpServer, apiWorkers, ingestWorkers);
             throw t;
         }
     }
@@ -504,7 +558,8 @@ public final class RhizomeNode implements AutoCloseable {
      * there is no in-flight body read to wait out.
      */
     private static void stopServing(Eventloop eventloop, Thread eventloopThread,
-                                    HttpServer httpServer, java.util.concurrent.ExecutorService apiWorkers) {
+                                    HttpServer httpServer, java.util.concurrent.ExecutorService apiWorkers,
+                                    java.util.concurrent.ExecutorService ingestWorkers) {
         try {
             eventloop.submit(() -> httpServer.close());
             eventloop.keepAlive(false);
@@ -516,6 +571,7 @@ public final class RhizomeNode implements AutoCloseable {
             log.warn("failed to unwind the event loop after a failed start: {}", e.toString());
         } finally {
             apiWorkers.shutdownNow();
+            ingestWorkers.shutdownNow();
         }
     }
 
@@ -670,8 +726,10 @@ public final class RhizomeNode implements AutoCloseable {
         boolean workersStuck = false;
         if (rt != null) {
             rt.apiWorkers().shutdownNow();
+            rt.ingestWorkers().shutdownNow();
             try {
-                if (!rt.apiWorkers().awaitTermination(30, TimeUnit.SECONDS)) {
+                if (!rt.apiWorkers().awaitTermination(30, TimeUnit.SECONDS)
+                    | !rt.ingestWorkers().awaitTermination(30, TimeUnit.SECONDS)) {
                     workersStuck = true;
                     log.error("API worker pool still busy after 30 s; the store close will be "
                         + "skipped (native use-after-free / lock-hang risk)");

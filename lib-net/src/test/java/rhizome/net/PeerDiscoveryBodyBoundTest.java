@@ -71,6 +71,23 @@ class PeerDiscoveryBodyBoundTest {
         assertTrue(peers.contains("http://10.1.2.3:3000"));
     }
 
+    /**
+     * NET-14 — Hand PEX workers a response full of slow-resolving names: PEX-learned URLs go to
+     * the configured admitter (the node's off-loop queue), never resolved on the PEX worker.
+     */
+    @Test
+    void pexLearnedPeersAreHandedToTheAdmitterNotResolvedOnThePexWorker() {
+        respond("{\"peers\":[\"http://slow-a.invalid:3000\",\"http://slow-b.invalid:3000\"]}"
+            .getBytes(StandardCharsets.UTF_8));
+        var registry = new PeerRegistry(null, 128);
+        assertTrue(registry.add(baseUrl));
+        var admitted = new java.util.concurrent.CopyOnWriteArrayList<String>();
+        var discovery = new PeerDiscovery(registry, null).withAdmitter(admitted::add);
+        discovery.round();
+        assertEquals(2, admitted.size());
+        assertEquals(1, registry.size(), "the registry itself was not touched on the PEX worker");
+    }
+
     @Test
     void slowDripPeersBodyHitsDeadline() {
         // Headers arrive, then the body stalls: the request timeout alone only covers up to the
@@ -157,7 +174,7 @@ class PeerDiscoveryBodyBoundTest {
             for (int i = 0; i < 4; i++) { // past MAX_FAILURES: an eviction would have happened by now
                 discovery.round();
             }
-            assertTrue(discovery.failures.isEmpty(),
+            assertEquals(0, registry.failureCount(baseUrl),
                 "local saturation must not count as a peer failure");
             assertEquals(1, registry.size(),
                 "an honest peer must not be evicted over LOCAL pool saturation");
@@ -178,10 +195,10 @@ class PeerDiscoveryBodyBoundTest {
         assertTrue(registry.add("http://127.0.0.1:1")); // port 1: connection refused
         var discovery = new PeerDiscovery(registry, null);
         discovery.round();
-        assertTrue(discovery.failures.containsKey("http://127.0.0.1:1"),
+        assertEquals(1, registry.failureCount("http://127.0.0.1:1"),
             "a failed peer should be failure-counted");
         registry.remove("http://127.0.0.1:1");
-        discovery.round(); // empty registry: the stale failure entry must still be pruned
-        assertFalse(discovery.failures.containsKey("http://127.0.0.1:1"));
+        discovery.round(); // empty registry: removal must have dropped the failure entry with it
+        assertEquals(0, registry.failureCount("http://127.0.0.1:1"));
     }
 }

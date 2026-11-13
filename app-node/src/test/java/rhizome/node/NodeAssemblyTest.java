@@ -71,11 +71,40 @@ class NodeAssemblyTest {
         }
     }
 
+    /**
+     * API-16 — Front a token-less loopback node with a reverse proxy: every client collapses onto
+     * 127.0.0.1 (one shared identity) and the operator routes are open through the proxy.
+     */
+    @Test
+    void aLoopbackNodeAdvertisedPubliclyWithNoTokenNeedsTrustXffOrAnExplicitOptIn() throws IOException {
+        NodeConfig proxied = config("proxied").toBuilder()
+            .advertisedUrl(java.util.Optional.of("https://node.example.org")).build();
+        assertThrows(IllegalStateException.class, () -> RhizomeNode.assemble(proxied));
+        assertThrows(IllegalStateException.class, () -> RhizomeNode.assemble(config("proxied2").toBuilder()
+            .extraAllowedHosts(java.util.List.of("node.example.org:443")).build()));
+        assertFalse(Files.exists(tempDir.resolve("proxied")), "refusal precedes the stores");
+
+        try (NodeComponents c = RhizomeNode.assemble(proxied.toBuilder().trustXff(true).build())) {
+            assertNotNull(c.engine());
+        }
+        try (NodeComponents c = RhizomeNode.assemble(config("tok").toBuilder()
+                .advertisedUrl(java.util.Optional.of("https://node.example.org"))
+                .apiToken(java.util.Optional.of("s3cret")).build())) {
+            assertNotNull(c.engine());
+        }
+        // Loopback names alone are not a proxy.
+        try (NodeComponents c = RhizomeNode.assemble(config("lo").toBuilder()
+                .advertisedUrl(java.util.Optional.of("http://127.0.0.1:3000"))
+                .extraAllowedHosts(java.util.List.of("localhost:3000")).build())) {
+            assertNotNull(c.engine());
+        }
+    }
+
     @Test
     void theHostAllowlistIsComputedAtAssemblyAndCarriesTheAdvertisedName() throws IOException {
         try (NodeComponents c = RhizomeNode.assemble(
                 config("hosts").toBuilder().advertisedUrl(java.util.Optional.of("http://node.example:3000"))
-                    .extraAllowedHosts(java.util.List.of("proxy.example")).build())) {
+                    .extraAllowedHosts(java.util.List.of("proxy.example")).trustXff(true).build())) {
             assertTrue(c.allowedHosts().contains("node.example:3000"), "the advertised authority");
             assertTrue(c.allowedHosts().contains("localhost:3000"), "the loopback names");
             assertTrue(c.allowedHosts().contains("proxy.example"), "the operator's extra authority");

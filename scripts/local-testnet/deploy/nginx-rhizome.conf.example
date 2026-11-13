@@ -18,8 +18,8 @@
 # appended to.
 #
 # Rhizome's RHIZOME_TRUST_XFF (see node.env.example) makes the node key per-client rate
-# limits, push-strike tables and scan ownership on the FIRST hop of the X-Forwarded-For
-# header (NodeApi.resolveXffHop reads everything before the first comma) instead of the TCP
+# limits, push-strike tables and scan ownership on the RIGHT-most hop of the X-Forwarded-For
+# header (NodeApi.resolveXffHop reads everything after the last comma) instead of the TCP
 # socket address that actually connected to it. That is only safe if THIS PROXY IS THE ONLY
 # THING THAT CAN SET THAT HEADER'S FIRST HOP — i.e. the node's port is reachable ONLY from
 # this proxy (loopback bind, or a firewall/security-group that admits only this host).

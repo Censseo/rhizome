@@ -161,6 +161,16 @@ public final class PeerBanList {
      * counterpart is {@link #addressKey}.
      */
     static String endpointKey(PeerId peer) {
+        return endpointKey(peer, null);
+    }
+
+    /**
+     * As {@link #endpointKey(PeerId)}, keyed on {@code dialledIp} — the address the registry
+     * resolved and DIALLED at admission — when it is non-null. Re-resolving here keyed bans on
+     * whatever DNS said at ban time, so a name that flipped its A record after admission banned
+     * (and was checked against) a different address than the one that misbehaved.
+     */
+    static String endpointKey(PeerId peer, String dialledIp) {
         if (!peer.isValid()) {
             return "";
         }
@@ -170,6 +180,9 @@ public final class PeerBanList {
             String host = uri.getHost();
             if (host != null && !host.isEmpty()) {
                 int port = portOf(uri);
+                if (dialledIp != null) {
+                    return dialledIp + ":" + port;
+                }
                 try {
                     return PeerHosts.resolveFirst(host).getHostAddress() + ":" + port;
                 } catch (java.net.UnknownHostException unresolved) {
@@ -206,8 +219,16 @@ public final class PeerBanList {
      * back to the hostname (no port) when resolution is unavailable.
      */
     static String addressKey(PeerId peer) {
+        return addressKey(peer, null);
+    }
+
+    /** As {@link #addressKey(PeerId)}, keyed on the admission-time dialled IP when given. */
+    static String addressKey(PeerId peer, String dialledIp) {
         if (!peer.isValid()) {
             return "addr:";
+        }
+        if (dialledIp != null) {
+            return "addr:" + dialledIp;
         }
         try {
             String host = URI.create(peer.canonical()).getHost();
@@ -233,9 +254,12 @@ public final class PeerBanList {
      * up, so the escalation simply does not apply there; endpoint bans still do, and on those
      * networks they are the correct granularity anyway.
      */
-    private static boolean escalationApplies(PeerId peer) {
+    private static boolean escalationApplies(PeerId peer, String dialledIp) {
         if (!peer.isValid()) {
             return false;
+        }
+        if (dialledIp != null) {
+            return PeerHosts.isPubliclyRoutable(dialledIp); // an IP literal: no DNS involved
         }
         try {
             String host = URI.create(peer.canonical()).getHost();
@@ -277,15 +301,24 @@ public final class PeerBanList {
      * address-wide threshold).
      */
     public boolean misbehave(PeerId peer, int points) {
+        return misbehave(peer, points, null);
+    }
+
+    /**
+     * As {@link #misbehave(PeerId, int)}, scoring the address the registry actually dialled
+     * ({@code dialledIp}, resolved ONCE at admission) instead of re-resolving the hostname now.
+     * Null falls back to resolving (tests, callers with no registry entry).
+     */
+    public boolean misbehave(PeerId peer, int points, String dialledIp) {
         long now = nowMillis.getAsLong();
-        boolean endpointBanned = scoreEndpoint(peer, points, now);
-        boolean addressBanned = escalateAddress(peer, points, now);
+        boolean endpointBanned = scoreEndpoint(peer, dialledIp, points, now);
+        boolean addressBanned = escalateAddress(peer, dialledIp, points, now);
         return endpointBanned || addressBanned;
     }
 
     /** Credits the peer's endpoint entry; bans it (plus the name mirror) at the threshold. */
-    private boolean scoreEndpoint(PeerId peer, int points, long now) {
-        String key = endpointKey(peer);
+    private boolean scoreEndpoint(PeerId peer, String dialledIp, int points, long now) {
+        String key = endpointKey(peer, dialledIp);
         maybeSweepEntries(now);
         Entry entry = entries.get(key);
         if (entry == null) {
@@ -339,12 +372,12 @@ public final class PeerBanList {
      * offending after its own ban lands (its score stops accumulating, the address's does not)
      * would reach the address threshold single-handed and ban every sibling port with it.
      */
-    private boolean escalateAddress(PeerId peer, int points, long now) {
-        if (!escalationApplies(peer)) {
+    private boolean escalateAddress(PeerId peer, String dialledIp, int points, long now) {
+        if (!escalationApplies(peer, dialledIp)) {
             return false;
         }
-        String key = addressKey(peer);
-        String endpoint = endpointKey(peer);
+        String key = addressKey(peer, dialledIp);
+        String endpoint = endpointKey(peer, dialledIp);
         maybeSweepAddresses(now);
         Entry entry = addresses.get(key);
         if (entry == null) {
@@ -425,10 +458,15 @@ public final class PeerBanList {
     }
 
     public boolean isBanned(PeerId peer) {
+        return isBanned(peer, null);
+    }
+
+    /** As {@link #isBanned(PeerId)}, against the admission-time dialled IP (never re-resolved). */
+    public boolean isBanned(PeerId peer, String dialledIp) {
         long now = nowMillis.getAsLong();
-        Entry byEndpoint = entries.get(endpointKey(peer));
+        Entry byEndpoint = entries.get(endpointKey(peer, dialledIp));
         Entry byName = mirrors.get(nameKey(peer));
-        Entry byAddress = addresses.get(addressKey(peer));
+        Entry byAddress = addresses.get(addressKey(peer, dialledIp));
         // An untracked endpoint is NEVER banned: the shared overflow bucket only counts the
         // spray, it must not condemn an endpoint that committed no offence of its own (eclipse
         // lever). Likewise an address is only ever banned by its own escalation entry.

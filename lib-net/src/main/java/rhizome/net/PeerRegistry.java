@@ -34,7 +34,7 @@ import java.util.function.LongSupplier;
  */
 public final class PeerRegistry {
 
-    /** Max discovered peers per IP subnet bucket (/16 v4, /48 v6). Bounds eclipse via one subnet. */
+    /** Max discovered peers per IP subnet bucket (/16 v4, /32 v6). Bounds eclipse via one subnet. */
     private static final int MAX_PER_SUBNET = 16;
 
     /** Cap on the removal-cooldown table (bounded LRU; attacker-influenced keys, so hard-bounded). */
@@ -54,10 +54,10 @@ public final class PeerRegistry {
      * flip cannot corrupt the accounting — audit F5) and, on mainnet, the routability verdict
      * served by {@link #publicSnapshot()} (audit F3).
      */
-    private record Entry(String subnetBucket, boolean publiclyRoutable) {}
+    private record Entry(String subnetBucket, boolean publiclyRoutable, String dialledIp) {}
 
     /** Placeholder entry for seed peers (never subnet-counted, never publicly advertised). */
-    private static final Entry SEED_ENTRY = new Entry("", true);
+    private static final Entry SEED_ENTRY = new Entry("", true, null);
 
     private final Map<PeerId, Entry> peers = new ConcurrentHashMap<>();
     /** Config/seed peers: exempt from SSRF + subnet caps and never evicted by capacity. */
@@ -69,6 +69,14 @@ public final class PeerRegistry {
      * {@link #markConfirmed} for why the distinction carries a ban decision.
      */
     private final Set<PeerId> confirmed = ConcurrentHashMap.newKeySet();
+    /**
+     * Consecutive transport failures per peer, fed by EVERY channel that talks to it (PEX, pull
+     * sync, gossip). One counter, because a tarpit peer answers just enough on one channel to look
+     * healthy while it stalls another: three consecutive failures from any mix evict it.
+     */
+    private final Map<PeerId, Integer> failures = new ConcurrentHashMap<>();
+    /** Consecutive transport failures that evict a non-seed peer. */
+    static final int MAX_FAILURES = 3;
     /** Live count of discovered (non-seed) peers per subnet bucket. */
     private final Map<String, Integer> subnetCounts = new ConcurrentHashMap<>();
     /**
@@ -166,10 +174,10 @@ public final class PeerRegistry {
             removalCooldowns.remove(id.endpoint()); // window expired: eligible again
         }
         // Cheap rejections BEFORE the blocking DNS resolution below: an exact duplicate or a
-        // full table is decided on the live map directly (both are re-checked authoritatively
-        // under the lock at insertion). A flood of duplicate/full-table adds must not each pay
+        // table with nothing evictable is decided on the live map directly (both are re-checked
+        // authoritatively under the lock at insertion). A flood of such adds must not each pay
         // a resolver round-trip (audit: admission ordering).
-        if (peers.containsKey(id) || peers.size() >= maxPeers) {
+        if (peers.containsKey(id) || (needsEviction() && !hasEvictable())) {
             return false;
         }
         // The routability verdict is computed ONCE here, at admission; publicSnapshot serves this
@@ -179,17 +187,29 @@ public final class PeerRegistry {
             return false; // SSRF: refuse internal / metadata / private targets
         }
         String bucket = subnetKey(host);
+        // The address this peer will be DIALLED at, fixed once here: bans and ban checks key on it
+        // and never resolve again (a DNS flip after admission must not move the ban key).
+        String dialled = dialledIpOf(host);
         synchronized (lock) {
             if (peers.containsKey(id)) {
                 return false;
             }
-            if (peers.size() >= maxPeers) {
-                return false;
+            if (needsEviction()) {
+                // A full table (or a full unconfirmed share of it) used to refuse every newcomer:
+                // an attacker who filled it first held it, and an honest joiner could never get in.
+                // Instead one random UNCONFIRMED non-seed peer makes room. Confirmed (outbound-
+                // verified) peers and seeds are never displaced by an unverified newcomer, and the
+                // reserved share (see RESERVED_FOR_CONFIRMED_DIVISOR) guarantees they have room.
+                PeerId victim = randomUnconfirmed();
+                if (victim == null) {
+                    return false;
+                }
+                removeLocked(victim, false);
             }
             if (subnetCounts.getOrDefault(bucket, 0) >= MAX_PER_SUBNET) {
                 return false; // eclipse: one subnet cannot monopolise the table
             }
-            if (peers.putIfAbsent(id, new Entry(bucket, routable)) == null) {
+            if (peers.putIfAbsent(id, new Entry(bucket, routable, dialled)) == null) {
                 subnetCounts.merge(bucket, 1, Integer::sum);
                 return true;
             }
@@ -229,15 +249,69 @@ public final class PeerRegistry {
         if (banList == null || !id.isValid() || seeds.contains(id)) {
             return false;
         }
-        boolean banned = banList.misbehave(id, points);
+        boolean banned = banList.misbehave(id, points, dialledIp(id));
         if (banned) {
             remove(url);
         }
         return banned;
     }
 
+    /**
+     * Records one transport failure (timeout, refused, {@code PeerUnavailableException}) against
+     * {@code url}; at {@link #MAX_FAILURES} consecutive failures a non-seed peer is removed (which
+     * also arms the re-admission cooldown). A seed is a trusted anchor: it accumulates the count
+     * but is never evicted (audit M4). Returns true when the peer was evicted.
+     */
+    public boolean recordFailure(String url) {
+        PeerId id = PeerId.of(url);
+        if (!id.isValid() || !peers.containsKey(id)) {
+            return false;
+        }
+        int f = failures.merge(id, 1, Integer::sum);
+        if (f < MAX_FAILURES) {
+            return false;
+        }
+        failures.remove(id);
+        if (seeds.contains(id)) {
+            return false;
+        }
+        remove(url);
+        return true;
+    }
+
+    /** Consecutive failures currently recorded for {@code url} (package-private for tests). */
+    int failureCount(String url) {
+        return failures.getOrDefault(PeerId.of(url), 0);
+    }
+
+    /** A successful exchange clears the consecutive-failure count. */
+    public void recordSuccess(String url) {
+        PeerId id = PeerId.of(url);
+        if (id.isValid()) {
+            failures.remove(id);
+        }
+    }
+
     public boolean isBanned(String url) {
-        return banList != null && banList.isBanned(PeerId.of(url));
+        if (banList == null) {
+            return false;
+        }
+        PeerId id = PeerId.of(url);
+        return banList.isBanned(id, dialledIp(id));
+    }
+
+    /** Admission-time dialled IP of a registered peer, or null (unknown peer, seed, unresolved). */
+    private String dialledIp(PeerId id) {
+        Entry e = peers.get(id);
+        return e == null ? null : e.dialledIp();
+    }
+
+    private static String dialledIpOf(String host) {
+        try {
+            return PeerHosts.resolveFirst(host).getHostAddress();
+        } catch (java.net.UnknownHostException unresolved) {
+            return null;
+        }
     }
 
     /** True if {@code url} names a configured seed peer (trusted anchor, never PEX-evicted). */
@@ -251,11 +325,48 @@ public final class PeerRegistry {
         }
     }
 
+    /** Share (1/N) of the table kept for peers that have answered a protocol exchange. */
+    private static final int RESERVED_FOR_CONFIRMED_DIVISOR = 4;
+
+    private int unconfirmedCount() {
+        return peers.size() - seeds.size() - confirmed.size();
+    }
+
+    /** True when admitting one more peer needs a victim: table full, or the unconfirmed share is. */
+    private boolean needsEviction() {
+        int reserved = maxPeers / RESERVED_FOR_CONFIRMED_DIVISOR; // none below 4 slots
+        return peers.size() >= maxPeers || unconfirmedCount() >= maxPeers - reserved;
+    }
+
+    private boolean hasEvictable() {
+        return unconfirmedCount() > 0;
+    }
+
+    /** A uniformly random non-seed, unconfirmed peer, or null. Called under {@link #lock}. */
+    private PeerId randomUnconfirmed() {
+        List<PeerId> candidates = new ArrayList<>();
+        for (PeerId p : peers.keySet()) {
+            if (!seeds.contains(p) && !confirmed.contains(p)) {
+                candidates.add(p);
+            }
+        }
+        return candidates.isEmpty() ? null
+            : candidates.get(java.util.concurrent.ThreadLocalRandom.current().nextInt(candidates.size()));
+    }
+
     public void remove(String url) {
         PeerId id = PeerId.of(url);
         synchronized (lock) {
+            removeLocked(id, true);
+        }
+    }
+
+    /** {@code cooldown} false for a capacity eviction: the victim did nothing wrong, so it is not locked out. */
+    private void removeLocked(PeerId id, boolean cooldown) {
+        {
             Entry entry = peers.remove(id);
             confirmed.remove(id); // bounded by the peer table: never outlives its entry
+            failures.remove(id);
             if (entry == null) {
                 return;
             }
@@ -264,7 +375,7 @@ public final class PeerRegistry {
                 // so a DNS flip between add and remove cannot corrupt the accounting (audit F5).
                 subnetCounts.computeIfPresent(entry.subnetBucket(), (k, v) -> v <= 1 ? null : v - 1);
                 String endpoint = id.endpoint();
-                if (!endpoint.isEmpty()) {
+                if (cooldown && !endpoint.isEmpty()) {
                     removalCooldowns.put(endpoint, nowMillis.getAsLong() + REMOVAL_COOLDOWN_MILLIS);
                 }
             }

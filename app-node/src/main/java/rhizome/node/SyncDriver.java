@@ -119,16 +119,30 @@ final class SyncDriver {
         int peersTried = 0;
         int peersSkippedBanned = 0;
         boolean progressed = false;
-        // Rotate the starting index each round so that if the peers visited first are slow and eat the
-        // round budget, the ones skipped this round are visited first next round — every peer gets a turn.
-        int start = (int) Math.floorMod(syncRoundCursor++, n);
+        // Seeds first, every round: they are the operator's trusted anchors, so a tarpit among the
+        // discovered peers must never eat the budget before an anchor is tried. The discovered
+        // peers rotate behind them, and the cursor RESUMES where a budget-cut round stopped (a
+        // flat +1 let the same slow peers be first again and starve the tail forever).
+        java.util.List<String> ordered = new java.util.ArrayList<>(n);
+        java.util.List<String> others = new java.util.ArrayList<>(n);
+        for (String p : peers) {
+            (registry.isSeed(p) ? ordered : others).add(p);
+        }
+        int seedCount = ordered.size();
+        int m = others.size();
+        int start = m == 0 ? 0 : (int) Math.floorMod(syncRoundCursor, (long) m);
+        for (int i = 0; i < m; i++) {
+            ordered.add(others.get((start + i) % m));
+        }
         long deadline = System.currentTimeMillis() + SYNC_ROUND_BUDGET_MS;
+        syncRoundCursor++; // a completed round rotates by one; a cut round overrides below
         for (int i = 0; i < n; i++) {
             if (System.currentTimeMillis() >= deadline) {
                 log.debug("Sync round budget reached; deferring {} of {} peers to the next round", n - i, n);
+                syncRoundCursor = syncRoundCursor - 1 + Math.max(0, i - seedCount);
                 break;
             }
-            String peerUrl = peers.get((start + i) % n);
+            String peerUrl = ordered.get(i);
             // Seeds are trusted anchors: they can never be penalized directly (PeerRegistry.penalize
             // exempts them), so a seed seen as banned can only be a COLLATERAL ban of its address —
             // which must not blind the node to its operator-configured anchor (testnet campaign S5).
@@ -146,6 +160,7 @@ final class SyncDriver {
                 // misbehaving). Only the malformed-data path can still see an unconfirmed peer;
                 // see penalize (audit B-3).
                 registry.markConfirmed(peerUrl);
+                registry.recordSuccess(peerUrl);
                 switch (result) {
                     case EXTENDED, REORGED -> {
                         progressed = true;
@@ -164,10 +179,15 @@ final class SyncDriver {
                         log.debug("Peer {} pruned the bodies we need; trying another source", peerUrl);
                     case NO_CHANGE -> { /* healthy, nothing to do */ }
                 }
-            } catch (HttpPeerSource.PeerUnavailableException e) {
-                // Transport failures are not misbehaviour; PeerDiscovery prunes the
-                // persistently unreachable. Only protocol violations earn ban score.
+            } catch (rhizome.core.blockchain.PeerUnavailableException e) {
+                // Transport failures are not misbehaviour (no ban score), but they DO feed the same
+                // per-peer failure counter PEX uses, so a tarpit that answers PEX yet stalls sync is
+                // evicted after three consecutive failures instead of costing a round slot forever.
+                // A seed accumulates the count but is never evicted (PeerRegistry.recordFailure).
                 log.debug("Peer {} unavailable: {}", peerUrl, e.getMessage());
+                if (registry.recordFailure(peerUrl)) {
+                    log.debug("dropped unreachable peer {} after repeated sync failures", peerUrl);
+                }
             } catch (PeerProtocolException e) {
                 // Malformed protocol data (junk scalars, absurd snapshot chunk counts) is a
                 // protocol violation like serving an invalid chain — penalize accordingly.

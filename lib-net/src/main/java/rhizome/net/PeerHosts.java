@@ -100,7 +100,7 @@ final class PeerHosts {
             return cached.addrs();
         }
         try {
-            InetAddress[] addrs = InetAddress.getAllByName(host);
+            InetAddress[] addrs = lookupWithDeadline(host);
             DNS_CACHE.put(key, new CacheEntry(addrs, now + CACHE_TTL_NANOS));
             return addrs;
         } catch (UnknownHostException e) {
@@ -108,6 +108,50 @@ final class PeerHosts {
             // unresolvable name blocks on the resolver again (audit F3).
             DNS_CACHE.put(key, new CacheEntry(null, now + NEGATIVE_TTL_NANOS));
             throw e;
+        }
+    }
+
+    /** Hard wall-clock bound on one blocking lookup: the JDK resolver can sit in a ~5 s (or worse)
+     *  timeout per name, and an attacker-chosen hostname must not hold a caller that long. */
+    private static final long LOOKUP_TIMEOUT_MS = 3_000L;
+
+    /**
+     * Small dedicated resolver pool. Callers (sync, gossip, PEX, admission) used to block on
+     * {@code getAllByName} in their own threads; a name that never answers parked all of them. Four
+     * daemon threads and a short bounded queue cap the resolver concurrency, and a saturated pool
+     * fails the lookup (negative-cached by the caller) instead of queueing without bound.
+     */
+    private static final java.util.concurrent.ExecutorService RESOLVER =
+        new java.util.concurrent.ThreadPoolExecutor(4, 4, 30L, java.util.concurrent.TimeUnit.SECONDS,
+            new java.util.concurrent.ArrayBlockingQueue<>(64),
+            r -> {
+                Thread t = new Thread(r, "rhizome-dns");
+                t.setDaemon(true);
+                return t;
+            },
+            new java.util.concurrent.ThreadPoolExecutor.AbortPolicy());
+
+    private static InetAddress[] lookupWithDeadline(String host) throws UnknownHostException {
+        java.util.concurrent.Future<InetAddress[]> f;
+        try {
+            f = RESOLVER.submit(() -> InetAddress.getAllByName(host));
+        } catch (java.util.concurrent.RejectedExecutionException saturated) {
+            throw new UnknownHostException(host + " (resolver saturated)");
+        }
+        try {
+            return f.get(LOOKUP_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS);
+        } catch (java.util.concurrent.TimeoutException timeout) {
+            f.cancel(true);
+            throw new UnknownHostException(host + " (lookup timed out)");
+        } catch (InterruptedException e) {
+            f.cancel(true);
+            Thread.currentThread().interrupt();
+            throw new UnknownHostException(host + " (interrupted)");
+        } catch (java.util.concurrent.ExecutionException e) {
+            if (e.getCause() instanceof UnknownHostException uhe) {
+                throw uhe;
+            }
+            throw new UnknownHostException(host + " (" + e.getCause() + ")");
         }
     }
 
@@ -253,7 +297,9 @@ final class PeerHosts {
         return true;
     }
 
-    /** Subnet bucket key for eclipse-resistant diversity: /16 (v4) or /48 (v6); host string if unresolved. */
+    /** Subnet bucket key for eclipse-resistant diversity: /16 (v4) or /32 (v6); host string if unresolved.
+     *  v6 is /32, not /48: an ISP hands a customer a /48 or /56, so a /48 bucket let one allocation
+     *  holder mint 2^16 distinct buckets and fill the table one bucket at a time. */
     static String subnetKey(String host) {
         if (host == null) {
             return "host:";
@@ -263,8 +309,7 @@ final class PeerHosts {
             if (b.length == 4) {
                 return "v4:" + (b[0] & 0xFF) + "." + (b[1] & 0xFF);
             }
-            return String.format("v6:%02x%02x:%02x%02x:%02x%02x",
-                b[0], b[1], b[2], b[3], b[4], b[5]);
+            return String.format("v6:%02x%02x:%02x%02x", b[0], b[1], b[2], b[3]);
         } catch (UnknownHostException e) {
             return "host:" + host;
         }

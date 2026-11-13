@@ -85,6 +85,30 @@ class HttpPeerSourceTest {
             "expected a deadline rejection, got: " + ex.getCause());
     }
 
+    /**
+     * NET-12 — Tarpit the scalar fetches (/block_count, /total_work, /info): they hold the single
+     * sync thread for the bulk 30 s deadline unless they get their own 5 s one.
+     */
+    @Test
+    void scalarFetchesUseAFiveSecondDeadlineNotTheBulkOne() {
+        server.createContext("/block_count", exchange -> {
+            exchange.sendResponseHeaders(200, 100);
+            exchange.getResponseBody().write(new byte[]{'4'});
+            exchange.getResponseBody().flush();
+            try {
+                Thread.sleep(15_000);
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
+            exchange.close();
+        });
+        var source = new HttpPeerSource(baseUrl, false, new PeerExchange()); // default 30 s bulk deadline
+        long t0 = System.nanoTime();
+        assertThrows(HttpPeerSource.PeerUnavailableException.class, source::height);
+        long elapsedMs = (System.nanoTime() - t0) / 1_000_000;
+        assertTrue(elapsedMs < 10_000, "scalar read must hit the 5 s deadline, not the 30 s one: " + elapsedMs + "ms");
+    }
+
     @Test
     void malformedScalarEarnsProtocolException() {
         // A syntactically-invalid scalar is peer MISBEHAVIOUR (PeerProtocolException, ban-score

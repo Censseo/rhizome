@@ -145,8 +145,18 @@ public final class NodeService {
      * aggregate lock-guarded block-decode budget this second is exhausted (the caller then sheds the
      * request with 429 before touching the store). See {@link AdmissionControl}.
      */
-    public boolean tryReadBudget(int cost) {
-        return admission.tryRead(cost);
+    public boolean tryReadBudget(String shareKey, int cost) {
+        return admission.tryRead(shareKey, cost);
+    }
+
+    /** As {@link #tryReadBudget} for the peer-sync serving routes' own aggregate bucket. */
+    public boolean trySyncBudget(String shareKey, int cost) {
+        return admission.trySync(shareKey, cost);
+    }
+
+    /** Records a push strike for a body that failed to decode (junk never reaches submit*). */
+    public void notePushFault(String clientKey) {
+        pushStrikes.note(clientKey);
     }
 
 
@@ -593,8 +603,8 @@ public final class NodeService {
      * decode-before-gate asymmetry the S6 finding closed); internal/direct callers of {@link
      * #submitBlock} (block production, tests) legitimately bypass this network-boundary shed.
      */
-    public boolean trySubmitBudget() {
-        return admission.trySubmit();
+    public boolean trySubmitBudget(String shareKey) {
+        return admission.trySubmit(shareKey);
     }
 
     /**
@@ -603,8 +613,8 @@ public final class NodeService {
      * {@code /submit} (audit M1). Internal/direct callers of {@link #submitTransaction} (block
      * production, tests) legitimately bypass this network-boundary shed.
      */
-    public boolean tryMempoolSigBudget() {
-        return admission.tryMempoolSig();
+    public boolean tryMempoolSigBudget(String shareKey) {
+        return admission.tryMempoolSig(shareKey);
     }
 
     /** Accepts a mined block; on success the mempool is purged of its transactions. */

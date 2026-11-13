@@ -252,10 +252,11 @@ public final class NodeApi {
      * {@code RHIZOME_PEER_TOKEN} to this node), so it suits private clusters, not public relays.
      * The static SPA/docs shell ({@code /}, {@code /dashboard/*}, {@code /docs/*}) stays open:
      * a browser cannot attach a bearer to a plain navigation, and the shell is static content
-     * with no chain data — the SPA's own API fetches carry the token and stay gated.
+     * with no chain data. Note the embedded SPA holds no bearer (it never sends one), so under
+     * protectReads its own API fetches are refused: use a private node with an external client.
      *
      * <p>{@code trustXff} ({@code RHIZOME_TRUST_XFF}) keys rate limits, push-strike tables and
-     * scan ownership on the FIRST {@code X-Forwarded-For} hop instead of the socket address —
+     * scan ownership on the RIGHT-most {@code X-Forwarded-For} hop (the one the trusted proxy appended) instead of the socket address —
      * required when the node sits behind a reverse proxy, without which every client shares the
      * proxy's budget and scan namespace (audit: no reverse-proxy support). DANGEROUS when the
      * port is directly reachable: clients could then spoof the header and evade per-IP limits.
@@ -264,6 +265,22 @@ public final class NodeApi {
     public static AsyncServlet servlet(Reactor reactor, NodeService node, RateLimiter limiter, SseLogHub sse,
                                        java.util.Set<String> allowedHosts, String apiToken,
                                        java.util.concurrent.Executor blocking,
+                                       boolean protectReads, boolean trustXff) {
+        return servlet(reactor, node, limiter, sse, allowedHosts, apiToken, blocking, blocking,
+            protectReads, trustXff);
+    }
+
+    /**
+     * As above, with a separate {@code ingest} executor for {@code /submit} and
+     * {@code /add_transaction*}. Sharing one pool let a flood of ingest (each a PoW hash or an
+     * Ed25519 verify, all serialised on the engine lock anyway) occupy every worker and shed the
+     * explorer reads, peer sync and the scalar routes behind them with 429. A small dedicated
+     * pool bounds ingest concurrency to what the lock can use and leaves the general pool free.
+     */
+    public static AsyncServlet servlet(Reactor reactor, NodeService node, RateLimiter limiter, SseLogHub sse,
+                                       java.util.Set<String> allowedHosts, String apiToken,
+                                       java.util.concurrent.Executor blocking,
+                                       java.util.concurrent.Executor ingest,
                                        boolean protectReads, boolean trustXff) {
         int maxBlockBody = node.params().maxBlockSizeBytes() + 1024;
         DashboardAssets dashboard = DashboardAssets.load();
@@ -311,11 +328,13 @@ public final class NodeApi {
             // /block_count and /total_work are what peers read first in a sync round; during a
             // reorg window they answer 503 like the other chain routes so a peer never sees the
             // "height before the pop, headers after it" inconsistency (testnet campaign S5).
-            .with(GET, "/block_count", req -> ok(whenNotReorging(node, () -> text(String.valueOf(node.blockCount())))))
-            .with(GET, "/total_work", req -> ok(whenNotReorging(node, () -> totalWorkResponse(node))))
-            .with(GET, "/difficulty", req -> ok(text(String.valueOf(node.difficulty()))))
-            .with(GET, "/mempool", req -> ok(mempoolResponse(node)))
-            .with(GET, "/info", req -> ok(infoResponse(node)))
+            // These read chain state under the engine lock, so they are offloaded: run inline they
+            // parked the single event loop behind any long lock holder (a block apply, a reorg).
+            .with(GET, "/block_count", req -> offload(blocking, () -> whenNotReorging(node, () -> text(String.valueOf(node.blockCount())))))
+            .with(GET, "/total_work", req -> offload(blocking, () -> whenNotReorging(node, () -> totalWorkResponse(node))))
+            .with(GET, "/difficulty", req -> offload(blocking, () -> text(String.valueOf(node.difficulty()))))
+            .with(GET, "/mempool", req -> offload(blocking, () -> mempoolResponse(node)))
+            .with(GET, "/info", req -> offload(blocking, () -> infoResponse(node)))
             // ---- peer registry ----
             .with(GET, "/peers", req -> ok(peersResponse(node)))
             .with(POST, "/add_peer", req -> req.loadBody(SMALL_BODY).map(body -> guardedResponse(() -> {
@@ -356,16 +375,18 @@ public final class NodeApi {
             .with(GET, "/sync", req -> guarded(() -> SyncApi.sync(node, req)))
             .with(GET, "/headers", req -> guarded(() -> SyncApi.headers(node, req)))
             .with(GET, "/orphan", req -> offload(blocking, () -> SyncApi.orphan(node, req)))
-            .with(POST, "/add_transaction_json", req -> req.loadBody(JSON_TX_BODY).then(body -> offload(blocking, () -> {
-                Transaction t = Transaction.of(parseJson(body.getString(StandardCharsets.UTF_8)));
+            .with(POST, "/add_transaction_json", req -> req.loadBody(JSON_TX_BODY).then(body -> offload(ingest, () -> {
+                Transaction t = decodeOrStrike(node, clientKey(req, trustXff),
+                    () -> Transaction.of(parseJson(body.getString(StandardCharsets.UTF_8))));
                 return statusResponse(node.submitTransaction(t, clientKey(req, trustXff)));
             })))
-            .with(POST, "/add_transaction", req -> req.loadBody(TX_BODY).then(body -> offload(blocking, () -> {
-                Transaction t = Transaction.of(TransactionDto.fromBuffer(body.getArray()));
+            .with(POST, "/add_transaction", req -> req.loadBody(TX_BODY).then(body -> offload(ingest, () -> {
+                Transaction t = decodeOrStrike(node, clientKey(req, trustXff),
+                    () -> Transaction.of(TransactionDto.fromBuffer(body.getArray())));
                 return statusResponse(node.submitTransaction(t, clientKey(req, trustXff)));
             })))
-            .with(POST, "/submit", req -> req.loadBody(maxBlockBody).then(body -> offload(blocking, () -> {
-                Block block = BlockCodec.decode(body.getArray());
+            .with(POST, "/submit", req -> req.loadBody(maxBlockBody).then(body -> offload(ingest, () -> {
+                Block block = decodeOrStrike(node, clientKey(req, trustXff), () -> BlockCodec.decode(body.getArray()));
                 return statusResponse(node.submitBlock(block, clientKey(req, trustXff)));
             })))
             .build();
@@ -406,15 +427,19 @@ public final class NodeApi {
             // lock: the per-IP limiter above cannot stop a distributed flood from summing past it, so a
             // process-wide bucket bounds the total lock-guarded decode work on the event-loop thread
             // (audit 5th-pass, net Finding 2). Shed over-budget reads before they touch the store.
-            if (RoutePolicy.guarded(route, RoutePolicy.Guard.READ_BUDGET) && !node.tryReadBudget(cost)) {
+            String share = clientShareKey(request, trustXff);
+            if (RoutePolicy.guarded(route, RoutePolicy.Guard.READ_BUDGET) && !node.tryReadBudget(share, cost)) {
                 return errorJson(429, "read budget exceeded").toPromise();
+            }
+            if (RoutePolicy.guarded(route, RoutePolicy.Guard.SYNC_BUDGET) && !node.trySyncBudget(share, cost)) {
+                return errorJson(429, "sync budget exceeded").toPromise();
             }
             // Aggregate submit gate, consumed BEFORE the /submit handler decodes the block body. The
             // decode (up to maxBlockSizeBytes, ~25 000 tx allocations) and the memory-hard PoW hash it
             // triggers both run on the event-loop thread; the per-IP limiter cannot stop a distributed
             // flood from summing past it. Shedding here — rather than inside submitBlock, after the
             // decode already ran — closes the decode-before-gate asymmetry (audit S6).
-            if (RoutePolicy.guarded(route, RoutePolicy.Guard.SUBMIT_BUDGET) && !node.trySubmitBudget()) {
+            if (RoutePolicy.guarded(route, RoutePolicy.Guard.SUBMIT_BUDGET) && !node.trySubmitBudget(share)) {
                 return errorJson(429, "submit throttled").toPromise();
             }
             // Aggregate mempool-admission gate, consumed BEFORE the tx body is decoded — symmetric
@@ -422,7 +447,7 @@ public final class NodeApi {
             // the event-loop thread and never caches invalid signatures, so without an aggregate cap
             // a distributed corrupt-signature flood sums past the per-IP limiter and pins the loop
             // (audit M1).
-            if (RoutePolicy.guarded(route, RoutePolicy.Guard.MEMPOOL_BUDGET) && !node.tryMempoolSigBudget()) {
+            if (RoutePolicy.guarded(route, RoutePolicy.Guard.MEMPOOL_BUDGET) && !node.tryMempoolSigBudget(share)) {
                 return errorJson(429, "transaction throttled").toPromise();
             }
             // DNS-rebinding Host check for ALL browser-reachable requests when an allowlist is
@@ -906,9 +931,9 @@ public final class NodeApi {
      * The state-changing/operator routes gated by {@code RHIZOME_API_TOKEN} when configured
      * (audit F4). The P2P protocol endpoints ({@code /sync}, {@code /headers}, {@code /blocks},
      * {@code /peers}, {@code /block_count}, {@code /total_work}) deliberately stay open so
-     * peering keeps working. Note {@code /submit} and {@code /add_transaction} ARE gated: they
-     * are the operator's block/tx ingest routes and already carry their own anti-DoS budgets —
-     * an operator enabling the token on a gossiping node must have peers present it too.
+     * peering keeps working. Note {@code /submit} and {@code /add_transaction*} are NOT gated
+     * ({@link RoutePolicy.Guard#INGEST}): gossip-learned peers never hold the token, so gating
+     * them stops convergence; they are defended by their budgets and the push-strike table.
      *
      * <p>With {@code protectReads} it instead gates EVERY route (any method) — the
      * RHIZOME_PROTECT_READS private-node switch: the read surface (stats, balances, SSE logs) is
@@ -928,7 +953,7 @@ public final class NodeApi {
             // route (the router answers 404 for it either way).
             return !RoutePolicy.guarded(route, RoutePolicy.Guard.SPA_SHELL);
         }
-        return RoutePolicy.guarded(route, RoutePolicy.Guard.TOKEN);
+        return RoutePolicy.guarded(route, RoutePolicy.Guard.OPERATOR);
     }
 
     /** Constant-time check of {@code Authorization: Bearer <token>} against the configured token. */
@@ -1024,12 +1049,42 @@ public final class NodeApi {
         return ScanRegistry.Owner.of(clientKey(request, trustXff), secret);
     }
 
+    /**
+     * Runs a push-body decode; a failure records a push strike for the client before rethrowing
+     * (the 400 comes from the caller's guard). Without it junk bodies died at decode, never
+     * reached submit*, and so never struck (audit: decode failures free).
+     */
+    private static <T> T decodeOrStrike(NodeService node, String client, java.util.function.Supplier<T> decode) {
+        try {
+            return decode.get();
+        } catch (RuntimeException e) {
+            node.notePushFault(client);
+            throw e;
+        }
+    }
+
+    /**
+     * Key for the per-client share of each aggregate bucket: the IPv6 /48 (a site allocation of
+     * 2^16 /64s, so rotating /64s buys no extra share) or the IPv4 address.
+     */
+    static String clientShareKey(HttpRequest request, boolean trustXff) {
+        try {
+            java.net.InetAddress addr = clientAddress(request, trustXff);
+            if (addr != null && addr.getAddress().length == 16) {
+                return clientSubnetKey(request, trustXff);
+            }
+        } catch (RuntimeException e) {
+            // fall through to the plain key
+        }
+        return clientKey(request, trustXff);
+    }
+
     private static String clientKey(HttpRequest request) {
         return clientKey(request, false);
     }
 
     /**
-     * As {@link #clientKey(HttpRequest)}, but when {@code trustXff} the FIRST
+     * As {@link #clientKey(HttpRequest)}, but when {@code trustXff} the RIGHT-most
      * {@code X-Forwarded-For} hop replaces the socket address — for nodes only reachable
      * through a trusted reverse proxy (audit: no reverse-proxy support). The header value is
      * parsed as an IP LITERAL ONLY (never via a DNS lookup, which a spoofed hostname would
@@ -1100,8 +1155,8 @@ public final class NodeApi {
 
     /**
      * The address identifying this request's client: the socket address, or — when
-     * {@code trustXff} and an {@code X-Forwarded-For} header is present — the FIRST hop of
-     * that header, resolved by {@link #resolveXffHop} as an IP LITERAL only (never a hostname,
+     * {@code trustXff} and an {@code X-Forwarded-For} header is present — the RIGHT-most hop of
+     * that header (the one our own proxy appended; everything left of it is client-supplied), resolved by {@link #resolveXffHop} as an IP LITERAL only (never a hostname,
      * so no DNS lookup can be triggered on the event loop by a spoofed header). An absent or
      * unparsable hop falls back to the socket address: a client can then only miskey itself.
      */
@@ -1120,7 +1175,7 @@ public final class NodeApi {
     }
 
     /**
-     * The XFF first hop resolved to an address, or {@code socket} when the header is absent or
+     * The XFF right-most hop resolved to an address, or {@code socket} when the header is absent or
      * carries no usable literal (package-private for tests). IPv4 hops are parsed octet-by-octet
      * with a 0..255 range check and built via {@link java.net.InetAddress#getByAddress(byte[])}:
      * a dotted quad with an overflowing octet ({@code 300.1.1.1}) is NOT an IPv4 literal, and
@@ -1135,8 +1190,10 @@ public final class NodeApi {
             return socket;
         }
         try {
-            int comma = xff.indexOf(',');
-            String first = (comma < 0 ? xff : xff.substring(0, comma)).trim();
+            // Right-most: a proxy that appends ($proxy_add_x_forwarded_for) puts the address it
+            // actually saw LAST; the left side is whatever the client chose to send.
+            int comma = xff.lastIndexOf(',');
+            String first = (comma < 0 ? xff : xff.substring(comma + 1)).trim();
             if (first.indexOf(':') >= 0) {
                 // IPv6 literal only: invalid forms throw fast, with no resolver round-trip.
                 return java.net.InetAddress.getByName(first);

@@ -126,4 +126,22 @@ class SseLogStreamTest {
         int count = eventloop.<Integer>submit(() -> io.activej.promise.Promise.of(hub.subscriberCount())).get();
         assertTrue(count <= 2);
     }
+
+    /**
+     * API-17 — Fill the log-stream table with connections that then die, on a chain that mints no
+     * blocks: dead subscribers used to be reaped only by a publish, so the slots stayed taken.
+     */
+    @Test
+    void deadSubscribersAreReapedOnSubscribeWithoutAnyPublish() throws Exception {
+        int accepted = eventloop.<Integer>submit(() -> {
+            var a = hub.subscribe("a");
+            var b = hub.subscribe("b");
+            assertTrue(a != null && b != null);
+            assertEquals(null, hub.subscribe("c"), "cap of 2 reached");
+            a.closeEx(new java.io.IOException("client gone"));
+            b.closeEx(new java.io.IOException("client gone"));
+            return io.activej.promise.Promise.of(hub.subscribe("c") != null ? 1 : 0);
+        }).get();
+        assertEquals(1, accepted, "closed subscribers free their slots at subscribe time");
+    }
 }

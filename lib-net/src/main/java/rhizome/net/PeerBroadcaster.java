@@ -16,6 +16,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 import org.slf4j.Logger;
@@ -70,6 +71,9 @@ public final class PeerBroadcaster implements AutoCloseable {
     /** Decides whether the RHIZOME_PEER_TOKEN secret may be presented to a given peer
      *  (configured + https only); never logged (audit: peer token exfiltration via gossip). */
     private final PeerTokenPolicy tokenPolicy;
+    /** Transport failures/successes per peer, fed into the registry's shared failure counter. */
+    private volatile Consumer<String> onFailure = p -> { };
+    private volatile Consumer<String> onSuccess = p -> { };
     private final Set<String> recentlySent = Collections.newSetFromMap(
         Collections.synchronizedMap(new LinkedHashMap<>(DEDUP_WINDOW, 0.75f, false) {
             @Override
@@ -120,6 +124,17 @@ public final class PeerBroadcaster implements AutoCloseable {
                 }
                 droppedSends.incrementAndGet();
             });
+    }
+
+    /**
+     * Wires gossip transport outcomes into the per-peer failure counter that evicts
+     * ({@code PeerRegistry::recordFailure} / {@code recordSuccess}): a peer that only ever times
+     * out on gossip used to cost a pool thread per send forever and never be dropped.
+     */
+    public PeerBroadcaster withOutcomeSinks(Consumer<String> onFailure, Consumer<String> onSuccess) {
+        this.onFailure = onFailure;
+        this.onSuccess = onSuccess;
+        return this;
     }
 
     public void broadcastBlock(Block block) {
@@ -211,6 +226,11 @@ public final class PeerBroadcaster implements AutoCloseable {
         return droppedSends.get();
     }
 
+    /** Runs one send inline (package-private for tests). */
+    void sendQuietlyForTest(String peer, String path, byte[] body) {
+        sendQuietly(peer, path, body);
+    }
+
     private void sendQuietly(String peer, String path, byte[] body) {
         // Pin the peer to a freshly-resolved, validated IP before every send (PeerExchange
         // .pinnedRequest → PeerHosts.pin). Without this, gossip re-resolved the hostname at
@@ -242,10 +262,15 @@ public final class PeerBroadcaster implements AutoCloseable {
                 }
                 return null;
             });
+            onSuccess.accept(peer);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+        } catch (BodyReadSaturatedException e) {
+            // LOCAL pool saturation: says nothing about the peer.
+            log.debug("broadcast to {} skipped: local body-read pool saturated", peer);
         } catch (Exception e) {
             log.debug("broadcast to {} failed: {}", peer, e.toString());
+            onFailure.accept(peer);
         }
     }
 

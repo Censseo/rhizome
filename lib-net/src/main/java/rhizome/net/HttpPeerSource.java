@@ -60,6 +60,12 @@ public final class HttpPeerSource implements PeerSource {
      */
     private static final Duration REQUEST_DEADLINE = Duration.ofSeconds(30);
     /**
+     * Deadline for the scalar fetches (/block_count, /total_work, /info — bodies of at most
+     * {@link #SCALAR_CAP}). They are tiny, so a peer needing more than this is a tarpit: under the
+     * 30 s bulk deadline one such peer ate half a sync round per scalar.
+     */
+    private static final Duration SCALAR_DEADLINE = Duration.ofSeconds(5);
+    /**
      * Hard cap on one /orphan body: a full block, with the same headroom the node's own
      * /submit body cap allows. Bounds a hostile peer's reply before the codec parses it.
      */
@@ -305,9 +311,12 @@ public final class HttpPeerSource implements PeerSource {
 
     /** Fetches {@code path}, with a 404 mapping to {@code null} when {@code nullOn404}; throws on other errors. */
     private byte[] fetch(String path, long maxBytes, boolean nullOn404) {
+        // SCALAR_CAP is used by the scalar routes only (height, totalWork, info).
+        Duration deadline = maxBytes <= SCALAR_CAP && requestDeadline.compareTo(SCALAR_DEADLINE) > 0
+            ? SCALAR_DEADLINE : requestDeadline;
         HttpRequest request = PeerExchange.pinnedRequest(originalUrl, path, blockPrivateHosts,
                 tokenPolicy, originalUrl)
-            .timeout(requestDeadline)
+            .timeout(deadline)
             .GET()
             .build();
         for (int attempt = 0; ; attempt++) {
@@ -315,7 +324,7 @@ public final class HttpPeerSource implements PeerSource {
                 // Same whole-exchange deadline as blocks(): the request timeout alone would let a
                 // slow-drip peer hang the sync thread mid-body (audit F1).
                 AtomicReference<AutoCloseable> openBody = new AtomicReference<>();
-                return BodyReadDeadline.call(requestDeadline, openBody, () -> {
+                return BodyReadDeadline.call(deadline, openBody, () -> {
                     HttpResponse<InputStream> response = exchange.client().send(request, HttpResponse.BodyHandlers.ofInputStream());
                     if (response.statusCode() != 200) {
                         response.body().close();

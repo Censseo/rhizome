@@ -22,6 +22,7 @@ record NodeRuntime(
     Thread eventloopThread,
     HttpServer httpServer,
     ExecutorService apiWorkers,
+    ExecutorService ingestWorkers,
     BlockProducer producer,
     ScheduledExecutorService syncScheduler,
     PeerDiscovery discovery) {

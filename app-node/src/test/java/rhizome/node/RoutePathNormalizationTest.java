@@ -19,6 +19,7 @@ import rhizome.net.RateLimiter;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
 /**
@@ -88,11 +89,15 @@ class RoutePathNormalizationTest {
     }
 
     @Test
-    void everySpellingThatReachesTheIngestHandlerIsBearerGated() throws Exception {
-        var servlet = tokenGated();
+    void everySpellingThatReachesTheIngestHandlerIsBearerGatedUnderProtectReadsAndOpenOtherwise() throws Exception {
+        var privateNode = NodeApi.servlet(eventloop, node, new RateLimiter(1000, 1000, 8192),
+            null, null, "s3cret", null, true, false);
         for (String alias : SUBMIT_ALIASES) {
-            assertEquals(401, call(servlet, HttpRequest.post("http://x" + alias).build()).getCode(),
+            assertEquals(401, call(privateNode, HttpRequest.post("http://x" + alias).build()).getCode(),
                 alias + " reaches the /submit handler, so it must be bearer-gated like /submit");
+            // Token posture without protectReads: ingest is open (INGEST), only budgeted.
+            assertNotEquals(401, call(tokenGated(), HttpRequest.post("http://x" + alias).withBody(new byte[] {1}).build()).getCode(),
+                alias + " is a public ingest route: budgeted (400/429), never a 401");
         }
     }
 
