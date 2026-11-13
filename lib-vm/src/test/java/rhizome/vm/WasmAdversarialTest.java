@@ -906,6 +906,17 @@ class WasmAdversarialTest {
             () -> WasmVm.validateCode(resultsModule(WasmVm.MAX_FUNCTION_PARAMS + 1)));
         assertTrue(ex.getMessage().contains("results"), ex.getMessage());
         WasmVm.validateCode(resultsModule(WasmVm.MAX_FUNCTION_PARAMS)); // the cap itself deploys
+
+        // validateCode alone cannot tell the two guards apart: the byte pre-scan and the post-parse
+        // guard each refuse the module, so deleting either one leaves the other to throw. Drive each
+        // in isolation so removing either cap fails this test.
+        byte[] over = resultsModule(WasmVm.MAX_FUNCTION_PARAMS + 1);
+        var scan = assertThrows(IllegalArgumentException.class, () -> WasmPreScan.scan(over));
+        assertTrue(scan.getMessage().contains("results"), scan.getMessage());
+        var parsed = com.dylibso.chicory.wasm.Parser.parse(over);
+        var guard = assertThrows(IllegalArgumentException.class,
+            () -> WasmModuleGuard.rejectOversizedAllocations(parsed));
+        assertTrue(guard.getMessage().contains("results"), guard.getMessage());
     }
 
     // ---- memory determinism: OOM, operand stack, log bytes (lot 2 hardening) ----
