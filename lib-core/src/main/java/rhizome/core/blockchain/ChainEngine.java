@@ -774,7 +774,12 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
                 // fully applied, so undo it (ledger + processors + accumulator) before rejecting.
                 if (stateAccumulator != null) {
                     long height2 = b.id();
-                    byte[] newRoot = stateAccumulator.applyBlock(height2, collectStateChanges(block, touched, height2));
+                    byte[] newRoot;
+                    try {
+                        newRoot = stateAccumulator.applyBlock(height2, collectStateChanges(block, touched, height2));
+                    } catch (RuntimeException e) {
+                        throw unwindFailedCommit(block, height2, parent.supply(), e);
+                    }
                     if (!java.util.Arrays.equals(newRoot, b.stateRoot().toBytes())) {
                         stateAccumulator.revertBlock(height2);
                         Executor.rollbackBlock(block, ledger, contractProcessor, boxProcessor, height2,
@@ -799,9 +804,13 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
                 // of one synced put per sender after it (audit perf: per-sender fsync). On a
                 // failed append the staged values are discarded, exactly as they were previously
                 // never written.
-                commitAccountNonces(block);
-                nonceStore.markSyncedThrough(b.id()); // nonces now reflect this new tip
-                store.append(block); // flushes the staged ledger + nonce writes + block + height in one batch
+                try {
+                    commitAccountNonces(block);
+                    nonceStore.markSyncedThrough(b.id()); // nonces now reflect this new tip
+                    store.append(block); // flushes the staged ledger + nonce writes + block + height in one batch
+                } catch (RuntimeException e) {
+                    throw unwindFailedCommit(block, b.id(), parent.supply(), e);
+                }
                 appended = true;
                 // Persist the bodies of the uncles this block references, BEFORE the bounded
                 // orphan pool's LRU can evict them (audit: uncle-sync blocker). A block carries
@@ -866,6 +875,36 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
         } finally {
             lock.unlock();
         }
+    }
+
+    /**
+     * A throwable between the domain commit (Executor.executeBlock commits contract/box/token
+     * batches at {@code height}) and the atomic append: those stores sit AT {@code height} with
+     * their journals while the chain is at height-1, and the next block at {@code height} would
+     * die on "already has a journal" forever. Undo them exactly as the state-root rejection does.
+     * If the undo itself fails the peripherals are ahead of the chain for good, so mark the node
+     * degraded restart-required (boot reconciliation rewinds them), as a torn pop does. Returns
+     * the original failure for the caller to rethrow.
+     */
+    private RuntimeException unwindFailedCommit(Block block, long height, long parentSupply, RuntimeException cause) {
+        try {
+            if (stateAccumulator != null && stateAccumulator.committedHeight() >= height) {
+                stateAccumulator.revertBlock(height);
+            }
+            Executor.rollbackBlock(block, ledger, contractProcessor, boxProcessor, height, params, parentSupply);
+            revertStateDomains(height);
+            // Idempotent (sets each sender back to the block's own lowest nonce) whether or not
+            // commitAccountNonces got that far; a staged (RocksDB) nonce write is discarded anyway.
+            revertAccountNonces(block);
+            nonceStore.markSyncedThrough(height - 1);
+        } catch (RuntimeException revertFailure) {
+            cause.addSuppressed(revertFailure);
+            markDegraded("commit of block " + height + " failed (" + cause.getMessage() + ") and its"
+                + " rollback failed too (" + revertFailure.getMessage() + ") — a peripheral store is"
+                + " ahead of the chain height; new-tip blocks are refused until the node restarts"
+                + " into boot recovery", true);
+        }
+        return cause;
     }
 
     /**
