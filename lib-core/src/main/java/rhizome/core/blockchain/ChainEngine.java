@@ -195,6 +195,19 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
         };
 
     /**
+     * Uncle bodies of recently popped canonical blocks (bounded), keyed by uncle hash. The store
+     * drops them with the block on pop; keeping them here lets a restore of the same block (whose
+     * orphan-pool copy a hostile peer may have churned away, audit V5) persist them again.
+     */
+    private final java.util.LinkedHashMap<SHA256Hash, Block> poppedUncleBodies =
+        new java.util.LinkedHashMap<>(64, 0.75f, false) {
+            @Override
+            protected boolean removeEldestEntry(Map.Entry<SHA256Hash, Block> eldest) {
+                return size() > 2L * Math.max(1, params.maxReorgDepth()) * Math.max(1, params.maxUnclesPerBlock());
+            }
+        };
+
+    /**
      * Observable degraded-state marker (audit: silent restore failure). Set when a post-reorg
      * restore of the local branch fails — the node is then shorter than it started and needs a
      * full resync; cleared when a restore completes and the chain is whole again. Volatile-read
@@ -807,26 +820,17 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
                 try {
                     commitAccountNonces(block);
                     nonceStore.markSyncedThrough(b.id()); // nonces now reflect this new tip
-                    store.append(block); // flushes the staged ledger + nonce writes + block + height in one batch
+                    // Flushes the staged ledger + nonce writes + block + height + the referenced uncle
+                    // bodies in one batch. Bodies are persisted BEFORE the bounded orphan pool's LRU
+                    // can evict them (audit: uncle-sync blocker): a block carries only UncleRefs, so
+                    // peers syncing past this height fetch the bodies from us (PeerSource.orphan →
+                    // orphanBlock). On a trusted restore the pool may have lost the body, so a
+                    // popped block's bodies are kept aside (popBlock) and re-offered here.
+                    store.append(block, uncleBodiesFor(block));
                 } catch (RuntimeException e) {
                     throw unwindFailedCommit(block, b.id(), parent.supply(), e);
                 }
                 appended = true;
-                // Persist the bodies of the uncles this block references, BEFORE the bounded
-                // orphan pool's LRU can evict them (audit: uncle-sync blocker). A block carries
-                // only UncleRefs, so peers syncing past this height later fetch the bodies from
-                // us (PeerSource.orphan → orphanBlock) — without persistence the pool churn would
-                // make the uncle unserveable and the chain unsynchronisable for fresh nodes. On
-                // the trusted-restore path the uncle may already be gone from the pool; the
-                // entry written on first acceptance is simply kept.
-                if (!trustedRestore) {
-                    for (UncleRef ref : block.uncles()) {
-                        Block uncle = uncles.pooled(ref.hash());
-                        if (uncle != null) {
-                            store.putUncle(ref.hash(), uncle);
-                        }
-                    }
-                }
                 // Slide the median-time window forward: the new tip enters, the oldest leaves (P6).
                 mtpWindow.addLast(b.timestamp());
                 if (mtpWindow.size() > params.medianTimeWindow()) {
@@ -875,6 +879,21 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
         } finally {
             lock.unlock();
         }
+    }
+
+    /** The bodies of {@code block}'s uncles that this node holds: the live pool, else a just-popped copy. */
+    private Map<SHA256Hash, Block> uncleBodiesFor(Block block) {
+        Map<SHA256Hash, Block> bodies = new HashMap<>();
+        for (UncleRef ref : block.uncles()) {
+            Block body = uncles.pooled(ref.hash());
+            if (body == null) {
+                body = poppedUncleBodies.get(ref.hash());
+            }
+            if (body != null) {
+                bodies.put(ref.hash(), body);
+            }
+        }
+        return bodies;
     }
 
     /**
@@ -941,6 +960,12 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
                 throw new IllegalStateException("Cannot pop genesis");
             }
             Block tip = store.tip();
+            for (UncleRef ref : tip.uncles()) {
+                Block body = store.uncleAt(ref.hash()); // store.pop() below drops it
+                if (body != null) {
+                    poppedUncleBodies.put(ref.hash(), body);
+                }
+            }
             // Stage the ledger reversals so store.pop() flushes them atomically with the height
             // decrement — the pop is then atomic for the ledger too (audit S3). rollbackBlock only
             // READS the peripherals' receipts (still present at this point: they are dropped by

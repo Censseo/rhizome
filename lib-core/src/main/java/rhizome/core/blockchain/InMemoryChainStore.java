@@ -58,6 +58,9 @@ public final class InMemoryChainStore implements ChainStore {
                 txIndex.remove(t.hashContents());
             }
         }
+        for (rhizome.core.block.UncleRef ref : removed.uncles()) {
+            uncles.remove(ref.hash());
+        }
     }
 
     @Override

@@ -3,10 +3,13 @@ package rhizome.adversarial;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static rhizome.crypto.Crypto.generateKeyPairTyped;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -14,7 +17,9 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import rhizome.core.block.BlockImpl;
+import rhizome.core.block.UncleRef;
 import rhizome.core.blockchain.ChainEngine;
+import rhizome.core.blockchain.ChainEngineTestAccess;
 import rhizome.core.blockchain.Miner;
 import rhizome.core.blockchain.NetworkParameters;
 import rhizome.core.blockchain.SupplyStamp;
@@ -106,6 +111,62 @@ class PersistenceAttackTest {
             good.nonce(Miner.mineNonce(good.hash(), good.difficulty(), params.powAlgorithm()));
             assertEquals(ExecutionStatus.SUCCESS, engine.addBlock(good));
         }
+    }
+
+    /**
+     * PERS-10 — Crash between a block landing and its uncle bodies being written (or pop a block
+     * and leave its bodies behind forever). The bodies of the uncles a canonical block references
+     * are staged into the block's own append batch, so they survive a restart with it, and are
+     * dropped with it on pop -- a block with no body to serve its uncle strands every peer syncing
+     * past it, and a never-deleted body is unbounded growth.
+     */
+    @Test
+    void uncleBodiesLandWithTheirBlockAndLeaveWithIt() throws Exception {
+        var params = NetworkParameters.testnet().toBuilder()
+            .powAlgorithm(PowAlgorithm.SHA256).genesisDifficulty(4).minDifficulty(4).build();
+        var clock = new AtomicLong(1_000_000L);
+        var snapshot = new LedgerSnapshot("t", 0, params.chainId());
+        SHA256Hash uncleHash;
+        try (var store = new RocksDbNodeStore(dir.toString())) {
+            ChainEngine engine = ChainEngine.boot(params, store, snapshot).clock(() -> 100_000_000_000L).build();
+            assertEquals(ExecutionStatus.SUCCESS, engine.addBlock(coinbaseOnly(engine, params, clock, List.of())));
+            // An orphan sibling of the tip, then a nephew citing it as an uncle.
+            long tipHeight = engine.height();
+            var orphan = (BlockImpl) BlockImpl.builder().id((int) tipHeight).timestamp(clock.addAndGet(500))
+                .difficulty(engine.difficulty()).lastBlockHash(engine.blockAt(tipHeight - 1).hash())
+                .uncles(new ArrayList<>()).build();
+            var orphanMiner = PublicAddress.random();
+            orphan.addTransaction(Transaction.of(orphanMiner, new TransactionAmount(params.miningReward(tipHeight))));
+            var tree = new MerkleTree();
+            tree.setItems(orphan.transactions());
+            orphan.merkleRoot(tree.getRootHash());
+            orphan.nonce(Miner.mineNonce(orphan.hash(), orphan.difficulty(), params.powAlgorithm()));
+            engine.registerOrphan(orphan);
+            uncleHash = orphan.hash();
+            var ref = new UncleRef(uncleHash, orphan.difficulty(), orphanMiner);
+            assertEquals(ExecutionStatus.SUCCESS, engine.addBlock(coinbaseOnly(engine, params, clock, List.of(ref))));
+            assertNotNull(store.chainStore().uncleAt(uncleHash), "body persisted with the block");
+        }
+        try (var store = new RocksDbNodeStore(dir.toString())) {
+            assertNotNull(store.chainStore().uncleAt(uncleHash), "body survives a restart");
+            ChainEngine engine = ChainEngine.boot(params, store, snapshot).clock(() -> 100_000_000_000L).build();
+            ChainEngineTestAccess.popBlock(engine);
+            assertNull(store.chainStore().uncleAt(uncleHash), "body dropped with the block that referenced it");
+        }
+    }
+
+    private static BlockImpl coinbaseOnly(ChainEngine engine, NetworkParameters params, AtomicLong clock,
+                                          List<UncleRef> refs) {
+        long height = engine.height() + 1;
+        var b = (BlockImpl) BlockImpl.builder().id((int) height).timestamp(clock.addAndGet(1000))
+            .difficulty(engine.difficulty()).lastBlockHash(engine.tipHash()).uncles(new ArrayList<>(refs))
+            .supply(SupplyStamp.next(engine, height, engine.difficulty(), refs)).build();
+        b.addTransaction(Transaction.of(PublicAddress.random(), new TransactionAmount(params.miningReward(height))));
+        var tree = new MerkleTree();
+        tree.setItems(b.transactions());
+        b.merkleRoot(tree.getRootHash());
+        b.nonce(Miner.mineNonce(b.hash(), b.difficulty(), params.powAlgorithm()));
+        return b;
     }
 
     private static BlockImpl candidate(ChainEngine engine, NetworkParameters params, PublicAddress miner,

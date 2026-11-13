@@ -456,6 +456,11 @@ public final class RocksDbNodeStore extends RocksDbStore implements rhizome.core
 
         @Override
         public void append(Block block) {
+            append(block, java.util.Map.of());
+        }
+
+        @Override
+        public void append(Block block, java.util.Map<SHA256Hash, Block> uncleBodies) {
             long expected = height() + 1;
             if (block.id() != expected) {
                 throw new IllegalArgumentException(
@@ -483,6 +488,11 @@ public final class RocksDbNodeStore extends RocksDbStore implements rhizome.core
                 stagePendingLedgerInto(batch);
                 // Same atomicity for the account nonces (audit perf: per-sender fsync).
                 stagePendingNoncesInto(batch);
+                // Referenced uncle bodies ride the same batch: a crash can no longer land the
+                // block without the bodies peers syncing past it must fetch.
+                for (var e : uncleBodies.entrySet()) {
+                    batch.put(unclesCf, e.getKey().raw(), BlockCodec.encode(e.getValue()));
+                }
                 // Incremental pruning (amortised O(1)): the body that just fell out of the
                 // retention window is discarded in the same batch. Genesis is never pruned.
                 if (keepBlocks > 0) {
@@ -579,6 +589,9 @@ public final class RocksDbNodeStore extends RocksDbStore implements rhizome.core
                     if (!t.isTransactionFee()) {
                         batch.delete(txIndexCf, t.hashContents().raw()); // copied natively — see append
                     }
+                }
+                for (rhizome.core.block.UncleRef ref : tip.uncles()) {
+                    batch.delete(unclesCf, ref.hash().raw()); // the popped block's uncle bodies go with it
                 }
                 batch.put(metaCf, HEIGHT_KEY, heightKey(height - 1));
                 // The block's ledger reversals (staged during rollbackBlock) ride the same batch as

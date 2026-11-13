@@ -1,5 +1,7 @@
 package rhizome.core.blockchain;
 
+import java.util.Map;
+
 import rhizome.core.block.Block;
 import rhizome.core.block.BlockHeader;
 import rhizome.crypto.SHA256Hash;
@@ -86,6 +88,18 @@ public interface ChainStore {
     void append(Block block);
 
     /**
+     * As {@link #append(Block)}, also persisting the bodies of the uncles the block references.
+     * A store with an atomic batch (RocksDB) overrides this to stage them in the SAME batch: a
+     * crash after the block landed and before a separate {@link #putUncle} lost the body, leaving
+     * peers syncing past this block unable to fetch it. The default keeps the two-step shape for
+     * stores with no crash to defend against.
+     */
+    default void append(Block block, Map<SHA256Hash, Block> uncleBodies) {
+        append(block);
+        uncleBodies.forEach(this::putUncle);
+    }
+
+    /**
      * Persists the body of an uncle that a canonical block references, so a later
      * restart or orphan-pool eviction can still serve it to peers syncing past
      * that block (audit: uncle-sync blocker). Called by the engine after accepting
@@ -100,7 +114,11 @@ public interface ChainStore {
      */
     default Block uncleAt(SHA256Hash hash) { return null; }
 
-    /** Removes the tip block and de-indexes its transactions, flushing staged ledger reverts atomically. */
+    /**
+     * Removes the tip block, de-indexes its transactions and drops the bodies of the uncles it
+     * referenced (an uncle is referenced by at most one canonical block, so none is shared),
+     * flushing staged ledger reverts atomically.
+     */
     void pop();
 
     /** True if a transaction with this content hash is in an applied block. */
