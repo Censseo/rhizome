@@ -348,7 +348,13 @@ public final class Executor {
                 return BlockOutcome.of(TRANSACTION_FEE_TOO_LOW);
             }
             SHA256Hash id = t.hashContents();
-            if (!seenInBlock.add(id) || alreadyExecuted.test(id)) {
+            // BOX_COLLECT is exempt from the history check (in-block duplicates still refused): a
+            // snap-synced node has no tx index below its pivot, so a history-dependent verdict on a
+            // replayed collect would split archive from snap nodes. Collects are permissionless and
+            // their hash binds nothing a miner cannot vary, so a replay is no more than a fresh
+            // collect; box state (existence, expiry) is the real gate (STATE-09).
+            boolean historyGuarded = tx.kind() != rhizome.core.transaction.TransactionKind.BOX_COLLECT;
+            if (!seenInBlock.add(id) || (historyGuarded && alreadyExecuted.test(id))) {
                 return BlockOutcome.of(EXPIRED_TRANSACTION);
             }
             if (!tx.senderBindingValid()) {

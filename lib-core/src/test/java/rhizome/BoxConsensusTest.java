@@ -322,6 +322,38 @@ class BoxConsensusTest {
     }
 
     /**
+     * STATE-09 — a BOX_COLLECT's validity must not depend on node history. A snap-synced node has no
+     * tx-index rows below its pivot, so if "already executed" applied to collects, a block re-including
+     * an old collect verbatim would be EXPIRED_TRANSACTION on archive nodes and valid on snap nodes: a
+     * chain split for one block of PoW. Collects are permissionless and their hash binds nothing a miner
+     * cannot vary, so re-collecting a re-expired box is exactly as valid as minting a fresh collect.
+     */
+    @Test
+    void aReplayedRentCollectionIsJudgedOnBoxStateNotOnTheTxIndex() {
+        byte[] id = Box.deriveId(sender, 0);
+        assertEquals(ExecutionStatus.SUCCESS, mine(List.of(boxTx(TransactionKind.BOX_CREATE,
+            BoxPayload.encodeCreate(List.of()), 5000, 0))));
+        long size = engine.box(id).serializedSize();
+        assertEquals(ExecutionStatus.SUCCESS, mineEmpty()); // height 3
+        assertEquals(ExecutionStatus.SUCCESS, mineEmpty()); // height 4
+        Block first = BlockAssembler.assemble(engine, mempool, miner, clock.addAndGet(1000));
+        Transaction collect = first.transactions().stream()
+            .filter(t -> ((TransactionImpl) t).kind() == TransactionKind.BOX_COLLECT)
+            .findFirst().orElseThrow();
+        var b = (BlockImpl) first;
+        engine.stampStateRoot(b);
+        b.nonce(Miner.mineNonce(b.hash(), b.difficulty(), params.powAlgorithm()));
+        assertEquals(ExecutionStatus.SUCCESS, engine.addBlock(b)); // height 5, rent charged once
+        assertTrue(store.hasTransaction(collect.hashContents()), "this node indexed the collect");
+
+        assertEquals(ExecutionStatus.SUCCESS, mineEmpty()); // height 6
+        assertEquals(ExecutionStatus.SUCCESS, mineEmpty()); // height 7
+        // Height 8: the box is due again; the identical collect is judged on box state alone.
+        assertEquals(ExecutionStatus.SUCCESS, mine(List.of(collect)));
+        assertEquals(5000 - 2 * size, engine.box(id).value(), "rent charged a second time");
+    }
+
+    /**
      * Security regression: a self-authorized BOX_COLLECT must never name a funded sender or carry a
      * fee. BOX_COLLECT skips signature verification (signatureValid() == true) and the account-nonce
      * rule, so its only gate on `from` is PublicAddress.of(signingKey).equals(from) — which an

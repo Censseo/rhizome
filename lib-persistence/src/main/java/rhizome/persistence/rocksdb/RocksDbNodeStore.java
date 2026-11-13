@@ -592,10 +592,9 @@ public final class RocksDbNodeStore extends RocksDbStore implements rhizome.core
          * already ignores an indexed height below {@code prunedBelow} (its body is gone), so the
          * rows were pure unbounded growth. Replay protection past the retention window rests on
          * the persisted account nonces, which every node enforces regardless of retention — so
-         * ONLY nonce-sequenced rows may go. Coinbase and self-authorized BOX_COLLECT skip the nonce
-         * walk (ChainEngine.checkAccountNonces): the index is their only replay guard and feeds
-         * Executor's EXPIRED_TRANSACTION verdict, so dropping them would let a pruned node accept a
-         * block an archive node rejects (a retention-dependent chain split). Those rows are kept.
+         * every row may go: account txs are
+         * nonce-guarded, and BOX_COLLECT is deliberately not history-guarded (Executor, STATE-09),
+         * so no consensus verdict reads a pruned row. Coinbases are never indexed.
          */
         private int stageTxIndexDeletes(WriteBatch batch, long height) throws RocksDBException {
             byte[] body = raw(blocksCf, heightKey(height));
@@ -604,8 +603,7 @@ public final class RocksDbNodeStore extends RocksDbStore implements rhizome.core
             }
             int n = 0;
             for (Transaction t : BlockCodec.decode(body).transactions()) {
-                if (!t.isTransactionFee()
-                        && t.kind() != rhizome.core.transaction.TransactionKind.BOX_COLLECT) {
+                if (!t.isTransactionFee()) {
                     batch.delete(txIndexCf, t.hashContents().raw());
                     n++;
                 }
