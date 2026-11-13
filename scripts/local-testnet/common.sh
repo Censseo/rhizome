@@ -38,6 +38,11 @@ profile_get() {
   printf '%s' "${!key}"
 }
 
+# Le wallet exige qu'on lui NOMME le réseau au premier usage d'une clé (il ne se fie plus au
+# /info du nœud) : le chainId du profil chargé sert d'attente explicite pour toutes les suites.
+export RHIZOME_EXPECT_CHAIN_ID="${CHAIN_ID:-}"
+[[ -n "$RHIZOME_EXPECT_CHAIN_ID" ]] || unset RHIZOME_EXPECT_CHAIN_ID
+
 # Binaire de nœud : natif (GraalVM) par défaut depuis la campagne 3. Un nœud natif démarre en
 # quelques dizaines de ms et occupe ~3-4× moins de mémoire qu'une JVM — c'est ce qui rend 30
 # nœuds tenables sur une seule machine. RHIZOME_TESTNET_NATIVE=0 retombe sur installDist

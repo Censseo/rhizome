@@ -145,3 +145,16 @@ RHIZOME_NETWORK=devnet RHIZOME_MINER=<address> ./gradlew :app-node:run
 ./gradlew :app-wallet:run --args="deploy  <nodeUrl> <keyfile> <wasmfile> [gasLimit] [gasPrice]"
 ./gradlew :app-wallet:run --args="call    <nodeUrl> <keyfile> <contract> <hexInput> [gasLimit] [gasPrice]"
 ```
+
+Signing commands (`send`, `deploy`, `call`, `box-*`, `token-*`) take extra flags:
+
+- `--network <mainnet|testnet|devnet|staging>` (or `--expect-chain-id <n>`) is **required the
+  first time a key file signs**: the node's own `/info` answer is no longer trusted to pin the
+  chain. Later runs use the pin sealed in the key file.
+- `--nonce <n>` re-signs at a given nonce (retry a failed send without risking a double payment);
+  `--cross-check <url>` refuses to sign if a second node reports a different nonce.
+- `--api-token-file <path>` or `RHIZOME_API_TOKEN` supply the bearer token (`--api-token` still
+  works but is visible in `ps` and warns). Passphrase and token files must not be readable by
+  group/other (`chmod 600`).
+- `send`'s fee defaults to 0; pass `[fee]` on a network with a fee floor (the node does not
+  advertise it on `/info`).

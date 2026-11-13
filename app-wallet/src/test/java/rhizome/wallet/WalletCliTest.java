@@ -13,7 +13,8 @@ class WalletCliTest {
 
     @Test
     void firstContactPinsTheNodeChainId() {
-        WalletCli.ChainIdDecision decision = WalletCli.decideChainId(5, null, null);
+        // First use needs the operator's own statement of the network; the pin then records it.
+        WalletCli.ChainIdDecision decision = WalletCli.decideChainId(5, "5", null);
         assertEquals(5, decision.chainId());
         assertTrue(decision.pin(), "first use must record the chainId in the keyfile");
     }
