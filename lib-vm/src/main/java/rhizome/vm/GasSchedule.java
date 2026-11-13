@@ -20,6 +20,21 @@ public final class GasSchedule {
      */
     public static final long MEMORY_PER_PAGE = 128L;
 
+    /**
+     * Charged per {@code (params + locals)} slot of every WASM activation. Each frame allocates a
+     * slot array and reserves the same count from the tree-wide locals budget, but only the
+     * {@code call} instruction itself was priced, so deep recursion of a wide function was
+     * ~free per byte allocated. 1 gas/slot keeps ordinary compiled functions (tens of slots)
+     * cheap against their instruction count.
+     */
+    public static final long FRAME_SLOT = 1L;
+
+    /**
+     * Charged per declared minimum table entry at instantiation, where {@link #MEMORY_PER_PAGE}
+     * prices the initial memory pages: the entries are allocated eagerly, before any instruction.
+     */
+    public static final long TABLE_ENTRY = 1L;
+
     public static final long STORAGE_READ_BASE = 50L;
     public static final long STORAGE_WRITE_BASE = 200L;   // writes are the expensive, state-growing op
 
@@ -45,9 +60,15 @@ public final class GasSchedule {
     /** Calling another contract: a base cost plus per byte of input and copied output. */
     public static final long CALL_BASE = 500L;
 
-    /** Deploying stores code on-chain: a base cost plus per code byte. */
+    /**
+     * Deploying stores code on-chain: a base cost plus per code byte. Deployed code is permanent
+     * replicated state exactly like a storage value, so it pays the storage byte rate — at the
+     * old 10 gas/byte, state could be grown 25x cheaper through deploy than through
+     * {@code storage_write}. (At this rate the {@code NetworkParameters.maxTxGas} cap, 50M, bounds a
+     * deployable module to ~195 KB, just under {@link WasmVm#MAX_CODE_SIZE}.)
+     */
     public static final long DEPLOY_BASE = 500L;
-    public static final long DEPLOY_PER_CODE_BYTE = 10L;
+    public static final long DEPLOY_PER_CODE_BYTE = STORAGE_WRITE_PER_BYTE;
 
     /**
      * Charged on a CALL that misses the module cache and must re-parse + re-scan the whole module

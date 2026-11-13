@@ -324,6 +324,16 @@ public final class WasmVm {
         // current/maximum pages and reserve only what a grow will actually commit (see meter).
         Memory[] memHolder = new Memory[1];
         try {
+            // Table entries are allocated eagerly at instantiation; price them like the initial
+            // memory pages (deploy-time caps bound the count, so this is a small network constant).
+            var tables = module.tableSection();
+            if (tables != null) {
+                long entries = 0;
+                for (int i = 0; i < tables.tableCount(); i++) {
+                    entries += tables.getTable(i).limits().min();
+                }
+                gas.charge(entries * GasSchedule.TABLE_ENTRY);
+            }
             Instance instance = Instance.builder(module)
                 .withImportValues(imports)
                 .withStart(false)
@@ -337,7 +347,7 @@ public final class WasmVm {
                 // Deterministic WASM call-depth cap: traps unbounded recursion at a fixed depth
                 // on every node, replacing the JVM-stack-dependent StackOverflowError that would
                 // otherwise fork consensus (see DepthLimitedInterpreterMachine).
-                .withMachineFactory(DepthLimitedInterpreterMachine::new)
+                .withMachineFactory(inst -> new DepthLimitedInterpreterMachine(inst, gas))
                 // Meter every instruction; bulk-memory / memory.grow are charged by their
                 // runtime operand, not a flat 1, so O(N) work cannot cost O(1) gas.
                 .withUnsafeExecutionListener((instruction, stack) -> meter(instruction, stack, gas, frameAdded, memHolder))

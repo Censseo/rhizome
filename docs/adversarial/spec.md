@@ -441,6 +441,8 @@ check is a boot-time equality composed with guards those suites already exercise
 | VM-28 | Emit event data without bound at 1 gas/byte to bloat retained logs and receipts. | A1 | DEFENDED | `lib-vm/src/test/java/rhizome/vm/WasmAdversarialTest.java#cumulativeLogBytesPerTransactionAreCapped` |
 | VM-29 | Trigger a JVM stack overflow so the VM result claims full gas while the processor reports `meter.used()` — a gas mismatch between the two. | A1 | DEFENDED | `lib-vm/src/test/java/rhizome/vm/WasmAdversarialTest.java#aStackOverflowSaturatesTheSharedMeter` |
 | VM-30 | Cycle distinct max-size modules through the process-wide module cache (bounded by entry count only) to pin tens of MiB, or collide its weak key hash to degrade every lookup. | A1 | DEFENDED | `lib-vm/src/test/java/rhizome/vm/WasmAdversarialTest.java#theModuleCacheIsBoundedByBytesAndKeyedByAStrongHash` |
+| VM-31 | Recurse through functions declaring many locals, or declare a large table, for the flat price of the instructions — frame slots and eagerly allocated table entries were unmetered. | A1 | DEFENDED | `lib-vm/src/test/java/rhizome/vm/WasmAdversarialTest.java#frameSlotsAndTableEntriesAreCharged` |
+| VM-32 | Grow permanent replicated state through deployed code at a tenth of the `storage_write` byte price. | A1 | DEFENDED | `lib-vm/src/test/java/rhizome/vm/WasmAdversarialTest.java#deployedCodeBytesPayTheStorageByteRate` |
 
 ## STATE — authenticated state and snapshots
 

@@ -1007,6 +1007,57 @@ class WasmAdversarialTest {
         assertEquals(50_000_000L, over.gasUsed(), "the cap is a saturating full-gas trap");
     }
 
+    /** {@code call} -> {@code call 1}; function 1 declares one local group of {@code locals} i32s. */
+    private static byte[] frameModule(int locals) {
+        byte[] f0 = bytes(0x00, 0x10, 0x01, 0x0B);               // 0 locals, call 1, end
+        byte[] f1 = bytes(0x01, locals, 0x7F, 0x0B);             // 1 group of `locals` i32, end
+        ByteArrayOutputStream code = new ByteArrayOutputStream();
+        code.write(0x02);
+        uleb(code, f0.length); code.writeBytes(f0);
+        uleb(code, f1.length); code.writeBytes(f1);
+        return module(section(1, bytes(0x01, 0x60, 0x00, 0x00)), section(3, bytes(0x02, 0x00, 0x00)),
+            section(7, CALL_EXPORT), section(10, code.toByteArray()));
+    }
+
+    /** A call-able module declaring a funcref table of {@code min} entries (max 100). */
+    private static byte[] tableModule(int min) {
+        return module(section(1, bytes(0x01, 0x60, 0x00, 0x00)), section(3, bytes(0x01, 0x00)),
+            section(4, bytes(0x01, 0x70, 0x01, min, 100)), section(7, CALL_EXPORT),
+            section(10, bytes(0x01, 0x02, 0x00, 0x0B)));
+    }
+
+    /** VM-31 — recurse through functions declaring many locals, or declare a big table, for the
+     *  flat price of the instructions: frame slots and table entries are allocated unmetered. */
+    @Test
+    void frameSlotsAndTableEntriesAreCharged() {
+        WasmVm.clearModuleCacheForTest();
+        MapHostState h = new MapHostState(new byte[0], new byte[0], 0);
+        ExecResult few = vm.execute(frameModule(1), h, new GasMeter(10_000_000));
+        ExecResult many = vm.execute(frameModule(100), h, new GasMeter(10_000_000));
+        assertEquals(ContractResult.Status.OK, many.status());
+        assertEquals(99 * GasSchedule.FRAME_SLOT, many.gasUsed() - few.gasUsed(),
+            "each extra local slot of an activation costs FRAME_SLOT");
+
+        ExecResult small = vm.execute(tableModule(1), h, new GasMeter(10_000_000));
+        ExecResult big = vm.execute(tableModule(100), h, new GasMeter(10_000_000));
+        assertEquals(ContractResult.Status.OK, big.status());
+        assertEquals(99 * GasSchedule.TABLE_ENTRY, big.gasUsed() - small.gasUsed(),
+            "each eagerly allocated table entry costs TABLE_ENTRY");
+    }
+
+    /** VM-32 — grow permanent state through contract code at a tenth of the storage-write price. */
+    @Test
+    void deployedCodeBytesPayTheStorageByteRate() {
+        byte[] code = shipped("counter");
+        var proc = new WasmContractProcessor(new WasmVm(), new InMemoryContractStore());
+        proc.begin();
+        var result = proc.run(rhizome.core.ledger.PublicAddress.random(),
+            rhizome.core.transaction.TransactionKind.DEPLOY, rhizome.core.ledger.PublicAddress.empty(),
+            code, 0, 10_000_000, 0);
+        assertEquals(GasSchedule.DEPLOY_BASE + (long) code.length * GasSchedule.STORAGE_WRITE_PER_BYTE,
+            result.gasUsed());
+    }
+
     /** VM-30 — cycle distinct max-size modules through the process-wide cache (bounded by entry
      *  count only) to pin tens of MiB, and collide the weak key hash to degrade every lookup. */
     @Test
