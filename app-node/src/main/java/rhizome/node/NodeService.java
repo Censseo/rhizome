@@ -1,5 +1,6 @@
 package rhizome.node;
 
+import rhizome.net.PeerIdentity;
 import rhizome.net.PeerRegistry;
 
 import java.util.ArrayList;
@@ -406,7 +407,48 @@ public final class NodeService {
         if (registry == null) {
             return;
         }
-        admissions.enqueue(url, registry::add);
+        admissions.enqueue(url, candidate -> {
+            if (peerIdentityAcceptable(candidate)) {
+                registry.add(candidate);
+            }
+        });
+    }
+
+    /**
+     * Runs on the off-loop admission worker (it may block on the candidate's {@code /info}). A
+     * candidate advertising another chainId or genesisHash is refused; a rulesetVersion mismatch
+     * only warns (same chain, differing tuning). Any absent field, and any probe failure, reads as
+     * UNKNOWN and is allowed: pre-launch every node is on this build so absence is not an attack
+     * surface, and the sync layer still bans a wrong-chain peer by its blocks — this is an early
+     * filter, not the authority.
+     */
+    private boolean peerIdentityAcceptable(String candidate) {
+        var probe = sources.peerProbe();
+        if (probe == null) {
+            return true;
+        }
+        PeerIdentity peer;
+        try {
+            peer = probe.apply(candidate);
+        } catch (RuntimeException e) {
+            return true; // unreachable/malformed: unknown, not a mismatch
+        }
+        if (peer == null) {
+            return true;
+        }
+        if (peer.chainId() != null && peer.chainId() != chainId()) {
+            log.info("refusing peer {}: chainId {} != ours {}", candidate, peer.chainId(), chainId());
+            return false;
+        }
+        if (peer.genesisHash() != null && !peer.genesisHash().equalsIgnoreCase(genesisHash())) {
+            log.info("refusing peer {}: genesisHash differs from ours", candidate);
+            return false;
+        }
+        if (peer.rulesetVersion() != null && !peer.rulesetVersion().equalsIgnoreCase(rulesetVersion())) {
+            log.warn("peer {} runs a different consensus ruleset ({} vs ours {}); admitting, but expect "
+                + "blocks it serves to be refused", candidate, peer.rulesetVersion(), rulesetVersion());
+        }
+        return true;
     }
 
     public NetworkParameters params() {
@@ -419,6 +461,30 @@ public final class NodeService {
 
     public String networkName() {
         return engine.params().networkName();
+    }
+
+    private volatile String genesisHash;
+
+    /** Hex genesis hash, read once (genesis never changes) so hot {@code /info} polls take no lock. */
+    public String genesisHash() {
+        String h = genesisHash;
+        if (h == null) {
+            h = engine.headerAt(rhizome.core.blockchain.GenesisBlock.GENESIS_ID).hash().toHexString();
+            genesisHash = h;
+        }
+        return h;
+    }
+
+    private volatile String rulesetVersion;
+
+    /** {@link NetworkParameters#rulesetVersion()}, computed once. */
+    public String rulesetVersion() {
+        String v = rulesetVersion;
+        if (v == null) {
+            v = engine.params().rulesetVersion();
+            rulesetVersion = v;
+        }
+        return v;
     }
 
     public long blockCount() {

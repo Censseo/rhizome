@@ -355,7 +355,7 @@ else
   WINNING_PEER=$CAMP_B_REP
   "$STOPSH" -n "$RECOVERY_TARGET" > "$BASE_DIR/logs/stop-recovery.log" 2>&1
   rm -rf "$(data_dir "$RECOVERY_TARGET")"
-  launch_custom "$RECOVERY_TARGET" RHIZOME_SYNC=snap RHIZOME_PEERS="$(node_seed_url "$WINNING_PEER")"
+  launch_custom "$RECOVERY_TARGET" RHIZOME_SYNC=snap RHIZOME_SNAP_ALLOW_HTTP=true RHIZOME_PEERS="$(node_seed_url "$WINNING_PEER")"
 
   up_deadline=$((SECONDS + 90)); up=0
   while (( SECONDS < up_deadline )); do [[ -n "$(node_stats "$RECOVERY_TARGET")" ]] && { up=1; break; }; sleep 2; done

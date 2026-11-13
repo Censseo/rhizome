@@ -68,7 +68,7 @@ class E2EPrunedAndSnapSyncTest {
             archive.syncPeriodMs(), archive.blockIntervalMs(), archive.mempoolSize(),
             archive.allowPrivatePeers(), archive.bindAddress(), archive.apiToken(),
             keep, archive.allowOpenApi(), archive.peerToken(), archive.snapSync(),
-            archive.protectReads(), archive.trustXff(), archive.vote(),
+            archive.snapAllowHttp(), archive.protectReads(), archive.trustXff(), archive.vote(),
             archive.snapshotEveryBlocks(), archive.hostAllowlistEnabled(),
             archive.extraAllowedHosts());
 

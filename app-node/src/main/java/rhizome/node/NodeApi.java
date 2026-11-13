@@ -160,6 +160,9 @@ public final class NodeApi {
     private static final Key K_SIZE = Key.of("size");
     private static final Key K_CHAIN_ID = Key.of("chainId");
     private static final Key K_NETWORK = Key.of("network");
+    private static final Key K_GENESIS_HASH = Key.of("genesisHash");
+    private static final Key K_MIN_FEE = Key.of("minFee");
+    private static final Key K_RULESET_VERSION = Key.of("rulesetVersion");
     private static final Key K_HEIGHT = Key.of("height");
     private static final Key K_DIFFICULTY = Key.of("difficulty");
     private static final Key K_MEMPOOL = Key.of("mempool");
@@ -526,6 +529,9 @@ public final class NodeApi {
         sink.beginObject();
         sink.field(K_CHAIN_ID, node.chainId());
         sink.field(K_NETWORK, node.networkName());
+        sink.field(K_GENESIS_HASH, node.genesisHash());
+        sink.field(K_MIN_FEE, node.params().minFee());
+        sink.field(K_RULESET_VERSION, node.rulesetVersion());
         sink.field(K_HEIGHT, tip.height());
         sink.field(K_DIFFICULTY, node.difficulty());
         sink.field(K_MEMPOOL, node.mempoolSize());

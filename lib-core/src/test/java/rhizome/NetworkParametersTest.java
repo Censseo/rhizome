@@ -986,7 +986,7 @@ class NetworkParametersTest {
         }
 
         assertEquals(
-            java.util.Set.of("chainId", "networkName", "genesisSnapshotResource",
+            java.util.Set.of("chainId", "networkName", "genesisSnapshotResource", "expectedGenesisHash",
                 "genesisDifficulty", "minDifficulty"),
             differingFields,
             "staging() must deviate from cleanMainnet() in exactly its declared identity, "
@@ -1024,5 +1024,46 @@ class NetworkParametersTest {
         assertNotEquals(NetworkParameters.testnet().chainId(), NetworkParameters.staging().chainId());
         assertNotEquals(NetworkParameters.devnet().chainId(), NetworkParameters.staging().chainId());
         assertEquals(4, NetworkParameters.staging().chainId());
+    }
+
+    // --- Ruleset fingerprint (/info rulesetVersion) ---
+
+    /** Staging's published ruleset version; re-pin deliberately whenever a consensus constant moves. */
+    private static final String STAGING_RULESET_VERSION =
+        "A00FA37D289E0F9662FC52FAED36C055318AB3A4786BDEB2878D3AF8B6EC220D";
+
+    @Test
+    void stagingRulesetVersionIsPinned() {
+        assertEquals(STAGING_RULESET_VERSION, NetworkParameters.staging().rulesetVersion());
+    }
+
+    @Test
+    void rulesetVersionSeparatesProfilesAndTracksConsensusConstants() {
+        NetworkParameters staging = NetworkParameters.staging();
+        assertNotEquals(NetworkParameters.cleanMainnet().rulesetVersion(), staging.rulesetVersion());
+        assertNotEquals(staging.rulesetVersion(), staging.toBuilder().minFee(11).build().rulesetVersion());
+        // Non-consensus metadata must not move it.
+        assertEquals(staging.rulesetVersion(),
+            staging.toBuilder().networkName("renamed").genesisSnapshotResource(null).build().rulesetVersion());
+    }
+
+    /**
+     * Every declared field is either in the canonical encoding or in the explicit non-consensus
+     * set, so adding a consensus field without extending {@code canonicalRuleset()} fails here.
+     */
+    @Test
+    void everyConsensusFieldIsInTheCanonicalRulesetEncoding() {
+        java.util.Set<String> nonConsensus = java.util.Set.of("networkName", "genesisSnapshotResource",
+            "expectedGenesisHash", "emissionCurve", "supplyTargetSchedule");
+        String canonical = NetworkParameters.staging().canonicalRuleset();
+        for (java.lang.reflect.Field field : NetworkParameters.class.getDeclaredFields()) {
+            if (java.lang.reflect.Modifier.isStatic(field.getModifiers()) || field.isSynthetic()
+                || nonConsensus.contains(field.getName())) {
+                continue;
+            }
+            assertTrue(canonical.contains("\n" + field.getName() + "=")
+                || canonical.startsWith(field.getName() + "="),
+                "field '" + field.getName() + "' is missing from canonicalRuleset()");
+        }
     }
 }

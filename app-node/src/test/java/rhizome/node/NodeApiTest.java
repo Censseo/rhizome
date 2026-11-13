@@ -721,6 +721,21 @@ class NodeApiTest {
         "chainId", "network", "height", "difficulty", "mempool", "prunedBelow", "snapshotPivot",
         "storageFeeFactor", "minValuePerByte");
 
+    /** Added by the chain-identity lot: what a peer needs to refuse a different chain. */
+    private static final java.util.Set<String> CHAIN_IDENTITY_INFO_FIELDS =
+        java.util.Set.of("genesisHash", "minFee", "rulesetVersion");
+
+    @Test
+    void infoAdvertisesTheChainIdentityAPeerChecksBeforeAdmission() throws Exception {
+        HttpResponse response = callWith(servlet, HttpRequest.get("http://x/info").build());
+        JSONObject info = new JSONObject(
+            response.getBody().getString(java.nio.charset.StandardCharsets.UTF_8));
+        assertEquals(engine.headerAt(1).hash().toHexString(), info.getString("genesisHash"));
+        assertEquals(params.minFee(), info.getLong("minFee"));
+        assertEquals(params.rulesetVersion(), info.getString("rulesetVersion"));
+        assertEquals(params.chainId(), info.getInt("chainId"));
+    }
+
     private static final java.util.Set<String> EMISSION_FIELDS = java.util.Set.of(
         "rule", "activationHeight", "supply", "subsidy", "target", "peakTarget",
         "decayStartHeight", "distanceToTarget", "progressBps", "obligation",
@@ -775,7 +790,8 @@ class NodeApiTest {
 
         // Additive, not mutative: exactly the nine pre-existing fields plus the one new object.
         assertEquals(PREEXISTING_INFO_FIELDS, info.keySet().stream()
-                .filter(k -> !k.equals("emission")).collect(java.util.stream.Collectors.toSet()),
+                .filter(k -> !k.equals("emission") && !CHAIN_IDENTITY_INFO_FIELDS.contains(k))
+                .collect(java.util.stream.Collectors.toSet()),
             "no pre-existing /info field may be added, removed or renamed");
         assertEquals(f.params().chainId(), info.getInt("chainId"));
         assertEquals(f.params().networkName(), info.getString("network"));

@@ -301,6 +301,13 @@ outside the A-14 gate. The whole response stays under the 4 KB peer cap (`HttpPe
 `SCALAR_CAP`) with ≥ 50% headroom. `chainId` and `prunedBelow` keep their exact types (the wallet
 and peer pruning probes read them by name).
 
+**`/info` chain identity.** `/info` also carries `genesisHash` (hex hash of block 1), `minFee`
+(base units) and `rulesetVersion` (hex SHA-256 over `NetworkParameters.canonicalRuleset()`, the one
+canonical encoding of every consensus constant — adding a consensus field means adding it there, a
+reflective test enforces it). Peers read `chainId` and `genesisHash` before admitting a candidate
+and refuse a mismatch; a `rulesetVersion` mismatch only logs a warning. A field absent from an
+older node's `/info` is treated as unknown and allowed (every pre-launch node is upgraded anyway).
+
 **`/stats`** adds the identical fragment, sourced from the `StatsWindow` cache's tip fields — a
 stationary dashboard poll takes no extra consensus lock for it. Its classification (cost
 `STATS_WINDOW`, `READ_BUDGET`, A-14 503) is unchanged.

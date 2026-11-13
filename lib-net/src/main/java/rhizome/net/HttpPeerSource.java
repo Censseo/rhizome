@@ -143,6 +143,11 @@ public final class HttpPeerSource implements PeerSource {
     }
 
     @Override
+    public String describe() {
+        return originalUrl;
+    }
+
+    @Override
     public long height() {
         String body = getString("/block_count", SCALAR_CAP);
         try {
@@ -229,6 +234,16 @@ public final class HttpPeerSource implements PeerSource {
         String body = getString("/info", SCALAR_CAP);
         try {
             return PeerJson.parseObject(body).optLong("prunedBelow", 0); // depth-bounded (audit F11)
+        } catch (RuntimeException e) {
+            throw new PeerProtocolException("peer /info is malformed", e);
+        }
+    }
+
+    /** The chain identity the peer advertises on {@code /info} (fields it lacks read as null). */
+    public PeerIdentity identity() {
+        String body = getString("/info", SCALAR_CAP);
+        try {
+            return PeerIdentity.fromInfoBody(body);
         } catch (RuntimeException e) {
             throw new PeerProtocolException("peer /info is malformed", e);
         }

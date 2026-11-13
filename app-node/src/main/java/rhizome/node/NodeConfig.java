@@ -71,6 +71,9 @@ public record NodeConfig(
     Optional<String> peerToken,
     /** RHIZOME_SYNC=snap: bootstrap from a peer snapshot instead of replaying every block. */
     boolean snapSync,
+    /** RHIZOME_SNAP_ALLOW_HTTP: permits plaintext http:// seeds for snap bootstrap (local testnets
+     *  only; a plaintext seed can be impersonated, and snap trusts the seeds' chain). */
+    boolean snapAllowHttp,
     /** RHIZOME_PROTECT_READS: gate every route behind the api token, not just the POSTs. */
     boolean protectReads,
     /** RHIZOME_TRUST_XFF: key rate limits on the first X-Forwarded-For hop. DANGEROUS unless the
@@ -89,7 +92,7 @@ public record NodeConfig(
         return new NodeConfig(params, dataDir, apiPort, Optional.empty(), Optional.empty(),
             List.of(), Optional.empty(), 10_000L, params.desiredBlockTimeSec() * 1000L, 100_000, false,
             "127.0.0.1", Optional.empty(),
-            0, false, Optional.empty(), false, false, false, 0, DEFAULT_SNAPSHOT_EVERY,
+            0, false, Optional.empty(), false, false, false, false, 0, DEFAULT_SNAPSHOT_EVERY,
             true, List.of());
     }
 
@@ -133,6 +136,7 @@ public record NodeConfig(
         // variable is the operator switch. Documented as a deliberate double source.
         b.allowPrivatePeers(config.allowPrivatePeers() || isTrue(env.apply("RHIZOME_ALLOW_PRIVATE_PEERS")));
         b.snapSync("snap".equalsIgnoreCase(trimmed(env.apply("RHIZOME_SYNC"))));
+        b.snapAllowHttp(isTrue(env.apply("RHIZOME_SNAP_ALLOW_HTTP")));
         b.protectReads(isTrue(env.apply("RHIZOME_PROTECT_READS")));
         b.trustXff(isTrue(env.apply("RHIZOME_TRUST_XFF")));
         b.vote(parseVote(env.apply("RHIZOME_VOTE")));
