@@ -76,7 +76,7 @@ class ChainSynchronizerTest {
     }
 
     /** A PeerSource backed by another engine. */
-    private static final class EnginePeer implements PeerSource {
+    private static class EnginePeer implements PeerSource {
         final ChainEngine engine;
         EnginePeer(ChainEngine engine) { this.engine = engine; }
         public long height() { return engine.height(); }
@@ -102,6 +102,27 @@ class ChainSynchronizerTest {
         assertEquals(6, local.height());
         assertEquals(peer.tipHash(), local.tipHash());
         assertEquals(peer.totalWork(), local.totalWork());
+    }
+
+    /**
+     * REORG-14 (full-block path) — gossip adding the very height the sync is fetching makes the
+     * body apply fail INVALID_BLOCK_ID; that is a race with ourselves, not peer misbehaviour, so it
+     * must read as NO_CHANGE rather than PEER_INVALID (which strikes an honest peer toward a ban).
+     */
+    @Test
+    void aBodyApplyThatLostARaceToGossipIsNoChangeNotAPeerFault() {
+        ChainEngine peerEngine = newEngine();
+        mineBlocks(peerEngine, PublicAddress.random(), new AtomicLong(0), 3);
+        ChainEngine local = newEngine();
+        EnginePeer racing = new EnginePeer(peerEngine) {
+            @Override public List<Block> blocks(long start, long end) {
+                if (local.height() == 1) {
+                    assertEquals(ExecutionStatus.SUCCESS, local.addBlock(engine.blockAt(2))); // gossip wins
+                }
+                return super.blocks(start, end);
+            }
+        };
+        assertEquals(Result.NO_CHANGE, new ChainSynchronizer(local).syncFrom(racing));
     }
 
     @Test
