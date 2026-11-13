@@ -77,6 +77,9 @@ class SnapshotBootstrapSeedAttackTest {
             case "https://a" -> BigInteger.valueOf(100);
             case "https://b" -> BigInteger.valueOf(300);
             case "https://c" -> BigInteger.valueOf(200);
+            // Plaintext seeds ANSWER the probe: a dropped-at-the-filter seed must be refused by the
+            // https rule itself, not merely because the probe happens to fail for it.
+            case "http://a", "http://x" -> BigInteger.valueOf(100);
             default -> throw new IllegalStateException("unreachable " + url);
         };
 
@@ -85,6 +88,12 @@ class SnapshotBootstrapSeedAttackTest {
         assertEquals(1, SnapSeeds.plan(List.of("https://a"), false, work).size(), "a lone configured seed is allowed");
         assertEquals(List.of(), SnapSeeds.plan(List.of("https://a", "http://x"), false, work),
             "one usable https seed out of two configured is not a quorum");
+
+        // Fewer than two usable seeds is refused BEFORE any probe is spent (cheap-first).
+        java.util.concurrent.atomic.AtomicInteger probes = new java.util.concurrent.atomic.AtomicInteger();
+        assertEquals(List.of(), SnapSeeds.plan(List.of("https://a", "http://x"), false,
+            url -> { probes.incrementAndGet(); return work.apply(url); }));
+        assertEquals(0, probes.get(), "no seed is probed when the usable quorum is already short");
 
         // Two of three reachable: each candidate must match the best OTHER reachable seed.
         List<SnapSeeds.Attempt> plan = SnapSeeds.plan(
@@ -131,6 +140,13 @@ class SnapshotBootstrapSeedAttackTest {
         var t2 = new SnapTestFixture.Target();
         assertFalse(run(beyond, f, t2, honest(f, chain), BigInteger.ZERO));
         assertFalse(t2.bootstrapping);
+
+        // A tip beyond the validation bound is refused before a single header is fetched.
+        var absurd = new SnapTestFixture.Peer(SnapshotBootstrap.MAX_TIP_VALIDATION_HEIGHT + 1, f.info(),
+            chain, f.chunk, BigInteger.TEN);
+        var t4 = new SnapTestFixture.Target();
+        assertFalse(run(SnapTestFixture.PARAMS, f, t4, absurd, BigInteger.ZERO));
+        assertEquals(0, absurd.headerFetches(), "refused on the advertised height alone, before any fetch");
 
         // The locally built genesis must be the pinned one.
         NetworkParameters wrongPin = SnapTestFixture.PARAMS.toBuilder()

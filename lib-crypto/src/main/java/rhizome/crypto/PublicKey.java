@@ -147,7 +147,9 @@ public final class PublicKey {
         hexStringToByteArray("ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"),
     };
 
-    private static boolean isSmallOrder(byte[] bytes) {
+    // package-private so PublicKeyTest can prove the denylist directly: BouncyCastle rejects every listed
+    // encoding first, so through of(byte[]) the denylist is unobservable.
+    static boolean isSmallOrder(byte[] bytes) {
         // The top bit of the last byte is the x-coordinate sign, not part of y: the sign-flipped
         // twin of a listed encoding (e.g. 00..0080, 01..0080) is the same small-order y, so mask the
         // bit on both sides before comparing.

@@ -107,7 +107,12 @@ final class SnapTestFixture {
         @Override public long height() { return height; }
         @Override public PeerSource.SnapshotInfo snapshotInfo() { return info; }
         @Override public List<Block> blocks(long start, long end) { return List.of(); }
+        private int headerFetches;
+
+        int headerFetches() { return headerFetches; }
+
         @Override public List<BlockHeader> headers(long start, long end) {
+            headerFetches++;
             return headers.stream().filter(h -> h.id() >= start && h.id() <= end).toList();
         }
         @Override public byte[] snapshotChunk(int index) { return chunk; }

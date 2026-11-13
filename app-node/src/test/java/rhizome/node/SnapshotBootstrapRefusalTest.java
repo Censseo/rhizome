@@ -76,10 +76,10 @@ class SnapshotBootstrapRefusalTest {
     }
 
     /** Mines a standalone, PoW-valid header (no retarget crossed in these short test chains). */
-    private BlockHeader mineHeader(long id, SHA256Hash parent, long timestamp, SHA256Hash stateRoot) {
+    private BlockHeader mineHeader(long id, SHA256Hash parent, long timestamp, SHA256Hash stateRoot, long supply) {
         var b = (BlockImpl) BlockImpl.builder().id((int) id).timestamp(timestamp)
             .difficulty(PARAMS.genesisDifficulty()).lastBlockHash(parent)
-            .merkleRoot(SHA256Hash.random()).stateRoot(stateRoot).build();
+            .merkleRoot(SHA256Hash.random()).stateRoot(stateRoot).supply(supply).build();
         b.nonce(Miner.mineNonce(b.hash(), b.difficulty(), PARAMS.powAlgorithm()));
         return BlockHeader.of(b);
     }
@@ -88,14 +88,19 @@ class SnapshotBootstrapRefusalTest {
      * A real, PoW-validated header chain from height 2 through {@code pivot + maxReorgDepth} —
      * exactly the window {@code SnapshotBootstrap} fetches and validates before it ever looks at
      * the advertised chunk count — with {@code pivotRoot} on the pivot header and everywhere else
-     * empty (only the pivot's state root is checked against the snapshot advertisement).
+     * empty (only the pivot's state root is checked against the snapshot advertisement). Every
+     * header commits the supply the emission rule dictates: the header gate refuses a chain without
+     * it, which is how these cases once failed for the wrong reason (and passed vacuously). The peer
+     * tip must equal the last served height, because the bootstrap validates to the TIP.
      */
     private List<BlockHeader> buriedPivotHeaders(long pivot, SHA256Hash pivotRoot) {
         SHA256Hash parent = BlockHeader.of(GenesisBlock.build(PARAMS, genesisSnapshot)).hash();
         List<BlockHeader> chain = new ArrayList<>();
         long validateTo = pivot + PARAMS.maxReorgDepth();
+        long supply = genesisSnapshot.totalSupply();
         for (long h = 2; h <= validateTo; h++) {
-            BlockHeader header = mineHeader(h, parent, h * 1000L, h == pivot ? pivotRoot : SHA256Hash.empty());
+            supply += PARAMS.miningReward(h, supply);
+            BlockHeader header = mineHeader(h, parent, h * 1000L, h == pivot ? pivotRoot : SHA256Hash.empty(), supply);
             chain.add(header);
             parent = header.hash();
         }
@@ -151,16 +156,47 @@ class SnapshotBootstrapRefusalTest {
         assertEquals(0, target.chainStore().height());
     }
 
-    @Test
-    void anOutOfRangeChunkCountIsRefusedBeforeAnyFetch() {
-        // A real, PoW-validated chain buries the pivot and its advertised root matches the
-        // validated header, so these cases are refused BY THE CHUNK COUNT specifically — not,
-        // as a peer serving no headers at all would be, by the earlier proof-of-burial checks.
+    /**
+     * A chain-valid, root-matching snapshot at pivot 2 whose tip is exactly {@code pivot + maxReorgDepth},
+     * advertising {@code chunks} chunks. Returns the peer so the test can read how many chunks were fetched.
+     */
+    private FakePeer peerAdvertising(int chunks) {
         long pivot = 2;
         SHA256Hash pivotRoot = SHA256Hash.random();
         List<BlockHeader> chain = buriedPivotHeaders(pivot, pivotRoot);
-        assertFalse(bootstrap(new FakePeer(100, info(pivot, pivotRoot.toBytes(), -1), chain)));
-        assertFalse(bootstrap(new FakePeer(100, info(pivot, pivotRoot.toBytes(), Integer.MAX_VALUE), chain)));
+        return new FakePeer(pivot + PARAMS.maxReorgDepth(), info(pivot, pivotRoot.toBytes(), chunks), chain);
+    }
+
+    @Test
+    void theChunkCountCasesReachTheChunkCountCheck() {
+        // CONTROL for the three refusals below: with a sane count the very same chain gets through
+        // header validation, the burial check and the root agreement, and the bootstrap goes on to
+        // FETCH chunk 0 (which this peer then fails to serve, so the attempt still returns false).
+        // If this fetch count were 0, the refusals below would be proving nothing about the count.
+        FakePeer peer = peerAdvertising(1);
+        assertFalse(bootstrap(peer));
+        assertEquals(1, peer.chunkFetches.get(), "a valid count proceeds past every earlier gate to the fetch");
+        assertEquals(0, target.chainStore().height());
+    }
+
+    @Test
+    void theLargestCountThatFitsTheSpoolBoundIsStillFetched() {
+        FakePeer peer = peerAdvertising(256); // 256 x 16 MiB == the 4 GiB bound exactly
+        assertFalse(bootstrap(peer));
+        assertEquals(1, peer.chunkFetches.get(), "the boundary count is admitted, so 257 above is refused by the bound alone");
+    }
+
+    @Test
+    void anOutOfRangeChunkCountIsRefusedBeforeAnyFetch() {
+        // Same chain as the control above, so these are refused BY THE CHUNK COUNT specifically: the
+        // refusal is the absence of the fetch the control performs.
+        // 257 chunks is the first count whose worst-case size (16 MiB each) exceeds the 4 GiB spool
+        // bound: it passes the plain range check, so only the spool-bound cross-check refuses it.
+        for (int count : new int[] {-1, Integer.MAX_VALUE, 257}) {
+            FakePeer peer = peerAdvertising(count);
+            assertFalse(bootstrap(peer), "count " + count);
+            assertEquals(0, peer.chunkFetches.get(), "count " + count + " must be refused before any fetch");
+        }
         assertEquals(0, target.chainStore().height());
     }
 
@@ -170,15 +206,11 @@ class SnapshotBootstrapRefusalTest {
         // state; zero is as absurd as a negative count, not a legitimate empty snapshot.
         // HttpPeerSource's own /state/snapshot/info parsing already refuses chunks <= 0 (audit
         // F6) — this pins the outcome for SnapshotBootstrap's own check, which used to only
-        // refuse a negative count: before that fix a zero-chunk snapshot still never got
-        // adopted (root verification cannot pass against zero chunks), but only after spooling
-        // a temp file and running a verification pass doomed to fail. The pivot here is
-        // genuinely buried and its advertised root genuinely matches the validated header, so
-        // this is not refused for either of those unrelated reasons.
-        long pivot = 2;
-        SHA256Hash pivotRoot = SHA256Hash.random();
-        List<BlockHeader> chain = buriedPivotHeaders(pivot, pivotRoot);
-        assertFalse(bootstrap(new FakePeer(100, info(pivot, pivotRoot.toBytes(), 0), chain)));
+        // refuse a negative count. The chain, burial and root are valid (see the control test), so
+        // the only thing that can refuse this peer before a fetch is the chunk count.
+        FakePeer peer = peerAdvertising(0);
+        assertFalse(bootstrap(peer));
+        assertEquals(0, peer.chunkFetches.get());
         assertEquals(0, target.chainStore().height());
     }
 
@@ -187,11 +219,15 @@ class SnapshotBootstrapRefusalTest {
     }
 
     /** A peer that advertises a snapshot, optionally serves a real header chain, and nothing else. */
-    private record FakePeer(long height, PeerSource.SnapshotInfo snapshot, List<BlockHeader> servedHeaders)
-            implements PeerSource {
+    private record FakePeer(long height, PeerSource.SnapshotInfo snapshot, List<BlockHeader> servedHeaders,
+                            java.util.concurrent.atomic.AtomicInteger chunkFetches) implements PeerSource {
 
         FakePeer(long height, PeerSource.SnapshotInfo snapshot) {
             this(height, snapshot, List.of());
+        }
+
+        FakePeer(long height, PeerSource.SnapshotInfo snapshot, List<BlockHeader> servedHeaders) {
+            this(height, snapshot, servedHeaders, new java.util.concurrent.atomic.AtomicInteger());
         }
 
         @Override public PeerSource.SnapshotInfo snapshotInfo() {
@@ -207,6 +243,7 @@ class SnapshotBootstrapRefusalTest {
         }
 
         @Override public byte[] snapshotChunk(int index) {
+            chunkFetches.incrementAndGet();
             throw new IllegalStateException("no chunks served");
         }
 
