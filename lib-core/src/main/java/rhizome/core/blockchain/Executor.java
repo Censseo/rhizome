@@ -273,15 +273,14 @@ public final class Executor {
                 if (params.maxTxGas() > 0 && gasLimit > params.maxTxGas()) {
                     return BlockOutcome.of(GAS_LIMIT_EXCEEDED);
                 }
-                if (params.maxBlockGas() > 0) {
-                    try {
-                        blockGas = Math.addExact(blockGas, gasLimit);
-                    } catch (ArithmeticException overflow) {
-                        return BlockOutcome.of(GAS_LIMIT_EXCEEDED); // an unbounded-gasLimit sum can only be over the cap
-                    }
-                    if (blockGas > params.maxBlockGas()) {
-                        return BlockOutcome.of(GAS_LIMIT_EXCEEDED);
-                    }
+                blockGas = BlockGasRule.add(params, blockGas, gasLimit); // one rule, shared with MemPool selection
+                if (blockGas == BlockGasRule.EXCEEDED) {
+                    return BlockOutcome.of(GAS_LIMIT_EXCEEDED);
+                }
+                // The fee field is reserved on contract txs: minerRevenue counted it yet nothing
+                // debited it, so a fee=Long.MAX_VALUE CALL at gasPrice 0 outranked all traffic for free.
+                if (tx.fee().amount() != 0) {
+                    return BlockOutcome.of(INVALID_TRANSACTION_AMOUNT);
                 }
             }
             if (tx.kind().isBox()) {
