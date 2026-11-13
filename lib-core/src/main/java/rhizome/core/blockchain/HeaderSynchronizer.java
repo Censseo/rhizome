@@ -34,6 +34,20 @@ public final class HeaderSynchronizer {
 
     private final ChainEngine engine;
     private final ChainSynchronizer fallback;
+    /**
+     * A refused deep branch is flagged to the operator when its header-proven work above the fork
+     * exceeds this multiple of ours. 2x because a plain longer branch is the ordinary, benign
+     * outcome of a partition; a branch with twice the work we hold since the fork is what a
+     * stranded minority looks like, and past it no amount of waiting heals the node by itself.
+     */
+    static final int DEEP_FORK_WORK_MARGIN = 2;
+
+    /** At most one deep-fork assessment (a header download plus PoW validation) per this interval. */
+    static final long DEEP_FORK_ASSESS_INTERVAL_MS = 60_000;
+
+    private final java.util.concurrent.atomic.AtomicLong nextDeepForkAssessmentMillis =
+        new java.util.concurrent.atomic.AtomicLong();
+
     /** Retarget memo for the stateless header-chain gate — see {@link DifficultyMemo}, shared with
      *  ChainSynchronizer (self-invalidating by boundary-header hash, guarded by its own monitor). */
     private final DifficultyMemo difficultyMemo = new DifficultyMemo();
@@ -117,6 +131,9 @@ public final class HeaderSynchronizer {
         }
         long depth = engine.height() - forkHeight;
         if (depth > engine.params().maxReorgDepth()) {
+            // Refused by rule — but never silently: a node stranded on a minority branch must tell
+            // its operator (finality-window capture). The verdict stays REORG_TOO_DEEP: no ban.
+            assessDeepFork(peer, forkHeight, peerTotal);
             return ChainSynchronizer.Result.REORG_TOO_DEEP;
         }
 
@@ -184,6 +201,60 @@ public final class HeaderSynchronizer {
                 ? ChainSynchronizer.Result.NO_CHANGE : ChainSynchronizer.Result.PEER_INVALID;
         }
         return reorg(peer, forkHeight, branch);
+    }
+
+    /**
+     * Validates a REORG_TOO_DEEP peer's headers (the same bounded window as a normal sync) and,
+     * when they prove more than {@link #DEEP_FORK_WORK_MARGIN}x our work above the fork, marks the
+     * node degraded with an operator-readable reason (surfaced on /stats) and logs at ERROR.
+     * Never reorgs and never penalises the peer. Cheap gates first: skipped when already degraded,
+     * rate-limited, and skipped unless the peer's self-reported total could even permit the margin.
+     * A failed download or invalid headers is silent here: the caller's verdict is unchanged.
+     */
+    private void assessDeepFork(PeerSource peer, long forkHeight, BigInteger peerTotal) {
+        if (engine.degradedState() != null) {
+            return;
+        }
+        BigInteger localAbove = ReorgSupport.localWorkAboveFork(engine, forkHeight);
+        // peerTotal >= shared + peerAbove, so peerAbove > margin * localAbove implies this bound.
+        BigInteger bar = engine.baseWork().add(localAbove.multiply(BigInteger.valueOf(DEEP_FORK_WORK_MARGIN - 1)));
+        if (peerTotal.compareTo(bar) <= 0) {
+            return;
+        }
+        long now = engine.nowMillis();
+        long next = nextDeepForkAssessmentMillis.get();
+        if (now < next || !nextDeepForkAssessmentMillis.compareAndSet(next, now + DEEP_FORK_ASSESS_INTERVAL_MS)) {
+            return;
+        }
+        try {
+            long windowEnd = Math.min(peer.height(), forkHeight + MAX_HEADER_WINDOW);
+            if (windowEnd <= forkHeight) {
+                return;
+            }
+            List<BlockHeader> branch = fetchHeaders(peer, forkHeight + 1, windowEnd);
+            if (branch == null) {
+                return;
+            }
+            HeaderChain.Result validated = difficultyMemo.validate(
+                engine.params(), engine::headerAt, forkHeight, branch, engine.nowMillis());
+            if (!validated.valid()
+                || validated.work().compareTo(localAbove.multiply(BigInteger.valueOf(DEEP_FORK_WORK_MARGIN))) <= 0) {
+                return;
+            }
+            String ratio = new java.math.BigDecimal(validated.work())
+                .divide(new java.math.BigDecimal(localAbove), 2, java.math.RoundingMode.HALF_UP).toPlainString();
+            String reason = "deep fork with more work: " + peer.describe() + ", fork height " + forkHeight
+                + ", work ratio " + ratio + "x";
+            // restartRequired: only the operator heals this (resync / wipe) — a later benign restore
+            // must not clear it silently.
+            engine.markDegraded(reason, true);
+            log.error("{} — refusing to reorg past maxReorgDepth {}; this node is likely stranded on a "
+                + "minority branch and needs operator attention", reason, engine.params().maxReorgDepth());
+        } catch (LocalSaturationException | PeerUnavailableException e) {
+            // transport trouble: retried next interval, nothing to flag
+        } catch (RuntimeException e) {
+            log.debug("deep-fork assessment of {} failed: {}", peer.describe(), e.toString());
+        }
     }
 
     /**

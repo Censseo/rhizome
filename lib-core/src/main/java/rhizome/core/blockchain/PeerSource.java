@@ -78,4 +78,9 @@ public interface PeerSource {
     }
 
     record SnapshotInfo(long pivotHeight, byte[] stateRoot, int chunkCount) {}
+
+    /** A short label for logs and operator-visible reasons (the HTTP transport returns its URL). */
+    default String describe() {
+        return getClass().getSimpleName();
+    }
 }

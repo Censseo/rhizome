@@ -143,6 +143,11 @@ public final class HttpPeerSource implements PeerSource {
     }
 
     @Override
+    public String describe() {
+        return originalUrl;
+    }
+
+    @Override
     public long height() {
         String body = getString("/block_count", SCALAR_CAP);
         try {
