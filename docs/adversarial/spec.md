@@ -688,6 +688,21 @@ taken.
 
 ## Change log
 
+- **2026-11-13** — Chain identity and anchoring lot (pre-public-testnet): `GENESIS-05`, `NET-15..18`,
+  `REORG-15` and `STATE-08`. A per-profile pinned genesis hash (`NetworkParameters.expectedGenesisHash`,
+  staging pinned, testnet/devnet explicitly reset, mainnet unpinned while its artifact is provisional)
+  is enforced by `ChainEngine.Boot` on every boot (GENESIS-05) and `/info` now advertises
+  `genesisHash`, `minFee` and a `rulesetVersion` fingerprint of every consensus constant; peers
+  advertising another chainId or genesis are refused at off-loop admission, a ruleset mismatch only
+  warns (NET-15). Snap bootstrap no longer adopts the first seed whose snapshot verifies: https-only
+  seeds (`RHIZOME_SNAP_ALLOW_HTTP` for local testnets), two reachable seeds unless one is configured,
+  headers validated to the peer's tip and held to the best other seed's reported work within a 1/8
+  tolerance (NET-16, NET-17), checkpoints and the pinned genesis enforced, a chain shorter than the
+  highest checkpoint refused (NET-18). A snap abort after the stores were seeded now leaves the
+  bootstrap marker set and stops the search instead of clearing it (STATE-08). A refused deep fork
+  whose header-proven work exceeds twice ours since the fork marks the node degraded for the
+  operator, never auto-reorging (REORG-15; the full-block fallback path stays silent).
+
 - **2026-11-13** — `WALLET-08..11` added for the pre-testnet wallet CLI hardening: first use of a
   key file now requires `--network` / `--expect-chain-id` instead of pinning the node's own
   `/info` answer (08); `--cross-check` / `--nonce` and a printed nonce notice blunt a node that

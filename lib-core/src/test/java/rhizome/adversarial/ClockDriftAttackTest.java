@@ -90,7 +90,9 @@ class ClockDriftAttackTest {
      */
     @Test
     void aDriftedClockAcceptsWhatAnAlignedClockRejectsUntilRealTimeCatchesUp() {
-        NetworkParameters params = NetworkParameters.staging();
+        // The synthetic whale genesis below is not the published allocation, so the profile's
+        // genesis-hash pin (GENESIS-05) is lifted; every other staging constant is unchanged.
+        NetworkParameters params = NetworkParameters.staging().toBuilder().expectedGenesisHash(null).build();
 
         // staging() pins a genesis supply (inherited from cleanMainnet(), § genesis allocation):
         // an empty snapshot's total (0) would fail GenesisBlock's boot-time pin check. Both
