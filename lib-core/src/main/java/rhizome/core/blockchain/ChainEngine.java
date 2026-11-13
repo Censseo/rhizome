@@ -357,12 +357,18 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
                 tokenProcessor, stateAccumulator);
             engine.genesisSnapshot = snapshot;
             ChainStore store = stores.chainStore();
+            // An explicit expectedGenesis wins; otherwise the profile's own pin (null = unpinned).
+            // Enforced here, on every boot, so no caller can forget it — and on a non-empty store
+            // too, where a pinned profile must never keep running over a different genesis.
+            SHA256Hash pin = expectedGenesisHash != null ? expectedGenesisHash : params.expectedGenesisHash();
             if (store.height() == 0) {
-                Block genesis = GenesisBlock.initChain(stores.ledger(), params, snapshot,
-                    expectedGenesisHash);
+                Block genesis = GenesisBlock.initChain(stores.ledger(), params, snapshot, pin);
                 store.append(genesis);
             } else if (!GenesisBlock.matches(store.blockAt(GenesisBlock.GENESIS_ID), params, snapshot)) {
                 throw new IllegalStateException("Stored genesis does not match network parameters and snapshot");
+            } else if (pin != null && !store.blockAt(GenesisBlock.GENESIS_ID).hash().equals(pin)) {
+                throw new IllegalStateException("Stored genesis does not match the network's pinned genesis hash "
+                    + pin.toHexString());
             }
             checkEmissionScheduleConsistency(params, store);
             // Under the lock even though nothing else can see the engine yet: these three are tier-1

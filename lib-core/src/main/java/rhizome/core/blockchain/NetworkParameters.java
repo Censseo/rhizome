@@ -469,6 +469,20 @@ public final class NetworkParameters {
     private final long genesisSupply = GENESIS_SUPPLY_UNPINNED;
 
     /**
+     * Pinned hash of this network's genesis block, or {@code null} = unpinned (this profile
+     * publishes no genesis identity, so no boot-time identity check runs — the analogue of
+     * {@link #GENESIS_SUPPLY_UNPINNED}). When set, the node refuses to boot, and a joiner
+     * refuses to snap-adopt, over a snapshot whose {@code GenesisBlock.build} hash differs: the
+     * chain's identity is a constant of the release, never something a peer or an
+     * operator-supplied artifact can redefine. Like {@link #genesisSupply} it is NOT inherited
+     * silently: every profile deriving through {@code toBuilder()} must state it (testnet/devnet
+     * reset it to null; staging pins its own). Mainnet stays unpinned while its allocation
+     * artifact is provisional. Deliberately excluded from {@link #rulesetHash()} — it is exposed
+     * as its own {@code /info} field.
+     */
+    private final rhizome.crypto.SHA256Hash expectedGenesisHash;
+
+    /**
      * Classpath resource path of this network's default genesis allocation artifact
      * (network metadata, like {@link #networkName} — not itself a consensus value: it
      * only selects which snapshot a default boot loads, and is never committed to the
@@ -514,7 +528,8 @@ public final class NetworkParameters {
                       int maxTokenSymbolBytes, int maxTokenNameBytes, int maxTokenDecimals,
                       long votingEpochLength, long storageFeeFactorStep, long storageFeeFactorMin,
                       long storageFeeFactorMax, long minValuePerByteStep, long minValuePerByteMin,
-                      long minValuePerByteMax, long genesisSupply, String genesisSnapshotResource) {
+                      long minValuePerByteMax, long genesisSupply,
+                      rhizome.crypto.SHA256Hash expectedGenesisHash, String genesisSnapshotResource) {
         new PowCosts(powCostT, powCostM); // genesis costs must be valid
         boolean afterSet = powCostTAfter != -1 || powCostMAfter != -1;
         if (powUpgradeHeight <= 0 && afterSet) {
@@ -713,6 +728,111 @@ public final class NetworkParameters {
         this.minValuePerByteMax = minValuePerByteMax;
         this.genesisSupply = genesisSupply;
         this.genesisSnapshotResource = genesisSnapshotResource;
+        this.expectedGenesisHash = expectedGenesisHash;
+    }
+
+    /** Hex of {@link #rulesetHash()}: the {@code /info} {@code rulesetVersion} value. */
+    public String rulesetVersion() {
+        return rulesetHash().toHexString();
+    }
+
+    /**
+     * SHA-256 over {@link #canonicalRuleset()}: a fingerprint of every consensus-relevant constant,
+     * so two nodes that differ on ANY of them (a retuned reward, a different fee floor) can be told
+     * apart before they fork each other's blocks into ban scores. Not a security boundary — a peer
+     * can lie — only an operator-visible early warning.
+     */
+    public rhizome.crypto.SHA256Hash rulesetHash() {
+        try {
+            return rhizome.crypto.SHA256Hash.of(java.security.MessageDigest.getInstance("SHA-256")
+                .digest(canonicalRuleset().getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e); // SHA-256 is mandatory in every JRE
+        }
+    }
+
+    /**
+     * The one canonical encoding behind {@link #rulesetHash()}: {@code name=value} lines in the
+     * fixed order below, checkpoints sorted by height. ADDING A CONSENSUS FIELD MEANS ADDING IT
+     * HERE (a reflective test fails the build if a field is neither encoded nor in its explicit
+     * non-consensus exclusion set); reordering or renaming changes every network's version and is
+     * a deliberate act. Excluded as non-consensus: networkName, genesisSnapshotResource (artifact
+     * selection), expectedGenesisHash (its own /info field) and the two derived tables.
+     */
+    public String canonicalRuleset() {
+        StringBuilder b = new StringBuilder();
+        java.util.function.BiConsumer<String, Object> f =
+            (name, value) -> b.append(name).append('=').append(value).append('\n');
+        f.accept("chainId", chainId);
+        f.accept("powAlgorithm", powAlgorithm);
+        f.accept("powCostT", powCostT);
+        f.accept("powCostM", powCostM);
+        f.accept("powUpgradeHeight", powUpgradeHeight);
+        f.accept("powCostTAfter", powCostTAfter);
+        f.accept("powCostMAfter", powCostMAfter);
+        f.accept("consensusV2Height", consensusV2Height);
+        f.accept("genesisTimestamp", genesisTimestamp);
+        f.accept("genesisDifficulty", genesisDifficulty);
+        f.accept("desiredBlockTimeSec", desiredBlockTimeSec);
+        f.accept("difficultyLookback", difficultyLookback);
+        f.accept("minDifficulty", minDifficulty);
+        f.accept("maxDifficulty", maxDifficulty);
+        f.accept("maxFutureBlockTimeSec", maxFutureBlockTimeSec);
+        f.accept("minBlockTimeSec", minBlockTimeSec);
+        f.accept("medianTimeWindow", medianTimeWindow);
+        f.accept("maxTransactionsPerBlock", maxTransactionsPerBlock);
+        f.accept("minFee", minFee);
+        f.accept("maxBlockSizeBytes", maxBlockSizeBytes);
+        f.accept("maxUncleBodyBytes", maxUncleBodyBytes);
+        f.accept("maxTxGas", maxTxGas);
+        f.accept("maxBlockGas", maxBlockGas);
+        f.accept("maxUnclesPerBlock", maxUnclesPerBlock);
+        f.accept("uncleMaxDepth", uncleMaxDepth);
+        f.accept("maxReorgDepth", maxReorgDepth);
+        StringBuilder cp = new StringBuilder();
+        new java.util.TreeMap<>(checkpoints).forEach((h, hash) ->
+            cp.append(h).append(':').append(hash.toHexString()).append(','));
+        f.accept("checkpoints", cp);
+        f.accept("decimalScaleFactor", decimalScaleFactor);
+        f.accept("initialReward", initialReward);
+        f.accept("rewardEpochBlocks", rewardEpochBlocks);
+        f.accept("rewardDecayNum", rewardDecayNum);
+        f.accept("rewardDecayDen", rewardDecayDen);
+        f.accept("uncleRewardNum", uncleRewardNum);
+        f.accept("uncleRewardDen", uncleRewardDen);
+        f.accept("nephewRewardDivisor", nephewRewardDivisor);
+        f.accept("supplyTarget", supplyTarget);
+        f.accept("emissionCoefficient", emissionCoefficient);
+        f.accept("emissionTableSteps", emissionTableSteps);
+        f.accept("emissionCurveHeight", emissionCurveHeight);
+        f.accept("minerRevenueFloor", minerRevenueFloor);
+        f.accept("decayStartHeight", decayStartHeight);
+        f.accept("decayEpochBlocks", decayEpochBlocks);
+        f.accept("decayNum", decayNum);
+        f.accept("decayDen", decayDen);
+        f.accept("supplyTargetFloor", supplyTargetFloor);
+        f.accept("burnShareNum", burnShareNum);
+        f.accept("burnShareDen", burnShareDen);
+        f.accept("boxActivationHeight", boxActivationHeight);
+        f.accept("maxBoxSizeBytes", maxBoxSizeBytes);
+        f.accept("maxBoxRegisters", maxBoxRegisters);
+        f.accept("minValuePerByte", minValuePerByte);
+        f.accept("storagePeriodBlocks", storagePeriodBlocks);
+        f.accept("storageFeeFactor", storageFeeFactor);
+        f.accept("maxBoxCollectsPerBlock", maxBoxCollectsPerBlock);
+        f.accept("tokenActivationHeight", tokenActivationHeight);
+        f.accept("maxTokenSymbolBytes", maxTokenSymbolBytes);
+        f.accept("maxTokenNameBytes", maxTokenNameBytes);
+        f.accept("maxTokenDecimals", maxTokenDecimals);
+        f.accept("votingEpochLength", votingEpochLength);
+        f.accept("storageFeeFactorStep", storageFeeFactorStep);
+        f.accept("storageFeeFactorMin", storageFeeFactorMin);
+        f.accept("storageFeeFactorMax", storageFeeFactorMax);
+        f.accept("minValuePerByteStep", minValuePerByteStep);
+        f.accept("minValuePerByteMin", minValuePerByteMin);
+        f.accept("minValuePerByteMax", minValuePerByteMax);
+        f.accept("genesisSupply", genesisSupply);
+        return b.toString();
     }
 
     /**
@@ -1000,6 +1120,9 @@ public final class NetworkParameters {
             // fails the build on any drift between this constant and the artifact.
             .genesisSupply(1_000_000_000_000L)
             .genesisSnapshotResource("genesis/rhizome-mainnet.json")
+            // expectedGenesisHash is left UNPINNED (null): the mainnet allocation artifact is
+            // provisional, so pinning now would only freeze a placeholder. Pin it, together with
+            // the artifact, at launch.
             // Supply-driven logarithmic emission curve constants (004-integer-log-curve;
             // WHITEPAPER.md §5.3; research.md Decision 6): calibrated for tau ~= 20 years at
             // this 5-second cadence, targeting the speed-of-light supply S* (299,792,458 PDN).
@@ -1072,6 +1195,8 @@ public final class NetworkParameters {
             // override, exactly as before this feature (~20 existing suites rely on it).
             .genesisSupply(GENESIS_SUPPLY_UNPINNED)
             .genesisSnapshotResource(null)
+            // Same inheritance trap for the genesis-hash pin: never carry another profile's pin.
+            .expectedGenesisHash(null)
             // Explicitly never activate the curve (006-emission-fork-activation), rather than
             // inherit cleanMainnet()'s now-scheduled height: testnet is the test-shaped profile,
             // not a deployed network with operators to notify (Clarifications Q3). Keeping it at
@@ -1140,6 +1265,8 @@ public final class NetworkParameters {
             // inherit the mainnet genesis-supply pin or its shipped-artifact resource.
             .genesisSupply(GENESIS_SUPPLY_UNPINNED)
             .genesisSnapshotResource(null)
+            // Same inheritance trap for the genesis-hash pin: never carry another profile's pin.
+            .expectedGenesisHash(null)
             // Explicitly restate (006-emission-fork-activation) rather than rely on inheriting
             // cleanMainnet()'s value: scripts/local-testnet/start.sh starts RHIZOME_NETWORK=devnet,
             // so a local network must mint under the same rule mainnet mints under to be
@@ -1221,6 +1348,11 @@ public final class NetworkParameters {
             // (1,000,000,000,000 base units) unchanged, so the emission curve, the revenue floor
             // and the burn schedule are bit-identical to mainnet's; only the allocation differs.
             .genesisSnapshotResource("genesis/rhizome-staging.json")
+            // The published staging genesis identity (GenesisBlock.build over the artifact above);
+            // StagingGenesisTest asserts this constant equals the computed hash, so the artifact
+            // and the pin can only move together.
+            .expectedGenesisHash(rhizome.crypto.SHA256Hash.of(
+                "8CB7AD090F912D3C051B1C3FBB3FF187918843DF06301339D84C91305DF46590"))
             .build();
     }
 
