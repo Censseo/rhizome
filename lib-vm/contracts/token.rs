@@ -10,6 +10,7 @@ extern "C" {
     fn emit_log(topic_ptr: *const u8, topic_len: i32, data_ptr: *const u8, data_len: i32);
     fn get_caller(out_ptr: *mut u8, out_cap: i32) -> i32;
     fn get_deployer(out_ptr: *mut u8, out_cap: i32) -> i32;
+    fn get_value() -> i64;
     fn get_input(out_ptr: *mut u8, out_cap: i32) -> i32;
 }
 
@@ -22,7 +23,7 @@ fn is_deployer(who: &[u8; ADDR_LEN]) -> bool {
 }
 
 #[panic_handler]
-fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }
+fn panic(_: &core::panic::PanicInfo) -> ! { core::arch::wasm32::unreachable() }
 
 /// Revert the whole call: used by transfer_from, whose callers (pools, wallets)
 /// must observe failure through call_contract's -1 rather than a silent no-op.
@@ -115,6 +116,9 @@ fn do_transfer(from: &[u8; ADDR_LEN], to: &[u8; ADDR_LEN], amount: u64) -> bool 
 ///       insufficient allowance or balance, so composing contracts observe the failure
 #[no_mangle]
 pub extern "C" fn call() {
+    // Non-payable: nothing here can spend native coin, so value attached to any path would be
+    // stranded forever. Trap instead; the executor rolls the attached value back.
+    if unsafe { get_value() } != 0 { fail(); }
     let mut input = [0u8; 96];
     let n = unsafe { get_input(input.as_mut_ptr(), 96) };
     if n < 1 { return; }

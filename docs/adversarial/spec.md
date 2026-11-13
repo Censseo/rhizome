@@ -443,6 +443,8 @@ check is a boot-time equality composed with guards those suites already exercise
 | VM-30 | Cycle distinct max-size modules through the process-wide module cache (bounded by entry count only) to pin tens of MiB, or collide its weak key hash to degrade every lookup. | A1 | DEFENDED | `lib-vm/src/test/java/rhizome/vm/WasmAdversarialTest.java#theModuleCacheIsBoundedByBytesAndKeyedByAStrongHash` |
 | VM-31 | Recurse through functions declaring many locals, or declare a large table, for the flat price of the instructions — frame slots and eagerly allocated table entries were unmetered. | A1 | DEFENDED | `lib-vm/src/test/java/rhizome/vm/WasmAdversarialTest.java#frameSlotsAndTableEntriesAreCharged` |
 | VM-32 | Grow permanent replicated state through deployed code at a tenth of the `storage_write` byte price. | A1 | DEFENDED | `lib-vm/src/test/java/rhizome/vm/WasmAdversarialTest.java#deployedCodeBytesPayTheStorageByteRate` |
+| VM-33 | Add lopsided liquidity to a pair so the whole offered amount is pulled while shares are minted for only the smaller leg (the excess is donated), or have the deposit mint fewer shares than the provider expected after the pool moved. | A1 | DEFENDED | `lib-vm/src/test/java/rhizome/vm/TokenPairTest.java#addLiquidityPullsOnlyTheOptimalAmounts`, `lib-vm/src/test/java/rhizome/vm/TokenPairTest.java#addLiquidityTrapsBelowMinShares` |
+| VM-34 | Attach native coin to a template call that cannot spend it (token, pair, agent wallet) or to a launchpad path that returns silently, stranding the coin in the contract. | A1 | DEFENDED | `lib-vm/src/test/java/rhizome/vm/WasmAdversarialTest.java#nonPayablePathsAndLaunchpadRefusalsTrapInsteadOfKeepingValue` |
 
 ## STATE — authenticated state and snapshots
 

@@ -266,6 +266,36 @@ class TokenPairTest {
     }
 
     @Test
+    void addLiquidityPullsOnlyTheOptimalAmounts() {
+        // VM-33: offer 100k A and 200k B into a 1:1 pool. shares = min(sa, sb) = 100k, so only
+        // 100k of B is useful — the other 100k used to be pulled and donated to the pool.
+        assertEquals(ExecutionStatus.SUCCESS, mineBlock(List.of(
+            tx(9, tokenB, concat(new byte[] {3}, pair.toBytes(), le64(200_000)), TransactionKind.CALL),
+            tx(10, pair, concat(new byte[] {1}, le64(100_000), le64(200_000)), TransactionKind.CALL))));
+        assertArrayEquals(le64(LIQUIDITY + 100_000), contracts.getStorage(pair, new byte[] {2}), "reserve A");
+        assertArrayEquals(le64(LIQUIDITY + 100_000), contracts.getStorage(pair, new byte[] {3}), "reserve B");
+        assertArrayEquals(le64(SUPPLY - LIQUIDITY - 100_000), contracts.getStorage(tokenB, balKey(sender)),
+            "only the optimal 100k of B left the provider");
+        assertArrayEquals(le64(600_000), contracts.getStorage(pair, lpKey(sender)), "shares minted");
+        assertArrayEquals(le64(100_000), contracts.getStorage(tokenB, allowanceKey(sender, pair)),
+            "the unused half of the B allowance is untouched");
+    }
+
+    @Test
+    void addLiquidityTrapsBelowMinShares() {
+        // VM-33: min_shares at [17]. 100k/100k mints 100k shares; demanding 100_001 traps the call
+        // and unwinds both legs.
+        assertEquals(ExecutionStatus.SUCCESS, mineBlock(List.of(
+            tx(9, tokenB, concat(new byte[] {3}, pair.toBytes(), le64(200_000)), TransactionKind.CALL),
+            tx(10, pair, concat(new byte[] {1}, le64(100_000), le64(100_000), le64(100_001)),
+                TransactionKind.CALL))));
+        assertArrayEquals(le64(LIQUIDITY), contracts.getStorage(pair, new byte[] {2}), "reserve A untouched");
+        assertArrayEquals(le64(LIQUIDITY), contracts.getStorage(pair, new byte[] {3}), "reserve B untouched");
+        assertArrayEquals(le64(SUPPLY - LIQUIDITY), contracts.getStorage(tokenB, balKey(sender)), "B not pulled");
+        assertArrayEquals(le64(LIQUIDITY), contracts.getStorage(pair, lpKey(sender)), "no shares minted");
+    }
+
+    @Test
     void swapBeyondTheAllowanceUnwindsBothLegs() {
         // Only 100k of allowance remains on token A after setup; asking to swap 150k
         // makes the token's transfer_from trap, the pair trap in turn, and the whole

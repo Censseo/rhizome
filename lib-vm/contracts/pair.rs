@@ -16,13 +16,14 @@ extern "C" {
     fn get_deployer(out_ptr: *mut u8, out_cap: i32) -> i32;
     fn get_input(out_ptr: *mut u8, out_cap: i32) -> i32;
     fn get_self(out_ptr: *mut u8, out_cap: i32) -> i32;
+    fn get_value() -> i64;
     fn call_contract(addr_ptr: *const u8, addr_len: i32,
                      in_ptr: *const u8, in_len: i32,
                      out_ptr: *mut u8, out_cap: i32) -> i32;
 }
 
 #[panic_handler]
-fn panic(_: &core::panic::PanicInfo) -> ! { loop {} }
+fn panic(_: &core::panic::PanicInfo) -> ! { core::arch::wasm32::unreachable() }
 
 fn fail() -> ! { core::arch::wasm32::unreachable() }
 
@@ -135,12 +136,16 @@ fn amount_out(amount_in: u64, reserve_in: u64, reserve_out: u64) -> u64 {
 
 /// input[0] selector:
 ///   0 = init(tokenA(25), tokenB(25))       — once
-///   1 = add_liquidity(amtA(8), amtB(8))    — pulls both legs from the caller (approve first)
+///   1 = add_liquidity(amtA(8), amtB(8), min_shares(8)) — pulls the OPTIMAL (ratio-matched) amounts
+///       within the offered amtA/amtB from the caller (approve first); traps if shares < min_shares
 ///   2 = swap_a_for_b(amount_in(8))         — pulls A, pays B, emits "swap"
 ///   3 = swap_b_for_a(amount_in(8))         — the mirror
 ///   4 = reserves()                         — output reserveA(8) || reserveB(8)
 #[no_mangle]
 pub extern "C" fn call() {
+    // Non-payable: nothing here can spend native coin, so value attached to any path would be
+    // stranded forever. Trap instead; the executor rolls the attached value back.
+    if unsafe { get_value() } != 0 { fail(); }
     let mut input = [0u8; 64];
     let n = unsafe { get_input(input.as_mut_ptr(), 64) };
     if n < 1 { return; }
@@ -167,12 +172,30 @@ pub extern "C" fn call() {
             }
         }
         1 => {
-            let amt_a = read_u64_at(&input, 1);
-            let amt_b = read_u64_at(&input, 9);
-            if amt_a == 0 || amt_b == 0 { fail(); }
+            let want_a = read_u64_at(&input, 1);
+            let want_b = read_u64_at(&input, 9);
+            // min_shares at [17]: the provider's slippage floor — 0 (or absent, the input buffer is
+            // zero-padded) keeps the old ABI; a positive value traps the deposit if it mints less.
+            let min_shares = read_u64_at(&input, 17);
+            if want_a == 0 || want_b == 0 { fail(); }
             let reserve_a = read_u64(&KEY_RESERVE_A);
             let reserve_b = read_u64(&KEY_RESERVE_B);
             let total = read_u64(&KEY_LP_TOTAL);
+            // Pull only the OPTIMAL amounts (the largest pair within the caller's offer that matches
+            // the pool ratio). Shares are min(sa, sb), so pulling the full offer donated the
+            // lopsided leg's excess to the pool for nothing. u128 throughout: the wanted-for-other-
+            // leg product can exceed u64 before the division.
+            let (amt_a, amt_b) = if total == 0 {
+                (want_a, want_b)
+            } else {
+                let b_opt = (want_a as u128) * (reserve_b as u128) / (reserve_a as u128);
+                if b_opt <= want_b as u128 {
+                    (want_a, b_opt as u64)
+                } else {
+                    // b_opt > want_b  =>  a_opt < want_a, so this fits the offer by construction.
+                    (((want_b as u128) * (reserve_a as u128) / (reserve_b as u128)) as u64, want_b)
+                }
+            };
             // Shares minted for this deposit (audit T4): the geometric mean on the first deposit,
             // else the min across both legs vs. the pre-deposit reserves so a lopsided deposit can
             // never over-mint. u128 intermediates avoid overflow; ratios use pre-deposit reserves.
@@ -183,7 +206,7 @@ pub extern "C" fn call() {
                 let sb = ((amt_b as u128) * (total as u128) / (reserve_b as u128)) as u64;
                 if sa < sb { sa } else { sb }
             };
-            if shares == 0 { fail(); }
+            if shares == 0 || shares < min_shares { fail(); }
             let token_a = read_token(&KEY_TOKEN_A);
             let token_b = read_token(&KEY_TOKEN_B);
             pull(&token_a, &caller, &own, amt_a);

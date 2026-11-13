@@ -1045,6 +1045,29 @@ class WasmAdversarialTest {
             "each eagerly allocated table entry costs TABLE_ENTRY");
     }
 
+    private static ExecResult runShipped(String name, byte[] input, long value) {
+        return new WasmVm().execute(shipped(name), new MapHostState(new byte[25], input, value),
+            new GasMeter(10_000_000));
+    }
+
+    /** VM-34 — attach native coin to a template call that cannot spend it (token, pair, agent
+     *  wallet), or to a launchpad path that returns silently, stranding the coin in the contract. */
+    @Test
+    void nonPayablePathsAndLaunchpadRefusalsTrapInsteadOfKeepingValue() {
+        for (String name : new String[] {"token", "pair", "agent_wallet"}) {
+            assertEquals(ContractResult.Status.REVERTED, runShipped(name, new byte[0], 1).status(),
+                name + " must trap on attached value");
+            assertEquals(ContractResult.Status.OK, runShipped(name, new byte[0], 0).status(),
+                name + " still runs without value");
+        }
+        // Non-deployer init, non-deployer withdraw and an unknown selector all trap (they returned).
+        for (byte selector : new byte[] {0, 2, 9}) {
+            assertEquals(ContractResult.Status.REVERTED,
+                runShipped("launchpad", new byte[] {selector}, 5).status(),
+                "launchpad selector " + selector + " must trap");
+        }
+    }
+
     /** VM-32 — grow permanent state through contract code at a tenth of the storage-write price. */
     @Test
     void deployedCodeBytesPayTheStorageByteRate() {
