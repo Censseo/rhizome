@@ -124,7 +124,9 @@ LockPersonality=yes
 RemoveIPC=yes
 # Empty assignment: drop every capability. The node binds a port above 1024 and needs none.
 CapabilityBoundingSet=
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# AF_NETLINK: the JVM enumerates local interfaces (RHIZOME_ALLOWED_HOSTS discovery) via
+# getifaddrs, which uses a netlink socket on Linux.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 RestrictNamespaces=yes
 PrivateDevices=yes
 SystemCallArchitectures=native

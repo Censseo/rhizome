@@ -43,10 +43,13 @@ EnvironmentFile=/etc/rhizome/faucet.env
 # Key comes from /etc/rhizome/faucet.key, copied into the credentials directory for this unit.
 LoadCredential=key:/etc/rhizome/faucet.key
 
+# --state-file: the script defaults to ~/.rhizome-faucet, unwritable under ProtectHome; %S is the
+# StateDirectory root (/var/lib), so the state lives in the unit's own StateDirectory below.
 # Python script at an assumed install path (not a repo fact — adjust to the real deploy layout).
 ExecStart=/usr/bin/python3 /opt/rhizome/faucet/faucet.py \
     --node-url "${FAUCET_NODE_URL}" \
     --key-file %d/key \
+    --state-file %S/rhizome-faucet/state.json \
     --port "${FAUCET_LISTEN_PORT}"
 
 Restart=on-failure
