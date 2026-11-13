@@ -88,8 +88,8 @@ list the proxy's advertised hostname, or the DNS-rebinding `Host` allowlist
 
 [node.env.example](../../scripts/local-testnet/deploy/node.env.example) is the field-by-field
 mirror of `NodeConfig`'s own defaults and validation — "if they and this file ever disagree,
-they win" is stated in the file's own header. Copy it to `/etc/rhizome/node.env` (mode `0640`,
-owned `root:rhizome`, since it can hold bearer tokens), fill in the values marked REQUIRED for a
+they win" is stated in the file's own header. Copy it to `/etc/rhizome/node.env` (mode `0600`,
+owned `root:root`, since it can hold bearer tokens and systemd reads `EnvironmentFile` as root), fill in the values marked REQUIRED for a
 publicly reachable node, and drive it with
 [rhizome-node.service](../../scripts/local-testnet/deploy/rhizome-node.service) (systemd
 `EnvironmentFile=`, no leading `-` — a missing env file is a misconfiguration that must refuse
