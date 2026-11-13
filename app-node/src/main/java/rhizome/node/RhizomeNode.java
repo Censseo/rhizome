@@ -269,6 +269,9 @@ public final class RhizomeNode implements AutoCloseable {
             var service = new NodeService(engine, mempool, AdmissionControl.defaults(),
                 NodeSources.builder()
                     .peers(registry)
+                    // Admission reads the candidate's /info and refuses another chain (NodeService).
+                    .peerProbe(url -> new HttpPeerSource(url, blockPrivatePeers, exchange,
+                        peerTokenPolicy).identity())
                     // Contract event logs and box/token lifecycle events by height, so agents can
                     // watch on-chain state on one feed.
                     .logSource(contractProcessor::logs)

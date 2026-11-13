@@ -234,6 +234,16 @@ public final class HttpPeerSource implements PeerSource {
         }
     }
 
+    /** The chain identity the peer advertises on {@code /info} (fields it lacks read as null). */
+    public PeerIdentity identity() {
+        String body = getString("/info", SCALAR_CAP);
+        try {
+            return PeerIdentity.fromInfoBody(body);
+        } catch (RuntimeException e) {
+            throw new PeerProtocolException("peer /info is malformed", e);
+        }
+    }
+
     @Override
     public SnapshotInfo snapshotInfo() {
         byte[] bytes = getBytesOrNullOn404("/state/snapshot/info", SCALAR_CAP);

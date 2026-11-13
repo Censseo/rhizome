@@ -8,6 +8,7 @@ import rhizome.core.blockchain.ContractApi;
 import rhizome.core.box.BoxProcessor;
 import rhizome.core.ledger.PublicAddress;
 import rhizome.core.token.TokenProcessor;
+import rhizome.net.PeerIdentity;
 import rhizome.net.PeerRegistry;
 import rhizome.core.blockchain.ContractApi.ContractLog;
 
@@ -32,6 +33,8 @@ import rhizome.core.blockchain.ContractApi.ContractLog;
 @lombok.Builder(toBuilder = true)
 public record NodeSources(
     PeerRegistry peers,
+    /** Reads a candidate peer's advertised chain identity (its {@code /info}); null = no admission check. */
+    Function<String, PeerIdentity> peerProbe,
     LongFunction<List<ContractLog>> logSource,
     Function<PublicAddress, byte[]> codeSource,
     LongFunction<List<BoxProcessor.BoxEvent>> boxEventSource,
