@@ -60,6 +60,17 @@ final class SnapshotBootstrap {
     /** Worst-case bytes of one served chunk (the peer-side /state/snapshot/chunk fetch cap). */
     private static final long MAX_CHUNK_BYTES = 16L * 1024 * 1024;
 
+    /**
+     * Thrown when a bootstrap fails after it began seeding the stores: the in-progress marker is
+     * deliberately left set and the caller must NOT try another peer or fall back — doing so would
+     * run on half-seeded state. Boot then refuses with the existing "delete and restart" message.
+     */
+    static final class StoresDirtyException extends IllegalStateException {
+        StoresDirtyException(String message, Throwable cause) {
+            super(message, cause);
+        }
+    }
+
     private SnapshotBootstrap() {}
 
     /**
@@ -228,6 +239,11 @@ final class SnapshotBootstrap {
             target.beginBootstrap();
             contractStore.beginBulkImport();
             boolean adopted = false;
+            // True once a replay may have written to a domain store: from then on a failure is NOT a
+            // clean refusal (see the finally). A verification failure writes nothing — importVerified
+            // verifies the whole set before its first sink.put — so it is the one failure that stays
+            // retryable.
+            boolean seeded = false;
             try {
                 try (var channel = java.nio.channels.FileChannel.open(spool, java.nio.file.StandardOpenOption.READ)) {
                     chunks = new SpooledChunks(channel, offsets, lengths, info.chunkCount());
@@ -236,8 +252,15 @@ final class SnapshotBootstrap {
                     } catch (StateSnapshotImporter.SnapshotVerificationException e) {
                         log.warn("Snapshot verification failed: {}", e.getMessage());
                         return false;
+                    } catch (RuntimeException e) {
+                        seeded = true; // may have failed mid-replay
+                        throw e;
                     }
+                    seeded = true;
                 } catch (java.io.IOException e) {
+                    if (seeded) {
+                        throw e; // channel close after a completed replay: still dirty, not a refusal
+                    }
                     log.warn("Snapshot spool could not be read: {}", e.toString());
                     return false;
                 }
@@ -256,14 +279,26 @@ final class SnapshotBootstrap {
                 target.nonceStore().markSyncedThrough(pivot);
                 target.endBootstrap();
                 adopted = true;
+            } catch (java.io.IOException | RuntimeException e) {
+                if (seeded) {
+                    // Fail closed: stores were written, so the marker stays set (finally below) and
+                    // no other peer is tried over them — the caller must stop, and the next boot
+                    // refuses with "inconsistent — delete it and restart" (audit M8).
+                    throw new StoresDirtyException("snap bootstrap failed after seeding the stores: " + e, e);
+                }
+                if (e instanceof java.io.IOException io) {
+                    throw new java.io.UncheckedIOException(io);
+                }
+                throw (RuntimeException) e;
             } finally {
-                if (!adopted) {
-                    // A refused or failed attempt restores the pre-attempt state: the bulk window
-                    // closes and the marker clears, so the node may retry another peer or fall
-                    // back to full sync exactly as before the marker covered the seed. A CRASH
-                    // mid-seed never runs this — the marker stays set and the next boot refuses
-                    // to run on half-seeded state (audit M8). Best-effort: a failed clear fails
-                    // closed (the marker stays set, boot refuses) and must not mask the refusal.
+                if (!adopted && !seeded) {
+                    // A refused attempt that WROTE NOTHING restores the pre-attempt state: the bulk
+                    // window closes and the marker clears, so the node may retry another peer or
+                    // fall back to full sync exactly as before the marker covered the seed. An
+                    // attempt that wrote anything never gets here — clearing the marker over
+                    // half-seeded stores is what let the next boot run on them (and a CRASH
+                    // mid-seed never runs this either). Best-effort: a failed clear fails closed
+                    // (the marker stays set, boot refuses) and must not mask the refusal.
                     try {
                         contractStore.syncToDisk();
                         target.endBootstrap();

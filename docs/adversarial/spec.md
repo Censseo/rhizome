@@ -471,6 +471,7 @@ check is a boot-time equality composed with guards those suites already exercise
 | STATE-05 | Offer a snapshot pivot that is unburied, out of range, or would overflow the header window. | A2 | DEFENDED | `app-node/src/test/java/rhizome/node/SnapshotBootstrapRefusalTest.java#anUnburiedPivotIsRefused`, `app-node/src/test/java/rhizome/node/SnapshotBootstrapRefusalTest.java#aPivotThatWouldOverflowTheHeaderWindowIsRefused`, `app-node/src/test/java/rhizome/node/SnapshotBootstrapRefusalTest.java#anOutOfRangeChunkCountIsRefusedBeforeAnyFetch` |
 | STATE-06 | Overwrite an existing node's local history via the bootstrap path. | A2 | DEFENDED | `app-node/src/test/java/rhizome/node/SnapshotBootstrapRefusalTest.java#aNonEmptyChainStoreIsARefusalToOverwriteLocalHistory` |
 | STATE-07 | Repeat a key inside a state snapshot so the tree absorbs the copy while the import sink is fed both. | A2 | DEFENDED | `lib-core/src/test/java/rhizome/StateSnapshotTest.java#duplicateKeyIsRefused` |
+| STATE-08 | Make a snap bootstrap fail after its verification passed and the stores were seeded (disk full, a store error), hoping the abort path clears the in-progress marker over half-seeded stores so the next boot runs on them. Once anything was written the marker stays set and the failure propagates (no other peer is tried); only an attempt that wrote nothing clears it. | A2 | DEFENDED | `app-node/src/test/java/rhizome/node/SnapshotBootstrapFailClosedAttackTest.java#anAbortAfterSeedingLeavesTheMarkerSetAndStopsTheSearch` |
 
 ## PERS — persistence, reorg reversal, crash consistency
 

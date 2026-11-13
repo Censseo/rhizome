@@ -207,6 +207,8 @@ public final class RhizomeNode implements AutoCloseable {
                                 System.currentTimeMillis(), Path.of(config.dataDir()))) {
                             break;
                         }
+                    } catch (SnapshotBootstrap.StoresDirtyException e) {
+                        throw e; // half-seeded stores + marker set: never try another peer over them
                     } catch (RuntimeException e) {
                         log.warn("Snap bootstrap from {} failed: {}", peerUrl, e.toString());
                     }
