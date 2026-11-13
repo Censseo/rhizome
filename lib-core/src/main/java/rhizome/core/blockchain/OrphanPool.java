@@ -30,7 +30,9 @@ public final class OrphanPool {
     }
 
     public synchronized void put(Block block) {
-        pool.put(block.hash(), block);
+        // put-if-absent: the hash does not commit the nonce or body, so a later resubmission of
+        // the same header must never replace the body already vetted and pooled.
+        pool.putIfAbsent(block.hash(), block);
     }
 
     /** The orphan with this hash, or {@code null} if unknown. */

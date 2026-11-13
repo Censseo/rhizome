@@ -173,6 +173,7 @@ catalogue is never run as one suite.
 | CONS-08 | Submit a block containing a box or token transaction on a node that has no such processor, so validity depends on the node's wiring. | A3 | DEFENDED | `lib-core/src/test/java/rhizome/core/blockchain/ChainEngineBootTest.java#aDomainThatWasNeverNamedRejectsItsTransactionsInsteadOfIgnoringThem` |
 | CONS-09 | Force a validating node to run unbounded VM work by mining a free, enormous `gasLimit` call into a block ("poison block"). | A3 | DEFENDED | `lib-vm/src/test/java/rhizome/vm/ContractConsensusTest.java#contractTxOverPerTxGasCapIsRejectedBeforeExecution`, `lib-vm/src/test/java/rhizome/vm/ContractConsensusTest.java#perTxUnderCapButBlockGasSumOverCapIsRejected`, `app-node/src/test/java/rhizome/adversarial/e2e/E2EContractTest.java#aPoisonBlockPushedAtTheSubmitRouteIsRefusedAndTheNodeStaysHealthy` |
 | CONS-10 | Exploit the difference between a node's rejection order and its cost by making an invalid block expensive to reject. | A1 | DEFENDED | `lib-core/src/test/java/rhizome/core/blockchain/BlockUnclesTest.java#blocksOwnPowIsVerifiedBeforeUncleWork` |
+| CONS-11 | Spray blocks that fail proof of work but carry up to 25 000 distinct senders, so every one costs 25 000 nonce-store reads before the (cheaper to reject) PoW gate. | A1 | DEFENDED | `lib-core/src/test/java/rhizome/ChainEngineTest.java#accountNonceWalkRunsOnlyAfterTheProofOfWork` |
 
 ## POW — proof of work and difficulty
 
@@ -186,6 +187,7 @@ catalogue is never run as one suite.
 | POW-06 | Mine under one PoW cost schedule and have it verified under another, across an upgrade boundary. | A3 | DEFENDED | `lib-core/src/test/java/rhizome/PowUpgradeTest.java#blockAfterBoundaryMinedWithOldCostsIsRejected`, `lib-core/src/test/java/rhizome/PowUpgradeTest.java#blockBeforeBoundaryMinedWithNewCostsIsRejected` |
 | POW-07 | Feed the PoW entry point out-of-range cost parameters to trigger a remote arithmetic fault. | A2 | DEFENDED | `lib-crypto/src/test/java/rhizome/crypto/PowCostsTest.java#pufferfishEntryPointRejectsOverflowingCostT`, `lib-crypto/src/test/java/rhizome/crypto/PowCostsTest.java#pufferfishEntryPointRejectsOutOfRangeCostM` |
 | POW-08 | Flood a validator with structurally invalid blocks (a forged merkle root, say) hoping the node still pays the full memory-hard PoW hash before refusing each one, turning a cheap-to-produce fault into a CPU-exhaustion amplifier. | A1 | DEFENDED | `lib-core/src/test/java/rhizome/adversarial/PufferfishCostAttackTest.java#cheapGateRejectionIsOrdersOfMagnitudeFasterThanPayingForMemoryHardPow` |
+| POW-09 | Win the race against the built-in miner by moving the tip: the miner grinds a stale candidate to completion, wasting the whole interval on a block that can only be an orphan. | A3 | DEFENDED | `lib-core/src/test/java/rhizome/core/blockchain/OrphanBodyBindingTest.java#theMinerAbandonsACandidateWhenItsStaleCheckFires` |
 
 ## TIME — timestamps
 
@@ -262,6 +264,9 @@ catalogue is never run as one suite.
 | UNCLE-05 | Pad headers with in-range fake uncle references to inflate a branch's apparent work at the reorg gate and force a pop/restore cycle. | A2 | DEFENDED | `lib-core/src/test/java/rhizome/HeaderChainTest.java#committedUncleWorkDoesNotInflateTheReorgGateWork`, `lib-core/src/test/java/rhizome/core/blockchain/BlockUnclesTest.java#baseWorkExcludesUncleWorkThatTotalWorkIncludes` |
 | UNCLE-06 | Exceed the per-block uncle count so a submitted block forces unbounded memory-hard hashing. | A1 | DEFENDED | `lib-core/src/test/java/rhizome/core/blockchain/BlockUnclesTest.java#rejectsTooManyUncles`, `lib-core/src/test/java/rhizome/BlockAssemblerUncleSizeTest.java#uncleBytesAreChargedAgainstTheSizeCap` |
 | UNCLE-07 | Churn the bounded orphan pool so an honest node cannot restore its own suffix after a rejected reorg, forcing a full resync. | A2 | DEFENDED | `lib-core/src/test/java/rhizome/core/blockchain/BlockUnclesTest.java#restoreBlockRecoversANephewWhoseUncleIsMissingFromThePool`, `lib-core/src/test/java/rhizome/core/blockchain/BlockUnclesTest.java#restoreBlockStillEnforcesStructuralUncleBounds` |
+| UNCLE-08 | Replay an honest orphan's header and nonce over a body whose coinbase pays the attacker (the hash commits the merkle root, not the body) to steal the uncle reward or split nodes on two body variants. | A2 | DEFENDED | `lib-core/src/test/java/rhizome/core/blockchain/OrphanBodyBindingTest.java#anOrphanBodyThatDoesNotMatchItsHeaderMerkleRootIsNeverPooled` |
+| UNCLE-09 | Resubmit a cached orphan header with a garbage nonce so the hash-keyed verify-once cache vouches for it and the bad-nonce body replaces the pooled (later persisted) uncle body. | A2 | DEFENDED | `lib-core/src/test/java/rhizome/core/blockchain/OrphanBodyBindingTest.java#aGarbageNonceUnderACachedHeaderNeitherPassesTheCacheNorReplacesThePooledBody` |
+| UNCLE-10 | Spray maximum-size orphans, each with a cheap real minDifficulty PoW, to pin megabytes of unvalidated uncle bodies in memory and in the store forever. | A1 | BOUNDED | `lib-core/src/test/java/rhizome/core/blockchain/OrphanBodyBindingTest.java#anOrphanBodyOverTheUncleBodyCapIsRefusedBeforeAnyHashing` |
 
 ## SUPPLY — circulating supply header commitment
 
@@ -397,6 +402,8 @@ check is a boot-time equality composed with guards those suites already exercise
 | REORG-10 | Get an honest peer banned by making local backpressure or a transport hiccup look like a protocol violation, then eclipse the victim. | A2 | DEFENDED | `lib-core/src/test/java/rhizome/ChainSynchronizerTest.java#localSaturationDuringSyncIsNotPeerInvalid`, `lib-core/src/test/java/rhizome/HeaderSynchronizerTest.java#localBackpressureMidBodyIsNotAPeerFaultOnTheHeadersPath` |
 | REORG-11 | Selfish mining: withhold blocks and release them selectively to earn a revenue share above the miner's hash-rate share. | A3 | BOUNDED | `lib-core/src/test/java/rhizome/adversarial/SelfishMiningAttackTest.java#onlyTheFirstBlockOfAnOrphanedBranchIsEverRefundedAsAnUncle`, `lib-core/src/test/java/rhizome/adversarial/SelfishMiningAttackTest.java#aBranchWithheldPastTheFinalityWindowEarnsNothingAtAll`, `lib-core/src/test/java/rhizome/adversarial/SelfishMiningAttackTest.java#aMinerThatPublishesEveryBlockEarnsExactlyItsHashRateShare`, `lib-core/src/test/java/rhizome/adversarial/SelfishMiningAttackTest.java#aRunIsAPureFunctionOfItsSeedSoTheMeasurementIsReproducible`, `lib-core/src/test/java/rhizome/adversarial/SelfishMiningAttackTest.java#withholdingBlocksEarnsAFortyPercentMinerMoreThanItsHashRateShare`, `lib-core/src/test/java/rhizome/adversarial/SelfishMiningAttackTest.java#withholdingBlocksCostsATenPercentMinerMoreThanItEarns`, `lib-core/src/test/java/rhizome/adversarial/SelfishMiningAttackTest.java#ghostUncleRewardsShrinkTheSelfishMinersEdgeWithoutClosingIt` |
 | REORG-12 | Grind the deterministic tip-hash tie-break by re-mining a contested block in search of a smaller hash. | A3 | BOUNDED | `lib-core/src/test/java/rhizome/adversarial/SelfishMiningAttackTest.java#grindingTheTieBreakRequiresAFullProofOfWorkSolvePerAttemptAgainstAFairCoin` |
+| REORG-13 | Serve bodies whose hash matches the PoW-validated headers but whose nonce is forged, which the trusted body apply persists without re-hashing. | A2 | DEFENDED | `lib-core/src/test/java/rhizome/HeaderSynchronizerTest.java#aBodyWithAForgedNonceUnderAValidatedHeaderIsRefused` |
+| REORG-14 | Win the race to a height (gossip or the local producer) so the victim's body apply fails INVALID_BLOCK_ID, reading as peer misbehaviour and striking an honest peer toward a ban. | A2 | DEFENDED | `lib-core/src/test/java/rhizome/HeaderSynchronizerTest.java#aBodyApplyThatLostARaceToGossipIsNoChangeNotAPeerFault` |
 
 ## POOL — mempool and relay policy
 
@@ -672,6 +679,16 @@ taken.
   the overflow to its existing signed-range refusal), STATE-07 (duplicate snapshot key refused),
   CODEC-08 (token string UTF-8 validity compares bytes, not lengths) and CODEC-09 (coinbase must
   carry zero signature and key bytes, `BOX_COLLECT` a zero key).
+- **2026-11-13** — Block/uncle/sync/miner hardening lot (pre-public-testnet): UNCLE-08 to UNCLE-10
+  (an orphan body is now bound to its header by recomputing the merkle root before the PoW verdict,
+  the verify-once PoW cache stores the verified nonce rather than a bare hash hit, the orphan pool
+  is put-if-absent, and orphan bodies over `maxUncleBodyBytes` (64 KiB, all profiles inherit) are
+  refused before hashing), POW-09 (the built-in miner polls a stale check and abandons a candidate
+  whose parent is no longer the tip; a solved-but-stale block is pooled as an orphan), CONS-11
+  (account-nonce sequencing moved behind the block's own PoW), REORG-13 (headers-first body apply
+  also requires the header's nonce, the one header field the hash omits) and REORG-14 (an
+  INVALID_BLOCK_ID/IS_SYNCING body-apply failure on the extension path is NO_CHANGE, not a strike).
+  The retarget memo also keeps its floor entry, and `SyncDriver` holds one `HeaderSynchronizer`.
 
 - **2026-09-07** — POW-08 for the pre-PoW gate ordering CONS-10 already locks by status code
   (`BlockUnclesTest#blocksOwnPowIsVerifiedBeforeUncleWork`), proven this time by an actual cost

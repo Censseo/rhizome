@@ -707,10 +707,6 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
             if (!computeMerkleRoot(block).equals(b.merkleRoot())) {
                 return INVALID_MERKLE_ROOT;
             }
-            ExecutionStatus nonceCheck = checkAccountNonces(block);
-            if (nonceCheck != SUCCESS) {
-                return nonceCheck;
-            }
             // Proof of work, verified last so an invalid block can't burn CPU (Pandanite lesson) — unless
             // the caller already proved it: a headers-first-synced body whose hash equals a header
             // HeaderChain.validate PoW-verified carries the same memory-hard proof, so re-hashing it is
@@ -722,6 +718,13 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
                 || (trustedRestore && b.nonce().equals(recentlyPoppedBlocks.get(block.hash())));
             if (!powAlreadyProven && !block.verifyNonce(params.powAlgorithm(), params.powCostsAt(b.id()))) {
                 return INVALID_NONCE;
+            }
+            // Account-nonce sequencing is body work: up to maxTransactionsPerBlock nonceStore reads
+            // per block, so it runs only once the block's own PoW is proven (an unmined spray of
+            // 25 000-sender blocks used to cost 25 000 reads each before the hash was ever checked).
+            ExecutionStatus nonceCheck = checkAccountNonces(block);
+            if (nonceCheck != SUCCESS) {
+                return nonceCheck;
             }
 
             // Structural uncle checks (GHOST): bounded count, distinct, none is the parent, and each
@@ -1879,7 +1882,7 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
         lowest.forEach(nonceStore::set);
     }
 
-    private static SHA256Hash computeMerkleRoot(Block block) {
+    static SHA256Hash computeMerkleRoot(Block block) {
         var tree = new MerkleTree();
         tree.setItems(block.transactions());
         return tree.getRootHash();

@@ -143,6 +143,16 @@ public final class NetworkParameters {
     private final int maxBlockSizeBytes;
 
     /**
+     * Maximum serialized size of an ORPHAN body the node will pool (and later persist as an uncle
+     * body). Uncle bodies are never validated beyond PoW + merkle, so a full-size one is pure
+     * retention for no consensus value: an uncle's reward needs only its header and coinbase.
+     * Orphans over the cap are refused before any hashing. Profiles derive via toBuilder(), so
+     * testnet/devnet inherit this value; a profile that ever raises its block size must keep
+     * the cap above its largest coinbase-only block.
+     */
+    private final int maxUncleBodyBytes;
+
+    /**
      * Maximum gas a single contract transaction may declare. A contract's {@code gasLimit} is
      * otherwise bounded only by affordability, and with {@code gasPrice = 0} (valid at consensus —
      * the min-fee floor is a mempool-only policy) a zero-cost call can name an arbitrary limit, so a
@@ -485,7 +495,7 @@ public final class NetworkParameters {
                       long genesisTimestamp, int genesisDifficulty,
                       int desiredBlockTimeSec, int difficultyLookback, int minDifficulty, int maxDifficulty,
                       int maxFutureBlockTimeSec, int minBlockTimeSec, int medianTimeWindow,
-                      int maxTransactionsPerBlock, long minFee, int maxBlockSizeBytes,
+                      int maxTransactionsPerBlock, long minFee, int maxBlockSizeBytes, int maxUncleBodyBytes,
                       long maxTxGas, long maxBlockGas, int maxUnclesPerBlock, int uncleMaxDepth,
                       int maxReorgDepth, java.util.Map<Long, rhizome.crypto.SHA256Hash> checkpoints,
                       long decimalScaleFactor, long initialReward, long rewardEpochBlocks,
@@ -653,6 +663,10 @@ public final class NetworkParameters {
         this.maxTransactionsPerBlock = maxTransactionsPerBlock;
         this.minFee = minFee;
         this.maxBlockSizeBytes = maxBlockSizeBytes;
+        if (maxUncleBodyBytes <= 0) {
+            throw new IllegalArgumentException("maxUncleBodyBytes must be positive");
+        }
+        this.maxUncleBodyBytes = maxUncleBodyBytes;
         this.maxTxGas = maxTxGas;
         this.maxBlockGas = maxBlockGas;
         this.maxUnclesPerBlock = maxUnclesPerBlock;
@@ -946,6 +960,7 @@ public final class NetworkParameters {
             .medianTimeWindow(60)
             .maxTransactionsPerBlock(25_000)
             .maxBlockSizeBytes(Constants.MAX_BLOCK_SIZE_BYTES)
+            .maxUncleBodyBytes(64 * 1024)
             // Consensus gas ceiling: one contract call is capped at 50M gas (ample — real calls use a
             // few million; matches the read-only VM cap), and a block's contract calls total at most
             // 250M declared gas, so the worst-case VM work a valid block can force on every node is

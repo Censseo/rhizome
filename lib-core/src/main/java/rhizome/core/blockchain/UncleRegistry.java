@@ -51,10 +51,10 @@ final class UncleRegistry {
      * attacker cannot evict useful entries with junk headers. Engine-lock-guarded like every
      * caller ({@link #registerOrphan}, {@link #uncleEligible}).
      */
-    private final LinkedHashMap<SHA256Hash, Boolean> verifiedOrphanPow =
+    private final LinkedHashMap<SHA256Hash, SHA256Hash> verifiedOrphanPow =
         new LinkedHashMap<>(256, 0.75f, true) {
             @Override
-            protected boolean removeEldestEntry(Map.Entry<SHA256Hash, Boolean> eldest) {
+            protected boolean removeEldestEntry(Map.Entry<SHA256Hash, SHA256Hash> eldest) {
                 return size() > 1024;
             }
         };
@@ -90,11 +90,22 @@ final class UncleRegistry {
         if (block.serializedSize() > params.maxBlockSizeBytes()) {
             return; // too large to ever be accepted or referenced
         }
+        // Uncle bodies are retained (pool, then persisted) but never fully validated: cap them far
+        // below a block so a spray of max-size orphans cannot pin megabytes each.
+        if (block.serializedSize() > params.maxUncleBodyBytes()) {
+            return;
+        }
         if (uid <= GenesisBlock.GENESIS_ID || uid > tip || uid < tip - depth + 1) {
             return; // not a recent past sibling of a block we could still build on
         }
         if (!store.headerAt(uid - 1).hash().equals(b.lastBlockHash())) {
             return; // must fork from our known main-chain parent at height uid-1
+        }
+        // Bind the body to the header BEFORE the PoW: the hash commits merkleRoot, not the body, so
+        // without this an attacker replays an honest orphan's header+nonce over a body whose coinbase
+        // pays itself (the uncle's miner is read from the body) or two body variants split nodes.
+        if (!ChainEngine.computeMerkleRoot(block).equals(b.merkleRoot())) {
+            return;
         }
         // Only now the memory-hard proof-of-work check, on a block that is at least a
         // structurally-plausible recent sibling — verify-once: a sibling already proven (e.g.
@@ -309,13 +320,15 @@ final class UncleRegistry {
      */
     private boolean verifyOrphanPowOnce(Block block, int id) {
         SHA256Hash key = block.hash();
-        if (verifiedOrphanPow.containsKey(key)) {
+        // The hash does not commit the nonce, so the cache must: a bare hash hit would vouch for
+        // the same header carrying a garbage nonce.
+        if (block.nonce().equals(verifiedOrphanPow.get(key))) {
             return true;
         }
         if (!block.verifyNonce(params.powAlgorithm(), params.powCostsAt(id))) {
             return false;
         }
-        verifiedOrphanPow.put(key, Boolean.TRUE);
+        verifiedOrphanPow.put(key, block.nonce());
         return true;
     }
 

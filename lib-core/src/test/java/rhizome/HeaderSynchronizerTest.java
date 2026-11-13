@@ -448,6 +448,64 @@ class HeaderSynchronizerTest {
             "the reorg window must be closed, so the chain accepts new tips again");
     }
 
+    /** A copy of {@code b} with a nonce that fails PoW (same hash: the nonce is not in it). */
+    private static Block withBadNonce(Block b) {
+        var src = (BlockImpl) b;
+        var copy = (BlockImpl) BlockImpl.builder().id(src.id()).timestamp(src.timestamp())
+            .difficulty(src.difficulty()).lastBlockHash(src.lastBlockHash()).merkleRoot(src.merkleRoot())
+            .stateRoot(src.stateRoot()).vote(src.vote()).supply(src.supply())
+            .uncles(src.uncles()).build();
+        src.transactions().forEach(copy::addTransaction);
+        byte[] raw = src.nonce().toBytes();
+        do {
+            raw[0]++;
+            copy.nonce(SHA256Hash.of(raw));
+        } while (copy.verifyNonce(PARAMS.powAlgorithm()));
+        return copy;
+    }
+
+    /**
+     * REORG-13 — a peer serves bodies whose hash matches the PoW-validated headers but whose
+     * nonce is forged: addValidatedBody skips PoW, so the body must be bound to the header's
+     * nonce here or the forged nonce is persisted as the canonical block's.
+     */
+    @Test
+    void aBodyWithAForgedNonceUnderAValidatedHeaderIsRefused() {
+        ChainEngine peerEngine = newEngine();
+        mine(peerEngine, PublicAddress.random(), new AtomicLong(0), 3);
+        ChainEngine local = newEngine();
+        EnginePeer forger = new EnginePeer(peerEngine) {
+            @Override public List<Block> blocks(long start, long end) {
+                List<Block> out = new ArrayList<>();
+                for (Block b : super.blocks(start, end)) out.add(withBadNonce(b));
+                return out;
+            }
+        };
+        assertEquals(ChainSynchronizer.Result.PEER_INVALID, new HeaderSynchronizer(local).syncFrom(forger));
+        assertEquals(1, local.height(), "no forged-nonce body was applied");
+    }
+
+    /**
+     * REORG-14 — gossip (or the local producer) adding the very height the sync is fetching makes
+     * the body apply fail INVALID_BLOCK_ID; that is a race with ourselves, not peer misbehaviour,
+     * so it must not read as PEER_INVALID (which strikes an honest peer toward a ban).
+     */
+    @Test
+    void aBodyApplyThatLostARaceToGossipIsNoChangeNotAPeerFault() {
+        ChainEngine peerEngine = newEngine();
+        mine(peerEngine, PublicAddress.random(), new AtomicLong(0), 3);
+        ChainEngine local = newEngine();
+        EnginePeer racing = new EnginePeer(peerEngine) {
+            @Override public List<Block> blocks(long start, long end) {
+                if (local.height() == 1) {
+                    assertEquals(ExecutionStatus.SUCCESS, local.addBlock(e.blockAt(2))); // gossip wins
+                }
+                return super.blocks(start, end);
+            }
+        };
+        assertEquals(ChainSynchronizer.Result.NO_CHANGE, new HeaderSynchronizer(local).syncFrom(racing));
+    }
+
     @Test
     void aMalformedBodyWindowIsThePeersFaultAndNeverEscapesTheSyncPass() {
         // The headers-first and full-block paths classify a failed body fetch DIFFERENTLY, and

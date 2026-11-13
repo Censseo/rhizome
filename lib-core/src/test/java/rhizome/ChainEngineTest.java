@@ -18,6 +18,7 @@ import org.junit.jupiter.api.Test;
 
 import rhizome.core.block.Block;
 import rhizome.core.block.BlockImpl;
+import rhizome.crypto.SHA256Hash;
 import rhizome.core.blockchain.ChainEngine;
 import rhizome.core.blockchain.ChainEngineTestAccess;
 import rhizome.core.blockchain.GenesisBlock;
@@ -305,6 +306,25 @@ class ChainEngineTest {
         // In-block sequence 1,2 accepted.
         assertEquals(ExecutionStatus.SUCCESS,
             engine.addBlock(nextBlock(List.of(send(100, 0, 1), send(100, 0, 2)))));
+    }
+
+    /**
+     * CONS-11 — the 25 000-sender nonce walk is body work and must not run before the block's
+     * own proof of work: a block with BOTH a bad account nonce and a bad PoW is refused at the PoW
+     * gate (INVALID_NONCE), proving the nonce store was never consulted for it.
+     */
+    @Test
+    void accountNonceWalkRunsOnlyAfterTheProofOfWork() {
+        BlockImpl b = (BlockImpl) nextBlock(List.of(send(100, 0, 5))); // gap: 0 expected
+        SHA256Hash bad = b.nonce();
+        do {
+            byte[] raw = bad.toBytes();
+            raw[0]++;
+            bad = SHA256Hash.of(raw);
+            b.nonce(bad);
+        } while (b.verifyNonce(params.powAlgorithm()));
+        assertEquals(ExecutionStatus.INVALID_NONCE, engine.addBlock(b));
+        assertEquals(1, engine.height());
     }
 
     @Test
