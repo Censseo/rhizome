@@ -100,8 +100,13 @@ final class AdmissionControl {
 
     private static final int SHARE_MAX_KEYS = 8_192;
 
+    /** The most one request can cost: the per-IP limiter's own 1000 units/s. A share below it would
+     *  make a legitimate deep scan (cost up to 1000) permanently unadmittable. */
+    private static final int MAX_SINGLE_COST = 1000;
+
     private static RateLimiter share(int bucketPerSec) {
-        return new RateLimiter(Math.max(1, bucketPerSec / CLIENT_SHARE_DIVISOR), 1000, SHARE_MAX_KEYS);
+        int cap = bucketPerSec / CLIENT_SHARE_DIVISOR;
+        return new RateLimiter(cap < 100 ? Math.max(1, cap) : Math.max(cap, MAX_SINGLE_COST), 1000, SHARE_MAX_KEYS);
     }
 
     /**

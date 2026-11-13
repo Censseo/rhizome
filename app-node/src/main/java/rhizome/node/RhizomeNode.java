@@ -422,6 +422,16 @@ public final class RhizomeNode implements AutoCloseable {
                 return t;
             },
             new java.util.concurrent.ThreadPoolExecutor.AbortPolicy());
+        // Dedicated small pool for /submit and /add_transaction*: ingest is serialised on the
+        // engine lock anyway, so more threads only let a flood occupy the general pool above.
+        var ingestWorkers = new java.util.concurrent.ThreadPoolExecutor(2, 2,
+            60L, TimeUnit.SECONDS, new java.util.concurrent.ArrayBlockingQueue<>(64),
+            r -> {
+                Thread t = new Thread(r, "rhizome-ingest-worker");
+                t.setDaemon(true);
+                return t;
+            },
+            new java.util.concurrent.ThreadPoolExecutor.AbortPolicy());
         // Stream every applied block's logs (plus a heartbeat) to SSE subscribers,
         // whatever path the block arrived by: API submit, gossip, sync or the local
         // producer. The engine listener only enqueues onto the event loop.
@@ -459,7 +469,7 @@ public final class RhizomeNode implements AutoCloseable {
         }
         HttpServer httpServer = HttpServer.builder(eventloop,
                 NodeApi.servlet(eventloop, c.service(), limiter, sseHub, c.allowedHosts(),
-                    config.apiToken().orElse(null), apiWorkers, protectReads, trustXff))
+                    config.apiToken().orElse(null), apiWorkers, ingestWorkers, protectReads, trustXff))
             .withListenAddress(new java.net.InetSocketAddress(config.bindAddress(), config.apiPort()))
             // Bound how long a connection may stall a read or write: body sizes are capped, but
             // without an inactivity deadline a client can trickle a POST body one byte at a time
@@ -531,13 +541,13 @@ public final class RhizomeNode implements AutoCloseable {
                 }, "snapshot materialisation"), config.syncPeriodMs(), config.syncPeriodMs(), TimeUnit.MILLISECONDS);
             }
 
-            return new NodeRuntime(eventloop, eventloopThread, httpServer, apiWorkers, producer,
+            return new NodeRuntime(eventloop, eventloopThread, httpServer, apiWorkers, ingestWorkers, producer,
                 syncScheduler, discovery);
         } catch (Throwable t) {
             if (producer != null) {
                 producer.stop();
             }
-            stopServing(eventloop, eventloopThread, httpServer, apiWorkers);
+            stopServing(eventloop, eventloopThread, httpServer, apiWorkers, ingestWorkers);
             throw t;
         }
     }
@@ -548,7 +558,8 @@ public final class RhizomeNode implements AutoCloseable {
      * there is no in-flight body read to wait out.
      */
     private static void stopServing(Eventloop eventloop, Thread eventloopThread,
-                                    HttpServer httpServer, java.util.concurrent.ExecutorService apiWorkers) {
+                                    HttpServer httpServer, java.util.concurrent.ExecutorService apiWorkers,
+                                    java.util.concurrent.ExecutorService ingestWorkers) {
         try {
             eventloop.submit(() -> httpServer.close());
             eventloop.keepAlive(false);
@@ -560,6 +571,7 @@ public final class RhizomeNode implements AutoCloseable {
             log.warn("failed to unwind the event loop after a failed start: {}", e.toString());
         } finally {
             apiWorkers.shutdownNow();
+            ingestWorkers.shutdownNow();
         }
     }
 
@@ -714,8 +726,10 @@ public final class RhizomeNode implements AutoCloseable {
         boolean workersStuck = false;
         if (rt != null) {
             rt.apiWorkers().shutdownNow();
+            rt.ingestWorkers().shutdownNow();
             try {
-                if (!rt.apiWorkers().awaitTermination(30, TimeUnit.SECONDS)) {
+                if (!rt.apiWorkers().awaitTermination(30, TimeUnit.SECONDS)
+                    | !rt.ingestWorkers().awaitTermination(30, TimeUnit.SECONDS)) {
                     workersStuck = true;
                     log.error("API worker pool still busy after 30 s; the store close will be "
                         + "skipped (native use-after-free / lock-hang risk)");

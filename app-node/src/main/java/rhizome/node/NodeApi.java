@@ -266,6 +266,22 @@ public final class NodeApi {
                                        java.util.Set<String> allowedHosts, String apiToken,
                                        java.util.concurrent.Executor blocking,
                                        boolean protectReads, boolean trustXff) {
+        return servlet(reactor, node, limiter, sse, allowedHosts, apiToken, blocking, blocking,
+            protectReads, trustXff);
+    }
+
+    /**
+     * As above, with a separate {@code ingest} executor for {@code /submit} and
+     * {@code /add_transaction*}. Sharing one pool let a flood of ingest (each a PoW hash or an
+     * Ed25519 verify, all serialised on the engine lock anyway) occupy every worker and shed the
+     * explorer reads, peer sync and the scalar routes behind them with 429. A small dedicated
+     * pool bounds ingest concurrency to what the lock can use and leaves the general pool free.
+     */
+    public static AsyncServlet servlet(Reactor reactor, NodeService node, RateLimiter limiter, SseLogHub sse,
+                                       java.util.Set<String> allowedHosts, String apiToken,
+                                       java.util.concurrent.Executor blocking,
+                                       java.util.concurrent.Executor ingest,
+                                       boolean protectReads, boolean trustXff) {
         int maxBlockBody = node.params().maxBlockSizeBytes() + 1024;
         DashboardAssets dashboard = DashboardAssets.load();
         DocsAssets docs = DocsAssets.load();
@@ -312,11 +328,13 @@ public final class NodeApi {
             // /block_count and /total_work are what peers read first in a sync round; during a
             // reorg window they answer 503 like the other chain routes so a peer never sees the
             // "height before the pop, headers after it" inconsistency (testnet campaign S5).
-            .with(GET, "/block_count", req -> ok(whenNotReorging(node, () -> text(String.valueOf(node.blockCount())))))
-            .with(GET, "/total_work", req -> ok(whenNotReorging(node, () -> totalWorkResponse(node))))
-            .with(GET, "/difficulty", req -> ok(text(String.valueOf(node.difficulty()))))
-            .with(GET, "/mempool", req -> ok(mempoolResponse(node)))
-            .with(GET, "/info", req -> ok(infoResponse(node)))
+            // These read chain state under the engine lock, so they are offloaded: run inline they
+            // parked the single event loop behind any long lock holder (a block apply, a reorg).
+            .with(GET, "/block_count", req -> offload(blocking, () -> whenNotReorging(node, () -> text(String.valueOf(node.blockCount())))))
+            .with(GET, "/total_work", req -> offload(blocking, () -> whenNotReorging(node, () -> totalWorkResponse(node))))
+            .with(GET, "/difficulty", req -> offload(blocking, () -> text(String.valueOf(node.difficulty()))))
+            .with(GET, "/mempool", req -> offload(blocking, () -> mempoolResponse(node)))
+            .with(GET, "/info", req -> offload(blocking, () -> infoResponse(node)))
             // ---- peer registry ----
             .with(GET, "/peers", req -> ok(peersResponse(node)))
             .with(POST, "/add_peer", req -> req.loadBody(SMALL_BODY).map(body -> guardedResponse(() -> {
@@ -357,17 +375,17 @@ public final class NodeApi {
             .with(GET, "/sync", req -> guarded(() -> SyncApi.sync(node, req)))
             .with(GET, "/headers", req -> guarded(() -> SyncApi.headers(node, req)))
             .with(GET, "/orphan", req -> offload(blocking, () -> SyncApi.orphan(node, req)))
-            .with(POST, "/add_transaction_json", req -> req.loadBody(JSON_TX_BODY).then(body -> offload(blocking, () -> {
+            .with(POST, "/add_transaction_json", req -> req.loadBody(JSON_TX_BODY).then(body -> offload(ingest, () -> {
                 Transaction t = decodeOrStrike(node, clientKey(req, trustXff),
                     () -> Transaction.of(parseJson(body.getString(StandardCharsets.UTF_8))));
                 return statusResponse(node.submitTransaction(t, clientKey(req, trustXff)));
             })))
-            .with(POST, "/add_transaction", req -> req.loadBody(TX_BODY).then(body -> offload(blocking, () -> {
+            .with(POST, "/add_transaction", req -> req.loadBody(TX_BODY).then(body -> offload(ingest, () -> {
                 Transaction t = decodeOrStrike(node, clientKey(req, trustXff),
                     () -> Transaction.of(TransactionDto.fromBuffer(body.getArray())));
                 return statusResponse(node.submitTransaction(t, clientKey(req, trustXff)));
             })))
-            .with(POST, "/submit", req -> req.loadBody(maxBlockBody).then(body -> offload(blocking, () -> {
+            .with(POST, "/submit", req -> req.loadBody(maxBlockBody).then(body -> offload(ingest, () -> {
                 Block block = decodeOrStrike(node, clientKey(req, trustXff), () -> BlockCodec.decode(body.getArray()));
                 return statusResponse(node.submitBlock(block, clientKey(req, trustXff)));
             })))

@@ -569,6 +569,24 @@ class NodeApiTest {
         assertNotEquals(429, callWith(syncSpent, HttpRequest.get("http://x/stats").build()).getCode());
     }
 
+    /**
+     * API-18 — Saturate the general worker pool with ingest, or hold the engine lock under the
+     * scalar routes, to wedge explorer reads and peer sync: ingest has its own pool, and the
+     * lock-taking scalar routes run on the worker pool rather than the event loop.
+     */
+    @Test
+    void ingestHasItsOwnPoolAndScalarRoutesAreOffloaded() throws Exception {
+        java.util.concurrent.Executor saturated = r -> { throw new java.util.concurrent.RejectedExecutionException(); };
+        var s = NodeApi.servlet(eventloop, new NodeService(engine, mempool),
+            new RateLimiter(1_000_000, 60_000, 100), null, null, null, saturated, null, false, false);
+        // General pool saturated: pool-backed reads and the offloaded scalar shed with 429...
+        assertEquals(429, callWith(s, HttpRequest.get("http://x/stats").build()).getCode());
+        assertEquals(429, callWith(s, HttpRequest.get("http://x/block_count").build()).getCode());
+        // ...while ingest (own pool; null = inline here) is untouched: junk is a 400, not a 429.
+        assertEquals(400, callWith(s, HttpRequest.post("http://x/add_transaction")
+            .withBody(new byte[] {1}).build()).getCode());
+    }
+
     @Test
     void aFullStrikeTableStillTracksTheClientOffendingNow() {
         // The strike table is bounded, and once it was full every NEW client's faults went to a
