@@ -373,13 +373,6 @@ public final class WasmVm {
             // transaction would revert on a small-heap node and succeed on a large one. HostFault
             // is rethrown at every depth up to the executor's fatal path.
             throw new HostFault("host out of memory during contract execution", e);
-        } catch (StackOverflowError e) {
-            // Defence in depth: recursion that somehow outran the deterministic depth cap. The exact
-            // stack at which a given JVM trips is host-specific, so normalize to a deterministic
-            // full-gas out-of-gas rather than a node-local outcome. The shared meter is saturated
-            // too: the processor reports meter.used(), which must agree with the result's gasUsed.
-            gas.exhaust();
-            return ExecResult.outOfGas(gas.limit());
         } catch (Throwable e) {
             HostFault fault = HostFault.of(e);
             if (fault != null) {
@@ -404,10 +397,12 @@ public final class WasmVm {
                 return ExecResult.outOfGas(gas.used());
             }
             if (isStackExhausted(e)) {
-                // Defence in depth: the tree-wide depth cap should trap first, but if Chicory ever
-                // rewraps a real JVM StackOverflowError as ChicoryException("call stack exhausted")
-                // it must not surface with node-local gas.used() — that would fork consensus. Pin it
-                // to the same deterministic full-gas out-of-gas as the StackOverflowError catch.
+                // Defence in depth: recursion that somehow outran the deterministic depth cap, raw
+                // or rewrapped by Chicory as ChicoryException("call stack exhausted"). The exact
+                // stack at which a JVM trips is host-specific, so it must not surface with
+                // node-local gas.used() — that would fork consensus. Pin it to a deterministic
+                // full-gas out-of-gas, and saturate the shared meter too: the processor reports
+                // meter.used(), which must agree with the result's gasUsed (VM-29).
                 gas.exhaust();
                 return ExecResult.outOfGas(gas.limit());
             }

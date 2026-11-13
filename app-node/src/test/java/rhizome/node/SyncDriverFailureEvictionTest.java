@@ -55,4 +55,34 @@ class SyncDriverFailureEvictionTest {
             assertFalse(node.knownPeers().contains(peer), "the third consecutive failure evicts the peer");
         }
     }
+
+    /** NET-12 — a sync round the peer answers clears its count: failures must be CONSECUTIVE to evict. */
+    @Test
+    void aSuccessfulSyncRoundResetsTheFailureCount() throws Exception {
+        int peerPort = freePort();
+        String peer = "http://127.0.0.1:" + peerPort;
+        NodeConfig config = NodeConfig.defaults(FAST, tempDir.resolve("a").toString(), freePort())
+            .withAllowPrivatePeers(true).toBuilder().syncPeriodMs(600_000L).build();
+        try (RhizomeNode node = new RhizomeNode(config)) {
+            node.start();
+            node.service().addPeer(peer);
+            long deadline = System.currentTimeMillis() + 10_000;
+            while (!node.knownPeers().contains(peer) && System.currentTimeMillis() < deadline) {
+                Thread.sleep(20);
+            }
+            assertTrue(node.knownPeers().contains(peer), "peer admitted");
+
+            node.syncRound();
+            node.syncRound(); // two failures while the peer is down
+            NodeConfig peerConfig = NodeConfig.defaults(FAST, tempDir.resolve("b").toString(), peerPort)
+                .withAllowPrivatePeers(true).toBuilder().syncPeriodMs(600_000L).build();
+            try (RhizomeNode up = new RhizomeNode(peerConfig)) {
+                up.start();
+                node.syncRound(); // answered: the count resets
+            }
+            node.syncRound();
+            node.syncRound(); // two more failures: four in all, but only two consecutive
+            assertTrue(node.knownPeers().contains(peer), "a success in between keeps the peer");
+        }
+    }
 }

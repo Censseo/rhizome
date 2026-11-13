@@ -616,6 +616,11 @@ public final class RhizomeNode implements AutoCloseable {
         runtime.discovery().round();
     }
 
+    /** The started runtime (pools, schedules); null before {@link #start()}. For wiring tests. */
+    NodeRuntime runtime() {
+        return runtime;
+    }
+
     public java.util.List<String> knownPeers() {
         return components.registry().snapshot();
     }

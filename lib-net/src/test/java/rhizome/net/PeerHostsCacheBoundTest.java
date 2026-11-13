@@ -3,6 +3,7 @@ package rhizome.net;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.net.UnknownHostException;
@@ -62,5 +63,22 @@ class PeerHostsCacheBoundTest {
         // A second lookup throws again — now served from the cache, not the resolver.
         assertThrows(UnknownHostException.class, () -> PeerHosts.resolveAll(host));
         assertTrue(PeerHosts.cachedEntryCount() <= 4_096, "negatives share the same bounded LRU");
+    }
+
+    /**
+     * NET-14 — a resolver that never answers costs the caller at most the 3 s lookup deadline, then
+     * fails as an unknown host and is negative-cached. {@link HangingTestResolverProvider} makes
+     * {@code *.hang.invalid} block until interrupted.
+     */
+    @Test
+    void aHangingResolverIsCutOffAtTheLookupDeadline() {
+        String host = "parked-" + Long.toHexString(System.nanoTime()) + HangingTestResolverProvider.HANG_SUFFIX;
+        long start = System.nanoTime();
+        UnknownHostException e = assertTimeoutPreemptively(java.time.Duration.ofSeconds(8),
+            () -> assertThrows(UnknownHostException.class, () -> PeerHosts.resolveAll(host)));
+        long tookMs = (System.nanoTime() - start) / 1_000_000;
+        assertTrue(tookMs >= 2_900 && tookMs < 6_000, "cut off at ~3 s, took " + tookMs + " ms");
+        assertTrue(e.getMessage().contains("timed out"), e.getMessage());
+        assertTrue(PeerHosts.isCachedNegative(host), "the timed-out name is negative-cached");
     }
 }
