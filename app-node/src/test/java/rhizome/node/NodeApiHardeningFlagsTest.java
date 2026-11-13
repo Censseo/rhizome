@@ -114,10 +114,11 @@ class NodeApiHardeningFlagsTest {
     void xffHopResolutionUsesOnlyTheParsedLiteralNeverTheResolver() throws Exception {
         var socket = java.net.InetAddress.getByAddress(new byte[] {10, 0, 0, 1});
 
-        // A syntactically valid hop keys on the literal; the first hop of a list wins.
+        // A syntactically valid hop keys on the literal; the RIGHT-most hop of a list wins:
+        // it is the one our proxy appended; everything left of it is client-supplied.
         assertEquals("1.2.3.4",
             NodeApi.resolveXffHop(socket, "1.2.3.4").getHostAddress());
-        assertEquals("9.9.9.9",
+        assertEquals("1.2.3.4",
             NodeApi.resolveXffHop(socket, "9.9.9.9, 1.2.3.4").getHostAddress());
         assertEquals("0:0:0:0:0:0:0:1",
             NodeApi.resolveXffHop(socket, "::1").getHostAddress());

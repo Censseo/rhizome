@@ -256,7 +256,7 @@ public final class NodeApi {
      * protectReads its own API fetches are refused: use a private node with an external client.
      *
      * <p>{@code trustXff} ({@code RHIZOME_TRUST_XFF}) keys rate limits, push-strike tables and
-     * scan ownership on the FIRST {@code X-Forwarded-For} hop instead of the socket address —
+     * scan ownership on the RIGHT-most {@code X-Forwarded-For} hop (the one the trusted proxy appended) instead of the socket address —
      * required when the node sits behind a reverse proxy, without which every client shares the
      * proxy's budget and scan namespace (audit: no reverse-proxy support). DANGEROUS when the
      * port is directly reachable: clients could then spoof the header and evade per-IP limits.
@@ -1066,7 +1066,7 @@ public final class NodeApi {
     }
 
     /**
-     * As {@link #clientKey(HttpRequest)}, but when {@code trustXff} the FIRST
+     * As {@link #clientKey(HttpRequest)}, but when {@code trustXff} the RIGHT-most
      * {@code X-Forwarded-For} hop replaces the socket address — for nodes only reachable
      * through a trusted reverse proxy (audit: no reverse-proxy support). The header value is
      * parsed as an IP LITERAL ONLY (never via a DNS lookup, which a spoofed hostname would
@@ -1137,8 +1137,8 @@ public final class NodeApi {
 
     /**
      * The address identifying this request's client: the socket address, or — when
-     * {@code trustXff} and an {@code X-Forwarded-For} header is present — the FIRST hop of
-     * that header, resolved by {@link #resolveXffHop} as an IP LITERAL only (never a hostname,
+     * {@code trustXff} and an {@code X-Forwarded-For} header is present — the RIGHT-most hop of
+     * that header (the one our own proxy appended; everything left of it is client-supplied), resolved by {@link #resolveXffHop} as an IP LITERAL only (never a hostname,
      * so no DNS lookup can be triggered on the event loop by a spoofed header). An absent or
      * unparsable hop falls back to the socket address: a client can then only miskey itself.
      */
@@ -1157,7 +1157,7 @@ public final class NodeApi {
     }
 
     /**
-     * The XFF first hop resolved to an address, or {@code socket} when the header is absent or
+     * The XFF right-most hop resolved to an address, or {@code socket} when the header is absent or
      * carries no usable literal (package-private for tests). IPv4 hops are parsed octet-by-octet
      * with a 0..255 range check and built via {@link java.net.InetAddress#getByAddress(byte[])}:
      * a dotted quad with an overflowing octet ({@code 300.1.1.1}) is NOT an IPv4 literal, and
@@ -1172,8 +1172,10 @@ public final class NodeApi {
             return socket;
         }
         try {
-            int comma = xff.indexOf(',');
-            String first = (comma < 0 ? xff : xff.substring(0, comma)).trim();
+            // Right-most: a proxy that appends ($proxy_add_x_forwarded_for) puts the address it
+            // actually saw LAST; the left side is whatever the client chose to send.
+            int comma = xff.lastIndexOf(',');
+            String first = (comma < 0 ? xff : xff.substring(comma + 1)).trim();
             if (first.indexOf(':') >= 0) {
                 // IPv6 literal only: invalid forms throw fast, with no resolver round-trip.
                 return java.net.InetAddress.getByName(first);

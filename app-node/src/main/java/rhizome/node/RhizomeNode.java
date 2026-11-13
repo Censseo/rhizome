@@ -103,6 +103,20 @@ public final class RhizomeNode implements AutoCloseable {
                 + "network. Set RHIZOME_API_TOKEN, bind 127.0.0.1, or set RHIZOME_ALLOW_OPEN_API=true "
                 + "for a pure P2P relay.");
         }
+        // The same exposure through a reverse proxy: the node binds loopback (so the gate above
+        // is satisfied) with no token, but is advertised / allow-listed under a public name — so a
+        // proxy fronts it and EVERY client arrives from 127.0.0.1. Without RHIZOME_TRUST_XFF they
+        // all share one rate-limit/strike/scan identity and every operator route is open to the
+        // world through the proxy.
+        if (config.apiToken().isEmpty() && isLoopbackBind(config.bindAddress())
+            && !config.allowOpenApi() && !config.trustXff() && namesNonLoopbackHost(config)) {
+            throw new IllegalStateException("refusing to start: RHIZOME_ADVERTISE / RHIZOME_ALLOWED_HOSTS "
+                + "name a non-loopback host, so a reverse proxy is presumed in front of this loopback "
+                + "bind, yet there is no RHIZOME_API_TOKEN and no RHIZOME_TRUST_XFF: every client would "
+                + "share one identity and the operator routes would be open through the proxy. Set "
+                + "RHIZOME_API_TOKEN, set RHIZOME_TRUST_XFF=true (proxy only), or set "
+                + "RHIZOME_ALLOW_OPEN_API=true to accept it.");
+        }
         // The opt-in is legitimate for a relay, but it is worth saying out loud what it buys the
         // network: anyone can POST /add_peer, so anyone chooses hosts this node will periodically
         // fetch (SSRF-filtered, bounded, evicted on failure — audit B-3).
@@ -343,6 +357,36 @@ public final class RhizomeNode implements AutoCloseable {
                 + " is below maxReorgDepth=" + maxReorgDepth
                 + "; a reorg that deep could not rebuild state roots — raise the retention");
         }
+    }
+
+    /** True when RHIZOME_ADVERTISE or RHIZOME_ALLOWED_HOSTS names a host that is not loopback. Textual
+     *  check only, never a DNS lookup. */
+    static boolean namesNonLoopbackHost(NodeConfig config) {
+        java.util.List<String> hosts = new java.util.ArrayList<>(config.extraAllowedHosts());
+        config.advertisedUrl().ifPresent(u -> {
+            try {
+                String h = java.net.URI.create(u).getHost();
+                if (h != null) {
+                    hosts.add(h);
+                }
+            } catch (RuntimeException ignored) {
+                // malformed advertise URL is refused at config parse
+            }
+        });
+        for (String raw : hosts) {
+            String h = raw.trim().toLowerCase(java.util.Locale.ROOT);
+            if (h.startsWith("[")) {
+                int close = h.indexOf(']');
+                h = close < 0 ? h : h.substring(0, close + 1);
+            } else if (h.indexOf(':') == h.lastIndexOf(':') && h.contains(":")) {
+                h = h.substring(0, h.indexOf(':')); // name:port
+            }
+            if (!h.isEmpty() && !h.equals("localhost") && !h.startsWith("127.") && !h.equals("[::1]")
+                && !h.equals("::1")) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** True when the configured bind address resolves to a loopback interface only. */
