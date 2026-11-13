@@ -421,6 +421,30 @@ public final class NodeService {
         return engine.params().networkName();
     }
 
+    private volatile String genesisHash;
+
+    /** Hex genesis hash, read once (genesis never changes) so hot {@code /info} polls take no lock. */
+    public String genesisHash() {
+        String h = genesisHash;
+        if (h == null) {
+            h = engine.headerAt(rhizome.core.blockchain.GenesisBlock.GENESIS_ID).hash().toHexString();
+            genesisHash = h;
+        }
+        return h;
+    }
+
+    private volatile String rulesetVersion;
+
+    /** {@link NetworkParameters#rulesetVersion()}, computed once. */
+    public String rulesetVersion() {
+        String v = rulesetVersion;
+        if (v == null) {
+            v = engine.params().rulesetVersion();
+            rulesetVersion = v;
+        }
+        return v;
+    }
+
     public long blockCount() {
         return engine.height();
     }
