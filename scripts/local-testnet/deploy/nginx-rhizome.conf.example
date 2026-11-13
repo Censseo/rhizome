@@ -40,6 +40,27 @@
 # per-IP limits; enable only when the socket can solely be reached from the trusted proxy."
 # ============================================================================================
 
+# http{}-LEVEL DIRECTIVES — this file holds server blocks only, so these are a note, not live
+# config. Add them to /etc/nginx/nginx.conf inside http { } (before the sites-enabled include).
+# The limit_conn/limit_req lines below reference the zones and fail `nginx -t` without them:
+#   server_tokens off;
+#   limit_conn_zone $binary_remote_addr zone=rhz_conn:10m;
+#   limit_req_zone $binary_remote_addr zone=rhz_req:10m rate=50r/s;
+
+# Catch-all for unknown Host headers: drop the request with no response (444 is nginx-only).
+# On 443 there is no certificate for an unknown name, so the TLS handshake is refused instead
+# (ssl_reject_handshake needs nginx >= 1.19.4).
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    listen 443 ssl default_server;
+    listen [::]:443 ssl default_server;
+    server_name _;
+    ssl_reject_handshake on;
+
+    return 444;
+}
+
 # Plain-HTTP listener: redirect to HTTPS only. Never proxy application traffic here — an
 # unencrypted path to the node would also carry RHIZOME_API_TOKEN bearer headers in the clear.
 server {
@@ -70,6 +91,9 @@ server {
     ssl_session_cache shared:rhizome_tls:10m;
     ssl_session_timeout 1h;
 
+    # HSTS for the TLS vhost only (browsers ignore it over plain HTTP).
+    add_header Strict-Transport-Security "max-age=31536000" always;
+
     # A submitted block can be up to the network's maxBlockSizeBytes (4 MiB as pinned in
     # lib-core's Constants.MAX_BLOCK_SIZE_BYTES, checked against `/submit`'s own
     # maxBlockSizeBytes+1024 cap) — sized with real headroom above that, not tight against it,
@@ -95,6 +119,11 @@ server {
         # scheme.
         proxy_set_header X-Forwarded-Proto $scheme;
 
+        # Zones are defined in http{} (see the note at the top). 32 concurrent connections per
+        # client; 50 req/s sustained, bursts of 100 served without delay.
+        limit_conn rhz_conn 32;
+        limit_req zone=rhz_req burst=100 nodelay;
+
         # Slow-loris-style stalls are already bounded node-side (the node applies a 30s
         # read/write timeout per HTTP connection) — these just keep nginx's own idle connection
         # from lingering far longer than the node would.
@@ -112,6 +141,9 @@ server {
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header X-Forwarded-Proto $scheme;
+
+        # Stricter than `/`: at most 2 concurrent streams per client.
+        limit_conn rhz_conn 2;
 
         proxy_buffering off;
         proxy_cache off;
