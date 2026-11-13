@@ -771,7 +771,18 @@ public final class RocksDbNodeStore extends RocksDbStore implements rhizome.core
             byte[] key = longToBytes(height);
             byte[] encoded = raw(ledgerJournalCf, key);
             if (encoded == null) {
-                return false;
+                // A journal staged by the OPEN commit (the block's own, not yet appended) is not
+                // durable yet: the INVALID_STATE_ROOT rejection reverts it here. Missing it sent
+                // the rejection down the arithmetic mirrors while InMemoryLedger (which finds its
+                // journal) never exercised that path. Replay the inverses over the staging overlay
+                // and drop the staged journal -- it must not flush with the discarded block.
+                var staged = pendingLedgerJournal;
+                byte[] stagedBytes = staged == null ? null : staged.remove(height);
+                if (stagedBytes == null) {
+                    return false;
+                }
+                replayInverses(LedgerJournalCodec.decode(stagedBytes));
+                return true;
             }
             java.util.List<rhizome.core.ledger.LedgerOp> journal = LedgerJournalCodec.decode(encoded);
             if (pendingLedger != null) {
