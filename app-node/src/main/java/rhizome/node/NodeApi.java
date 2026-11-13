@@ -1070,6 +1070,13 @@ public final class NodeApi {
     static String clientShareKey(HttpRequest request, boolean trustXff) {
         try {
             java.net.InetAddress addr = clientAddress(request, trustXff);
+            // A direct loopback client is this host (co-located peers, local testnets, operator
+            // tooling): exempt from the per-client share, still under the aggregate buckets. Safe
+            // because a token-less loopback bind behind a public proxy refuses to start without
+            // TRUST_XFF, and with TRUST_XFF the key is the forwarded hop, never loopback.
+            if (!trustXff && addr != null && addr.isLoopbackAddress()) {
+                return null;
+            }
             if (addr != null && addr.getAddress().length == 16) {
                 return clientSubnetKey(request, trustXff);
             }

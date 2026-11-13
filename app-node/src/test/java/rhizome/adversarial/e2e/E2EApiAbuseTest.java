@@ -46,8 +46,8 @@ class E2EApiAbuseTest {
     }
 
     /**
-     * E2E-05 — the operator token actually gates the state-changing routes on the wire, and a
-     * refused caller costs the node nothing: it keeps mining.
+     * E2E-05 — the operator token actually gates the operator routes on the wire while public ingest
+     * stays open, and a refused caller costs the node nothing: it keeps mining.
      */
     @Test
     void stateChangingRoutesAreRefusedWithoutTheBearerAndTheNodeKeepsProducing() throws Exception {
@@ -56,16 +56,21 @@ class E2EApiAbuseTest {
                 .mining().blockInterval(150).apiToken(TOKEN).start();
             int port = node.apiPort();
 
-            assertEquals(401, RawHttp.post(port, "/submit", Map.of(), json()).status(),
-                "an unauthenticated /submit must be refused");
-            assertEquals(401, RawHttp.post(port, "/add_transaction", Map.of(), json()).status());
-            assertEquals(401, RawHttp.post(port, "/add_transaction",
+            assertEquals(401, RawHttp.post(port, "/add_peer", Map.of(), json()).status(),
+                "an unauthenticated operator route must be refused");
+            assertEquals(401, RawHttp.post(port, "/add_peer",
                     Map.of("Authorization", "Bearer wrong-token"), json()).status(),
                 "a wrong bearer is no better than none");
+            // Ingest is deliberately NOT token-gated (INGEST guard: open, budgeted, strike-tracked),
+            // so peers and wallets can push without the operator's secret.
+            assertNotEquals(401, RawHttp.post(port, "/submit", Map.of(), json()).status(),
+                "/submit is public ingest, refused on content rather than on the bearer");
+            assertNotEquals(401, RawHttp.post(port, "/add_transaction", Map.of(), json()).status(),
+                "/add_transaction is public ingest, refused on content rather than on the bearer");
 
             // With the right bearer the request reaches the handler: it is rejected on its content
-            // (an empty object is not a transaction), which is a different refusal entirely.
-            int authorized = RawHttp.post(port, "/add_transaction",
+            // (an empty object is not a peer announcement), which is a different refusal entirely.
+            int authorized = RawHttp.post(port, "/add_peer",
                 Map.of("Authorization", "Bearer " + TOKEN), json()).status();
             assertNotEquals(401, authorized, "the correct bearer must pass the gate");
 
@@ -91,16 +96,16 @@ class E2EApiAbuseTest {
 
             for (int len = 0; len < TOKEN.length(); len++) {
                 String prefix = TOKEN.substring(0, len);
-                assertEquals(401, RawHttp.post(port, "/add_transaction",
+                assertEquals(401, RawHttp.post(port, "/add_peer",
                         Map.of("Authorization", "Bearer " + prefix), json()).status(),
                     "a " + len + "-byte prefix of the " + TOKEN.length()
                         + "-byte token must be refused, not partially accepted");
             }
-            assertEquals(401, RawHttp.post(port, "/add_transaction",
+            assertEquals(401, RawHttp.post(port, "/add_peer",
                     Map.of("Authorization", "Bearer " + TOKEN + "x"), json()).status(),
                 "a token one byte too long must also be refused");
 
-            int prefixAuthorized = RawHttp.post(port, "/add_transaction",
+            int prefixAuthorized = RawHttp.post(port, "/add_peer",
                 Map.of("Authorization", "Bearer " + TOKEN), json()).status();
             assertNotEquals(401, prefixAuthorized, "the exact, full-length token must still pass the gate");
 

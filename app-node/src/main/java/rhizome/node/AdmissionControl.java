@@ -144,24 +144,25 @@ final class AdmissionControl {
         return AdmissionControl.builder().build();
     }
 
-    /** Reserves one {@code /submit} PoW verification. */
+    /** Reserves one {@code /submit} PoW verification. A null {@code shareKey} (a direct loopback
+     *  client, see {@code NodeApi.clientShareKey}) skips the per-client share. */
     boolean trySubmit(String shareKey) {
-        return submitShare.allow(shareKey) && submitPow.allow("submit");
+        return (shareKey == null || submitShare.allow(shareKey)) && submitPow.allow("submit");
     }
 
     /** Reserves one mempool admission (one inline Ed25519 verification). */
     boolean tryMempoolSig(String shareKey) {
-        return mempoolShare.allow(shareKey) && mempoolSig.allow("tx");
+        return (shareKey == null || mempoolShare.allow(shareKey)) && mempoolSig.allow("tx");
     }
 
     /** Reserves {@code cost} units of the lock-guarded block-decode budget. */
     boolean tryRead(String shareKey, int cost) {
-        return readShare.allow(shareKey, cost) && read.allow("read", cost);
+        return (shareKey == null || readShare.allow(shareKey, cost)) && read.allow("read", cost);
     }
 
     /** Reserves {@code cost} units of the peer-sync serving budget. */
     boolean trySync(String shareKey, int cost) {
-        return syncShare.allow(shareKey, cost) && sync.allow("sync", cost);
+        return (shareKey == null || syncShare.allow(shareKey, cost)) && sync.allow("sync", cost);
     }
 
     /** Reserves {@code gasLimit} gas, charged at most {@link #MAX_READONLY_GAS_CHARGE}. */
