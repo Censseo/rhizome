@@ -102,6 +102,24 @@ public final class WasmVm {
     static final int HOST_BUFFER_CAP = 1024 * 1024;
 
     /**
+     * Hard cap on the operand stack (entries, 8 bytes each = 8 MiB) of one Instance, checked in the
+     * per-instruction meter. Chicory grows its {@code MStack} on demand with no limit, and recursion
+     * that leaves operands behind accumulates them across frames; without a network constant the
+     * outcome would depend on each node's {@code -Xmx}. Exceeding it is a saturating full-gas
+     * out-of-gas, like the other budgets here. A compiled contract keeps a few dozen entries live.
+     */
+    static final int MAX_OPERAND_STACK = 1 << 20;
+
+    /**
+     * Hard cap on the event-data bytes (topic + data) one transaction's whole call tree may emit.
+     * Logs cost {@link GasSchedule#PER_BYTE} (transient pricing) yet are retained in receipts and
+     * log indexes, and {@link #HOST_BUFFER_CAP} only bounds one call; a transaction could otherwise
+     * emit gas-limit-many bytes. Counted on the shared meter, discarded frames included, so the
+     * verdict is a pure function of the instruction stream. Exceeding it is a full-gas out-of-gas.
+     */
+    static final long MAX_TX_LOG_BYTES = 1024 * 1024;
+
+    /**
      * Hard cap on a module's declared table size (entries). A table's {@code initial} count forces
      * Chicory to eagerly allocate a reference array of that many entries at INSTANTIATION — before
      * the gas listener runs, so it is completely unmetered. Chicory's own limit is 10,000,000
@@ -323,11 +341,17 @@ public final class WasmVm {
             // Converting it to out-of-gas would make gasUsed depend on the local -Xmx (a large-heap
             // node completes with partial gas, a small-heap one reports full gas) and FORK consensus;
             // a crash is preferable to a fork (audit: heap-dependent gasUsed).
-            throw new IllegalStateException("host out of memory during contract execution", e);
+            // A HostFault (an Error), not an IllegalStateException: in a nested call_contract the
+            // parent's catch-all below would turn any RuntimeException into a revert, so the same
+            // transaction would revert on a small-heap node and succeed on a large one. HostFault
+            // is rethrown at every depth up to the executor's fatal path.
+            throw new HostFault("host out of memory during contract execution", e);
         } catch (StackOverflowError e) {
             // Defence in depth: recursion that somehow outran the deterministic depth cap. The exact
             // stack at which a given JVM trips is host-specific, so normalize to a deterministic
-            // full-gas out-of-gas rather than a node-local outcome.
+            // full-gas out-of-gas rather than a node-local outcome. The shared meter is saturated
+            // too: the processor reports meter.used(), which must agree with the result's gasUsed.
+            gas.exhaust();
             return ExecResult.outOfGas(gas.limit());
         } catch (Throwable e) {
             HostFault fault = HostFault.of(e);
@@ -357,6 +381,7 @@ public final class WasmVm {
                 // rewraps a real JVM StackOverflowError as ChicoryException("call stack exhausted")
                 // it must not surface with node-local gas.used() — that would fork consensus. Pin it
                 // to the same deterministic full-gas out-of-gas as the StackOverflowError catch.
+                gas.exhaust();
                 return ExecResult.outOfGas(gas.limit());
             }
             return ExecResult.reverted(gas.used(), e.getMessage());
@@ -640,6 +665,14 @@ public final class WasmVm {
     private static void meter(Instruction instruction, MStack stack, GasMeter gas, long[] frameAdded,
                               Memory[] memHolder) {
         gas.charge(GasSchedule.PER_INSTRUCTION);
+        // Chicory's operand stack is one growable long[] shared by every frame of the instance and
+        // capped by nothing but the heap: recursion that leaves values behind grows it without
+        // bound for the gas of the pushes, and a small-heap node OOMs where a large one finishes.
+        // A fixed entry cap, checked before each instruction, makes the ceiling a network constant.
+        if (stack.size() > MAX_OPERAND_STACK) {
+            gas.exhaust();
+            throw new OutOfGasException("operand stack limit exceeded (max " + MAX_OPERAND_STACK + ")");
+        }
         switch (instruction.opcode()) {
             case MEMORY_FILL, MEMORY_COPY, MEMORY_INIT, TABLE_FILL, TABLE_COPY, TABLE_INIT -> {
                 // O(N) bulk element/byte moves: charge by the runtime count operand so copying a
@@ -821,6 +854,10 @@ public final class WasmVm {
                 gas.charge(GasSchedule.LOG_BASE + ((long) topicLen + dataLen) * GasSchedule.PER_BYTE);
                 capHostBuffer(topicLen, gas);
                 capHostBuffer(dataLen, gas);
+                if (gas.addLogBytes((long) topicLen + dataLen) > MAX_TX_LOG_BYTES) {
+                    gas.exhaust();
+                    throw new OutOfGasException("log bytes per transaction exceeded (max " + MAX_TX_LOG_BYTES + ")");
+                }
                 byte[] topic = mem.readBytes(asOffset(args[0]), topicLen);
                 byte[] data = mem.readBytes(asOffset(args[2]), dataLen);
                 host.emitLog(topic, data);

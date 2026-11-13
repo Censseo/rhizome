@@ -907,4 +907,116 @@ class WasmAdversarialTest {
         assertTrue(ex.getMessage().contains("results"), ex.getMessage());
         WasmVm.validateCode(resultsModule(WasmVm.MAX_FUNCTION_PARAMS)); // the cap itself deploys
     }
+
+    // ---- memory determinism: OOM, operand stack, log bytes (lot 2 hardening) ----
+
+    private static byte[] shipped(String name) {
+        try (var in = WasmAdversarialTest.class.getResourceAsStream("/" + name + ".wasm")) {
+            return in.readAllBytes();
+        } catch (java.io.IOException e) {
+            throw new java.io.UncheckedIOException(e);
+        }
+    }
+
+    /** router.wasm input: selector 0 (forward) + a 25-byte callee address + empty payload. */
+    private static byte[] routerForwardInput() {
+        byte[] in = new byte[26];
+        in[0] = 0;
+        return in;
+    }
+
+    /** VM-26 — make a nested frame run out of JVM heap so the parent turns the OOM into a
+     *  revert, and the outcome depends on each node's heap. */
+    @Test
+    void aNestedOutOfMemoryStaysFatalAtEveryDepth() {
+        byte[] router = shipped("router");
+        GasMeter gas = new GasMeter(10_000_000);
+        // outer router -> (handler) inner router -> (handler) simulated OOM. The inner frame's
+        // OutOfMemoryError must leave vm.execute as a HostFault (an Error) so the OUTER frame's
+        // catch-all rethrows it; as a RuntimeException it became "revert" one level up.
+        assertThrows(HostFault.class, () -> vm.execute(router,
+            new MapHostState(new byte[0], routerForwardInput(), 0), gas,
+            (callee, input) -> vm.execute(router,
+                new MapHostState(new byte[0], routerForwardInput(), 0), gas,
+                (callee2, input2) -> { throw new OutOfMemoryError("simulated"); }).output()));
+    }
+
+    /** VM-27 — pile operand-stack entries across recursive frames (the stack is shared and
+     *  uncapped by Chicory) until the node's heap, not a network constant, decides the outcome. */
+    @Test
+    void theOperandStackIsCappedAtANetworkConstant() {
+        // f: push 1100 i32 constants, call f, drop them all. ~950 frames of 1100 entries pass 2^20
+        // live entries before the 1024-frame depth cap would have trapped.
+        ByteArrayOutputStream body = new ByteArrayOutputStream();
+        body.write(0x00);
+        for (int i = 0; i < 1100; i++) { body.write(0x41); body.write(0x00); }
+        body.write(0x10); body.write(0x00);
+        for (int i = 0; i < 1100; i++) { body.write(0x1A); }
+        body.write(0x0B);
+        ByteArrayOutputStream code = new ByteArrayOutputStream();
+        code.write(0x01);
+        uleb(code, body.size());
+        code.writeBytes(body.toByteArray());
+        byte[] mod = module(section(1, bytes(0x01, 0x60, 0x00, 0x00)), section(3, bytes(0x01, 0x00)),
+            section(7, CALL_EXPORT), section(10, code.toByteArray()));
+        ExecResult r = vm.execute(mod, new MapHostState(new byte[0], new byte[0], 0), new GasMeter(50_000_000));
+        assertEquals(ContractResult.Status.OUT_OF_GAS, r.status(), "operand stack cap is a full-gas trap");
+        assertEquals(50_000_000L, r.gasUsed());
+    }
+
+    /** A module calling {@code emit_log(0, 5, 0, 65536)} {@code times} times (one page of memory). */
+    private static byte[] emitLogModule(int times) {
+        ByteArrayOutputStream type = new ByteArrayOutputStream();
+        type.write(0x02);
+        type.writeBytes(bytes(0x60, 0x04, 0x7F, 0x7F, 0x7F, 0x7F, 0x00));
+        type.writeBytes(bytes(0x60, 0x00, 0x00));
+        ByteArrayOutputStream imp = new ByteArrayOutputStream();
+        imp.write(0x01);
+        imp.write(0x03); imp.writeBytes("env".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        imp.write(0x08); imp.writeBytes("emit_log".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        imp.write(0x00); imp.write(0x00);
+        ByteArrayOutputStream body = new ByteArrayOutputStream();
+        body.write(0x00);
+        for (int i = 0; i < times; i++) {
+            body.write(0x41); sleb(body, 0);
+            body.write(0x41); sleb(body, 5);
+            body.write(0x41); sleb(body, 0);
+            body.write(0x41); sleb(body, 65536);
+            body.write(0x10); uleb(body, 0);
+        }
+        body.write(0x0B);
+        ByteArrayOutputStream code = new ByteArrayOutputStream();
+        code.write(0x01);
+        uleb(code, body.size());
+        code.writeBytes(body.toByteArray());
+        return module(section(1, type.toByteArray()), section(2, imp.toByteArray()),
+            section(3, bytes(0x01, 0x01)), section(5, bytes(0x01, 0x00, 0x01)),
+            section(7, bytes(0x01, 0x04, 0x63, 0x61, 0x6C, 0x6C, 0x00, 0x01)),
+            section(10, code.toByteArray()));
+    }
+
+    /** VM-28 — emit event data without bound (1 gas/byte) to bloat retained logs and receipts. */
+    @Test
+    void cumulativeLogBytesPerTransactionAreCapped() {
+        ExecResult within = vm.execute(emitLogModule(15),
+            new MapHostState(new byte[0], new byte[0], 0), new GasMeter(50_000_000));
+        assertEquals(ContractResult.Status.OK, within.status(), "15 x 64 KiB is under the 1 MiB cap");
+        ExecResult over = vm.execute(emitLogModule(20),
+            new MapHostState(new byte[0], new byte[0], 0), new GasMeter(50_000_000));
+        assertEquals(ContractResult.Status.OUT_OF_GAS, over.status());
+        assertEquals(50_000_000L, over.gasUsed(), "the cap is a saturating full-gas trap");
+    }
+
+    /** VM-29 — trigger a JVM stack overflow so the VM result claims full gas while the processor,
+     *  which reports {@code meter.used()}, charges less. */
+    @Test
+    void aStackOverflowSaturatesTheSharedMeter() {
+        byte[] router = shipped("router");
+        GasMeter gas = new GasMeter(10_000_000);
+        ExecResult r = vm.execute(router, new MapHostState(new byte[0], routerForwardInput(), 0), gas,
+            (callee, input) -> { throw new StackOverflowError(); });
+        assertEquals(ContractResult.Status.OUT_OF_GAS, r.status());
+        assertEquals(10_000_000L, r.gasUsed());
+        assertEquals(10_000_000L, gas.used(), "the meter itself, not only the result, is saturated");
+    }
 }
