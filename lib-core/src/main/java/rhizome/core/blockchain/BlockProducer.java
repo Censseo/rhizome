@@ -84,11 +84,22 @@ public final class BlockProducer {
         // the accumulator is on, the state root — from one execution of this candidate, before
         // the PoW binds them into the header hash (009 T051: assemble -> dry-run -> stamp -> mine).
         engine.stampStateRoot(block);
-        block.nonce(Miner.mineNonce(block.hash(), block.difficulty(), engine.params().powAlgorithm(),
-            engine.params().powCostsAt(engine.height() + 1)));
+        // Abandon the search once the tip is no longer this candidate's parent: the block could only
+        // become an orphan, and the loop then re-assembles on the new tip instead of grinding a
+        // dead candidate to completion (an interrupted stop() also ends the search).
+        Optional<rhizome.crypto.SHA256Hash> nonce = Miner.mineNonce(block.hash(), block.difficulty(),
+            engine.params().powAlgorithm(), engine.params().powCostsAt(block.id()),
+            () -> Thread.currentThread().isInterrupted() || !engine.tipHash().equals(block.lastBlockHash()));
+        if (nonce.isEmpty()) {
+            return Optional.empty();
+        }
+        block.nonce(nonce.get());
 
         ExecutionStatus status = engine.addBlock(block);
         if (status != ExecutionStatus.SUCCESS) {
+            // Solved but the tip moved during the final attempt: genuine PoW on a sibling of the
+            // new tip is a valid uncle candidate, so pool it rather than discard it.
+            engine.registerOrphan(block);
             return Optional.empty();
         }
         mempool.onBlockApplied(block);

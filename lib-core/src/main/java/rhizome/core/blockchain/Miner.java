@@ -1,5 +1,8 @@
 package rhizome.core.blockchain;
 
+import java.util.Optional;
+import java.util.function.BooleanSupplier;
+
 import rhizome.crypto.Crypto;
 import rhizome.crypto.PowAlgorithm;
 import rhizome.crypto.PowCosts;
@@ -25,6 +28,17 @@ public final class Miner {
      * found under the wrong costs will not verify.
      */
     public static SHA256Hash mineNonce(SHA256Hash target, int difficulty, PowAlgorithm algorithm, PowCosts costs) {
+        return mineNonce(target, difficulty, algorithm, costs, () -> false).orElseThrow();
+    }
+
+    /**
+     * As above, but polls {@code stale} between attempts (every attempt under Pufferfish2, every
+     * 256th under SHA-256) and returns empty the moment it holds: a candidate whose parent is no
+     * longer the tip can only ever become an orphan, so grinding on it burns the whole interval
+     * while the chain moves on without us (the old loop never returned until solved).
+     */
+    public static Optional<SHA256Hash> mineNonce(SHA256Hash target, int difficulty, PowAlgorithm algorithm,
+                                                 PowCosts costs, BooleanSupplier stale) {
         boolean usePufferfish = algorithm == PowAlgorithm.PUFFERFISH2;
         byte[] nonce = new byte[SHA256Hash.SIZE];
         new java.security.SecureRandom().nextBytes(nonce);
@@ -36,13 +50,17 @@ public final class Miner {
         byte[] data = new byte[64];
         // raw(): the target half is arraycopy'd into the preimage once here, never retained.
         System.arraycopy(target.raw(), 0, data, 0, 32);
-        while (true) {
+        int pollMask = usePufferfish ? 0 : 255;
+        for (long attempt = 0; ; attempt++) {
+            if ((attempt & pollMask) == 0 && stale.getAsBoolean()) {
+                return Optional.empty();
+            }
             System.arraycopy(nonce, 0, data, 32, 32);
             SHA256Hash fullHash = usePufferfish
                 ? Crypto.PUFFERFISH(data, false, costs)
                 : Crypto.SHA256(data);
             if (Crypto.checkLeadingZeroBits(fullHash, difficulty)) {
-                return SHA256Hash.of(nonce);
+                return Optional.of(SHA256Hash.of(nonce));
             }
             for (int i = nonce.length - 1; i >= 0; i--) {
                 if (++nonce[i] != 0) {
