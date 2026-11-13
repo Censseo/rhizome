@@ -66,6 +66,15 @@ class PeerDiscoveryTest {
         }
     }
 
+    private static void awaitKnown(RhizomeNode node, List<String> urls, String message)
+            throws InterruptedException {
+        long deadline = System.currentTimeMillis() + 10_000;
+        while (!node.knownPeers().containsAll(urls) && System.currentTimeMillis() < deadline) {
+            Thread.sleep(25);
+        }
+        assertTrue(node.knownPeers().containsAll(urls), message);
+    }
+
     private RhizomeNode node(String name, int port, List<String> seeds, boolean miner) {
         NodeConfig config = NodeConfig.defaults(FAST, tempDir.resolve(name).toString(), port)
             .withPeers(seeds)
@@ -101,9 +110,11 @@ class PeerDiscoveryTest {
                 a.discoverRound();
             }
 
-            assertTrue(a.knownPeers().containsAll(List.of(urlB, urlC)), "A should learn B and C");
-            assertTrue(b.knownPeers().containsAll(List.of(urlA, urlC)), "B should learn A and C");
-            assertTrue(c.knownPeers().containsAll(List.of(urlA, urlB)), "C should learn A and B");
+            // Admission is off-loop and now probes the candidate's /info first (chain identity), so
+            // the table fills a moment after the PEX round returns.
+            awaitKnown(a, List.of(urlB, urlC), "A should learn B and C");
+            awaitKnown(b, List.of(urlA, urlC), "B should learn A and C");
+            awaitKnown(c, List.of(urlA, urlB), "C should learn A and B");
 
             // A now knows C (learned via discovery) and gossips its blocks there.
             long deadline = System.currentTimeMillis() + 25_000;
