@@ -274,9 +274,9 @@ final class WasmModuleGuard {
                 // Results get the same cap: a label of huge arity makes every `br` re-validate
                 // that many operands, so a few KiB of `br 0` cost Chicory's validator quadratic time.
                 int results = types.getType(i).returns().size();
-                if (results > WasmVm.MAX_FUNCTION_PARAMS) {
+                if (results > WasmVm.MAX_FUNCTION_RESULTS) {
                     throw new IllegalArgumentException("contract function type declares too many results: "
-                        + results + " (max " + WasmVm.MAX_FUNCTION_PARAMS + ")");
+                        + results + " (max " + WasmVm.MAX_FUNCTION_RESULTS + ")");
                 }
             }
         }

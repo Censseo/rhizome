@@ -245,9 +245,9 @@ final class WasmPreScan {
             }
             // Same cap as params (a huge-arity label makes Chicory's validator quadratic), then the
             // bytes-present bound (Chicory presizes new ArrayList<>(resultCount)).
-            if (resultCount > WasmVm.MAX_FUNCTION_PARAMS) {
+            if (resultCount > WasmVm.MAX_FUNCTION_RESULTS) {
                 throw new IllegalArgumentException("contract function type declares too many results: "
-                    + resultCount + " (max " + WasmVm.MAX_FUNCTION_PARAMS + ")");
+                    + resultCount + " (max " + WasmVm.MAX_FUNCTION_RESULTS + ")");
             }
             requireFitsSection(resultCount, p, sectionEnd, "results in a function type");
             for (long j = 0; j < resultCount; j++) {

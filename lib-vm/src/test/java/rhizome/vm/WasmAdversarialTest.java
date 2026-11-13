@@ -903,9 +903,9 @@ class WasmAdversarialTest {
     @Test
     void rejectsAFunctionTypeDeclaringTooManyResults() {
         var ex = assertThrows(IllegalArgumentException.class,
-            () -> WasmVm.validateCode(resultsModule(WasmVm.MAX_FUNCTION_PARAMS + 1)));
+            () -> WasmVm.validateCode(resultsModule(WasmVm.MAX_FUNCTION_RESULTS + 1)));
         assertTrue(ex.getMessage().contains("results"), ex.getMessage());
-        WasmVm.validateCode(resultsModule(WasmVm.MAX_FUNCTION_PARAMS)); // the cap itself deploys
+        WasmVm.validateCode(resultsModule(WasmVm.MAX_FUNCTION_RESULTS)); // the cap itself deploys
     }
 
     // ---- memory determinism: OOM, operand stack, log bytes (lot 2 hardening) ----

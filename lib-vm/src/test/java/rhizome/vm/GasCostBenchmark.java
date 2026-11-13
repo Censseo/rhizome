@@ -244,7 +244,7 @@ class GasCostBenchmark {
     /** call: () -> 1000 x i32, body = {@code br 0} repeated. */
     private static byte[] maxResultsBr(int bytes) {
         Mod m = new Mod();
-        int t = m.type(type(0, WasmVm.MAX_FUNCTION_PARAMS));
+        int t = m.type(type(0, WasmVm.MAX_FUNCTION_RESULTS));
         m.exportFunc = m.fn(t, body(0, new byte[] {0x00}, rep(new byte[] {0x0C, 0x00}, (bytes - 1200) / 2)));
         return m.build();
     }

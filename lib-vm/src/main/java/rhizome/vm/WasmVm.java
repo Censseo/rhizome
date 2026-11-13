@@ -165,6 +165,10 @@ public final class WasmVm {
      * deploy-time cap keeps that reservation small. Matches Chicory's own (unenforced) limit.
      */
     static final int MAX_FUNCTION_PARAMS = 1_000;
+    /** Cap on results per function type. Chicory validates each {@code br} by popping the label's
+     *  full arity, so a high-arity type plus repeated branches was ~74x more CPU per gas than plain
+     *  execution on a cold call (GasCostBenchmark 2d'); compiled contracts return 0 or 1 values. */
+    static final int MAX_FUNCTION_RESULTS = 16;
 
     /**
      * Hard cap on a module's declared globals. Each global is materialised as a
