@@ -35,15 +35,19 @@ class E2EGenesisDivergenceTest {
 
     /** Adds one peer and waits for its admission to complete before the caller adds another. */
     private static void admit(RhizomeNode node, String peerUrl) throws InterruptedException {
-        node.service().addPeer(peerUrl);
-        TestNetwork.await(() -> node.knownPeers().contains(peerUrl),
+        // Re-enqueue on every poll: the admission queue coalesces one in-flight candidate per HOST,
+        // and every node here is 127.0.0.1, so a request made while another is probing is dropped.
+        TestNetwork.await(() -> {
+                node.service().addPeer(peerUrl);
+                return node.knownPeers().contains(peerUrl);
+            },
             () -> "peer " + peerUrl + " was never admitted; known: " + node.knownPeers());
     }
 
     /**
      * E2E-45 — two honest nodes sharing one genesis, meshed with a third honest node whose genesis
-     * differs only in per-address distribution (same total supply), all three peered with each
-     * other, driven through a bounded, repeated series of real sync rounds: hoping the divergent
+     * differs only in per-address distribution (same total supply) — refused at admission by the
+     * /info genesis check, yet still dialling the honest pair itself — driven through a bounded, repeated series of real sync rounds: hoping the divergent
      * peer's constant stream of {@code INCOMPATIBLE} verdicts either poisons the honest pair's
      * convergence, gets adopted by (or adopts) either honest node's chain, or accumulates some
      * unbounded per-round cost that a longer-running mesh would eventually pay for.
@@ -82,13 +86,23 @@ class E2EGenesisDivergenceTest {
             TestNetwork.awaitHeight(alice, 4);
             TestNetwork.awaitHeight(bob, 4);
 
-            // Full mesh: every node peers with every other node, one admission at a time.
+            // Full mesh attempt. Admission now probes each candidate's /info and refuses a peer
+            // advertising another genesis (NET-15), so carol never enters alice's or bob's table.
+            // Admission holds one in-flight candidate per host (all 127.0.0.1 here): the honest peer
+            // queued after carol only lands once carol's probe has finished, so carol's absence below
+            // is a verdict, not a race.
+            alice.service().addPeer(TestNetwork.urlOf(carol));
             admit(alice, TestNetwork.urlOf(bob));
-            admit(alice, TestNetwork.urlOf(carol));
+            bob.service().addPeer(TestNetwork.urlOf(carol));
             admit(bob, TestNetwork.urlOf(alice));
-            admit(bob, TestNetwork.urlOf(carol));
-            admit(carol, TestNetwork.urlOf(alice));
-            admit(carol, TestNetwork.urlOf(bob));
+            assertFalse(alice.knownPeers().contains(TestNetwork.urlOf(carol)),
+                "a peer on another genesis must be refused at admission");
+            assertFalse(bob.knownPeers().contains(TestNetwork.urlOf(carol)),
+                "a peer on another genesis must be refused at admission");
+            // carol still tries to peer with the honest pair; whatever her own table holds, the
+            // rounds below must leave the honest pair converging and carol on her own chain.
+            carol.service().addPeer(TestNetwork.urlOf(alice));
+            carol.service().addPeer(TestNetwork.urlOf(bob));
 
             List<RhizomeNode> mesh = List.of(alice, bob, carol);
             long started = System.currentTimeMillis();
