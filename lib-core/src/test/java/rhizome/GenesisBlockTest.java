@@ -177,7 +177,7 @@ class GenesisBlockTest {
         LedgerSnapshot overflow = new LedgerSnapshot("pandanite", 536000, params.chainId());
         overflow.put(addr(1), new TransactionAmount(Long.MAX_VALUE));
         overflow.put(addr(2), new TransactionAmount(2L));
-        assertTrue(overflow.totalSupply() < 0, "the unsigned sum wraps the signed field negative");
+        assertThrows(ArithmeticException.class, overflow::totalSupply, "the sum is exact: overflow throws");
         assertThrows(IllegalArgumentException.class, () -> GenesisBlock.build(params, overflow));
     }
 
@@ -267,7 +267,7 @@ class GenesisBlockTest {
         LedgerSnapshot overflowAndMismatched = new LedgerSnapshot("test", 0, pinned.chainId());
         overflowAndMismatched.put(addr(1), new TransactionAmount(Long.MAX_VALUE));
         overflowAndMismatched.put(addr(2), new TransactionAmount(2L));
-        assertTrue(overflowAndMismatched.totalSupply() < 0);
+        assertThrows(ArithmeticException.class, overflowAndMismatched::totalSupply);
         IllegalArgumentException rangeEx = assertThrows(IllegalArgumentException.class,
             () -> GenesisBlock.build(pinned, overflowAndMismatched));
         assertTrue(rangeEx.getMessage().contains("Long.MAX_VALUE"),

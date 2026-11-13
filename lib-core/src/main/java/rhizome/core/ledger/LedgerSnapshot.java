@@ -63,11 +63,11 @@ public final class LedgerSnapshot {
         return chainId;
     }
 
-    /** Sum of all balances, as an unsigned 64-bit total. */
+    /** Sum of all balances; throws ArithmeticException past Long.MAX_VALUE rather than wrapping. */
     public long totalSupply() {
         long total = 0;
         for (TransactionAmount amount : balances.values()) {
-            total += amount.amount();
+            total = Math.addExact(total, amount.amount());
         }
         return total;
     }

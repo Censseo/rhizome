@@ -72,6 +72,7 @@ public class TransactionDto {
     public static final int MAX_DATA = 128 * 1024;
 
     private static final byte KIND_TRANSFER = 0;
+    private static final byte KIND_BOX_COLLECT = 6; // TransactionKind.BOX_COLLECT's wire code
     private static final byte[] NO_COMMITMENT = new byte[0];
 
     public TransactionDto(
@@ -143,13 +144,26 @@ public class TransactionDto {
         }
     }
 
+    private static boolean isAllZero(byte[] bytes) {
+        for (byte b : bytes) {
+            if (b != 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     public static TransactionDto readFrom(ByteBuffer buffer) {
         // Fails closed on any code that is not an implemented scheme, including the reserved
         // post-quantum block: silently treating an unknown scheme as Ed25519 would read the
         // following fields at the wrong widths and split consensus (see SignatureScheme.fromCode).
         SignatureScheme scheme = SignatureScheme.fromCode(buffer.get());
-        TransactionSignature signature = TransactionSignature.of(BinaryIO.getFixed(buffer, scheme.signatureBytes()));
-        PublicKey signingKey = PublicKey.of(BinaryIO.getFixed(buffer, scheme.publicKeyBytes()));
+        // Raw wire bytes kept for the zero checks below: PublicKey.of folds any invalid key to empty(),
+        // which would hide a non-zero junk key from a check made on the decoded value.
+        byte[] rawSignature = BinaryIO.getFixed(buffer, scheme.signatureBytes());
+        byte[] rawKey = BinaryIO.getFixed(buffer, scheme.publicKeyBytes());
+        TransactionSignature signature = TransactionSignature.of(rawSignature);
+        PublicKey signingKey = PublicKey.of(rawKey);
         byte[] pqCommitment = BinaryIO.getFixed(buffer, scheme.commitmentBytes());
         long timestamp = buffer.getLong();
         PublicAddress to = PublicAddress.of(BinaryIO.getFixed(buffer, PublicAddress.SIZE));
@@ -174,6 +188,15 @@ public class TransactionDto {
         int chainId = buffer.getInt();
         long nonce = buffer.getLong();
         byte kind = buffer.get();
+        // These bytes are not in the txid hash (TransactionImpl.hash), so any non-zero value on a
+        // self-authorized tx is free relay malleability: coinbase carries no signature and no key,
+        // BOX_COLLECT carries no key (its signature field is likewise unverified).
+        if (isTransactionFee && (!isAllZero(rawSignature) || !isAllZero(rawKey))) {
+            throw new IllegalArgumentException("coinbase must carry a zero signature and signing key");
+        }
+        if (kind == KIND_BOX_COLLECT && !isAllZero(rawKey)) {
+            throw new IllegalArgumentException("BOX_COLLECT must carry a zero signing key");
+        }
         long gasLimit = 0;
         long gasPrice = 0;
         byte[] data = new byte[0];

@@ -353,4 +353,21 @@ class StateSnapshotTest {
         assertArrayEquals(committedRoot,
             StateSnapshotImporter.verify(chunks, new InMemorySmtNodeStore(), committedRoot));
     }
+
+    /**
+     * STATE-07 — Replay one key twice in a snapshot whose second copy is silently absorbed by the
+     * tree (same value, same root) while the sink would be fed both: a duplicate key is refused.
+     */
+    @Test
+    void duplicateKeyIsRefused() {
+        byte[] committedRoot = engine.stateRoot();
+        List<SnapshotChunk> chunks = exportedChunks(1000);
+        SnapshotChunk first = chunks.get(0);
+        List<SnapshotChunk.Entry> entries = new ArrayList<>(first.entries());
+        entries.add(first.entries().get(0));
+        chunks.set(0, new SnapshotChunk(first.domain(), entries));
+
+        assertThrows(StateSnapshotImporter.SnapshotVerificationException.class,
+            () -> StateSnapshotImporter.verify(chunks, new InMemorySmtNodeStore(), committedRoot));
+    }
 }

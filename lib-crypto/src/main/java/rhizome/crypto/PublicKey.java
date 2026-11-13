@@ -136,6 +136,8 @@ public final class PublicKey {
      * explicit so the security property does not depend on a library's internal checks (audit F1).
      */
     private static final byte[][] SMALL_ORDER_DENYLIST = {
+        // y = 0 (order 4): the all-zero encoding never reaches here, but its sign-bit twin 00..0080 does.
+        new byte[SIZE],
         hexStringToByteArray("0100000000000000000000000000000000000000000000000000000000000000"),
         hexStringToByteArray("26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05"),
         hexStringToByteArray("26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85"),
@@ -146,8 +148,15 @@ public final class PublicKey {
     };
 
     private static boolean isSmallOrder(byte[] bytes) {
+        // The top bit of the last byte is the x-coordinate sign, not part of y: the sign-flipped
+        // twin of a listed encoding (e.g. 00..0080, 01..0080) is the same small-order y, so mask the
+        // bit on both sides before comparing.
+        byte[] masked = bytes.clone();
+        masked[SIZE - 1] &= 0x7f;
         for (byte[] denied : SMALL_ORDER_DENYLIST) {
-            if (java.util.Arrays.equals(bytes, denied)) {
+            byte[] d = denied.clone();
+            d[SIZE - 1] &= 0x7f;
+            if (java.util.Arrays.equals(masked, d)) {
                 return true;
             }
         }

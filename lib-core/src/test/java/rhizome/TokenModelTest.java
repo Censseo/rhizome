@@ -86,4 +86,20 @@ class TokenModelTest {
         // Box kinds are not tokens and vice versa.
         assertFalse(TransactionKind.BOX_CREATE.isToken());
     }
+
+    /**
+     * CODEC-08 — Smuggle a malformed UTF-8 token symbol whose lossy decode re-encodes to the same
+     * LENGTH (a truncated 4-byte sequence becomes one 3-byte U+FFFD), defeating a length-only check.
+     */
+    @Test
+    void invalidUtf8WithSameLengthReplacementIsRefused() {
+        byte[] data = new byte[8 + 1 + 1 + 3 + 1];
+        data[7] = 1;  // amount 1
+        data[9] = 3;  // symbol length 3: F0 9F 98 (truncated emoji)
+        data[10] = (byte) 0xF0;
+        data[11] = (byte) 0x9F;
+        data[12] = (byte) 0x98;
+        assertThrows(IllegalArgumentException.class,
+            () -> TokenPayload.decode(TransactionKind.TOKEN_MINT, data, 16, 64, 18));
+    }
 }

@@ -237,4 +237,16 @@ class LedgerSnapshotTest {
         assertNotNull(url, "fixture resource missing from test classpath");
         return Path.of(url.toURI()).getParent();
     }
+
+    /**
+     * INFL-12 — Wrap the snapshot's total supply by seeding two near-maximal balances, so the
+     * pinned-total boot check compares against a wrapped value: the sum must throw, not wrap.
+     */
+    @Test
+    void totalSupplyThrowsInsteadOfWrapping() {
+        LedgerSnapshot snapshot = new LedgerSnapshot("pandanite", 1, 1);
+        snapshot.put(addr(ADDR_A), new TransactionAmount(Long.MAX_VALUE));
+        snapshot.put(addr(ADDR_B), new TransactionAmount(1L));
+        assertThrows(ArithmeticException.class, snapshot::totalSupply);
+    }
 }

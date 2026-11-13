@@ -60,11 +60,14 @@ public final class GenesisBlock {
         // 64-bit integers (data-model.md), so an unsigned sum landing past Long.MAX_VALUE wraps
         // negative here and must fail loud at chain init rather than silently commit a bogus S0
         // (research.md Decision 6, FR-013).
-        long supply = snapshot.totalSupply();
-        if (supply < 0) {
+        // totalSupply() now sums with addExact (a multi-wrap sum could land back in range), so the
+        // overflow surfaces as ArithmeticException; same loud failure, same message.
+        long supply;
+        try {
+            supply = snapshot.totalSupply();
+        } catch (ArithmeticException overflow) {
             throw new IllegalArgumentException(
-                "Snapshot total supply " + Long.toUnsignedString(supply)
-                    + " exceeds Long.MAX_VALUE -- outside the signed 64-bit consensus range");
+                "Snapshot total supply exceeds Long.MAX_VALUE -- outside the signed 64-bit consensus range");
         }
         // Genesis-allocation pin (research.md Decision 2/6, contracts §2 check #3; FR-003, FR-004):
         // when this network profile pins a genesis supply, the loaded snapshot's total MUST equal

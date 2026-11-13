@@ -37,6 +37,8 @@ public sealed interface Transaction permits TransactionImpl {
                 .data(transactionImpl.data())
                 .gasLimit(transactionImpl.gasLimit())
                 .gasPrice(transactionImpl.gasPrice())
+                .scheme(transactionImpl.scheme())
+                .pqCommitment(transactionImpl.pqCommitment())
                 .build();
     }
 
