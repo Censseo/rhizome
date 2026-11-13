@@ -100,5 +100,24 @@ class PublicKeyTest {
         oneY[0] = 1;
         oneY[31] = (byte) 0x80;
         assertTrue(PublicKey.of(oneY).isEmpty());
+
+        // BouncyCastle's partial validation rejects these first, so the end-to-end asserts above
+        // pass even with the denylist deleted. Assert the denylist itself (sign bit masked, y = 0
+        // included): this is what fails if the mask or the y = 0 entry is removed.
+        assertTrue(PublicKey.isSmallOrder(zeroY), "y = 0 sign twin");
+        assertTrue(PublicKey.isSmallOrder(oneY), "y = 1 sign twin");
+        assertTrue(PublicKey.isSmallOrder(new byte[32]), "y = 0");
+        for (String hex : SMALL_ORDER_HEX) {
+            byte[] enc = new byte[32];
+            for (int i = 0; i < 32; i++) {
+                enc[i] = (byte) Integer.parseInt(hex.substring(2 * i, 2 * i + 2), 16);
+            }
+            assertTrue(PublicKey.isSmallOrder(enc), "listed: " + hex);
+            enc[31] ^= (byte) 0x80;
+            assertTrue(PublicKey.isSmallOrder(enc), "sign twin: " + hex);
+        }
+        byte[] ordinary = new byte[32];
+        ordinary[0] = 9;
+        assertFalse(PublicKey.isSmallOrder(ordinary));
     }
 }
