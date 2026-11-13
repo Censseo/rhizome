@@ -51,7 +51,7 @@ The local test battery (`suite-faucet.sh`) never touches a real key — see belo
 | `--wallet-bin` | `RHIZOME_FAUCET_WALLET_BIN` | `app-wallet/build/install/app-wallet/bin/app-wallet` | the CLI binary to shell out to |
 | `--state-file` | `RHIZOME_FAUCET_STATE_FILE` | `~/.rhizome-faucet/state.json` | persisted cooldowns/budget (JSON) |
 | `--drip-pdn` | `RHIZOME_FAUCET_DRIP_PDN` | `1` | amount per successful drip, in PDN |
-| `--fee-pdn` | `RHIZOME_FAUCET_FEE_PDN` | `0` | fee attached to each drip, in PDN |
+| `--fee-pdn` | `RHIZOME_FAUCET_FEE_PDN` | `0.001` | fee attached to each drip, in PDN; must be at least the target network's `minFee` (staging: 0.001, devnet: 0) |
 | `--cooldown-seconds` | `RHIZOME_FAUCET_COOLDOWN_SECONDS` | `3600` | minimum time between two drips to the same address |
 | `--ip-daily-cap` | `RHIZOME_FAUCET_IP_DAILY_CAP` | `5` | max successful drips per source IP per UTC day |
 | `--daily-budget-pdn` | `RHIZOME_FAUCET_DAILY_BUDGET_PDN` | `500` | hard stop: total PDN handed out per UTC day |
@@ -61,6 +61,7 @@ The local test battery (`suite-faucet.sh`) never touches a real key — see belo
 | `--node-probe-timeout-seconds` | `RHIZOME_FAUCET_NODE_PROBE_TIMEOUT_SECONDS` | `5` | timeout for the `/stats` reachability check done before every drip |
 | `--host` | `RHIZOME_FAUCET_HOST` | `127.0.0.1` | bind address — loopback by default; open it deliberately (e.g. behind a reverse proxy), not by accident |
 | `--port` | `RHIZOME_FAUCET_PORT` | `8085` | listen port |
+| `--trust-xff` | — | off | key the per-IP cap on the right-most `X-Forwarded-For` address (appended by your reverse proxy); only enable behind a proxy you control |
 
 `--fee-pdn` matters per network: devnet's `minFee` is `0`, but a profile like `staging` inherits
 mainnet's `minFee = 10` base units (`0.001` PDN) — a drip below that fee is admitted by the

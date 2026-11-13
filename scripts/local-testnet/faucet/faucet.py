@@ -38,6 +38,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import http.server
+import ipaddress
 import json
 import os
 import secrets
@@ -274,6 +275,20 @@ class Config:
     node_probe_timeout_seconds: float
     host: str
     port: int
+    trust_xff: bool
+
+
+def client_ip(socket_ip: str, xff_values: list[str], trust_xff: bool) -> str:
+    """Per-IP cap key. With trust_xff, the RIGHT-most X-Forwarded-For entry is used: a reverse
+    proxy appends the address it saw, so the left-most entries are client-supplied and forgeable.
+    Falls back to the socket peer when the header is absent or its last entry is not an IP."""
+    if not trust_xff or not xff_values:
+        return socket_ip
+    last = ",".join(xff_values).split(",")[-1].strip()
+    try:
+        return str(ipaddress.ip_address(last))
+    except ValueError:
+        return socket_ip
 
 
 class Faucet:
@@ -539,7 +554,9 @@ def make_handler(faucet: Faucet):
                 self._send_json(400, {"error": "invalid, expired or already-used challenge"})
                 return
 
-            code, body = faucet.drip(address, self.client_address[0])
+            ip = client_ip(self.client_address[0], self.headers.get_all("X-Forwarded-For") or [],
+                           faucet.config.trust_xff)
+            code, body = faucet.drip(address, ip)
             self._send_json(code, body)
 
     return Handler
@@ -600,6 +617,7 @@ def build_config(args: argparse.Namespace) -> Config:
         node_probe_timeout_seconds=args.node_probe_timeout_seconds,
         host=args.host,
         port=args.port,
+        trust_xff=args.trust_xff,
     )
 
 
@@ -629,10 +647,9 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
                         "written after every successful drip)")
     p.add_argument("--drip-pdn", default=env("RHIZOME_FAUCET_DRIP_PDN", "1"),
                    help="amount handed out per successful drip, in PDN")
-    p.add_argument("--fee-pdn", default=env("RHIZOME_FAUCET_FEE_PDN", "0"),
-                   help="transaction fee attached to each drip, in PDN (devnet's minFee is 0; "
-                        "a network with a nonzero minFee needs this raised, e.g. staging "
-                        "needs at least 0.001)")
+    p.add_argument("--fee-pdn", default=env("RHIZOME_FAUCET_FEE_PDN", "0.001"),
+                   help="transaction fee attached to each drip, in PDN; MUST be at least the "
+                        "target network's minFee (staging: 10 base units = 0.001 PDN; devnet: 0)")
     p.add_argument("--cooldown-seconds", type=int,
                    default=int(env("RHIZOME_FAUCET_COOLDOWN_SECONDS", "3600")),
                    help="minimum time between two drips to the same address")
@@ -658,6 +675,10 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
                         "should be exposed deliberately, e.g. behind a reverse proxy, not by "
                         "accident)")
     p.add_argument("--port", type=int, default=int(env("RHIZOME_FAUCET_PORT", "8085")))
+    p.add_argument("--trust-xff", action="store_true",
+                   help="key the per-IP cap on the right-most X-Forwarded-For address instead of "
+                        "the socket peer. ONLY when a reverse proxy you control sets the header "
+                        "(it appends the client address); otherwise clients can forge it")
     args = p.parse_args(argv)
     if not args.key_file:
         p.error("--key-file is required (or set RHIZOME_FAUCET_KEY_FILE)")
