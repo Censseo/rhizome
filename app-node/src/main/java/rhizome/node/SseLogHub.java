@@ -84,6 +84,9 @@ final class SseLogHub {
      * {@code subnetKey} (the IPv6-/48 / IPv4-/24 site tier — see {@link #MAX_SUBSCRIBERS_PER_SUBNET}).
      */
     ChannelSupplier<ByteBuf> subscribe(String clientKey, String subnetKey) {
+        // Reap subscribers whose connection already closed: they were pruned only on the next
+        // publish, so a quiet chain let dead streams hold every slot and 503 the live dashboard.
+        subscribers.removeIf(s -> s.buffer().getException() != null);
         if (subscribers.size() >= maxSubscribers) {
             return null;
         }
