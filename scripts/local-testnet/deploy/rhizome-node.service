@@ -11,8 +11,8 @@
 # Install:
 #   install -o root -g root -m 0644 rhizome-node.service /etc/systemd/system/rhizome-node.service
 #   useradd --system --no-create-home --shell /usr/sbin/nologin rhizome   # once, if absent
-#   install -d -o root -g root -m 0750 /etc/rhizome
-#   install -o root -g rhizome -m 0640 node.env.example /etc/rhizome/node.env   # then edit it
+#   install -d -m 0750 -o root -g root /etc/rhizome
+#   install -m 0600 -o root -g root node.env.example /etc/rhizome/node.env   # then edit it
 #   systemctl daemon-reload
 #   systemctl enable --now rhizome-node.service
 #
@@ -89,6 +89,10 @@ TimeoutStopSec=180s
 # also works for a manual (non-systemd) run of the binary.
 StateDirectory=rhizome-node
 StateDirectoryMode=0750
+# A JVM hs_err_pid<pid>.log (written to the working directory on a crash) dumps the process
+# environment, i.e. RHIZOME_API_TOKEN / RHIZOME_PEER_TOKEN. Pin the working directory to the
+# 0750 state directory so such a dump lands there, not in / or a world-readable path.
+WorkingDirectory=/var/lib/rhizome-node
 
 User=rhizome
 Group=rhizome
@@ -118,6 +122,16 @@ RestrictSUIDSGID=yes
 RestrictRealtime=yes
 LockPersonality=yes
 RemoveIPC=yes
+# Empty assignment: drop every capability. The node binds a port above 1024 and needs none.
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+PrivateDevices=yes
+SystemCallArchitectures=native
+# Files the node creates (RocksDB, snapshots, crash dumps) are owner-only.
+UMask=0077
+# Hide other users' processes (and their /proc entries) from the node.
+ProtectProc=invisible
 # Deliberately NOT set: SystemCallFilter= (a syscall allowlist needs to be derived from the
 # actual native-image binary's behaviour — JNI calls into librocksdbjni in particular can need
 # syscalls a naive "@system-service" filter blocks, and getting this wrong turns into a

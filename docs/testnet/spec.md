@@ -134,8 +134,8 @@ duplicate that content. The two things worth calling out before you copy it:
   seed host yet" caveat) — leave them unset for now and fill them in once a seed is published,
   or point them at a peer you are standing up yourself.
 
-Copy it to `/etc/rhizome/node.env`, mode `0640`, owned `root:rhizome` (it can hold bearer
-tokens) — the exact target O-4's systemd unit reads from.
+Copy it to `/etc/rhizome/node.env`, mode `0600`, owned `root:root` (it can hold bearer
+tokens; systemd reads `EnvironmentFile` as root) — the exact target O-4's systemd unit reads from.
 
 ### O-4 — systemd install *(implemented)*
 
@@ -153,8 +153,8 @@ install -o root -g root -m 0755 app-node/build/native/rhizome-node /usr/local/bi
 # Verbatim from rhizome-node.service's own header comment:
 install -o root -g root -m 0644 rhizome-node.service /etc/systemd/system/rhizome-node.service
 useradd --system --no-create-home --shell /usr/sbin/nologin rhizome   # once, if absent
-install -d -o root -g root -m 0750 /etc/rhizome
-install -o root -g rhizome -m 0640 node.env.example /etc/rhizome/node.env   # then edit it
+install -d -m 0750 -o root -g root /etc/rhizome
+install -m 0600 -o root -g root node.env.example /etc/rhizome/node.env   # then edit it
 systemctl daemon-reload
 systemctl enable --now rhizome-node.service
 ```
