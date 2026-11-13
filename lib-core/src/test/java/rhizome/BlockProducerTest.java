@@ -77,6 +77,24 @@ class BlockProducerTest {
         return t;
     }
 
+    /**
+     * POW-09 (producer wiring) -- the producer hands the miner a stale check, so a search whose
+     * thread is interrupted (stop()) or whose parent is no longer the tip is abandoned instead of
+     * ground to completion. At difficulty 4 an un-gated search would solve at once and land a block;
+     * the stale check is polled before the first hash, so none is produced and the chain stands still.
+     */
+    @Test
+    void produceAbandonsTheCandidateWhenTheMiningThreadIsInterrupted() {
+        Thread.currentThread().interrupt();
+        try {
+            assertTrue(producer.produce().isEmpty(), "a stale candidate must not be mined");
+            assertEquals(1, engine.height());
+        } finally {
+            Thread.interrupted(); // clear the flag for later tests on this worker
+        }
+        assertTrue(producer.produce().isPresent(), "control: the same producer mines normally when not stale");
+    }
+
     @Test
     void producesEmptyBlockWithCoinbase() {
         Optional<Block> produced = producer.produce();
