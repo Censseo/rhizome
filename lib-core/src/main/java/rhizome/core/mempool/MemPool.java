@@ -11,6 +11,7 @@ import java.util.TreeMap;
 import java.util.concurrent.locks.ReentrantLock;
 
 import rhizome.core.block.Block;
+import rhizome.core.blockchain.BlockGasRule;
 import rhizome.core.blockchain.FeePolicy;
 import rhizome.core.blockchain.NetworkParameters;
 import rhizome.core.blockchain.SignatureVerifier;
@@ -366,13 +367,17 @@ public final class MemPool {
                 }
             }
             List<Transaction> selected = new ArrayList<>(Math.min(maxTransactions, size));
+            long blockGas = 0;
             while (selected.size() < maxTransactions && !frontier.isEmpty()) {
                 var best = frontier.poll();
                 PublicAddress sender = best.getKey();
                 Cursor cursor = cursors.get(sender);
                 Transaction tx = best.getValue();
                 long spend = maxSpend(tx);
-                if (spend <= cursor.budget()) {
+                long gasAfter = tx.kind().isContract()
+                    ? BlockGasRule.add(params, blockGas, tx.gasLimit()) : blockGas;
+                if (spend <= cursor.budget() && gasAfter != BlockGasRule.EXCEEDED) {
+                    blockGas = gasAfter;
                     selected.add(tx);
                     NavigableMap<Long, Transaction> pending = bySender.get(sender);
                     Transaction next = pending.get(cursor.nextNonce() + 1);
@@ -381,8 +386,9 @@ public final class MemPool {
                         frontier.add(Map.entry(sender, next));
                     }
                 }
-                // Over-budget: the sender's run stalls here (its later nonces cannot be selected
-                // either), so nothing is re-offered for it.
+                // Over-budget or over the block gas cap: the sender's run stalls here (its later
+                // nonces cannot be selected either), so nothing is re-offered for it — other senders
+                // with smaller gas still fill the block.
             }
             return selected;
         } finally {
@@ -503,6 +509,26 @@ public final class MemPool {
                 size--;
             }
             stale.clear();
+            // A live front is not a live run: funds may have moved (a confirmed tx drained the
+            // sender), leaving unaffordable txs that would pin pool slots forever. Walk the contiguous
+            // run against the confirmed balance and drop from the first unaffordable tx on.
+            if (accounts.senderExists(sender)) {
+                long budget = accounts.confirmedBalance(sender);
+                boolean broke = false;
+                for (long n = confirmed; ; n++) {
+                    Transaction t = pending.get(n);
+                    if (t == null) {
+                        break;
+                    }
+                    long spend = maxSpend(t);
+                    if (!broke && spend <= budget) {
+                        budget -= spend;
+                        continue;
+                    }
+                    broke = true;
+                    remove(t.hashContents());
+                }
+            }
             if (pending.isEmpty()) {
                 bySender.remove(sender);
             }

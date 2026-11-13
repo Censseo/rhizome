@@ -552,4 +552,39 @@ class MemPoolTest {
         assertEquals(1, mempool.size());
         assertTrue(mempool.getTransactionsForBlock(10).isEmpty(), "the parked original is still unminable");
     }
+
+    /**
+     * POOL-10 — Pin pool slots forever with live-looking but unfunded transactions: fund A, park
+     * a run of nonces, then confirm a transaction that drains A. The front nonce is present, so the
+     * run read as "live" forever; onBlockApplied must re-check the run against the balance.
+     */
+    @Test
+    void drainedSenderRunIsPurgedWhenABlockIsApplied() {
+        accounts.balances.put(sender, 1_000L);
+        Transaction first = send(100, 0, 0);
+        assertEquals(ExecutionStatus.SUCCESS, mempool.addTransaction(first));
+        for (int n = 1; n <= 4; n++) {
+            assertEquals(ExecutionStatus.SUCCESS, mempool.addTransaction(send(100, 0, n)));
+        }
+        // Nonce 0 confirms and the confirmed balance collapses to 250: nonces 1, 2 stay affordable.
+        accounts.nonces.put(sender, 1L);
+        accounts.balances.put(sender, 250L);
+        mempool.onBlockApplied(blockOf(first));
+        assertEquals(2, mempool.size(), "only the unaffordable tail (nonces 3, 4) is dropped");
+        assertEquals(2, mempool.getTransactionsForBlock(10).size());
+
+        // Fully drained: the whole remaining run goes.
+        accounts.balances.put(sender, 50L);
+        mempool.onBlockApplied(blockOf());
+        assertEquals(0, mempool.size(), "an unaffordable live run must not pin slots");
+    }
+
+    private rhizome.core.block.Block blockOf(Transaction... txs) {
+        var b = rhizome.core.block.BlockImpl.builder().id(2).timestamp(5_000L)
+            .difficulty(params.genesisDifficulty()).lastBlockHash(rhizome.crypto.SHA256Hash.empty()).build();
+        for (Transaction t : txs) {
+            b.addTransaction(t);
+        }
+        return b;
+    }
 }
