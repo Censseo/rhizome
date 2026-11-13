@@ -818,4 +818,93 @@ class WasmAdversarialTest {
             "one gas short must fail before serialize()/the output copy, not after");
         assertEquals(present.gasUsed() - 1, shortGas.gasUsed());
     }
+
+    // ---- opcode allowlist, result cap (lot 2 hardening) ----
+
+    private static final byte[] CALL_EXPORT = bytes(0x01, 0x04, 0x63, 0x61, 0x6C, 0x6C, 0x00, 0x00);
+
+    /** {@code ()->()} module whose only function body is {@code instrs} (no locals, trailing end added). */
+    private static byte[] oneFunctionModule(byte[] tagSection, int... instrs) {
+        ByteArrayOutputStream body = new ByteArrayOutputStream();
+        body.write(0x00);
+        body.writeBytes(bytes(instrs));
+        body.write(0x0B);
+        ByteArrayOutputStream code = new ByteArrayOutputStream();
+        code.write(0x01);
+        uleb(code, body.size());
+        code.writeBytes(body.toByteArray());
+        byte[] type = section(1, bytes(0x01, 0x60, 0x00, 0x00));
+        byte[] func = section(3, bytes(0x01, 0x00));
+        byte[] export = section(7, CALL_EXPORT);
+        byte[] codeSec = section(10, code.toByteArray());
+        return tagSection == null ? module(type, func, export, codeSec)
+            : module(type, func, tagSection, export, codeSec);
+    }
+
+    /** VM-24 — deploy a module whose opcodes escape a denylist: try_table, return_call, atomics. */
+    @Test
+    void rejectsOpcodesOutsideTheAllowlistAtDeploy() {
+        // try_table (0x1F) with an empty catch list: parses with no tag section, so only the
+        // allowlist can refuse it.
+        var tryTable = assertThrows(IllegalArgumentException.class, () -> WasmVm.validateCode(
+            oneFunctionModule(null, 0x1F, 0x40, 0x00, 0x0B)));
+        assertTrue(tryTable.getMessage().contains("TRY_TABLE"), tryTable.getMessage());
+        // return_call (0x12) self-recursion: a tail call is a frame-free loop the depth cap never sees.
+        var returnCall = assertThrows(IllegalArgumentException.class, () -> WasmVm.validateCode(
+            oneFunctionModule(null, 0x12, 0x00)));
+        assertTrue(returnCall.getMessage().contains("RETURN_CALL"), returnCall.getMessage());
+        // atomic.fence (0xFE 0x03 0x00): the threads family is not part of the contract ISA.
+        var atomic = assertThrows(IllegalArgumentException.class, () -> WasmVm.validateCode(
+            oneFunctionModule(null, 0xFE, 0x03, 0x00)));
+        assertTrue(atomic.getMessage().contains("ATOMIC"), atomic.getMessage());
+    }
+
+    /** VM-24 — a tag section (exception handling) is refused outright, and THROW with it. */
+    @Test
+    void rejectsATagSectionAndThrowAtDeploy() {
+        byte[] tags = section(13, bytes(0x01, 0x00, 0x00));      // 1 tag: attribute 0, type 0
+        byte[] throwing = oneFunctionModule(tags, 0x08, 0x00);   // throw tag 0
+        var ex = assertThrows(IllegalArgumentException.class, () -> WasmVm.validateCode(throwing));
+        assertTrue(ex.getMessage().contains("tag section"), ex.getMessage());
+        // The allowlist refuses THROW on its own too (pre-scan bypassed): defence in depth.
+        var parsed = com.dylibso.chicory.wasm.Parser.parse(throwing);
+        var guard = assertThrows(IllegalArgumentException.class,
+            () -> WasmModuleGuard.rejectNonDeterministic(parsed));
+        assertTrue(guard.getMessage().contains("THROW"), guard.getMessage());
+    }
+
+    /** VM-24 — every shipped contract template still deploys under the allowlist. */
+    @Test
+    void everyShippedContractStillDeploysUnderTheAllowlist() throws java.io.IOException {
+        for (String name : new String[] {"agent_wallet", "amm", "counter", "emitter", "launchpad",
+                "logtree", "pair", "router", "token"}) {
+            try (var in = WasmAdversarialTest.class.getResourceAsStream("/" + name + ".wasm")) {
+                WasmVm.validateCode(in.readAllBytes());
+            }
+        }
+    }
+
+    /** A {@code () -> (i32 x results)} module whose body is {@code unreachable}, exporting {@code call}. */
+    private static byte[] resultsModule(int results) {
+        ByteArrayOutputStream type = new ByteArrayOutputStream();
+        uleb(type, 1);
+        type.write(0x60);
+        uleb(type, 0);
+        uleb(type, results);
+        for (int i = 0; i < results; i++) {
+            type.write(0x7F);
+        }
+        return module(section(1, type.toByteArray()), section(3, bytes(0x01, 0x00)),
+            section(7, CALL_EXPORT), section(10, bytes(0x01, 0x03, 0x00, 0x00, 0x0B)));
+    }
+
+    /** VM-25 — declare a function type with a huge result arity so Chicory's validator goes
+     *  quadratic on repeated {@code br} to a label of that arity. */
+    @Test
+    void rejectsAFunctionTypeDeclaringTooManyResults() {
+        var ex = assertThrows(IllegalArgumentException.class,
+            () -> WasmVm.validateCode(resultsModule(WasmVm.MAX_FUNCTION_PARAMS + 1)));
+        assertTrue(ex.getMessage().contains("results"), ex.getMessage());
+        WasmVm.validateCode(resultsModule(WasmVm.MAX_FUNCTION_PARAMS)); // the cap itself deploys
+    }
 }

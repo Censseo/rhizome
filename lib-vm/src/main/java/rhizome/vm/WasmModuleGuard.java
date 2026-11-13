@@ -85,7 +85,44 @@ final class WasmModuleGuard {
                 "non-deterministic opcode " + instruction.opcode().name()
                 + " is not allowed (float/SIMD)");
         }
+        // Everything else must be on the allowlist (exceptions, tail calls, atomics, typed refs …).
+        if (!ALLOWED_OPCODES.contains(instruction.opcode())) {
+            throw new IllegalArgumentException(
+                "opcode " + instruction.opcode().name() + " is not allowed in contracts");
+        }
     }
+
+    /**
+     * The opcodes a contract may contain: an ALLOWLIST. The previous denylist let THROW, THROW_REF,
+     * TRY_TABLE, RETURN_CALL*, CALL_REF and the atomics family through, and each {@code throw}
+     * allocates a JVM exception with a stack trace for ~1 gas. Anything Chicory learns to parse
+     * later stays refused until it is added here deliberately. The set is the MVP integer
+     * instruction set, sign-extension, null/func references (table elements), table ops and the
+     * bulk-memory ops; floats, SIMD, GC, exceptions, tail calls and atomics are absent. The shipped
+     * contracts compile to a subset (WasmAdversarialTest pins that they all still deploy).
+     */
+    private static final java.util.Set<com.dylibso.chicory.wasm.types.OpCode> ALLOWED_OPCODES =
+        java.util.Arrays.stream("""
+            UNREACHABLE NOP BLOCK LOOP IF ELSE END BR BR_IF BR_TABLE RETURN CALL CALL_INDIRECT
+            DROP SELECT SELECT_T LOCAL_GET LOCAL_SET LOCAL_TEE GLOBAL_GET GLOBAL_SET
+            TABLE_GET TABLE_SET TABLE_INIT ELEM_DROP TABLE_COPY TABLE_GROW TABLE_SIZE TABLE_FILL
+            REF_NULL REF_IS_NULL REF_FUNC
+            I32_LOAD I64_LOAD I32_LOAD8_S I32_LOAD8_U I32_LOAD16_S I32_LOAD16_U
+            I64_LOAD8_S I64_LOAD8_U I64_LOAD16_S I64_LOAD16_U I64_LOAD32_S I64_LOAD32_U
+            I32_STORE I64_STORE I32_STORE8 I32_STORE16 I64_STORE8 I64_STORE16 I64_STORE32
+            MEMORY_SIZE MEMORY_GROW MEMORY_INIT DATA_DROP MEMORY_COPY MEMORY_FILL
+            I32_CONST I64_CONST
+            I32_EQZ I32_EQ I32_NE I32_LT_S I32_LT_U I32_GT_S I32_GT_U I32_LE_S I32_LE_U I32_GE_S I32_GE_U
+            I64_EQZ I64_EQ I64_NE I64_LT_S I64_LT_U I64_GT_S I64_GT_U I64_LE_S I64_LE_U I64_GE_S I64_GE_U
+            I32_CLZ I32_CTZ I32_POPCNT I32_ADD I32_SUB I32_MUL I32_DIV_S I32_DIV_U I32_REM_S I32_REM_U
+            I32_AND I32_OR I32_XOR I32_SHL I32_SHR_S I32_SHR_U I32_ROTL I32_ROTR
+            I64_CLZ I64_CTZ I64_POPCNT I64_ADD I64_SUB I64_MUL I64_DIV_S I64_DIV_U I64_REM_S I64_REM_U
+            I64_AND I64_OR I64_XOR I64_SHL I64_SHR_S I64_SHR_U I64_ROTL I64_ROTR
+            I32_WRAP_I64 I64_EXTEND_I32_S I64_EXTEND_I32_U
+            I32_EXTEND_8_S I32_EXTEND_16_S I64_EXTEND_8_S I64_EXTEND_16_S I64_EXTEND_32_S
+            """.trim().split("\\s+"))
+            .map(com.dylibso.chicory.wasm.types.OpCode::valueOf)
+            .collect(java.util.stream.Collectors.toUnmodifiableSet());
 
     /**
      * Rejects the WASM GC feature family entirely (audit C1). Chicory 1.7.5 implements the GC
@@ -233,6 +270,13 @@ final class WasmModuleGuard {
                 if (params > WasmVm.MAX_FUNCTION_PARAMS) {
                     throw new IllegalArgumentException("contract function type declares too many params: "
                         + params + " (max " + WasmVm.MAX_FUNCTION_PARAMS + ")");
+                }
+                // Results get the same cap: a label of huge arity makes every `br` re-validate
+                // that many operands, so a few KiB of `br 0` cost Chicory's validator quadratic time.
+                int results = types.getType(i).returns().size();
+                if (results > WasmVm.MAX_FUNCTION_PARAMS) {
+                    throw new IllegalArgumentException("contract function type declares too many results: "
+                        + results + " (max " + WasmVm.MAX_FUNCTION_PARAMS + ")");
                 }
             }
         }
