@@ -34,7 +34,7 @@ class SnapshotBootstrapFailClosedAttackTest {
     @Test
     void anAbortAfterSeedingLeavesTheMarkerSetAndStopsTheSearch() {
         SnapTestFixture f = new SnapTestFixture();
-        var peer = new SnapTestFixture.Peer(100, f.info(), f.chain(5), f.chunk, BigInteger.TEN);
+        var peer = new SnapTestFixture.Peer(5, f.info(), f.chain(5), f.chunk, BigInteger.TEN);
 
         var failing = new SnapTestFixture.Target();
         failing.failOnHeaders = true;
@@ -43,7 +43,7 @@ class SnapshotBootstrapFailClosedAttackTest {
 
         // Nothing written (the chunk does not rebuild the committed root): marker cleared, retryable.
         byte[] wrongChunk = new SnapTestFixture().chunk;
-        var liar = new SnapTestFixture.Peer(100, f.info(), f.chain(5), wrongChunk, BigInteger.TEN);
+        var liar = new SnapTestFixture.Peer(5, f.info(), f.chain(5), wrongChunk, BigInteger.TEN);
         var untouched = new SnapTestFixture.Target();
         assertFalse(run(f, untouched, liar));
         assertFalse(untouched.bootstrapping, "a refusal that wrote nothing clears the marker");

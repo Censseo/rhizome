@@ -325,7 +325,7 @@ final class TestNetwork implements AutoCloseable {
             return tweak(c -> new NodeConfig(c.params(), c.dataDir(), c.apiPort(), c.snapshotPath(),
                 c.miner(), c.peers(), c.advertisedUrl(), c.syncPeriodMs(), c.blockIntervalMs(),
                 c.mempoolSize(), c.allowPrivatePeers(), c.bindAddress(), c.apiToken(),
-                keep, c.allowOpenApi(), c.peerToken(), c.snapSync(), c.protectReads(),
+                keep, c.allowOpenApi(), c.peerToken(), c.snapSync(), c.snapAllowHttp(), c.protectReads(),
                 c.trustXff(), c.vote(), c.snapshotEveryBlocks(), c.hostAllowlistEnabled(),
                 c.extraAllowedHosts()));
         }
@@ -335,7 +335,7 @@ final class TestNetwork implements AutoCloseable {
             return tweak(c -> new NodeConfig(c.params(), c.dataDir(), c.apiPort(), c.snapshotPath(),
                 c.miner(), c.peers(), c.advertisedUrl(), c.syncPeriodMs(), c.blockIntervalMs(),
                 c.mempoolSize(), c.allowPrivatePeers(), c.bindAddress(), c.apiToken(),
-                c.keepBlocks(), c.allowOpenApi(), c.peerToken(), true, c.protectReads(),
+                c.keepBlocks(), c.allowOpenApi(), c.peerToken(), true, true, c.protectReads(),
                 c.trustXff(), c.vote(), c.snapshotEveryBlocks(), c.hostAllowlistEnabled(),
                 c.extraAllowedHosts()));
         }
@@ -345,7 +345,7 @@ final class TestNetwork implements AutoCloseable {
             return tweak(c -> new NodeConfig(c.params(), c.dataDir(), c.apiPort(), c.snapshotPath(),
                 c.miner(), c.peers(), c.advertisedUrl(), c.syncPeriodMs(), c.blockIntervalMs(),
                 c.mempoolSize(), c.allowPrivatePeers(), c.bindAddress(), c.apiToken(),
-                c.keepBlocks(), c.allowOpenApi(), c.peerToken(), c.snapSync(), c.protectReads(),
+                c.keepBlocks(), c.allowOpenApi(), c.peerToken(), c.snapSync(), c.snapAllowHttp(), c.protectReads(),
                 c.trustXff(), c.vote(), blocks, c.hostAllowlistEnabled(), c.extraAllowedHosts()));
         }
 

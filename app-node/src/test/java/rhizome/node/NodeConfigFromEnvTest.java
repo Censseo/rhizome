@@ -139,4 +139,10 @@ class NodeConfigFromEnvTest {
         assertFalse(NodeConfig.fromEnv(env("RHIZOME_SYNC", "full")).snapSync());
         assertFalse(NodeConfig.fromEnv(env("RHIZOME_SYNC", "snapshot")).snapSync());
     }
+
+    @Test
+    void plaintextSnapSeedsNeedAnExplicitOptIn() {
+        assertFalse(NodeConfig.fromEnv(env("RHIZOME_SYNC", "snap")).snapAllowHttp());
+        assertTrue(NodeConfig.fromEnv(env("RHIZOME_SNAP_ALLOW_HTTP", "true")).snapAllowHttp());
+    }
 }

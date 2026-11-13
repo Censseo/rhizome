@@ -71,6 +71,24 @@ final class SnapshotBootstrap {
         }
     }
 
+    /**
+     * The candidate's proven work may fall short of the best other seed's REPORTED work by this
+     * fraction (1/8) before it is refused. Two honest causes of a shortfall exist and neither is an
+     * attack: the reported figure includes uncle work that header validation deliberately does not
+     * count (HeaderChain proves base work only), and seeds sit a few blocks apart at the tip. A
+     * fabricated chain must still carry within 12.5 % of the honest chain's real work — roughly the
+     * honest network's own hashpower — so the tolerance buys the attacker nothing cheap.
+     */
+    static final int WORK_TOLERANCE_DIVISOR = 8;
+
+    /**
+     * Highest peer tip a snap bootstrap will validate to. The whole validated prefix is retained
+     * (headers are looked up by height for retarget and median-time), so this bounds that heap.
+     * shortcut: retains every header up to the tip; switch to a boundary-only difficulty memo when
+     * a chain outgrows this (about 4 months at 5 s blocks) — beyond it the joiner falls back to full sync.
+     */
+    static final long MAX_TIP_VALIDATION_HEIGHT = 2_000_000L;
+
     private SnapshotBootstrap() {}
 
     /**
@@ -94,6 +112,22 @@ final class SnapshotBootstrap {
     static boolean bootstrap(NetworkParameters params, LedgerSnapshot genesisSnapshot,
                              BootstrapTarget target, rhizome.vm.ContractStore contractStore,
                              PeerSource peer, long nowMillis, java.nio.file.Path spoolDir) {
+        return bootstrap(params, genesisSnapshot, target, contractStore, peer, nowMillis, spoolDir,
+            java.math.BigInteger.ZERO);
+    }
+
+    /**
+     * As above, additionally requiring the peer's chain, validated to its TIP, to prove at least
+     * {@code requiredWork} (less {@link #WORK_TOLERANCE_DIVISOR}'s tolerance) — the work the OTHER
+     * reachable seeds report. Without this the first seed whose snapshot verified was adopted: a
+     * lone malicious seed could serve a fabricated ledger behind a cheaply-mined header chain
+     * (only pivot+maxReorgDepth headers were validated, and nothing compared work).
+     * {@code ZERO} disables the comparison (a lone configured seed, tests).
+     */
+    static boolean bootstrap(NetworkParameters params, LedgerSnapshot genesisSnapshot,
+                             BootstrapTarget target, rhizome.vm.ContractStore contractStore,
+                             PeerSource peer, long nowMillis, java.nio.file.Path spoolDir,
+                             java.math.BigInteger requiredWork) {
         if (target.chainStore().height() != 0) {
             throw new IllegalStateException("snapshot bootstrap requires an empty chain store");
         }
@@ -122,6 +156,26 @@ final class SnapshotBootstrap {
         // Chain identity: genesis is derived locally, never downloaded.
         Block genesis = GenesisBlock.build(params, genesisSnapshot);
         BlockHeader genesisHeader = BlockHeader.of(genesis);
+        if (params.expectedGenesisHash() != null && !genesis.hash().equals(params.expectedGenesisHash())) {
+            log.error("Locally built genesis {} is not the network's pinned genesis {}; refusing snapshot",
+                genesis.hash().toHexString(), params.expectedGenesisHash().toHexString());
+            return false;
+        }
+        // Checkpointed heights must be reachable in the peer's chain: HeaderChain refuses a hash
+        // mismatch at a height it validates, but a chain that simply ENDS before the highest
+        // checkpoint would pass it vacuously.
+        long highestCheckpoint = params.checkpoints().keySet().stream()
+            .mapToLong(Long::longValue).max().orElse(0L);
+        if (highestCheckpoint > peerHeight) {
+            log.warn("Peer tip {} is below the highest checkpoint {}; refusing snapshot",
+                peerHeight, highestCheckpoint);
+            return false;
+        }
+        if (peerHeight > MAX_TIP_VALIDATION_HEIGHT) {
+            log.warn("Peer tip {} exceeds the snap-bootstrap validation bound {}; refusing", peerHeight,
+                MAX_TIP_VALIDATION_HEIGHT);
+            return false;
+        }
 
         // Validate the peer's header chain above genesis under full PoW, in bounded windows: fetch a
         // window, validate it chaining from the prefix already validated, then advance — so a peer that
@@ -131,12 +185,18 @@ final class SnapshotBootstrap {
         // the peer's untrusted advertised height. The below-pivot headers are retained because they are
         // adopted below; a genuinely large chain still costs O(pivot) retained headers, but those must
         // carry real PoW to pass validation, so there is no cheap OOM primitive left.
-        long validateTo = pivot + params.maxReorgDepth();
+        // Extended to the peer's TIP (bounded by MAX_TIP_VALIDATION_HEIGHT above): the candidate's
+        // proven work is compared against the other seeds' below, and only a chain validated to its
+        // tip can prove it. The pivot's burial is implied (pivot + maxReorgDepth <= peerHeight).
+        long validateTo = peerHeight;
+        java.math.BigInteger provenWork = java.math.BigInteger.ONE.shiftLeft(genesisHeader.difficulty());
         List<BlockHeader> headers = new ArrayList<>();
         for (long start = 2; start <= validateTo; start += Constants.BLOCK_HEADERS_PER_FETCH) {
             long end = Math.min(validateTo, start + Constants.BLOCK_HEADERS_PER_FETCH - 1);
             List<BlockHeader> window = fetchHeaders(peer, start, end);
-            if (window == null || window.isEmpty()) {
+            // A short window means the peer advertises a tip it cannot prove: its work is only
+            // proven up to what it served, so "validated to the tip" would be a lie.
+            if (window == null || window.size() != end - start + 1) {
                 return false;
             }
             List<BlockHeader> prefix = headers; // validated heights 2..start-1, at index h-2
@@ -149,6 +209,16 @@ final class SnapshotBootstrap {
                 return false;
             }
             headers.addAll(window);
+            provenWork = provenWork.add(validated.work());
+        }
+
+        // Cheap-first: compare work before spooling a single chunk or touching a store.
+        java.math.BigInteger floor = requiredWork.subtract(requiredWork.divide(
+            java.math.BigInteger.valueOf(WORK_TOLERANCE_DIVISOR)));
+        if (provenWork.compareTo(floor) < 0) {
+            log.warn("Peer's proven work {} is below the {} required by the other seeds; refusing snapshot",
+                provenWork, floor);
+            return false;
         }
 
         // The authority for the expected root is the VALIDATED HEADER at the pivot —

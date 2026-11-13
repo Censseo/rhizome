@@ -198,13 +198,19 @@ public final class RhizomeNode implements AutoCloseable {
             // a buried pivot instead of replaying history; falls back to full sync when no peer
             // offers a usable snapshot. The engine boot below then starts at the pivot.
             if (config.snapSync() && store.chainStore().height() == 0) {
-                for (String peerUrl : config.peers()) {
+                // The plan (https only, >= 2 reachable seeds, per-seed required work) is what makes
+                // adopting a seed's state safe — see SnapSeeds / SnapshotBootstrap.
+                for (SnapSeeds.Attempt attempt : SnapSeeds.plan(config.peers(), config.snapAllowHttp(),
+                        url -> new HttpPeerSource(url, blockPrivatePeers, exchange, peerTokenPolicy)
+                            .totalWork())) {
+                    String peerUrl = attempt.url();
                     try {
                         if (SnapshotBootstrap.bootstrap(config.params(), snapshot,
                                 new RocksBootstrapTarget(store, boxStore, tokenStore, stateStore),
                                 contractStore, new HttpPeerSource(peerUrl, blockPrivatePeers,
                                     exchange, peerTokenPolicy),
-                                System.currentTimeMillis(), Path.of(config.dataDir()))) {
+                                System.currentTimeMillis(), Path.of(config.dataDir()),
+                                attempt.requiredWork())) {
                             break;
                         }
                     } catch (SnapshotBootstrap.StoresDirtyException e) {

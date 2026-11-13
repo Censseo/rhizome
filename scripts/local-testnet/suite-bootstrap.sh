@@ -144,7 +144,8 @@ expect_eq BOOT-02 oui "$BURIED_OK" "pivot enterré de $BURIED blocs sous le tip 
 
 # --- 2. Le snap-sync ------------------------------------------------------------------------
 kill_node "$SNAP_DATA"; rm -rf "$SNAP_DATA"
-launch "$SNAP_PORT" "$SNAP_DATA" snap RHIZOME_SYNC=snap RHIZOME_PEERS="$PROVIDER_SEED"
+# Seeds locaux en http:// : le snap les refuse sauf opt-in explicite (RHIZOME_SNAP_ALLOW_HTTP).
+launch "$SNAP_PORT" "$SNAP_DATA" snap RHIZOME_SYNC=snap RHIZOME_SNAP_ALLOW_HTTP=true RHIZOME_PEERS="$PROVIDER_SEED"
 if ! wait_up "$SNAP"; then
   record BOOT-03 FAIL "le nœud snap n'a jamais répondu (voir $BASE_DIR/logs/snap.log)"
 else
