@@ -155,6 +155,57 @@ class PersistenceAttackTest {
         }
     }
 
+    /**
+     * PERS-11 — Grow the node store without bound on a pruned node: RHIZOME_PRUNE discarded block
+     * bodies but kept one txindex row per transaction forever. Pruning (incremental on append, and
+     * the boot catch-up sweep when retention shrinks) now deletes the txindex rows of the bodies
+     * it discards, while rows of retained bodies keep resolving.
+     */
+    @Test
+    void pruningADiscardedBodyDropsItsTxIndexRows() throws Exception {
+        var params = NetworkParameters.testnet().toBuilder()
+            .powAlgorithm(PowAlgorithm.SHA256).genesisDifficulty(3).minDifficulty(3).build();
+        var clock = new AtomicLong(1_000_000L);
+        var pair = generateKeyPairTyped();
+        var sender = PublicAddress.of(pair.publicKey());
+        var snapshot = new LedgerSnapshot("t", 0, params.chainId());
+        snapshot.put(sender, new TransactionAmount(10_000_000L));
+        List<Transaction> txs = new ArrayList<>();
+        // Archive first (no pruning), so the catch-up sweep is what removes the early rows.
+        try (var store = new RocksDbNodeStore(dir.toString(), 0)) {
+            ChainEngine engine = ChainEngine.boot(params, store, snapshot).clock(clock::get).build();
+            for (int n = 0; n < 6; n++) {
+                Transaction tx = Transaction.of(sender, PublicAddress.random(), new TransactionAmount(1_000),
+                    pair.publicKey(), new TransactionAmount(0), clock.get(), params.chainId(), n);
+                tx.sign(pair.privateKey());
+                txs.add(tx);
+                BlockImpl b = candidate(engine, params, PublicAddress.random(), clock, tx);
+                b.nonce(Miner.mineNonce(b.hash(), b.difficulty(), params.powAlgorithm()));
+                assertEquals(ExecutionStatus.SUCCESS, engine.addBlock(b));
+            }
+            assertTrue(store.chainStore().hasTransaction(txs.get(0).hashContents()), "archive keeps every row");
+        }
+        // Reopen pruned to the last 2 bodies: boot catch-up drops the older bodies AND their rows.
+        long tip;
+        try (var store = new RocksDbNodeStore(dir.toString(), 2)) {
+            tip = store.chainStore().height();
+            assertFalse(store.chainStore().hasTransaction(txs.get(0).hashContents()), "pruned body's row gone");
+            assertFalse(store.chainStore().hasTransaction(txs.get(3).hashContents()), "pruned body's row gone");
+            assertTrue(store.chainStore().hasTransaction(txs.get(5).hashContents()), "retained body's row kept");
+            // Incremental path: one more block makes the oldest retained body fall out in its append batch.
+            ChainEngine engine = ChainEngine.boot(params, store, snapshot).clock(clock::get).build();
+            Transaction tx = Transaction.of(sender, PublicAddress.random(), new TransactionAmount(1_000),
+                pair.publicKey(), new TransactionAmount(0), clock.get(), params.chainId(), 6);
+            tx.sign(pair.privateKey());
+            BlockImpl b = candidate(engine, params, PublicAddress.random(), clock, tx);
+            b.nonce(Miner.mineNonce(b.hash(), b.difficulty(), params.powAlgorithm()));
+            assertEquals(ExecutionStatus.SUCCESS, engine.addBlock(b));
+            assertEquals(tip + 1, store.chainStore().height());
+            assertFalse(store.chainStore().hasTransaction(txs.get(4).hashContents()), "fell out with its body");
+            assertTrue(store.chainStore().hasTransaction(tx.hashContents()));
+        }
+    }
+
     private static BlockImpl coinbaseOnly(ChainEngine engine, NetworkParameters params, AtomicLong clock,
                                           List<UncleRef> refs) {
         long height = engine.height() + 1;

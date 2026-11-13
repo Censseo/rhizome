@@ -498,6 +498,7 @@ public final class RocksDbNodeStore extends RocksDbStore implements rhizome.core
                 if (keepBlocks > 0) {
                     long fallsOut = expected - keepBlocks;
                     if (fallsOut > GENESIS_HEIGHT) {
+                        stageTxIndexDeletes(batch, fallsOut);
                         batch.delete(blocksCf, heightKey(fallsOut));
                         batch.put(metaCf, PRUNED_BELOW_KEY, heightKey(fallsOut + 1));
                     }
@@ -563,15 +564,48 @@ public final class RocksDbNodeStore extends RocksDbStore implements rhizome.core
             // form one contiguous key range [from, height): a single deleteRange tombstone
             // replaces an unbounded WriteBatch holding one delete per body (audit: giant prune
             // batch). The range tombstone and the watermark ride the SAME WriteBatch, so a
-            // crash cannot leave bodies deleted with a stale watermark. Headers + txindex are
-            // retained, as before.
+            // crash cannot leave bodies deleted with a stale watermark. Headers are retained.
+            // The txindex rows of the pruned bodies go first, in chunked batches (a crash between
+            // chunks leaves bodies with a partial index, and the watermark unmoved, so the next
+            // boot's catch-up simply repeats the sweep).
             try (WriteBatch batch = new WriteBatch()) {
+                int staged = 0;
+                for (long h = from; h < height; h++) {
+                    staged += stageTxIndexDeletes(batch, h);
+                    if (staged >= BULK_LOAD_BATCH_CHUNK) {
+                        db.write(writeOptions, batch);
+                        batch.clear();
+                        staged = 0;
+                    }
+                }
                 batch.deleteRange(blocksCf, heightKey(from), heightKey(height));
                 batch.put(metaCf, PRUNED_BELOW_KEY, heightKey(height));
                 db.write(writeOptions, batch);
             } catch (RocksDBException e) {
                 throw new LedgerException("Failed to prune bodies below " + height, e);
             }
+        }
+
+        /**
+         * Stages deletes of the txindex rows of the body at {@code height} (none if the body is
+         * already gone). Pruned history keeps its headers but not its tx lookups: the explorer
+         * already ignores an indexed height below {@code prunedBelow} (its body is gone), so the
+         * rows were pure unbounded growth. Replay protection past the retention window rests on
+         * the persisted account nonces, which every node enforces regardless of retention.
+         */
+        private int stageTxIndexDeletes(WriteBatch batch, long height) throws RocksDBException {
+            byte[] body = raw(blocksCf, heightKey(height));
+            if (body == null) {
+                return 0;
+            }
+            int n = 0;
+            for (Transaction t : BlockCodec.decode(body).transactions()) {
+                if (!t.isTransactionFee()) {
+                    batch.delete(txIndexCf, t.hashContents().raw());
+                    n++;
+                }
+            }
+            return n;
         }
 
         @Override
