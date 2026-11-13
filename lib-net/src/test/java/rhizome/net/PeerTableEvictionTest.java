@@ -63,6 +63,22 @@ class PeerTableEvictionTest {
         assertEquals(6, registry.size(), "8 slots, 2 reserved for confirmed peers");
     }
 
+    /**
+     * NET-13 — a capacity eviction is not punishment: the displaced peer did nothing wrong, so it
+     * must not be locked out by the removal cooldown (a failed peer is; a victim is not). Without
+     * this an attacker cycling newcomers could also shut honest peers out of the table for the
+     * cooldown window.
+     */
+    @Test
+    void aCapacityEvictedPeerIsNotPutInTheRemovalCooldown() {
+        PeerRegistry registry = new PeerRegistry(null, 4); // 1 slot reserved: 3 unconfirmed fit
+        List<String> first = List.of("http://127.0.0.1:5001", "http://127.0.0.1:5002", "http://127.0.0.1:5003");
+        first.forEach(u -> assertTrue(registry.add(u)));
+        assertTrue(registry.add("http://127.0.0.1:5004"), "newcomer displaces one unconfirmed peer");
+        String victim = first.stream().filter(u -> !registry.snapshot().contains(u)).findFirst().orElseThrow();
+        assertTrue(registry.add(victim), "the displaced peer is not in the removal cooldown");
+    }
+
     /** NET-13 — IPv6 peers are bucketed per /32, not per /48. */
     @Test
     void ipv6SubnetBucketIsAThirtyTwoBitPrefix() {

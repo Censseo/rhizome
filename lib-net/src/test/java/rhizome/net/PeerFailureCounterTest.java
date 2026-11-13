@@ -1,8 +1,10 @@
 package rhizome.net;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.net.InetAddress;
 import java.util.List;
 
 import org.junit.jupiter.api.Test;
@@ -66,5 +68,60 @@ class PeerFailureCounterTest {
         assertTrue(bans.isBanned(a, "203.0.113.7"));
         assertTrue(bans.isBanned(b, "203.0.113.7"), "same dialled endpoint, different name: still banned");
         assertFalse(bans.isBanned(b, "203.0.113.8"), "a different dialled address is a different endpoint");
+    }
+
+    /**
+     * NET-14 (registry wiring) -- the ban key must be the IP the registry dialled at ADMISSION, not
+     * whatever the name resolves to when the ban or the check happens. The list-level test above
+     * passes the IP by hand, so it cannot tell if the registry stops supplying it.
+     */
+    @Test
+    void theRegistryBansAndChecksTheAdmissionTimeIpAfterADnsFlip() throws Exception {
+        PeerHosts.resetCacheForTests();
+        PeerBanList bans = new PeerBanList(100, 60_000L, 64);
+        PeerRegistry registry = new PeerRegistry(null, 16, bans);
+
+        // Ban path: admitted at .7, DNS flips to .9, the peer misbehaves.
+        PeerHosts.primeCacheForTests("flip-ban.test", InetAddress.getByName("203.0.113.7"));
+        assertTrue(registry.add("http://flip-ban.test:3000"));
+        PeerHosts.primeCacheForTests("flip-ban.test", InetAddress.getByName("203.0.113.9"));
+        assertTrue(registry.penalize("http://flip-ban.test:3000", 100));
+        assertTrue(bans.isBanned(PeerId.of("http://203.0.113.7:3000")), "the dialled address is the one banned");
+        assertFalse(bans.isBanned(PeerId.of("http://203.0.113.9:3000")), "not the post-flip resolution");
+
+        // Check path: ban recorded against the dialled .5, name now resolves to .6.
+        PeerHosts.primeCacheForTests("flip-check.test", InetAddress.getByName("203.0.113.5"));
+        assertTrue(registry.add("http://flip-check.test:3000"));
+        PeerHosts.primeCacheForTests("flip-check.test", InetAddress.getByName("203.0.113.6"));
+        assertTrue(bans.misbehave(PeerId.of("http://flip-check.test:3000"), 100, "203.0.113.5"));
+        assertTrue(registry.isBanned("http://flip-check.test:3000"),
+            "the check keys on the admission-time IP, not a fresh resolution");
+        PeerHosts.resetCacheForTests();
+    }
+
+    /** NET-12 -- a successful gossip send clears the consecutive-failure count, so only CONSECUTIVE failures evict. */
+    @Test
+    void aSuccessfulGossipSendClearsTheFailureCount() throws Exception {
+        var server = com.sun.net.httpserver.HttpServer.create(new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", ex -> {
+            ex.sendResponseHeaders(200, -1);
+            ex.close();
+        });
+        server.start();
+        try {
+            String live = "http://127.0.0.1:" + server.getAddress().getPort();
+            PeerRegistry registry = new PeerRegistry(null, 16);
+            assertTrue(registry.add(live));
+            registry.recordFailure(live);
+            registry.recordFailure(live);
+            assertEquals(2, registry.failureCount(live));
+            try (PeerBroadcaster b = new PeerBroadcaster(registry::snapshot, false)
+                    .withOutcomeSinks(registry::recordFailure, registry::recordSuccess)) {
+                b.sendQuietlyForTest(live, "/submit", new byte[] {1});
+            }
+            assertEquals(0, registry.failureCount(live), "a good gossip exchange resets the count");
+        } finally {
+            server.stop(0);
+        }
     }
 }
