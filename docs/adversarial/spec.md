@@ -514,6 +514,10 @@ check is a boot-time equality composed with guards those suites already exercise
 | WALLET-05 | Overflow the fee product, or slip a malformed amount, identifier or gas parameter past client validation. | A1 | DEFENDED | `app-wallet/src/test/java/rhizome/wallet/WalletCliArgumentParsingTest.java#callRefusesAGasPriceThatWouldOverflowTheFeeProduct`, `app-wallet/src/test/java/rhizome/wallet/WalletCliArgumentParsingTest.java#sendRefusesAnAmountFinerThanOneBaseUnit` |
 | WALLET-06 | Inject JSON metacharacters through a node URL to corrupt the key file. | A5 | DEFENDED | `app-wallet/src/test/java/rhizome/wallet/WalletTest.java#nodeUrlWithJsonMetacharactersDoesNotCorruptTheKeyFile` |
 | WALLET-07 | Make the browser wallet and the node disagree on a derivation, so a signed transaction spends from an address the user never saw. | A5 | DEFENDED | `app-node/src/test/java/rhizome/node/BrowserWalletVectorTest.java#browserSignedTransferParsesAndVerifies`, `app-node/src/test/java/rhizome/node/BrowserWalletVectorTest.java#contractAddressDerivationMatchesJs` |
+| WALLET-08 | Make a first-use wallet pin whatever chainId a hostile node reports, so a "testnet" node gets a mainnet-valid signature. | A2 | DEFENDED | `app-wallet/src/test/java/rhizome/wallet/WalletCliHardeningAttackTest.java#firstContactWithoutAnOperatorStatedNetworkIsRefused` |
+| WALLET-09 | Have a hostile node report nonce real+1 and withhold the signed transaction, so a resend at the real nonce later pays twice. | A2 | DEFENDED | `app-wallet/src/test/java/rhizome/wallet/WalletCliHardeningAttackTest.java#nonceFromAHostileNodeIsCrossCheckedAndOverridable` |
+| WALLET-10 | Smuggle an amount past the parser with exponent notation, a sign, excess precision or long overflow (`1e5` PDN). | A1 | DEFENDED | `app-wallet/src/test/java/rhizome/wallet/WalletCliHardeningAttackTest.java#amountsWithExponentSignOrExcessPrecisionAreRefused` |
+| WALLET-11 | Read the wallet passphrase or API token from a secret file that is readable by group or other users. | A6 | DEFENDED | `app-wallet/src/test/java/rhizome/wallet/WalletCliHardeningAttackTest.java#secretFileReadableByOthersIsRefused` |
 
 
 ## E2E — the assembled node and network
@@ -642,6 +646,12 @@ taken.
 
 ## Change log
 
+- **2026-11-13** — `WALLET-08..11` added for the pre-testnet wallet CLI hardening: first use of a
+  key file now requires `--network` / `--expect-chain-id` instead of pinning the node's own
+  `/info` answer (08); `--cross-check` / `--nonce` and a printed nonce notice blunt a node that
+  hands out real+1 and withholds the signed transaction (09); PDN amounts reject exponent, sign
+  and over-precision (10); passphrase and API-token files readable by group/other are refused
+  rather than warned about (11). All four are offline unit proofs in `WalletCliHardeningAttackTest`.
 - **2026-09-07** — POW-08 for the pre-PoW gate ordering CONS-10 already locks by status code
   (`BlockUnclesTest#blocksOwnPowIsVerifiedBeforeUncleWork`), proven this time by an actual cost
   measurement rather than only a rejection status: `PufferfishCostAttackTest` runs

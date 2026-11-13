@@ -65,7 +65,8 @@ warning**, with **heap zeroing** around the unencrypted material.
 
 Key files are written **owner-only** (`writeOwnerOnly`, `restrictToOwner`) and the containing
 directory is **fsynced** (`fsyncDirectory`) so a crash cannot leave a partially written key. On
-load, the wallet **warns if the file is group- or other-readable** (`warnIfGroupOrOtherReadable`).
+load, the wallet **warns if the file is group- or other-readable**. A `--passphrase-file` or
+`--api-token-file` readable by group/other is **refused** on POSIX filesystems (`requireOwnerOnly`).
 
 Key material is read as `char[]`/byte arrays and zeroed rather than held in `String`s
 (`seedJsonChars`, `readChars`, `extractPrivateKeySeed`).
@@ -73,9 +74,18 @@ Key material is read as `char[]`/byte arrays and zeroed rather than held in `Str
 ### W-4 — Chain-id TOFU pin *(implemented)*
 
 The wallet records a **trust-on-first-use chain-id pin** alongside the key (`TofuPin`,
-`readChainIdPin`, `saveChainIdPin`, `chainIdPin`). `--expect-chain-id` confirms explicitly. This
+`readChainIdPin`, `saveChainIdPin`, `chainIdPin`). The first signing command on a key file must **state the network** with `--network <name>` or
+`--expect-chain-id <n>`; the node's `/info` answer must match it, and is never itself trusted to
+establish the pin. This
 defends against a **malicious chain swap** — a node that answers with a different `chainId` would
 otherwise get a validly-signed transaction for a network the user did not intend.
+
+**Nonce trust.** The node supplies `nextNonce`, so a hostile node could answer real+1, withhold the
+signed transaction and report failure. Wallet-side mitigations: the nonce used is printed with a
+notice that the transaction stays valid until that nonce is consumed; `--nonce <n>` re-signs at the
+same nonce (a replacement, not a second payment); `--cross-check <url>` refuses on mismatch with a
+second node. `send`'s fee defaults to 0 because `/info` does not advertise the node's minimum fee.
+PDN amounts are plain decimals only (no exponent or sign, at most four fractional digits, within `long`).
 
 ### W-5 — Recipient address checksum *(implemented)*
 

@@ -39,7 +39,11 @@ import rhizome.core.transaction.TransactionKind;
  *   --api-token &lt;token&gt;           bearer token for a node gated by RHIZOME_API_TOKEN (or set
  *                               RHIZOME_API_TOKEN); never sent in cleartext to a non-loopback host
  *
- * Chain-id pinning (trust on first use): the first send/deploy/call/... records the node's
+ * First use of a key file requires {@code --network <name>} or {@code --expect-chain-id <n>}; the
+ * node's own /info answer is never trusted to establish the pin. Also: {@code --nonce <n>},
+ * {@code --cross-check <url>}, {@code --api-token-file <path>}.
+ *
+ * Chain-id pinning (trust on first use, once the operator named the network): the first send/deploy/call/... records the node's
  * chainId and URL in the key file; any later node reporting a different chainId aborts the
  * command, so a hostile node cannot replay your signature onto another chain (audit F2). On an
  * encrypted key file the pin is sealed INSIDE the encrypted payload — writing it requires the
@@ -176,7 +180,7 @@ public final class WalletCli {
     }
 
     private static int send(String[] args) throws Exception {
-        require(args, 5, "send <nodeUrl> <keyfile> <to> <amount> [fee] [--expect-chain-id <n>] [--passphrase-file <path>]");
+        require(args, 5, "send <nodeUrl> <keyfile> <to> <amount> [fee] [--network <name>|--expect-chain-id <n>] [--nonce <n>] [--cross-check <url>] [--passphrase-file <path>]");
         warnIfInsecureNodeUrl(args[1]);
         WalletClient client = walletClient(args);
         Wallet wallet = Wallet.load(Path.of(args[2]), passphraseFromFlag(args));
@@ -188,7 +192,7 @@ public final class WalletCli {
         echoPdn("fee", fee.amount());
 
         int chainId = verifiedChainId(client, args, wallet);
-        long nonce = client.walletInfo(wallet.address()).nextNonce();
+        long nonce = nonceFor(client, wallet, args);
         Transaction tx = wallet.signedSend(to, amount, fee, chainId, nonce, System.currentTimeMillis());
 
         String status = client.submit(tx);
@@ -198,6 +202,52 @@ public final class WalletCli {
             return 1;
         }
         return 0;
+    }
+
+    /**
+     * The nonce to sign with. The node supplies it, so a hostile node can answer real+1, withhold
+     * the signed transaction and report failure; the user then resends at the real nonce and the
+     * withheld one pays a second time once it lands. Mitigations that need no consensus change:
+     * {@code --cross-check <url>} refuses when a second node disagrees, {@code --nonce <n>} lets a
+     * retry re-sign at the SAME nonce (so the two transactions replace rather than add), and the
+     * nonce is always printed with the notice that the transaction stays valid until it is consumed.
+     */
+    private static long nonceFor(WalletClient client, Wallet wallet, String[] args) {
+        String override = flag(args, "--nonce");
+        long nonce;
+        if (override != null) {
+            nonce = parseNonce(override);
+        } else {
+            nonce = client.walletInfo(wallet.address()).nextNonce();
+            String other = flag(args, "--cross-check");
+            if (other != null) {
+                long second = new WalletClient(other, apiToken(args)).walletInfo(wallet.address()).nextNonce();
+                checkNoncesAgree(nonce, second);
+            }
+        }
+        System.err.println("nonce: " + nonce + " — the signed transaction stays valid until this nonce "
+            + "is consumed on chain; if submission fails or is unconfirmed, retry with --nonce "
+            + nonce + " (replaces, never duplicates).");
+        return nonce;
+    }
+
+    static long parseNonce(String text) {
+        try {
+            long n = Long.parseLong(text.trim());
+            if (n >= 0) {
+                return n;
+            }
+        } catch (NumberFormatException e) {
+            // fall through to the shared message
+        }
+        throw new IllegalArgumentException("invalid nonce: " + text);
+    }
+
+    static void checkNoncesAgree(long primary, long second) {
+        if (primary != second) {
+            throw new IllegalArgumentException("nodes disagree on the nonce (" + primary + " vs "
+                + second + " from --cross-check); refusing to sign.");
+        }
     }
 
     private static final long DEFAULT_GAS_LIMIT = 10_000_000L;
@@ -257,7 +307,7 @@ public final class WalletCli {
     }
 
     private static int deploy(String[] args) throws Exception {
-        require(args, 4, "deploy <nodeUrl> <keyfile> <wasmfile> [gasLimit] [gasPrice] [--expect-chain-id <n>] [--passphrase-file <path>]");
+        require(args, 4, "deploy <nodeUrl> <keyfile> <wasmfile> [gasLimit] [gasPrice] [--network <name>|--expect-chain-id <n>] [--nonce <n>] [--cross-check <url>] [--passphrase-file <path>]");
         warnIfInsecureNodeUrl(args[1]);
         WalletClient client = walletClient(args);
         Wallet wallet = Wallet.load(Path.of(args[2]), passphraseFromFlag(args));
@@ -266,7 +316,7 @@ public final class WalletCli {
         long gasLimit = gas[0];
         long gasPrice = gas[1];
 
-        long nonce = client.walletInfo(wallet.address()).nextNonce();
+        long nonce = nonceFor(client, wallet, args);
         Transaction tx = wallet.signedContract(TransactionKind.DEPLOY, PublicAddress.empty(),
             code, 0, gasLimit, gasPrice, verifiedChainId(client, args, wallet), nonce, System.currentTimeMillis());
         String status = client.submit(tx);
@@ -279,7 +329,7 @@ public final class WalletCli {
     }
 
     private static int call(String[] args) throws Exception {
-        require(args, 5, "call <nodeUrl> <keyfile> <contract> <hexInput> [gasLimit] [gasPrice] [--expect-chain-id <n>] [--passphrase-file <path>]");
+        require(args, 5, "call <nodeUrl> <keyfile> <contract> <hexInput> [gasLimit] [gasPrice] [--network <name>|--expect-chain-id <n>] [--nonce <n>] [--cross-check <url>] [--passphrase-file <path>]");
         warnIfInsecureNodeUrl(args[1]);
         WalletClient client = walletClient(args);
         Wallet wallet = Wallet.load(Path.of(args[2]), passphraseFromFlag(args));
@@ -289,7 +339,7 @@ public final class WalletCli {
         long gasLimit = gas[0];
         long gasPrice = gas[1];
 
-        long nonce = client.walletInfo(wallet.address()).nextNonce();
+        long nonce = nonceFor(client, wallet, args);
         Transaction tx = wallet.signedContract(TransactionKind.CALL, contract,
             input, 0, gasLimit, gasPrice, verifiedChainId(client, args, wallet), nonce, System.currentTimeMillis());
         String status = client.submit(tx);
@@ -304,7 +354,7 @@ public final class WalletCli {
     // ---- data boxes ----
 
     private static int boxCreate(String[] args) throws Exception {
-        require(args, 4, "box-create <nodeUrl> <keyfile> <value> [--owner <addr>] [--fee <fee>] [--reg <type>:<val>]... [--expect-chain-id <n>] [--passphrase-file <path>]");
+        require(args, 4, "box-create <nodeUrl> <keyfile> <value> [--owner <addr>] [--fee <fee>] [--reg <type>:<val>]... [--network <name>|--expect-chain-id <n>] [--nonce <n>] [--cross-check <url>] [--passphrase-file <path>]");
         warnIfInsecureNodeUrl(args[1]);
         WalletClient client = walletClient(args);
         Wallet wallet = Wallet.load(Path.of(args[2]), passphraseFromFlag(args));
@@ -316,7 +366,7 @@ public final class WalletCli {
         echoPdn("value", value);
         echoPdn("fee", fee);
 
-        long nonce = client.walletInfo(wallet.address()).nextNonce();
+        long nonce = nonceFor(client, wallet, args);
         var tx = wallet.signedBox(TransactionKind.BOX_CREATE, owner, data, value, fee,
             verifiedChainId(client, args, wallet), nonce, System.currentTimeMillis());
         String status = client.submit(tx);
@@ -329,7 +379,7 @@ public final class WalletCli {
     }
 
     private static int boxUpdate(String[] args) throws Exception {
-        require(args, 4, "box-update <nodeUrl> <keyfile> <boxId> [--topup <amt>] [--fee <fee>] [--reg <type>:<val>]... [--expect-chain-id <n>] [--passphrase-file <path>]");
+        require(args, 4, "box-update <nodeUrl> <keyfile> <boxId> [--topup <amt>] [--fee <fee>] [--reg <type>:<val>]... [--network <name>|--expect-chain-id <n>] [--nonce <n>] [--cross-check <url>] [--passphrase-file <path>]");
         warnIfInsecureNodeUrl(args[1]);
         WalletClient client = walletClient(args);
         Wallet wallet = Wallet.load(Path.of(args[2]), passphraseFromFlag(args));
@@ -340,7 +390,7 @@ public final class WalletCli {
         echoPdn("topup", topup);
         echoPdn("fee", fee);
 
-        long nonce = client.walletInfo(wallet.address()).nextNonce();
+        long nonce = nonceFor(client, wallet, args);
         var tx = wallet.signedBox(TransactionKind.BOX_UPDATE, wallet.address(), data, topup, fee,
             verifiedChainId(client, args, wallet), nonce, System.currentTimeMillis());
         String status = client.submit(tx);
@@ -353,7 +403,7 @@ public final class WalletCli {
     }
 
     private static int boxSpend(String[] args) throws Exception {
-        require(args, 4, "box-spend <nodeUrl> <keyfile> <boxId> [--fee <fee>] [--expect-chain-id <n>] [--passphrase-file <path>]");
+        require(args, 4, "box-spend <nodeUrl> <keyfile> <boxId> [--fee <fee>] [--network <name>|--expect-chain-id <n>] [--nonce <n>] [--cross-check <url>] [--passphrase-file <path>]");
         warnIfInsecureNodeUrl(args[1]);
         WalletClient client = walletClient(args);
         Wallet wallet = Wallet.load(Path.of(args[2]), passphraseFromFlag(args));
@@ -362,7 +412,7 @@ public final class WalletCli {
         byte[] data = rhizome.core.box.BoxPayload.encodeTarget(boxId);
         echoPdn("fee", fee);
 
-        long nonce = client.walletInfo(wallet.address()).nextNonce();
+        long nonce = nonceFor(client, wallet, args);
         var tx = wallet.signedBox(TransactionKind.BOX_SPEND, wallet.address(), data, 0, fee,
             verifiedChainId(client, args, wallet), nonce, System.currentTimeMillis());
         String status = client.submit(tx);
@@ -399,7 +449,7 @@ public final class WalletCli {
     // ---- native tokens ----
 
     private static int tokenMint(String[] args) throws Exception {
-        require(args, 7, "token-mint <nodeUrl> <keyfile> <symbol> <name> <amount> <decimals> [--fee <fee>] [--expect-chain-id <n>] [--passphrase-file <path>]");
+        require(args, 7, "token-mint <nodeUrl> <keyfile> <symbol> <name> <amount> <decimals> [--fee <fee>] [--network <name>|--expect-chain-id <n>] [--nonce <n>] [--cross-check <url>] [--passphrase-file <path>]");
         warnIfInsecureNodeUrl(args[1]);
         WalletClient client = walletClient(args);
         Wallet wallet = Wallet.load(Path.of(args[2]), passphraseFromFlag(args));
@@ -413,7 +463,7 @@ public final class WalletCli {
             + " (" + name + "), " + decimals + " decimals");
         echoPdn("fee", fee);
 
-        long nonce = client.walletInfo(wallet.address()).nextNonce();
+        long nonce = nonceFor(client, wallet, args);
         var tx = wallet.signedToken(TransactionKind.TOKEN_MINT, wallet.address(), data, fee,
             verifiedChainId(client, args, wallet), nonce, System.currentTimeMillis());
         String status = client.submit(tx);
@@ -426,7 +476,7 @@ public final class WalletCli {
     }
 
     private static int tokenTransfer(String[] args) throws Exception {
-        require(args, 6, "token-transfer <nodeUrl> <keyfile> <tokenId> <to> <amount> [--fee <fee>] [--expect-chain-id <n>] [--passphrase-file <path>]");
+        require(args, 6, "token-transfer <nodeUrl> <keyfile> <tokenId> <to> <amount> [--fee <fee>] [--network <name>|--expect-chain-id <n>] [--nonce <n>] [--cross-check <url>] [--passphrase-file <path>]");
         // Validate the recipient BEFORE loading the wallet: a checksum typo should not cost a
         // passphrase prompt and a scrypt round to discover.
         PublicAddress recipient = checkedRecipient(args[4], args);
@@ -438,7 +488,7 @@ public final class WalletCli {
     }
 
     private static int tokenBurn(String[] args) throws Exception {
-        require(args, 5, "token-burn <nodeUrl> <keyfile> <tokenId> <amount> [--fee <fee>] [--expect-chain-id <n>] [--passphrase-file <path>]");
+        require(args, 5, "token-burn <nodeUrl> <keyfile> <tokenId> <amount> [--fee <fee>] [--network <name>|--expect-chain-id <n>] [--nonce <n>] [--cross-check <url>] [--passphrase-file <path>]");
         String tokenId = hexId(args[3], "tokenId");
         long amount = tokenAmount(args[4]);
         Wallet wallet = Wallet.load(Path.of(args[2]), passphraseFromFlag(args));
@@ -456,7 +506,7 @@ public final class WalletCli {
         System.err.println("amount: " + amount + " units of token " + tokenIdHex);
         echoPdn("fee", fee);
 
-        long nonce = client.walletInfo(wallet.address()).nextNonce();
+        long nonce = nonceFor(client, wallet, args);
         var tx = wallet.signedToken(kind, to, data, fee, verifiedChainId(client, args, wallet), nonce, System.currentTimeMillis());
         String status = client.submit(tx);
         System.out.println("token: " + tokenIdHex);
@@ -535,6 +585,10 @@ public final class WalletCli {
      * wallet cannot authenticate).
      */
     private static WalletClient walletClient(String[] args) {
+        if (flag(args, "--api-token") != null) {
+            System.err.println("WARNING: --api-token on the command line is visible to every local "
+                + "user in `ps`; prefer RHIZOME_API_TOKEN or --api-token-file <path>.");
+        }
         return new WalletClient(args[1], apiToken(args));
     }
 
@@ -542,6 +596,16 @@ public final class WalletCli {
      *  {@code RHIZOME_API_TOKEN} env var; null when neither is set (open node). */
     private static String apiToken(String[] args) {
         String token = flag(args, "--api-token");
+        String file = flag(args, "--api-token-file");
+        if (file != null) {
+            Path tokenFile = Path.of(file);
+            try {
+                requireOwnerOnly(tokenFile, "api token file");
+                token = Files.readString(tokenFile);
+            } catch (java.io.IOException e) {
+                throw new IllegalArgumentException("cannot read --api-token-file " + file);
+            }
+        }
         if (token == null || token.isEmpty()) {
             token = System.getenv("RHIZOME_API_TOKEN");
         }
@@ -588,7 +652,12 @@ public final class WalletCli {
      * operator typed (audit F6). Rejects negatives, magnitudes past the long range, and precision
      * finer than one base unit — the same guardrails as {@code Helpers.PDN}, but exact.
      */
-    private static long pdnBaseUnits(String text) {
+    static long pdnBaseUnits(String text) {
+        // Plain decimal only: BigDecimal would accept "1e5" (100000 PDN) and a leading sign.
+        if (!text.matches("[0-9]+(\\.[0-9]+)?")) {
+            throw new IllegalArgumentException("invalid PDN amount: " + text
+                + " (plain digits with an optional fraction; no sign or exponent)");
+        }
         final BigDecimal scaled;
         try {
             scaled = new BigDecimal(text).multiply(BigDecimal.valueOf(Constants.DECIMAL_SCALE_FACTOR));
@@ -714,7 +783,7 @@ public final class WalletCli {
             return null;
         }
         Path passFile = Path.of(path);
-        warnIfGroupOrOtherReadable(passFile);
+        requireOwnerOnly(passFile, "passphrase file");
         byte[] bytes = Files.readAllBytes(passFile);
         try {
             // CR/LF are single bytes in UTF-8, so trailing-newline stripping is safe at byte level.
@@ -729,21 +798,21 @@ public final class WalletCli {
     }
 
     /**
-     * Best-effort permission audit of a passphrase file, mirroring the plaintext-key warning in
-     * {@code Wallet}: a group/other-readable passphrase unlocks the encrypted key file for any
-     * local user, so warn loudly on use. Ignored where POSIX permissions are unsupported.
+     * Refuses a secret file readable by group/other: such a passphrase or token unlocks the wallet
+     * (or the node's operator routes) for any local user. Skipped where POSIX permissions are
+     * unsupported, so non-POSIX filesystems keep working.
      */
-    private static void warnIfGroupOrOtherReadable(Path passFile) {
+    static void requireOwnerOnly(Path file, String what) {
         try {
-            var perms = Files.getPosixFilePermissions(passFile);
+            var perms = Files.getPosixFilePermissions(file);
             if (perms.contains(java.nio.file.attribute.PosixFilePermission.GROUP_READ)
                 || perms.contains(java.nio.file.attribute.PosixFilePermission.OTHERS_READ)) {
-                System.err.println("WARNING: passphrase file " + passFile
-                    + " is readable by group/other users — anyone who can read it can unlock the"
-                    + " wallet key. Run `chmod 600 " + passFile + "`.");
+                throw new IllegalArgumentException(what + " " + file + " is readable by group/other "
+                    + "users; run `chmod 600 " + file + "` and retry.");
             }
         } catch (UnsupportedOperationException | java.io.IOException e) {
-            // Non-POSIX filesystem or unreadable metadata: nothing to check (best-effort only).
+            // Non-POSIX filesystem or unreadable metadata: nothing to check here; the read that
+            // follows reports a genuinely missing file.
         }
     }
 
@@ -759,10 +828,8 @@ public final class WalletCli {
     private static int verifiedChainId(WalletClient client, String[] args, Wallet wallet)
             throws java.io.IOException {
         int nodeChainId = client.chainId();
-        String expected = flag(args, "--expect-chain-id");
-        if (expected == null) {
-            expected = System.getenv("RHIZOME_EXPECT_CHAIN_ID");
-        }
+        String expected = expectedChainId(flag(args, "--expect-chain-id"),
+            flag(args, "--network"), System.getenv("RHIZOME_EXPECT_CHAIN_ID"));
         Path keyFile = Path.of(args[2]);
         // The pin comes from the LOADED wallet: on an encrypted key file it is sealed inside
         // the GCM payload, so reading it requires the passphrase already resolved at load
@@ -785,10 +852,10 @@ public final class WalletCli {
                     java.util.Arrays.fill(pinPass, '\0');
                 }
             }
-            if (pin == null && (expected == null || expected.isEmpty())) {
+            if (pin == null) {
                 System.err.println("pinned chainId " + nodeChainId + " (node " + args[1] + ") in "
-                    + keyFile + " — first use, trust-on-first-use: a different chainId from any "
-                    + "future node will abort signing (override with --expect-chain-id).");
+                    + keyFile + " — first use: a different chainId from any future node will "
+                    + "abort signing (override with --network / --expect-chain-id).");
             } else if (pin != null && !pin.sealed()) {
                 System.err.println("migrated the chainId pin of " + keyFile + " INSIDE the "
                     + "encrypted payload — until now it sat beside the envelope in cleartext, "
@@ -796,6 +863,24 @@ public final class WalletCli {
             }
         }
         return decision.chainId();
+    }
+
+    /**
+     * The operator's chainId expectation as text: {@code --expect-chain-id}, else the profile named
+     * by {@code --network}, else the env var; null when none. Naming both flags with different
+     * chainIds is refused rather than silently preferring one.
+     */
+    static String expectedChainId(String expectFlag, String network, String env) {
+        String fromNetwork = network == null ? null
+            : String.valueOf(NetworkParameters.byName(network).chainId());
+        if (fromNetwork != null && expectFlag != null && !expectFlag.equals(fromNetwork)) {
+            throw new IllegalArgumentException("--network " + network + " is chainId " + fromNetwork
+                + " but --expect-chain-id says " + expectFlag);
+        }
+        if (expectFlag != null) {
+            return expectFlag;
+        }
+        return fromNetwork != null ? fromNetwork : env;
     }
 
     /** Outcome of the TOFU chainId check: the chainId to sign with, and whether to (re-)pin it. */
@@ -823,7 +908,13 @@ public final class WalletCli {
             return new ChainIdDecision(nodeChainId, true); // explicit override re-pins
         }
         if (pin == null) {
-            return new ChainIdDecision(nodeChainId, true); // first contact: pin (TOFU)
+            // The node's /info is unauthenticated: pinning whatever it answers lets a hostile
+            // "testnet" node steer the first signature onto mainnet. The operator must say which
+            // network they mean.
+            throw new ChainIdMismatchException("first use of this keyfile: state which network you "
+                + "mean with --network <mainnet|testnet|devnet|staging> or --expect-chain-id <n> "
+                + "(the node reports chainId " + nodeChainId + " but its answer is not trusted "
+                + "to pin); refusing to sign.");
         }
         if (pin.chainId() != nodeChainId) {
             throw new ChainIdMismatchException("node reports chainId " + nodeChainId
@@ -906,16 +997,25 @@ public final class WalletCli {
                 --passphrase-file <path>  key-file passphrase from a file; else console prompt;
                                           else RHIZOME_WALLET_PASSPHRASE (last resort: env vars are
                                           visible in /proc/<pid>/environ)
+                --network <name>          REQUIRED on a keyfile's first signing command (unless
+                                          --expect-chain-id): mainnet|testnet|devnet|staging; the
+                                          node's chainId must match or signing is refused
                 --expect-chain-id <n>     abort if the node reports a different chainId
                                           (or set RHIZOME_EXPECT_CHAIN_ID); overrides and re-pins
-                                          the keyfile's trust-on-first-use chainId pin
+                                          the keyfile's chainId pin
+                --nonce <n>               sign at this nonce instead of the node's answer (retry
+                                          a failed send at the SAME nonce: replaces, no double pay)
+                --cross-check <url>       second node; refuse to sign if its nonce differs
                 --plaintext               keygen only: permit an UNENCRYPTED key file when
                                           non-interactive (or set RHIZOME_WALLET_PLAINTEXT=1)
                 --overwrite               keygen only: overwrite an EXISTING key file (the old
                                           key is destroyed)
                 --force                   sends only: ignore a bad recipient checksum
-                --api-token <token>       bearer token for a node gated by RHIZOME_API_TOKEN
-                                          (or set RHIZOME_API_TOKEN)
+                --api-token-file <path>   bearer token from an owner-only file (or set
+                                          RHIZOME_API_TOKEN); --api-token <token> works but is
+                                          visible in `ps` and warns
+              send fee defaults to 0 (/info does not advertise the node's minimum fee); pass [fee]
+                                          explicitly on a network with a fee floor.
               chain-id pinning: the first signing command records the node's chainId+URL in the
                                           keyfile (trust on first use); a different chainId later
                                           aborts signing. Read-only commands never pin.""");
