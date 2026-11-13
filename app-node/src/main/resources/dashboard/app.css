@@ -150,6 +150,12 @@ pre.codebox {
 .callout { border-left: 3px solid var(--accent-2); padding: 10px 14px; background: var(--bg-2);
   border-radius: 0 8px 8px 0; font-size: 13.5px; margin: 12px 0; }
 .callout.warn { border-left-color: var(--warn); }
+label.callout { display: block; cursor: pointer; }
+
+/* ---- signing confirmation dialog ---- */
+.modal-overlay { position: fixed; inset: 0; z-index: 50; display: flex; align-items: center;
+  justify-content: center; background: color-mix(in srgb, var(--bg) 85%, transparent); }
+.modal { max-width: 640px; width: 92%; max-height: 90vh; overflow: auto; border-color: var(--accent-2); }
 
 #toast-zone { position: fixed; bottom: 20px; right: 20px; display: flex;
   flex-direction: column; gap: 8px; z-index: 50; }
