@@ -180,10 +180,19 @@ class SnapshotBootstrapRefusalTest {
     }
 
     @Test
+    void theLargestCountThatFitsTheSpoolBoundIsStillFetched() {
+        FakePeer peer = peerAdvertising(256); // 256 x 16 MiB == the 4 GiB bound exactly
+        assertFalse(bootstrap(peer));
+        assertEquals(1, peer.chunkFetches.get(), "the boundary count is admitted, so 257 above is refused by the bound alone");
+    }
+
+    @Test
     void anOutOfRangeChunkCountIsRefusedBeforeAnyFetch() {
         // Same chain as the control above, so these are refused BY THE CHUNK COUNT specifically: the
         // refusal is the absence of the fetch the control performs.
-        for (int count : new int[] {-1, Integer.MAX_VALUE}) {
+        // 257 chunks is the first count whose worst-case size (16 MiB each) exceeds the 4 GiB spool
+        // bound: it passes the plain range check, so only the spool-bound cross-check refuses it.
+        for (int count : new int[] {-1, Integer.MAX_VALUE, 257}) {
             FakePeer peer = peerAdvertising(count);
             assertFalse(bootstrap(peer), "count " + count);
             assertEquals(0, peer.chunkFetches.get(), "count " + count + " must be refused before any fetch");
