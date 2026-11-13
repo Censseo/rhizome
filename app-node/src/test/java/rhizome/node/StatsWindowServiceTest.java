@@ -94,4 +94,22 @@ class StatsWindowServiceTest {
         assertEquals(afterFirst, visits[0], "a same-tip poll must not re-decode the window");
         assertEquals(50L, again.tipSupply(), "the cached entry still carries the tip supply");
     }
+
+    @Test
+    void aSameHeightReorgInvalidatesTheCachedWindow() {
+        // Same height, different tip block (a same-height reorg): keyed on height alone the old
+        // tip's txCount/supply/timestamp would be served until the next block.
+        List<BlockImpl> chain = new ArrayList<>();
+        chain.add(block(1, 0L));
+        chain.add(block(2, 50L));
+        var tip = new java.util.concurrent.atomic.AtomicReference<>(rhizome.crypto.SHA256Hash.empty());
+        var service = new StatsWindowService(() -> 2, tip::get, i -> chain.get((int) i - 1));
+
+        assertEquals(50L, service.statsWindow(32).tipSupply());
+
+        chain.set(1, block(2, 77L));
+        assertEquals(50L, service.statsWindow(32).tipSupply(), "same height and same tip hash: cached");
+        tip.set(rhizome.crypto.SHA256Hash.of(new byte[] {1}));
+        assertEquals(77L, service.statsWindow(32).tipSupply(), "new tip hash at the same height: recomputed");
+    }
 }
