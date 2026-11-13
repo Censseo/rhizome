@@ -253,7 +253,9 @@ final class PeerHosts {
         return true;
     }
 
-    /** Subnet bucket key for eclipse-resistant diversity: /16 (v4) or /48 (v6); host string if unresolved. */
+    /** Subnet bucket key for eclipse-resistant diversity: /16 (v4) or /32 (v6); host string if unresolved.
+     *  v6 is /32, not /48: an ISP hands a customer a /48 or /56, so a /48 bucket let one allocation
+     *  holder mint 2^16 distinct buckets and fill the table one bucket at a time. */
     static String subnetKey(String host) {
         if (host == null) {
             return "host:";
@@ -263,8 +265,7 @@ final class PeerHosts {
             if (b.length == 4) {
                 return "v4:" + (b[0] & 0xFF) + "." + (b[1] & 0xFF);
             }
-            return String.format("v6:%02x%02x:%02x%02x:%02x%02x",
-                b[0], b[1], b[2], b[3], b[4], b[5]);
+            return String.format("v6:%02x%02x:%02x%02x", b[0], b[1], b[2], b[3]);
         } catch (UnknownHostException e) {
             return "host:" + host;
         }

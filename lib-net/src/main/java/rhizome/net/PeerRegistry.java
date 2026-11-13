@@ -34,7 +34,7 @@ import java.util.function.LongSupplier;
  */
 public final class PeerRegistry {
 
-    /** Max discovered peers per IP subnet bucket (/16 v4, /48 v6). Bounds eclipse via one subnet. */
+    /** Max discovered peers per IP subnet bucket (/16 v4, /32 v6). Bounds eclipse via one subnet. */
     private static final int MAX_PER_SUBNET = 16;
 
     /** Cap on the removal-cooldown table (bounded LRU; attacker-influenced keys, so hard-bounded). */
@@ -174,10 +174,10 @@ public final class PeerRegistry {
             removalCooldowns.remove(id.endpoint()); // window expired: eligible again
         }
         // Cheap rejections BEFORE the blocking DNS resolution below: an exact duplicate or a
-        // full table is decided on the live map directly (both are re-checked authoritatively
-        // under the lock at insertion). A flood of duplicate/full-table adds must not each pay
+        // table with nothing evictable is decided on the live map directly (both are re-checked
+        // authoritatively under the lock at insertion). A flood of such adds must not each pay
         // a resolver round-trip (audit: admission ordering).
-        if (peers.containsKey(id) || peers.size() >= maxPeers) {
+        if (peers.containsKey(id) || (needsEviction() && !hasEvictable())) {
             return false;
         }
         // The routability verdict is computed ONCE here, at admission; publicSnapshot serves this
@@ -191,8 +191,17 @@ public final class PeerRegistry {
             if (peers.containsKey(id)) {
                 return false;
             }
-            if (peers.size() >= maxPeers) {
-                return false;
+            if (needsEviction()) {
+                // A full table (or a full unconfirmed share of it) used to refuse every newcomer:
+                // an attacker who filled it first held it, and an honest joiner could never get in.
+                // Instead one random UNCONFIRMED non-seed peer makes room. Confirmed (outbound-
+                // verified) peers and seeds are never displaced by an unverified newcomer, and the
+                // reserved share (see RESERVED_FOR_CONFIRMED_DIVISOR) guarantees they have room.
+                PeerId victim = randomUnconfirmed();
+                if (victim == null) {
+                    return false;
+                }
+                removeLocked(victim, false);
             }
             if (subnetCounts.getOrDefault(bucket, 0) >= MAX_PER_SUBNET) {
                 return false; // eclipse: one subnet cannot monopolise the table
@@ -295,9 +304,45 @@ public final class PeerRegistry {
         }
     }
 
+    /** Share (1/N) of the table kept for peers that have answered a protocol exchange. */
+    private static final int RESERVED_FOR_CONFIRMED_DIVISOR = 4;
+
+    private int unconfirmedCount() {
+        return peers.size() - seeds.size() - confirmed.size();
+    }
+
+    /** True when admitting one more peer needs a victim: table full, or the unconfirmed share is. */
+    private boolean needsEviction() {
+        int reserved = maxPeers / RESERVED_FOR_CONFIRMED_DIVISOR; // none below 4 slots
+        return peers.size() >= maxPeers || unconfirmedCount() >= maxPeers - reserved;
+    }
+
+    private boolean hasEvictable() {
+        return unconfirmedCount() > 0;
+    }
+
+    /** A uniformly random non-seed, unconfirmed peer, or null. Called under {@link #lock}. */
+    private PeerId randomUnconfirmed() {
+        List<PeerId> candidates = new ArrayList<>();
+        for (PeerId p : peers.keySet()) {
+            if (!seeds.contains(p) && !confirmed.contains(p)) {
+                candidates.add(p);
+            }
+        }
+        return candidates.isEmpty() ? null
+            : candidates.get(java.util.concurrent.ThreadLocalRandom.current().nextInt(candidates.size()));
+    }
+
     public void remove(String url) {
         PeerId id = PeerId.of(url);
         synchronized (lock) {
+            removeLocked(id, true);
+        }
+    }
+
+    /** {@code cooldown} false for a capacity eviction: the victim did nothing wrong, so it is not locked out. */
+    private void removeLocked(PeerId id, boolean cooldown) {
+        {
             Entry entry = peers.remove(id);
             confirmed.remove(id); // bounded by the peer table: never outlives its entry
             failures.remove(id);
@@ -309,7 +354,7 @@ public final class PeerRegistry {
                 // so a DNS flip between add and remove cannot corrupt the accounting (audit F5).
                 subnetCounts.computeIfPresent(entry.subnetBucket(), (k, v) -> v <= 1 ? null : v - 1);
                 String endpoint = id.endpoint();
-                if (!endpoint.isEmpty()) {
+                if (cooldown && !endpoint.isEmpty()) {
                     removalCooldowns.put(endpoint, nowMillis.getAsLong() + REMOVAL_COOLDOWN_MILLIS);
                 }
             }
