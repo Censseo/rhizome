@@ -497,6 +497,21 @@ public final class MemPool {
         return true;
     }
 
+    /**
+     * Re-checks every sender's run against the chain as it now stands, without a block to drop.
+     * A reorg lowers confirmed nonces and balances through {@code popBlock}, which never reaches
+     * {@link #onBlockApplied}; without this the unaffordable runs it strands pin pool slots until
+     * the next applied block happens to purge them (POOL-10 only fired from there).
+     */
+    public void revalidate() {
+        lock.lock();
+        try {
+            pruneStale();
+        } finally {
+            lock.unlock();
+        }
+    }
+
     private void pruneStale() {
         for (PublicAddress sender : new ArrayList<>(bySender.keySet())) {
             NavigableMap<Long, Transaction> pending = bySender.get(sender);

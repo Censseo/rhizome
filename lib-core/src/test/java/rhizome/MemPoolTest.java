@@ -579,6 +579,25 @@ class MemPoolTest {
         assertEquals(0, mempool.size(), "an unaffordable live run must not pin slots");
     }
 
+    /**
+     * POOL-11 — Pin pool slots through a reorg: the unaffordable run a pop strands (balance back
+     * below the run's cost) is purged by {@code revalidate}, which the sync loop runs once a
+     * reorg settles, without waiting for some later block to apply.
+     */
+    @Test
+    void drainedSenderRunIsPurgedWhenTheChainReorganizes() {
+        accounts.balances.put(sender, 1_000L);
+        for (int n = 0; n < 4; n++) {
+            assertEquals(ExecutionStatus.SUCCESS, mempool.addTransaction(send(100, 0, n)));
+        }
+        // A reorg replaces a branch that credited the sender: no block applies, balance collapses.
+        accounts.balances.put(sender, 250L);
+        assertEquals(4, mempool.size(), "nothing re-checks the pool until revalidate runs");
+        mempool.revalidate();
+        assertEquals(2, mempool.size(), "only the affordable prefix (nonces 0, 1) survives");
+        assertEquals(2, mempool.getTransactionsForBlock(10).size());
+    }
+
     private rhizome.core.block.Block blockOf(Transaction... txs) {
         var b = rhizome.core.block.BlockImpl.builder().id(2).timestamp(5_000L)
             .difficulty(params.genesisDifficulty()).lastBlockHash(rhizome.crypto.SHA256Hash.empty()).build();

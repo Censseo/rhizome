@@ -419,6 +419,7 @@ check is a boot-time equality composed with guards those suites already exercise
 | POOL-08 | Grow the account-nonce state domain without bound by cycling one principal through fresh accounts. | A1 | RESIDUAL | One permanent leaf per account that has ever transacted; the domain cannot self-prune without reopening replay. Bounded economically by the optional `minFee` floor (off by default) and by block space — WHITEPAPER §7.6. |
 | POOL-09 | Fill the pool with max-gas contract calls so every honest miner assembles a block over the block gas cap, which every node rejects, forever. | A1 | DEFENDED | `lib-core/src/test/java/rhizome/AdmissionParityTest.java#selectionNeverExceedsTheBlockGasCap` |
 | POOL-10 | Pin pool slots indefinitely with a run of transactions whose sender was drained after admission (front nonce present, so the run reads as live). | A1 | DEFENDED | `lib-core/src/test/java/rhizome/MemPoolTest.java#drainedSenderRunIsPurgedWhenABlockIsApplied` |
+| POOL-11 | Pin pool slots through a reorg: a pop lowers a sender's confirmed balance without any block applying, so the unaffordable run it strands is never re-checked (POOL-10 ran only from `onBlockApplied`). | A3 | DEFENDED | `lib-core/src/test/java/rhizome/MemPoolTest.java#drainedSenderRunIsPurgedWhenTheChainReorganizes` |
 
 ## VM — contract sandbox and determinism
 

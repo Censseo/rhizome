@@ -617,6 +617,14 @@ public final class NodeService {
         return admission.tryMempoolSig(shareKey);
     }
 
+    /**
+     * The sync loop moved the chain (extended or reorganised it) behind the mempool's back: no
+     * {@link #submitBlock} ran, so re-check the pool's runs against the settled chain.
+     */
+    public void onChainSynced() {
+        mempool.revalidate();
+    }
+
     /** Accepts a mined block; on success the mempool is purged of its transactions. */
     public ExecutionStatus submitBlock(Block block) {
         ExecutionStatus status = engine.addBlock(block);

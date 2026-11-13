@@ -164,6 +164,7 @@ final class SyncDriver {
                 switch (result) {
                     case EXTENDED, REORGED -> {
                         progressed = true;
+                        service.onChainSynced();
                         log.info("Synced from {}: {} -> height {}", peerUrl, result, engine.height());
                     }
                     case PEER_INVALID -> penalize(peerUrl, PENALTY_INVALID, "served an invalid chain");
