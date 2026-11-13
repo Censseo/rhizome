@@ -90,6 +90,17 @@ public final class StateAccumulator {
         nodes.flushBatch();
         roots.putRoot(height, root);
         currentRoot = root;
+        return root;
+    }
+
+    /**
+     * Prunes durable roots (and GCs SMT nodes) below the reorg window, keyed to the chain TIP.
+     * Called by the engine only after a block has been appended: pruning inside {@link #applyBlock}
+     * keyed retention to a commit ATTEMPT, so a block rejected on a state-root mismatch (reverted
+     * right after) had already deleted root(H - retainDepth), and a later reorg of exactly that
+     * depth died on "no state root recorded". Same rule as {@code BlockStateProcessor.pruneToChainTip}.
+     */
+    public void pruneToChainTip(long height) {
         long cutoff = height - retainDepth;
         // Amortized prune (see PruneCadence): roots older than the window linger at most
         // PRUNE_INTERVAL extra heights; the reorg window (retainDepth) always stays covered.
@@ -97,7 +108,6 @@ public final class StateAccumulator {
             roots.pruneBelow(cutoff); // keep genesis (height 1) and the reorg window
             nodes.gcNodesIfDue(cutoff); // explicit node GC at the same cadence (constat 41)
         }
-        return root;
     }
 
     /** Reverts the block at {@code height}, moving the current root back to {@code height - 1}. */

@@ -844,6 +844,9 @@ public final class ChainEngine implements rhizome.core.mempool.AccountView {
                 for (BlockStateProcessor domain : stateDomains) {
                     domain.pruneToChainTip(b.id());
                 }
+                if (stateAccumulator != null) {
+                    stateAccumulator.pruneToChainTip(b.id()); // same rule: roots prune only for a standing tip
+                }
                 // The ledger's undo journal prunes on the same height schedule as the box/token/
                 // contract journals: retained at least maxReorgDepth deep, dropped below (audit:
                 // one undo protocol). A ledger without a journal is a no-op.
