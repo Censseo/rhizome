@@ -70,7 +70,8 @@ lib-core   — consensus core: ChainEngine (addBlock/popBlock), Executor (transa
              SparseMerkleTree state root, snapshots
 lib-vm     — WASM contract VM: WasmVm (Chicory, gas-metered), WasmContractProcessor,
              ContractStore, undo journals for reorg reversal
-lib-persistence — RocksDB stores (full node: one DB, atomic WriteBatch), plus
+lib-persistence — RocksDB stores (full node: five DBs — node store, contracts, boxes, tokens,
+             state; only chain + ledger + nonces + ledger journal share one atomic WriteBatch), plus
              PandaniteLedgerDumper (reads a Pandanite LevelDB ledger to seed genesis)
 lib-crypto — Ed25519, Pufferfish2 PoW (pure Java, validated against C reference), hashes
 ```
