@@ -93,6 +93,18 @@ than the number.
 | org.json | `20240303` | — |
 | JUnit Jupiter | `5.9.1` | Runs on Java 25 as-is. No `io.activej.test` rules are used anywhere, so ActiveJ test-module churn does not reach the suite. |
 
+**Provenance.** `gradle/verification-metadata.xml` records a sha256 for every resolved artifact
+(build, test, lint and plugin classpaths) and Gradle verifies them on every resolution; a mismatch
+fails the build. The wrapper is pinned by `distributionSha256Sum`, the JitPack repository is
+`exclusiveContent` for the ActiveJ group only (nothing else can supply it, and JitPack can supply
+nothing else), Docker base images are pinned by digest and CI actions by commit SHA. When bumping a
+pin, regenerate with `./gradlew --write-verification-metadata sha256 build -x test` (add `-x
+:app-node:stageDocs` only if unrelated docs checks fail), review the diff, and for ActiveJ compare the
+new hashes with an independent build of the fork's commit. **Residual risk:** the fork is still a
+mutable git tag built by JitPack, so the first resolution is trust-on-first-use; the recorded hashes
+stop later swaps, not a bad first fetch. Next step: publish the fork to a repository the project
+controls, pinned by commit.
+
 **ASM: deliberately unpinned.** A legacy `resolutionStrategy` force of ASM 9.7 was removed. Neither
 the v6 nor the v7 ActiveJ resolved graph contains an `org.ow2.asm` artifact — verified empirically
 against the resolved graph, not assumed. The force was inert config that misled readers into
