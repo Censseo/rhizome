@@ -121,6 +121,43 @@ class OrphanBodyBindingTest {
         engine.registerOrphan(garbage);
         assertEquals(honest.nonce(), engine.orphanBlock(honest.hash()).nonce(),
             "the pooled body keeps the PoW-proven nonce");
+
+        // The assertion above is satisfied by EITHER defence alone (a cache hit is still refused by
+        // put-if-absent, and put-if-absent is irrelevant to a garbage nonce the cache rejects), so
+        // each is isolated below.
+
+        // (1) Cache keyed by nonce: evict the honest body from the 256-slot pool while its cache entry
+        // survives (1024 slots), then resubmit the garbage nonce. A hash-only cache would vouch for it
+        // and pool it; the nonce-bound cache re-hashes it, finds the PoW invalid and refuses it.
+        for (int i = 0; i < 256; i++) {
+            engine.registerOrphan(mine(2, engine.blockAt(1).hash(), PublicAddress.random()));
+        }
+        assertNull(engine.orphanBlock(honest.hash()), "the honest body was churned out of the pool");
+        engine.registerOrphan(garbage);
+        assertNull(engine.orphanBlock(honest.hash()),
+            "a garbage nonce must not ride the cached verdict for the honest header");
+
+        // (2) Put-if-absent: a SECOND genuinely valid nonce for the same header passes the PoW check
+        // legitimately, so only the pool's put-if-absent keeps the first-vetted body in place.
+        BlockImpl first = siblingOfTip2();
+        engine.registerOrphan(first);
+        var second = (BlockImpl) BlockImpl.builder().id(first.id()).timestamp(first.timestamp())
+            .difficulty(first.difficulty()).lastBlockHash(first.lastBlockHash())
+            .merkleRoot(first.merkleRoot()).supply(first.supply()).build();
+        first.transactions().forEach(second::addTransaction);
+        byte[] raw2 = first.nonce().toBytes();
+        do {
+            raw2[1]++;
+            second.nonce(SHA256Hash.of(raw2));
+        } while (!second.verifyNonce(params.powAlgorithm()) || second.nonce().equals(first.nonce()));
+        engine.registerOrphan(second);
+        assertEquals(first.nonce(), engine.orphanBlock(first.hash()).nonce(),
+            "a later valid-nonce resubmission must not replace the pooled body");
+    }
+
+    /** A further sibling of the tip (the tip block itself already exists from {@link #siblingOfTip}). */
+    private BlockImpl siblingOfTip2() {
+        return mine(2, engine.blockAt(1).hash(), PublicAddress.random());
     }
 
     /**
