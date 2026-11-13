@@ -69,6 +69,14 @@ public final class PeerRegistry {
      * {@link #markConfirmed} for why the distinction carries a ban decision.
      */
     private final Set<PeerId> confirmed = ConcurrentHashMap.newKeySet();
+    /**
+     * Consecutive transport failures per peer, fed by EVERY channel that talks to it (PEX, pull
+     * sync, gossip). One counter, because a tarpit peer answers just enough on one channel to look
+     * healthy while it stalls another: three consecutive failures from any mix evict it.
+     */
+    private final Map<PeerId, Integer> failures = new ConcurrentHashMap<>();
+    /** Consecutive transport failures that evict a non-seed peer. */
+    static final int MAX_FAILURES = 3;
     /** Live count of discovered (non-seed) peers per subnet bucket. */
     private final Map<String, Integer> subnetCounts = new ConcurrentHashMap<>();
     /**
@@ -236,6 +244,42 @@ public final class PeerRegistry {
         return banned;
     }
 
+    /**
+     * Records one transport failure (timeout, refused, {@code PeerUnavailableException}) against
+     * {@code url}; at {@link #MAX_FAILURES} consecutive failures a non-seed peer is removed (which
+     * also arms the re-admission cooldown). A seed is a trusted anchor: it accumulates the count
+     * but is never evicted (audit M4). Returns true when the peer was evicted.
+     */
+    public boolean recordFailure(String url) {
+        PeerId id = PeerId.of(url);
+        if (!id.isValid() || !peers.containsKey(id)) {
+            return false;
+        }
+        int f = failures.merge(id, 1, Integer::sum);
+        if (f < MAX_FAILURES) {
+            return false;
+        }
+        failures.remove(id);
+        if (seeds.contains(id)) {
+            return false;
+        }
+        remove(url);
+        return true;
+    }
+
+    /** Consecutive failures currently recorded for {@code url} (package-private for tests). */
+    int failureCount(String url) {
+        return failures.getOrDefault(PeerId.of(url), 0);
+    }
+
+    /** A successful exchange clears the consecutive-failure count. */
+    public void recordSuccess(String url) {
+        PeerId id = PeerId.of(url);
+        if (id.isValid()) {
+            failures.remove(id);
+        }
+    }
+
     public boolean isBanned(String url) {
         return banList != null && banList.isBanned(PeerId.of(url));
     }
@@ -256,6 +300,7 @@ public final class PeerRegistry {
         synchronized (lock) {
             Entry entry = peers.remove(id);
             confirmed.remove(id); // bounded by the peer table: never outlives its entry
+            failures.remove(id);
             if (entry == null) {
                 return;
             }

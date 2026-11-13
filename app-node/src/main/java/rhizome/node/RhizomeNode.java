@@ -248,7 +248,7 @@ public final class RhizomeNode implements AutoCloseable {
             // than after the socket opens — as startGossip() did — because the broadcaster takes
             // nothing but the peer set and the config, and no request can arrive before start().
             var broadcaster = new PeerBroadcaster(registry::snapshot, blockPrivatePeers,
-                peerTokenPolicy, exchange);
+                peerTokenPolicy, exchange).withOutcomeSinks(registry::recordFailure, registry::recordSuccess);
             opened.push(broadcaster::close);
 
             // Snapshot spools live with the stores, not the OS temp dir (often a tmpfs → the whole

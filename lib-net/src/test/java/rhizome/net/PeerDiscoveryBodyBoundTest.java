@@ -157,7 +157,7 @@ class PeerDiscoveryBodyBoundTest {
             for (int i = 0; i < 4; i++) { // past MAX_FAILURES: an eviction would have happened by now
                 discovery.round();
             }
-            assertTrue(discovery.failures.isEmpty(),
+            assertEquals(0, registry.failureCount(baseUrl),
                 "local saturation must not count as a peer failure");
             assertEquals(1, registry.size(),
                 "an honest peer must not be evicted over LOCAL pool saturation");
@@ -178,10 +178,10 @@ class PeerDiscoveryBodyBoundTest {
         assertTrue(registry.add("http://127.0.0.1:1")); // port 1: connection refused
         var discovery = new PeerDiscovery(registry, null);
         discovery.round();
-        assertTrue(discovery.failures.containsKey("http://127.0.0.1:1"),
+        assertEquals(1, registry.failureCount("http://127.0.0.1:1"),
             "a failed peer should be failure-counted");
         registry.remove("http://127.0.0.1:1");
-        discovery.round(); // empty registry: the stale failure entry must still be pruned
-        assertFalse(discovery.failures.containsKey("http://127.0.0.1:1"));
+        discovery.round(); // empty registry: removal must have dropped the failure entry with it
+        assertEquals(0, registry.failureCount("http://127.0.0.1:1"));
     }
 }

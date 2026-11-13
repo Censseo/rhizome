@@ -6,12 +6,9 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.Callable;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -31,7 +28,6 @@ import org.slf4j.LoggerFactory;
 public final class PeerDiscovery {
 
     private static final Logger log = LoggerFactory.getLogger(PeerDiscovery.class);
-    private static final int MAX_FAILURES = 3;
     /** Cap on peers ingested from a single peer's PEX response per round (anti gossip-amplification/eclipse). */
     private static final int MAX_PEX_PER_PEER = 16;
     /**
@@ -64,7 +60,6 @@ public final class PeerDiscovery {
     private final PeerTokenPolicy tokenPolicy;
     /** Per-peer consecutive failure counts. Package-private so a test can assert the stale-entry
      *  pruning in {@link #round()} (audit F8). */
-    final Map<String, Integer> failures = new ConcurrentHashMap<>();
     private final ExecutorService pool;
     /** Rotates the round's peer order so a tail cut by the budget is visited first next round. */
     private long roundCursor;
@@ -130,9 +125,6 @@ public final class PeerDiscovery {
      */
     public void round() {
         List<String> peers = registry.snapshot();
-        // Drop failure bookkeeping for peers no longer in the registry, so the map cannot leak
-        // stale entries across rounds (audit F8).
-        failures.keySet().retainAll(new HashSet<>(peers));
         int n = peers.size();
         if (n == 0) {
             return;
@@ -158,7 +150,7 @@ public final class PeerDiscovery {
         try {
             registry.addAll(fetchPeers(peer));
             announceTo(peer);
-            failures.remove(peer);
+            registry.recordSuccess(peer);
         } catch (InterruptedException e) {
             // Cut by the round deadline (invokeAll cancelled the task) — not the peer's fault, so it is
             // not penalised; it will be retried, rotated to the front, next round.
@@ -169,18 +161,10 @@ public final class PeerDiscovery {
             // backpressure: the peer is retried on a later round.
             log.debug("PEX with {} skipped: local body-read pool saturated", peer);
         } catch (Exception e) {
-            int f = failures.merge(peer, 1, Integer::sum);
-            if (f >= MAX_FAILURES) {
-                failures.remove(peer);
-                if (registry.isSeed(peer)) {
-                    // A seed is an operator-configured connectivity anchor: it may accumulate
-                    // failure counts (observability) but is NEVER evicted by the PEX failure
-                    // path — otherwise an attacker that can briefly DoS the seeds could
-                    // unanchor the node (mirrors penalize()'s seed exemption, audit M4).
-                    log.debug("seed {} unreachable; keeping the trusted anchor", peer);
-                    return;
-                }
-                registry.remove(peer);
+            // Shared with sync and gossip (PeerRegistry.recordFailure): a seed accumulates the
+            // count but is NEVER evicted by the failure path, so an attacker that can briefly DoS
+            // the seeds cannot unanchor the node (audit M4).
+            if (registry.recordFailure(peer)) {
                 log.debug("dropped unreachable peer {}", peer);
             }
         }
