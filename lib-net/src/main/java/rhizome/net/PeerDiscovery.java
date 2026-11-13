@@ -61,6 +61,12 @@ public final class PeerDiscovery {
     /** Per-peer consecutive failure counts. Package-private so a test can assert the stale-entry
      *  pruning in {@link #round()} (audit F8). */
     private final ExecutorService pool;
+    /**
+     * Where PEX-learned URLs go. Defaults to {@code registry::add}, which RESOLVES DNS on the
+     * calling PEX worker; the node wires its off-loop admission queue here instead so a PEX
+     * response full of slow names cannot park the eight PEX workers in the resolver.
+     */
+    private volatile java.util.function.Consumer<String> admitter;
     /** Rotates the round's peer order so a tail cut by the budget is visited first next round. */
     private long roundCursor;
 
@@ -104,6 +110,7 @@ public final class PeerDiscovery {
         this.fetchDeadline = fetchDeadline;
         this.tokenPolicy = tokenPolicy;
         this.exchange = exchange;
+        this.admitter = registry::add;
         // Bounded queue + discard-oldest (the PeerBroadcaster pattern): a fixed pool's default
         // unbounded LinkedBlockingQueue would let one round's tasks accumulate without limit if
         // the workers stall (audit F2). Dropped tasks' futures never complete, so invokeAll
@@ -145,10 +152,16 @@ public final class PeerDiscovery {
         }
     }
 
+    /** Routes PEX-learned URLs through {@code admitter} (the node's off-loop admission queue). */
+    public PeerDiscovery withAdmitter(java.util.function.Consumer<String> admitter) {
+        this.admitter = admitter;
+        return this;
+    }
+
     /** PEX fetch + self-announce against one peer, with failure bookkeeping. */
     private void contactPeer(String peer) {
         try {
-            registry.addAll(fetchPeers(peer));
+            fetchPeers(peer).forEach(admitter);
             announceTo(peer);
             registry.recordSuccess(peer);
         } catch (InterruptedException e) {

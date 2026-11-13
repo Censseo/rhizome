@@ -509,7 +509,7 @@ public final class RhizomeNode implements AutoCloseable {
             }
 
             var discovery = new PeerDiscovery(c.registry(), config.selfUrl(), c.blockPrivatePeers(),
-                c.peerTokenPolicy(), c.exchange());
+                c.peerTokenPolicy(), c.exchange()).withAdmitter(c.service()::addPeer);
             // The sync round lives in its own driver once the graph exists; the scheduler only
             // arms below, so the driver is visible to any direct syncRound() call (tests) from
             // here on.

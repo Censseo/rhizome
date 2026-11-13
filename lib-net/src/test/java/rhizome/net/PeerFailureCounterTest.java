@@ -51,4 +51,20 @@ class PeerFailureCounterTest {
         }
         assertFalse(registry.snapshot().contains(dead), "repeated gossip failures evict the peer");
     }
+
+    /**
+     * NET-14 — Flip a peer's DNS after admission so its ban lands on (and is checked against) a
+     * different address than the one that misbehaved: bans key on the IP dialled at admission,
+     * supplied by the registry, and never resolve a name again.
+     */
+    @Test
+    void banKeysOnTheDialledIpNotOnAFreshResolution() {
+        PeerBanList bans = new PeerBanList(100, 60_000L, 64);
+        PeerId a = PeerId.of("http://never-resolves-a.invalid:3000");
+        PeerId b = PeerId.of("http://never-resolves-b.invalid:3000");
+        assertTrue(bans.misbehave(a, 100, "203.0.113.7"));
+        assertTrue(bans.isBanned(a, "203.0.113.7"));
+        assertTrue(bans.isBanned(b, "203.0.113.7"), "same dialled endpoint, different name: still banned");
+        assertFalse(bans.isBanned(b, "203.0.113.8"), "a different dialled address is a different endpoint");
+    }
 }

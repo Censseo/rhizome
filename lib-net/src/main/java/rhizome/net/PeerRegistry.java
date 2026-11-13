@@ -54,10 +54,10 @@ public final class PeerRegistry {
      * flip cannot corrupt the accounting — audit F5) and, on mainnet, the routability verdict
      * served by {@link #publicSnapshot()} (audit F3).
      */
-    private record Entry(String subnetBucket, boolean publiclyRoutable) {}
+    private record Entry(String subnetBucket, boolean publiclyRoutable, String dialledIp) {}
 
     /** Placeholder entry for seed peers (never subnet-counted, never publicly advertised). */
-    private static final Entry SEED_ENTRY = new Entry("", true);
+    private static final Entry SEED_ENTRY = new Entry("", true, null);
 
     private final Map<PeerId, Entry> peers = new ConcurrentHashMap<>();
     /** Config/seed peers: exempt from SSRF + subnet caps and never evicted by capacity. */
@@ -187,6 +187,9 @@ public final class PeerRegistry {
             return false; // SSRF: refuse internal / metadata / private targets
         }
         String bucket = subnetKey(host);
+        // The address this peer will be DIALLED at, fixed once here: bans and ban checks key on it
+        // and never resolve again (a DNS flip after admission must not move the ban key).
+        String dialled = dialledIpOf(host);
         synchronized (lock) {
             if (peers.containsKey(id)) {
                 return false;
@@ -206,7 +209,7 @@ public final class PeerRegistry {
             if (subnetCounts.getOrDefault(bucket, 0) >= MAX_PER_SUBNET) {
                 return false; // eclipse: one subnet cannot monopolise the table
             }
-            if (peers.putIfAbsent(id, new Entry(bucket, routable)) == null) {
+            if (peers.putIfAbsent(id, new Entry(bucket, routable, dialled)) == null) {
                 subnetCounts.merge(bucket, 1, Integer::sum);
                 return true;
             }
@@ -246,7 +249,7 @@ public final class PeerRegistry {
         if (banList == null || !id.isValid() || seeds.contains(id)) {
             return false;
         }
-        boolean banned = banList.misbehave(id, points);
+        boolean banned = banList.misbehave(id, points, dialledIp(id));
         if (banned) {
             remove(url);
         }
@@ -290,7 +293,25 @@ public final class PeerRegistry {
     }
 
     public boolean isBanned(String url) {
-        return banList != null && banList.isBanned(PeerId.of(url));
+        if (banList == null) {
+            return false;
+        }
+        PeerId id = PeerId.of(url);
+        return banList.isBanned(id, dialledIp(id));
+    }
+
+    /** Admission-time dialled IP of a registered peer, or null (unknown peer, seed, unresolved). */
+    private String dialledIp(PeerId id) {
+        Entry e = peers.get(id);
+        return e == null ? null : e.dialledIp();
+    }
+
+    private static String dialledIpOf(String host) {
+        try {
+            return PeerHosts.resolveFirst(host).getHostAddress();
+        } catch (java.net.UnknownHostException unresolved) {
+            return null;
+        }
     }
 
     /** True if {@code url} names a configured seed peer (trusted anchor, never PEX-evicted). */

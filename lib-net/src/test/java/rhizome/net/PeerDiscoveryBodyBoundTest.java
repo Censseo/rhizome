@@ -71,6 +71,23 @@ class PeerDiscoveryBodyBoundTest {
         assertTrue(peers.contains("http://10.1.2.3:3000"));
     }
 
+    /**
+     * NET-14 — Hand PEX workers a response full of slow-resolving names: PEX-learned URLs go to
+     * the configured admitter (the node's off-loop queue), never resolved on the PEX worker.
+     */
+    @Test
+    void pexLearnedPeersAreHandedToTheAdmitterNotResolvedOnThePexWorker() {
+        respond("{\"peers\":[\"http://slow-a.invalid:3000\",\"http://slow-b.invalid:3000\"]}"
+            .getBytes(StandardCharsets.UTF_8));
+        var registry = new PeerRegistry(null, 128);
+        assertTrue(registry.add(baseUrl));
+        var admitted = new java.util.concurrent.CopyOnWriteArrayList<String>();
+        var discovery = new PeerDiscovery(registry, null).withAdmitter(admitted::add);
+        discovery.round();
+        assertEquals(2, admitted.size());
+        assertEquals(1, registry.size(), "the registry itself was not touched on the PEX worker");
+    }
+
     @Test
     void slowDripPeersBodyHitsDeadline() {
         // Headers arrive, then the body stalls: the request timeout alone only covers up to the
