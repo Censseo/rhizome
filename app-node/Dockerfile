@@ -42,7 +42,8 @@
 # once, off this box, before relying on it for a real release build. Deliberately an ARG (not
 # baked into a bare FROM) so a maintainer can repoint it in one place if that check disagrees:
 #   docker build --build-arg GRAALVM_IMAGE=<confirmed-jdk25-tag> -f app-node/Dockerfile .
-ARG GRAALVM_IMAGE=ghcr.io/graalvm/graalvm-community:25
+# Pinned by manifest-list digest (docker buildx imagetools inspect, 2026-11-13); a bare tag is mutable. Re-resolve both digests (here and the runtime FROM) when bumping.
+ARG GRAALVM_IMAGE=ghcr.io/graalvm/graalvm-community:25@sha256:7eeb80438dcda5edfcc58e804ce919018d2bf40ef61ddbb555936a8ba2a216aa
 
 FROM ${GRAALVM_IMAGE} AS builder
 
@@ -74,7 +75,7 @@ RUN ./gradlew --no-daemon :app-node:nativeImage
 # against glibc by default too (the nativeImage task above does not pass any musl/static
 # toolchain flag), so the runtime base must supply it.
 # ================================================================================================
-FROM debian:bookworm-slim AS runtime
+FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS runtime
 
 # ca-certificates: the node makes outbound HTTPS requests to configured peers when
 # RHIZOME_PEER_TOKEN and/or https:// peer URLs are set (lib-net's HttpPeerSource) — without a
