@@ -34,28 +34,44 @@ final class StatsWindowService {
     private final LongSupplier height;
     private final LongFunction<Block> blockAt;
 
-    private volatile StatsWindow cache;
+    private final java.util.function.Supplier<rhizome.crypto.SHA256Hash> tipHash;
+
+    /** The window plus the tip hash it was computed for: height alone cannot tell a same-height reorg. */
+    private record Entry(StatsWindow window, rhizome.crypto.SHA256Hash tip) {}
+
+    private volatile Entry cache;
     /** Serializes recomputes: without it, N concurrent callers on a stale cache all re-decode
      *  the same window under the read path (duplicate lock-guarded work). */
     private final Object lock = new Object();
 
     StatsWindowService(LongSupplier height, LongFunction<Block> blockAt) {
+        this(height, () -> null, blockAt);
+    }
+
+    /** Cache key is (height, tipHash): a same-height reorg replaces the tip block, so its
+     *  txCount/lastTs/supply/difficulty/uncles must not be served from the old tip's entry. */
+    StatsWindowService(LongSupplier height, java.util.function.Supplier<rhizome.crypto.SHA256Hash> tipHash,
+                       LongFunction<Block> blockAt) {
         this.height = height;
+        this.tipHash = tipHash;
         this.blockAt = blockAt;
     }
 
     StatsWindow statsWindow(int window) {
+        // Hash first: if the tip moves between the two reads the entry is keyed to the older hash
+        // and simply recomputed next poll, never served as the newer tip's.
+        rhizome.crypto.SHA256Hash tip = tipHash.get();
         long h = height.getAsLong();
-        StatsWindow cached = cache;
-        if (cached != null && cached.height() == h) {
-            return cached;
+        Entry cached = cache;
+        if (cached != null && cached.window().height() == h && java.util.Objects.equals(cached.tip(), tip)) {
+            return cached.window();
         }
         synchronized (lock) {
             // Re-check inside the lock: a concurrent caller may already have recomputed this
             // height — only one thread re-decodes the window per tip movement.
             cached = cache;
-            if (cached != null && cached.height() == h) {
-                return cached;
+            if (cached != null && cached.window().height() == h && java.util.Objects.equals(cached.tip(), tip)) {
+                return cached.window();
             }
             long windowStart = Math.max(1, h - window + 1);
             long txCount = 0;
@@ -89,7 +105,7 @@ final class StatsWindowService {
             }
             StatsWindow w = new StatsWindow(windowStart, h, txCount, firstTs, lastTs, parentSupply,
                 tipSupply, tipDifficulty, tipUncles);
-            cache = w;
+            cache = new Entry(w, tip);
             return w;
         }
     }

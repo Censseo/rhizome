@@ -129,7 +129,23 @@ async function emissionSchedule(currentHeight) {
   return schedule;
 }
 
-function scale() { return BigInt(App.stats ? App.stats.decimalScaleFactor : 1); }
+/** Protocol constant (Constants.DECIMAL_SCALE_FACTOR, identical on every profile). Never read from the node:
+ *  a hostile node could inflate it so that typing "1" signs 1 x fakeScale base units. */
+const DECIMAL_SCALE = 10000n;
+
+function scale() { return DECIMAL_SCALE; }
+
+/** True when the node advertises a scale other than the protocol's: wallet signing is then refused. */
+function scaleMismatch(stats) {
+  return !!stats && stats.decimalScaleFactor !== undefined
+    && String(stats.decimalScaleFactor) !== DECIMAL_SCALE.toString();
+}
+
+/** Strips control and bidi-override characters from untrusted on-chain text before display. */
+function cleanChain(text) {
+  return String(text ?? '')
+    .replace(/[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '');
+}
 
 /** base units -> display string. */
 function fmtCoins(baseUnits) {
@@ -168,11 +184,15 @@ function timeAgo(ts) {
   return Math.floor(d / 86_400_000) + ' j';
 }
 
+function isLoopbackHost(h) {
+  return h === 'localhost' || h === '[::1]' || h === '::1' || /^127(\.\d{1,3}){3}$/.test(h);
+}
+
 function topicAscii(topicHex) {
   try {
     const bytes = RzTx.hexToBytes(topicHex);
     if ([...bytes].every(b => b >= 32 && b < 127)) {
-      return String.fromCharCode(...bytes);
+      return cleanChain(String.fromCharCode(...bytes));
     }
   } catch (e) { /* keep hex */ }
   return topicHex;
@@ -202,6 +222,7 @@ const VAULT_DB = 'rhizome-wallet';
 const VAULT_STORE = 'vault';
 const VAULT_KEY = 'seed';
 const LEGACY_KEY = 'rz.wallet.seed';
+const PIN_KEY = 'chainpin';
 
 function idb() {
   return new Promise((resolve, reject) => {
@@ -236,22 +257,27 @@ async function idbDel(key) {
   });
 }
 
-async function aesKey(passphrase, salt) {
+/** PBKDF2 cost of NEW vaults; records without an `iter` field predate it and used 200 000. */
+const KDF_ITER_NEW = 600000;
+const KDF_ITER_LEGACY = 200000;
+const MIN_PASSPHRASE = 12;
+
+async function aesKey(passphrase, salt, iterations) {
   const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(passphrase),
     'PBKDF2', false, ['deriveKey']);
   return crypto.subtle.deriveKey(
-    { name: 'PBKDF2', salt, iterations: 200000, hash: 'SHA-256' },
+    { name: 'PBKDF2', salt, iterations, hash: 'SHA-256' },
     base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
 }
 async function encryptSeed(seed, passphrase) {
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const iv = crypto.getRandomValues(new Uint8Array(12));
-  const key = await aesKey(passphrase, salt);
+  const key = await aesKey(passphrase, salt, KDF_ITER_NEW);
   const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, seed));
-  return { v: 1, enc: 'aes-gcm', salt: [...salt], iv: [...iv], ct: [...ct] };
+  return { v: 1, enc: 'aes-gcm', iter: KDF_ITER_NEW, salt: [...salt], iv: [...iv], ct: [...ct] };
 }
 async function decryptSeed(rec, passphrase) {
-  const key = await aesKey(passphrase, new Uint8Array(rec.salt));
+  const key = await aesKey(passphrase, new Uint8Array(rec.salt), rec.iter || KDF_ITER_LEGACY);
   const pt = await crypto.subtle.decrypt(
     { name: 'AES-GCM', iv: new Uint8Array(rec.iv) }, key, new Uint8Array(rec.ct));
   return new Uint8Array(pt);
@@ -268,6 +294,9 @@ const Vault = {
     // have been substituted by a MITM, and there is no WebCrypto to encrypt at rest (audit F8).
     if (!CRYPTO_OK) throw new Error('contexte non sécurisé — stockage de la clé refusé');
     if (passphrase) {
+      if (passphrase.length < MIN_PASSPHRASE) {
+        throw new Error('passphrase trop courte (' + MIN_PASSPHRASE + ' caractères minimum)');
+      }
       await idbPut(VAULT_KEY, await encryptSeed(seed, passphrase));
     } else {
       await idbPut(VAULT_KEY, { v: 1, enc: null, seed: [...seed] });
@@ -280,7 +309,11 @@ const Vault = {
     if (r.enc) return decryptSeed(r, passphrase);
     return new Uint8Array(r.seed);
   },
-  async forget() { await idbDel(VAULT_KEY); },
+  async forget() { await idbDel(VAULT_KEY); await idbDel(PIN_KEY); },
+  /** chainId pin {chainId, network}: set on first signing, kept beside the vault record. */
+  async pin() { return idbGet(PIN_KEY); },
+  async setPin(pin) { await idbPut(PIN_KEY, pin); },
+  async clearPin() { await idbDel(PIN_KEY); },
 };
 
 // In-memory unlocked state: the decrypted seed lives here only after unlock, so the many
@@ -289,7 +322,7 @@ const WalletStore = {
   _seed: null,
   seed() { return this._seed; },
   setUnlocked(seedBytes) { this._seed = seedBytes; },
-  lock() { this._seed = null; },
+  lock() { if (this._seed) this._seed.fill(0); this._seed = null; },
   address() {
     return this._seed
       ? RzTx.bytesToHex(RzTx.addressFromPublicKey(RzCrypto.ed25519Public(this._seed))) : null;
@@ -315,26 +348,129 @@ const AgentStore = {
   remove(address) { this.save(this.list().filter(a => a.address !== address)); },
 };
 
-/** Builds, signs and submits a transaction from the browser wallet. */
+/**
+ * Modal confirmation. rows = [[label, value|Node]]; resolves true on confirm. With `override`
+ * (a warning text) the confirm button stays disabled until the user ticks the override box.
+ */
+function confirmDialog(title, rows, { intro, override } = {}) {
+  return new Promise(resolve => {
+    const done = v => { overlay.remove(); document.removeEventListener('keydown', onKey); resolve(v); };
+    const onKey = e => { if (e.key === 'Escape') done(false); };
+    const ok = el('button', { onclick: () => done(true) }, 'Signer et envoyer');
+    const tick = override ? el('input', { type: 'checkbox' }) : null;
+    if (tick) {
+      ok.disabled = true;
+      tick.addEventListener('change', () => { ok.disabled = !tick.checked; });
+    }
+    const overlay = el('div', { class: 'modal-overlay', role: 'dialog', 'aria-modal': 'true' },
+      el('div', { class: 'modal card' },
+        el('h3', null, title),
+        intro ? el('p', { class: 'muted' }, intro) : null,
+        el('dl', { class: 'kv' }, rows.map(([k, v]) => [el('dt', null, k), el('dd', { class: 'mono wrap' }, v)])),
+        override ? el('label', { class: 'callout warn' }, tick, ' ', override) : null,
+        el('div', { class: 'row' }, ok,
+          el('button', { class: 'secondary', onclick: () => done(false) }, 'Annuler'))));
+    document.addEventListener('keydown', onKey);
+    document.body.append(overlay);
+    ok.focus();
+  });
+}
+
+const KIND_NAMES = Object.fromEntries(Object.entries(RzTx.KIND).map(([k, v]) => [v, k]));
+/** Kinds whose recipient is a key-derived wallet address (carries a checksum). */
+const CHECKSUMMED_KINDS = new Set([RzTx.KIND.TRANSFER, RzTx.KIND.TOKEN_TRANSFER]);
+
+/**
+ * Builds, signs and submits a transaction from the browser wallet. Every signature passes through a
+ * confirmation dialog, uses the protocol-constant decimal scale, and refuses a chainId that differs
+ * from the one pinned at the wallet's first signing (CLI parity: WalletCli.decideChainId).
+ */
 async function sendFromWallet(fields) {
   const seed = WalletStore.seed();
   if (!seed) throw new Error('aucune clé dans le wallet — ouvrez la page Wallet');
   const address = WalletStore.address();
-  const account = await api('/wallet?address=' + address);
+  const [account, stats] = await Promise.all([api('/wallet?address=' + address), api('/stats')]);
+  App.stats = stats;
+  if (scaleMismatch(stats)) {
+    throw new Error('le nœud annonce une échelle décimale ' + stats.decimalScaleFactor
+      + ' au lieu de ' + DECIMAL_SCALE + ' — signature refusée');
+  }
+  const chainId = Number(stats.chainId);
+  if (!Number.isInteger(chainId) || chainId < 0 || chainId > 0xffffffff) {
+    throw new Error('chainId du nœud invalide : ' + stats.chainId);
+  }
+  const pin = await Vault.pin();
+  if (pin && pin.chainId !== chainId) {
+    throw new Error('chainId du nœud : ' + chainId + ' (réseau ' + cleanChain(stats.network)
+      + ') ≠ chainId épinglé : ' + pin.chainId + ' (réseau ' + cleanChain(pin.network)
+      + ') — signature refusée. Réinitialisez l\'épinglage dans « Sécurité de la clé » si vous changez volontairement de réseau.');
+  }
+  const kind = fields.kind || RzTx.KIND.TRANSFER;
+  const amount = BigInt(fields.amount || 0n);
+  const fee = BigInt(fields.fee || 0n);
+  if (amount < 0n || fee < 0n) throw new Error('montant et frais doivent être positifs');
+  const nonce = BigInt(account.nextNonce) + BigInt(fields.nonceOffset || 0);
+  const badChecksum = CHECKSUMMED_KINDS.has(kind) && !RzTx.isValidAddressChecksum(fields.to);
+
+  const confirmed = await confirmDialog('Confirmer la signature', [
+    ['Type', KIND_NAMES[kind] || String(kind)],
+    ['Destinataire', fields.to],
+    ['Montant', fmtCoins(amount) + ' PDN (' + amount + ' unités de base)'],
+    ['Frais', fee + ' unités de base'],
+    ['Nonce', nonce.toString()],
+    ['Réseau', cleanChain(stats.network) + ' (chainId ' + chainId + ')'],
+  ], {
+    intro: pin ? null : 'Première signature : ce wallet sera lié à ce réseau. Réseau : '
+      + cleanChain(stats.network) + ' (chainId ' + chainId + ') — signer pour ce réseau ?',
+    override: badChecksum
+      ? 'La somme de contrôle de l\'adresse destinataire est invalide (faute de frappe probable). Envoyer quand même.'
+      : null,
+  });
+  if (!confirmed) throw new Error('envoi annulé');
+  if (!pin) await Vault.setPin({ chainId, network: stats.network });
+
   const built = RzTx.buildSigned({
     to: fields.to,
-    amount: fields.amount || 0n,
-    fee: fields.fee || 0n,
+    amount,
+    fee,
     timestamp: Date.now(),
-    chainId: App.stats.chainId,
-    nonce: BigInt(account.nextNonce) + BigInt(fields.nonceOffset || 0),
-    kind: fields.kind || RzTx.KIND.TRANSFER,
+    chainId,
+    nonce,
+    kind,
     data: fields.data,
     gasLimit: fields.gasLimit || 0,
     gasPrice: fields.gasPrice || 0,
   }, seed);
   await submitWire(built.wire);
   return built;
+}
+
+/* ---- idle auto-lock: the seed must not sit in memory behind an abandoned tab ---- */
+const IDLE_LOCK_MS = 15 * 60_000;
+const HIDDEN_LOCK_MS = 5 * 60_000;
+let lastActivity = Date.now();
+let hiddenSince = null;
+
+function installAutoLock() {
+  const touch = () => { lastActivity = Date.now(); };
+  for (const ev of ['pointerdown', 'keydown', 'wheel', 'touchstart']) {
+    window.addEventListener(ev, touch, { passive: true });
+  }
+  document.addEventListener('visibilitychange', () => {
+    hiddenSince = document.hidden ? Date.now() : null;
+    if (!document.hidden) checkAutoLock();
+  });
+  setInterval(checkAutoLock, 15_000);
+}
+
+function checkAutoLock() {
+  if (!WalletStore.seed()) return;
+  const now = Date.now();
+  if (now - lastActivity > IDLE_LOCK_MS || (hiddenSince !== null && now - hiddenSince > HIDDEN_LOCK_MS)) {
+    WalletStore.lock();
+    toast('Wallet verrouillé (inactivité).');
+    route();
+  }
 }
 
 /* ================= router ================= */
@@ -371,6 +507,7 @@ async function boot() {
       document.getElementById('peer-count').textContent = App.stats.peers + ' pair(s)';
     } catch (e) { /* transient */ }
   }, 5000);
+  installAutoLock();
   window.addEventListener('hashchange', route);
   route();
 }
@@ -837,6 +974,16 @@ async function renderWallet() {
   $view.append(el('h1', null, 'Wallet'),
     el('p', { class: 'sub' }, 'Les clés restent dans ce navigateur (IndexedDB, chiffrées par une passphrase) — le node ne les voit jamais. La signature Ed25519 est faite localement.'));
 
+  if (!isLoopbackHost(location.hostname)) {
+    $view.append(el('div', { class: 'callout warn' },
+      'Ce portefeuille s\'exécute dans le code servi par ce nœud. N\'y importez une clé que si vous contrôlez ce nœud.'));
+  }
+  if (scaleMismatch(App.stats)) {
+    $view.append(el('div', { class: 'callout warn' },
+      'Le nœud annonce une échelle décimale (' + App.stats.decimalScaleFactor + ') différente du protocole ('
+      + DECIMAL_SCALE + ') : la signature est désactivée. Ce nœud est défaillant ou hostile.'));
+  }
+
   // Non-secure context (plain-http remote): WebCrypto is unavailable and the served SPA may
   // have been substituted by a MITM — refuse wallet create/import/unlock entirely and leave the
   // dashboard read-only, rather than warn-and-continue with unencrypted key storage (audit F8).
@@ -892,7 +1039,7 @@ async function renderWallet() {
   // gesture, and push the user to encrypt it with a passphrase in the same step (audit:
   // cleartext vault auto-unlock). The seed stays on disk in cleartext until they choose.
   if (exists && !encrypted) {
-    const pass = el('input', { type: 'password', placeholder: 'Nouvelle passphrase' });
+    const pass = el('input', { type: 'password', placeholder: 'Nouvelle passphrase (12 caractères min.)' });
     const out = el('div');
     const unlockWith = async (encrypt) => {
       try {
@@ -931,8 +1078,8 @@ async function renderWallet() {
 
   // No wallet yet → create or import, encrypting with a passphrase when the context allows it.
   const importInput = el('input', { class: 'mono', placeholder: 'Clé privée (64 hex)…' });
-  const passCreate = el('input', { type: 'password', placeholder: 'Passphrase' });
-  const passImport = el('input', { type: 'password', placeholder: 'Passphrase' });
+  const passCreate = el('input', { type: 'password', placeholder: 'Passphrase (12 caractères min.)' });
+  const passImport = el('input', { type: 'password', placeholder: 'Passphrase (12 caractères min.)' });
   async function persistAndUnlock(seed, passphrase) {
     if (!passphrase) throw new Error('choisissez une passphrase');
     await Vault.store(seed, passphrase);
@@ -1005,7 +1152,7 @@ function renderWalletUnlocked() {
             const built = await sendFromWallet({
               to: toInput.value.trim(),
               amount: parseCoins(amountInput.value),
-              fee: BigInt(feeInput.value || '0'),
+              fee: RzTx.parseUint(feeInput.value || '0', 'frais'),
             });
             resultZone.replaceChildren(el('div', { class: 'result-box ok' },
               'Transaction acceptée par le mempool — txid ',
@@ -1025,7 +1172,7 @@ function renderWalletUnlocked() {
 /** Key-security controls: reveal (opt-in), (re)encrypt with a passphrase, forget. */
 function walletSecurityCard() {
   const seedReveal = el('div');
-  const passSet = el('input', { type: 'password', placeholder: 'Nouvelle passphrase' });
+  const passSet = el('input', { type: 'password', placeholder: 'Nouvelle passphrase (12 caractères min.)' });
   return el('details', null, el('summary', null, 'Sécurité de la clé'),
     el('div', { class: 'card' },
       el('p', { class: 'muted' }, 'La clé n’est jamais affichée automatiquement. Révélez-la seulement pour la sauvegarder hors-ligne.'),
@@ -1033,6 +1180,8 @@ function walletSecurityCard() {
         class: 'secondary', onclick: () => {
           seedReveal.replaceChildren(el('input', { class: 'mono', readonly: '',
             value: RzTx.bytesToHex(WalletStore.seed()) }));
+          // Auto-hide after 30 s; page timers are also torn down (and the node dropped) on navigation.
+          pageTimers.push(setTimeout(() => seedReveal.replaceChildren(), 30_000));
         },
       }, 'Révéler la clé privée'), seedReveal,
       CRYPTO_OK ? el('label', { class: 'f' }, '(Re)chiffrer / changer la passphrase') : null,
@@ -1047,6 +1196,12 @@ function walletSecurityCard() {
           } catch (e) { toast(e.message, true); }
         },
       }, 'Chiffrer') : null,
+      el('button', {
+        class: 'secondary', onclick: async () => {
+          await Vault.clearPin();
+          toast('Épinglage du réseau réinitialisé : la prochaine signature demandera confirmation.');
+        },
+      }, 'Réinitialiser l\'épinglage du réseau'),
       el('button', {
         class: 'danger', style: 'margin-top:10px', onclick: async () => {
           if (confirm('Oublier la clé de ce navigateur ? Sans sauvegarde, les fonds sont perdus.')) {
@@ -1074,7 +1229,8 @@ function tokensCard(address) {
           el('thead', null, el('tr', null, el('th', null, 'Token'), el('th', null, 'Id'),
             el('th', null, 'Solde (brut)'), el('th', null, 'Décimales'), el('th', null, 'Supply'))),
           el('tbody', null, res.tokens.map(t => el('tr', null,
-            el('td', null, t.symbol + ' — ' + t.name),
+            el('td', null, cleanChain(t.symbol) + ' — ' + cleanChain(t.name) + ' ',
+              el('span', { class: 'mono muted' }, '[' + short(t.id, 8) + ']')),
             el('td', { class: 'mono' }, el('a', {
               href: '#', onclick: ev => { ev.preventDefault(); transferId.value = t.id; },
             }, short(t.id, 8))),
@@ -1269,7 +1425,7 @@ function renderDeploy(zone, templateId) {
           const predicted = RzTx.deriveContractAddress(wallet, BigInt(account.nextNonce));
           const built = await sendFromWallet({
             to: EMPTY_ADDRESS, kind: RzTx.KIND.DEPLOY, data: code,
-            gasLimit: BigInt(gasInput.value || '0'),
+            gasLimit: RzTx.parseUint(gasInput.value || '0', 'gas'),
           });
           resultZone.replaceChildren(el('div', { class: 'result-box ok' },
             'DEPLOY soumis — txid ', el('span', { class: 'mono' }, short(built.txid, 16)),
@@ -1393,8 +1549,8 @@ function renderInteract(zone, presetAddress) {
             const built = await sendFromWallet({
               to: addrInput.value.trim(), kind: RzTx.KIND.CALL,
               data: buildPayload(),
-              amount: BigInt(valueInput.value || '0'),
-              gasLimit: BigInt(gasInput.value || '0'),
+              amount: RzTx.parseUint(valueInput.value || '0', 'valeur'),
+              gasLimit: RzTx.parseUint(gasInput.value || '0', 'gas'),
             });
             resultZone.replaceChildren(el('div', { class: 'result-box ok' },
               'CALL soumis — txid ', el('a', { href: '#/explorer/tx/' + built.txid, class: 'mono' },
@@ -1613,7 +1769,7 @@ function renderBoxes() {
   const listZone = el('div');
 
   function registerView(reg) {
-    const value = reg.type === 'STRING' ? '« ' + reg.string + ' »'
+    const value = reg.type === 'STRING' ? '« ' + cleanChain(reg.string) + ' »'
       : reg.type === 'I64' ? BigInt('0x' + (reg.hex || '0')).toString()
       : reg.type === 'BOOL' ? (reg.hex === '01' ? 'true' : 'false')
       : reg.hex;
@@ -1671,7 +1827,7 @@ function renderBoxes() {
   // from the current registers as JSON — crude but complete for v1.
   function editRegistersPrompt(b) {
     const current = (b.registers || []).map(r => ({
-      type: r.type, value: r.type === 'STRING' ? r.string : r.type === 'I64' ? BigInt('0x' + (r.hex || '0')).toString() : r.type === 'BOOL' ? (r.hex === '01' ? 'true' : 'false') : r.hex,
+      type: r.type, value: r.type === 'STRING' ? cleanChain(r.string) : r.type === 'I64' ? BigInt('0x' + (r.hex || '0')).toString() : r.type === 'BOOL' ? (r.hex === '01' ? 'true' : 'false') : r.hex,
     }));
     const raw = prompt('Registres (JSON [{type, value}], types: ' + REGISTER_TYPES.join('/') + ') :',
       JSON.stringify(current));
@@ -1750,7 +1906,7 @@ function renderBoxes() {
               const built = await sendFromWallet({
                 to: wallet, kind: RzTx.KIND.BOX_CREATE,
                 data: RzTx.encodeBoxCreate(currentRegs()),
-                amount: BigInt(valueInput.value || '0'),
+                amount: RzTx.parseUint(valueInput.value || '0', 'valeur'),
               });
               createOut.replaceChildren(el('div', { class: 'result-box ok' },
                 'BOX_CREATE soumis — txid ', el('span', { class: 'mono' }, short(built.txid, 14)),

@@ -82,7 +82,7 @@ public final class NodeService {
             ? sources.snapshots() : SnapshotService.none(engine);
         // Built here, not as a field initializer: the accessors capture `engine`, which the
         // compiler cannot prove initialized before the constructor body assigns it.
-        this.statsWindows = new StatsWindowService(engine::height, this::block);
+        this.statsWindows = new StatsWindowService(engine::height, engine::tipHash, this::block);
         // The /emission schedule memo (008 T032): ONE entry, keyed by decay-epoch index, built
         // for the boot height and replaced only when the index changes (see
         // {@link #noteAppliedHeight} / {@link #emissionSchedulePayload}). Size 1, deterministic

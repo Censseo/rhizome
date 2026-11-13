@@ -59,8 +59,19 @@ const RzTx = (() => {
     return s;
   }
 
+  /** Decimal digits only -> BigInt; rejects signs, hex, blanks and decimals (BigInt() accepts "-1", "0x10", " "). */
+  function parseUint(text, name) {
+    const t = String(text).trim();
+    if (!/^\d+$/.test(t)) throw new Error((name || 'valeur') + ' : entier positif attendu');
+    return BigInt(t);
+  }
+
+  /** Fixed-width big-endian; throws instead of wrapping when the value does not fit (or is negative). */
   function be(value, len) {
     let v = BigInt(value);
+    if (v < 0n || v >= (1n << (8n * BigInt(len)))) {
+      throw new Error('valeur hors limites pour ' + len + ' octets : ' + v);
+    }
     const out = new Uint8Array(len);
     for (let i = len - 1; i >= 0; i--) { out[i] = Number(v & 0xffn); v >>= 8n; }
     return out;
@@ -68,6 +79,7 @@ const RzTx = (() => {
 
   function le64(value) {
     let v = BigInt(value);
+    if (v < 0n || v >= (1n << 64n)) throw new Error('valeur hors limites pour 8 octets : ' + v);
     const out = new Uint8Array(8);
     for (let i = 0; i < 8; i++) { out[i] = Number(v & 0xffn); v >>= 8n; }
     return out;
@@ -94,6 +106,17 @@ const RzTx = (() => {
       throw new Error('pqCommitment: ' + PQ_COMMITMENT_SIZE + ' octets attendus');
     }
     return bytes;
+  }
+
+  /**
+   * True when the trailing 4 bytes equal SHA256(SHA256(version || body))[0..4] (PublicAddress.isValidChecksum).
+   * Only key-derived wallet addresses carry one; contract/box/token addresses are plain hashes.
+   */
+  function isValidAddressChecksum(hex) {
+    const b = hexToBytes(hex);
+    if (b.length !== 25) return false;
+    const sum = C.sha256(C.sha256(b.slice(0, 21))).slice(0, 4);
+    return sum.every((x, i) => x === b[21 + i]);
   }
 
   function addressBytes(hex) {
@@ -179,7 +202,12 @@ const RzTx = (() => {
    */
   function registerPayload(reg) {
     switch (reg.type) {
-      case 'I64': return be(BigInt(reg.value), 8);
+      case 'I64': {
+        // Signed 64-bit two's complement, matching the chain's integer convention.
+        const v = BigInt(reg.value);
+        if (v < -(1n << 63n) || v >= (1n << 63n)) throw new Error('I64 hors limites : ' + v);
+        return be(v < 0n ? v + (1n << 64n) : v, 8);
+      }
       case 'BOOL': return new Uint8Array([reg.value === true || reg.value === 'true' ? 1 : 0]);
       case 'ADDRESS': return addressBytes(reg.value);
       case 'HASH32': {
@@ -241,7 +269,9 @@ const RzTx = (() => {
     const sym = new TextEncoder().encode(symbol);
     const nm = new TextEncoder().encode(name);
     if (sym.length > 255 || nm.length > 255) throw new Error('symbole/nom trop long');
-    return C.concat(be(BigInt(amount), 8), new Uint8Array([Number(decimals) & 0xff]),
+    const dec = parseUint(decimals, 'décimales');
+    if (dec > 18n) throw new Error('décimales : 0 à 18');
+    return C.concat(be(parseUint(amount, 'supply'), 8), new Uint8Array([Number(dec)]),
       new Uint8Array([sym.length]), sym, new Uint8Array([nm.length]), nm);
   }
 
@@ -249,7 +279,7 @@ const RzTx = (() => {
   function encodeTokenAmount(tokenIdHex, amount) {
     const id = hexToBytes(tokenIdHex);
     if (id.length !== 32) throw new Error('token id: 32 octets attendus');
-    return C.concat(id, be(BigInt(amount), 8));
+    return C.concat(id, be(parseUint(amount, 'montant'), 8));
   }
 
   /** Token id for a TOKEN_MINT: SHA256(minter(25) || nonce(8 BE) || "rztoken"). */
@@ -259,7 +289,7 @@ const RzTx = (() => {
   }
 
   return {
-    KIND, REGISTER, SCHEME, PQ_COMMITMENT_SIZE, hexToBytes, bytesToHex, be, le64,
+    KIND, REGISTER, SCHEME, PQ_COMMITMENT_SIZE, hexToBytes, bytesToHex, be, le64, parseUint, isValidAddressChecksum,
     addressFromPublicKey, addressBytes, buildSigned, deriveContractAddress, buildCallPayload,
     encodeBoxCreate, encodeBoxUpdate, encodeBoxTarget, deriveBoxId, boxSerializedSize,
     encodeTokenMint, encodeTokenAmount, deriveTokenId,

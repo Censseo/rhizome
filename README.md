@@ -113,7 +113,10 @@ offline against your own node:
   txid or address.
 - **Wallet** — keys are generated and stored **in the browser** (localStorage)
   and transactions are signed locally in JS (Ed25519); the node never sees a
-  private key.
+  private key. The wallet code is, however, served by the node you open: only
+  import a key into the dashboard of a node you control (the page warns when
+  it is not loaded from localhost). Each signature asks for confirmation, and
+  a wallet is pinned to the chainId of its first signing.
 - **Contrats** — bundled contract templates (token, AMM, launchpad, agent
   wallet…) with their Rust sources, one-click deploy, typed call builder, and
   read-only queries (`POST /contract/query`) that execute the VM against a

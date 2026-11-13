@@ -230,4 +230,22 @@ class BrowserWalletVectorTest {
         assertEquals(JS_TOKEN_ID_FOR_AMOUNT, payload.tokenId().toHexString());
         assertEquals(500L, payload.amount());
     }
+
+    /**
+     * Z2-b: the dashboard's {@code isValidAddressChecksum} must agree with
+     * {@code PublicAddress.isValidChecksum}. The JS side was run under QuickJS against these
+     * same four vectors (valid classic, valid PQ, last byte flipped, version byte flipped) and
+     * returned true/true/false/false; here the Java side is pinned to the same answers.
+     */
+    @Test
+    void addressChecksumVectorsAgreeWithTheDashboard() {
+        String badTail = JS_ADDRESS.substring(0, 48) + "27";
+        String badVersion = "01" + JS_ADDRESS.substring(2);
+        assertTrue(rhizome.core.ledger.PublicAddress.of(JS_ADDRESS).isValidChecksum());
+        assertTrue(rhizome.core.ledger.PublicAddress.of(JS_PQ_ADDRESS).isValidChecksum());
+        org.junit.jupiter.api.Assertions.assertFalse(
+            rhizome.core.ledger.PublicAddress.of(badTail).isValidChecksum());
+        org.junit.jupiter.api.Assertions.assertFalse(
+            rhizome.core.ledger.PublicAddress.of(badVersion).isValidChecksum());
+    }
 }
