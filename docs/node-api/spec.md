@@ -46,7 +46,8 @@ aggregate token-bucket gate that sheds with HTTP 429 *before* doing the work.
 | Group | Routes |
 |---|---|
 | **P2P protocol** (stay open even with `RHIZOME_API_TOKEN`) | `/block`, `/blocks`, `/block_count`, `/headers`, `/sync`, `/total_work`, `/difficulty`, `/peers`, `/orphan`, `/state/snapshot/info`, `/state/snapshot/chunk` |
-| **Operator / state-changing** (gated by `RHIZOME_API_TOKEN`) | `/add_peer`, `/add_transaction`, `/add_transaction_json`, `/submit`, `/call_readonly`, `/scan/register`, `/scan/deregister` |
+| **Ingest** (`INGEST` guard: open even with `RHIZOME_API_TOKEN`; budgeted and strike-tracked instead) | `/add_transaction`, `/add_transaction_json`, `/submit` |
+| **Operator** (`OPERATOR` guard: gated by `RHIZOME_API_TOKEN`) | `/add_peer`, `/call_readonly`, `/scan/register`, `/scan/deregister` |
 | **Explorer / query** | `/transaction`, `/address_txs`, `/wallet`, `/mempool`, `/stats`, `/metrics`, `/info`, `/features`, `/contract`, `/logs`, `/logs/stream` |
 | **Boxes** | `/box`, `/boxes`, `/scan/boxes`, `/scan/list` |
 | **Tokens** | `/token`, `/tokens`, `/token_balance` |
@@ -80,12 +81,22 @@ aggregate token-bucket gate that sheds with HTTP 429 *before* doing the work.
 
 ### A-2 — API-token gating *(implemented)*
 
-When `RHIZOME_API_TOKEN` is set, state-changing and operator routes require
-`Authorization: Bearer <token>`; **P2P protocol endpoints stay open**.
+When `RHIZOME_API_TOKEN` is set, the **operator** routes (`/add_peer`, `/scan/*`, `/call_readonly`)
+require `Authorization: Bearer <token>`; **P2P protocol endpoints and the ingest routes stay open**.
 
-> Consequence worth stating loudly: with a token set, gossip peers must also present it on `/submit`
-> and `/add_transaction`. Set `RHIZOME_PEER_TOKEN` on **every** node of the deployment (with
-> `https://` peer URLs) or cross-node pushes are refused (401) and gossip stops converging.
+> `/submit` and `/add_transaction*` used to be token-gated, which was wrong for any public node: a
+> gossip-learned peer never receives `RHIZOME_PEER_TOKEN` (by design, networking P-8), so gating
+> ingest stopped gossip converging. Ingest is now defended by what a bearer cannot give: the
+> aggregate submit/mempool budgets, a per-client share of each (one client key, the IPv6 /48 or the
+> IPv4 address, may take at most 1/10 of a bucket per window), and the push-strike table, which now
+> also counts bodies that fail to *decode*. Under `RHIZOME_PROTECT_READS` every route but the
+> static shell, ingest included, still requires the bearer.
+
+Peer-sync serving routes (`/sync`, `/headers`, `/blocks`, `/block`, `/orphan`,
+`/state/snapshot/chunk`) meter against their own aggregate bucket, separate from the explorer-read
+bucket (`/stats`, `/metrics`, `/transaction`, `/address_txs`, `/boxes`, `/tokens`, `/contract`,
+`/wallet`, `/box`, `/token`, `/token_balance`, `/state`, `/state/proof`), so neither can shed the
+other.
 
 ### A-3 — Browser-surface hardening: CSRF + DNS-rebinding *(implemented)*
 

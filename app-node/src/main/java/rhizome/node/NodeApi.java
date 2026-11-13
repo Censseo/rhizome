@@ -252,7 +252,8 @@ public final class NodeApi {
      * {@code RHIZOME_PEER_TOKEN} to this node), so it suits private clusters, not public relays.
      * The static SPA/docs shell ({@code /}, {@code /dashboard/*}, {@code /docs/*}) stays open:
      * a browser cannot attach a bearer to a plain navigation, and the shell is static content
-     * with no chain data — the SPA's own API fetches carry the token and stay gated.
+     * with no chain data. Note the embedded SPA holds no bearer (it never sends one), so under
+     * protectReads its own API fetches are refused: use a private node with an external client.
      *
      * <p>{@code trustXff} ({@code RHIZOME_TRUST_XFF}) keys rate limits, push-strike tables and
      * scan ownership on the FIRST {@code X-Forwarded-For} hop instead of the socket address —
@@ -912,9 +913,9 @@ public final class NodeApi {
      * The state-changing/operator routes gated by {@code RHIZOME_API_TOKEN} when configured
      * (audit F4). The P2P protocol endpoints ({@code /sync}, {@code /headers}, {@code /blocks},
      * {@code /peers}, {@code /block_count}, {@code /total_work}) deliberately stay open so
-     * peering keeps working. Note {@code /submit} and {@code /add_transaction} ARE gated: they
-     * are the operator's block/tx ingest routes and already carry their own anti-DoS budgets —
-     * an operator enabling the token on a gossiping node must have peers present it too.
+     * peering keeps working. Note {@code /submit} and {@code /add_transaction*} are NOT gated
+     * ({@link RoutePolicy.Guard#INGEST}): gossip-learned peers never hold the token, so gating
+     * them stops convergence; they are defended by their budgets and the push-strike table.
      *
      * <p>With {@code protectReads} it instead gates EVERY route (any method) — the
      * RHIZOME_PROTECT_READS private-node switch: the read surface (stats, balances, SSE logs) is
@@ -934,7 +935,7 @@ public final class NodeApi {
             // route (the router answers 404 for it either way).
             return !RoutePolicy.guarded(route, RoutePolicy.Guard.SPA_SHELL);
         }
-        return RoutePolicy.guarded(route, RoutePolicy.Guard.TOKEN);
+        return RoutePolicy.guarded(route, RoutePolicy.Guard.OPERATOR);
     }
 
     /** Constant-time check of {@code Authorization: Bearer <token>} against the configured token. */

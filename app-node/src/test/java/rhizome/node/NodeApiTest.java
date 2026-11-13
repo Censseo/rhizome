@@ -456,8 +456,9 @@ class NodeApiTest {
         // otherwise an unauthenticated flood starves the authenticated ones.
         NodeService gated = new NodeService(engine, mempool, AdmissionControl.builder()
             .submitPow(new RateLimiter(1, 3_600_000, 1)).build());
+        // protectReads: /submit is token-gated only in private mode (INGEST is open otherwise).
         var s = NodeApi.servlet(eventloop, gated, new RateLimiter(1_000_000, 60_000, 100),
-            null, null, "s3cret");
+            null, null, "s3cret", null, true, false);
         var auth = io.activej.http.HttpHeaders.AUTHORIZATION;
 
         assertEquals(401, callWith(s, HttpRequest.post("http://x/submit")

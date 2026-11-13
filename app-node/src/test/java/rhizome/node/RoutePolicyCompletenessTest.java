@@ -16,6 +16,7 @@ import java.util.regex.Pattern;
 import rhizome.testsupport.JavaSource;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -141,8 +142,10 @@ class RoutePolicyCompletenessTest {
             + "/contract, /wallet, /box, /token, /token_balance, /state, /state/proof");
         assertEquals(6, count(RoutePolicy.Guard.SYNC_BUDGET),
             "/sync, /headers, /blocks, /block, /orphan, /state/snapshot/chunk: their own bucket");
-        assertEquals(7, count(RoutePolicy.Guard.TOKEN),
-            "exactly the POST routes; reads are gated only under protectReads");
+        assertEquals(4, count(RoutePolicy.Guard.OPERATOR),
+            "/add_peer, /scan/register, /scan/deregister, /call_readonly; reads are gated only under protectReads");
+        assertEquals(3, count(RoutePolicy.Guard.INGEST),
+            "/submit and /add_transaction*: open under a token, budgeted and strike-tracked instead");
         assertEquals(4, count(RoutePolicy.Guard.SPA_SHELL),
             "the static shell a browser navigation cannot bear a token for");
         assertEquals(3, count(RoutePolicy.Guard.PUSH_SHED), "the two tx ingests plus /submit");
@@ -153,9 +156,26 @@ class RoutePolicyCompletenessTest {
         // Reads are public by design unless protectReads is on; a GET landing in the TOKEN set
         // would silently close the explorer for every unauthenticated client.
         for (RoutePolicy.Route r : RoutePolicy.ROUTES) {
-            if (r.has(RoutePolicy.Guard.TOKEN)) {
+            if (r.has(RoutePolicy.Guard.OPERATOR)) {
                 assertEquals(io.activej.http.HttpMethod.POST, r.method(),
                     r.path() + " is bearer-gated, so it must be a state-changing POST");
+            }
+        }
+    }
+
+    /**
+     * API-15 — Use the open ingest routes as an unmetered channel, or gate them behind a token
+     * gossip peers cannot hold: every INGEST route is budgeted and strike-tracked and never
+     * OPERATOR.
+     */
+    @Test
+    void everyIngestRouteIsBudgetedAndStrikeTrackedAndNotOperatorGated() {
+        for (RoutePolicy.Route r : RoutePolicy.ROUTES) {
+            if (r.has(RoutePolicy.Guard.INGEST)) {
+                assertTrue(r.has(RoutePolicy.Guard.PUSH_SHED), r.path() + " must be strike-shed");
+                assertTrue(r.has(RoutePolicy.Guard.SUBMIT_BUDGET) || r.has(RoutePolicy.Guard.MEMPOOL_BUDGET),
+                    r.path() + " must be budgeted");
+                assertFalse(r.has(RoutePolicy.Guard.OPERATOR), r.path() + " is open, not operator-gated");
             }
         }
     }
