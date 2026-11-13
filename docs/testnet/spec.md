@@ -270,6 +270,25 @@ Deployment-shaped gaps in the `staging` story specifically — narrower than
 - **No `staging` faucet is running.** O-6 describes real, working code with no live deployment
   behind it yet, for the same reason as the network itself.
 
+## Genesis allocation custody
+
+Source: [genesis/rhizome-staging.json](../../lib-core/src/main/resources/genesis/rhizome-staging.json),
+`totalSupply` `1000000000000` base units, three balances:
+
+| Address | Balance (base units) | Share | Holder |
+|---|---|---|---|
+| `00000000000000000000000000000000000000000000000000` | `800000000000` | 80% | none — see below |
+| `000AC8B30AF4D0DF1E8130D09AA891A454844C6B1BF2E5883E` | `100000000000` | 10% | TODO maintainer: name the holder of `000AC8B30AF4D0DF1E8130D09AA891A454844C6B1BF2E5883E` |
+| `003AB03C20DFE00E66EBD887007D8CC7579B109D59CA134E36` | `100000000000` | 10% | TODO maintainer: name the holder of `003AB03C20DFE00E66EBD887007D8CC7579B109D59CA134E36` |
+
+- The all-zero address is the unspendable empty address, as `docs/state/spec.md` describes it.
+  No private key for it is known. TODO maintainer: confirm that no key exists or was ever derived for it.
+- The file does not say who holds the keys for the two 10% addresses. Do not infer a holder from
+  the address.
+- The provisional mainnet artifact (`genesis/rhizome-mainnet.json`, `"source": "genesis-allocation:provisional"`,
+  the whole supply at the all-zero address) must not ship in any release that accepts
+  `RHIZOME_NETWORK=mainnet`.
+
 ## References
 
 - `README.md` — "Run a node" (the `RHIZOME_NETWORK` table entry for `staging`) and

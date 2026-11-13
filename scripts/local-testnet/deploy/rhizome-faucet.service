@@ -48,17 +48,17 @@ StartLimitBurst=5
 Type=simple
 
 # FAUCET_NODE_URL, FAUCET_KEYFILE, FAUCET_LISTEN_PORT, FAUCET_DRIP_AMOUNT, FAUCET_RATE_LIMIT —
-# guessed names, matching this repo's RHIZOME_*-style all-caps-with-underscores convention.
-# No real faucet.py to confirm these flag/variable names against — see the header.
+# variable names are this unit's own; the script reads RHIZOME_FAUCET_* env vars instead, so
+# ExecStart below passes every value as a flag (flags are verified against faucet.py's argparse).
 EnvironmentFile=/etc/rhizome/faucet.env
 
 # Guessed install path, matching rhizome-node.service's /usr/local/bin convention. A Python
 # script (not a compiled binary) is assumed because every existing tool in
 # scripts/local-testnet/tools/ is Python and this repo has no Rust/Go toolchain in play here.
 ExecStart=/usr/bin/python3 /opt/rhizome/faucet/faucet.py \
-    --node "${FAUCET_NODE_URL}" \
-    --keyfile "${FAUCET_KEYFILE}" \
-    --listen-port "${FAUCET_LISTEN_PORT}"
+    --node-url "${FAUCET_NODE_URL}" \
+    --key-file "${FAUCET_KEYFILE}" \
+    --port "${FAUCET_LISTEN_PORT}"
 
 Restart=on-failure
 RestartSec=5s
