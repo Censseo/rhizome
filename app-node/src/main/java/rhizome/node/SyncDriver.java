@@ -57,6 +57,9 @@ final class SyncDriver {
     private static final long PROGRESS_WARN_ROUNDS = 6;
 
     private final ChainEngine engine;
+    // One for the driver's lifetime: its DifficultyMemo is synchronized and self-invalidating, and
+    // a fresh synchronizer per round threw the memo away, re-folding difficulty from genesis.
+    private final HeaderSynchronizer synchronizer;
     private final PeerRegistry registry;
     private final NodeService service;
     private final boolean blockPrivatePeers;
@@ -81,6 +84,7 @@ final class SyncDriver {
                boolean blockPrivatePeers, PeerExchange exchange, PeerTokenPolicy peerTokenPolicy,
                long syncPeriodMs) {
         this.engine = engine;
+        this.synchronizer = new HeaderSynchronizer(engine);
         this.registry = registry;
         this.service = service;
         this.blockPrivatePeers = blockPrivatePeers;
@@ -91,9 +95,6 @@ final class SyncDriver {
 
     /** One sync round across all known peers; peer failures are isolated. */
     void syncRound() {
-        // Bound once: this runs on the single sync thread, which the scheduler only arms after
-        // start() has published the graph, so the collaborators cannot change under the round.
-        var synchronizer = new HeaderSynchronizer(engine);
         java.util.List<String> peers = registry.snapshot();
         int n = peers.size();
         if (n == 0) {

@@ -105,7 +105,12 @@ public final class ChainSynchronizer {
             // — the round budget is only checked BETWEEN peers, never mid-sync (audit: sync
             // window). Returning EXTENDED after a capped window lets the next round continue.
             long to = Math.min(peer.height(), forkHeight + HeaderSynchronizer.MAX_HEADER_WINDOW);
-            return applyRange(peer, forkHeight + 1, to) ? Result.EXTENDED : Result.PEER_INVALID;
+            ExecutionStatus[] rejected = new ExecutionStatus[1];
+            if (applyRange(peer, forkHeight + 1, to, rejected)) {
+                return Result.EXTENDED;
+            }
+            // Gossip or the local producer landing this height first is a race, not misbehaviour.
+            return isApplyRace(rejected[0]) ? Result.NO_CHANGE : Result.PEER_INVALID;
         }
         return reorg(peer, forkHeight, peerTotal);
     }
@@ -152,7 +157,12 @@ public final class ChainSynchronizer {
      * {@link PeerUnavailableException} and {@link LocalSaturationException} differently from a
      * malformed response), so the cause is rethrown unwrapped rather than folded into a boolean.
      */
-    private boolean applyRange(PeerSource peer, long from, long to) {
+    /** A rejection caused by our own node adding (or being mid-reorg at) that height, not by the peer. */
+    static boolean isApplyRace(ExecutionStatus status) {
+        return status == ExecutionStatus.INVALID_BLOCK_ID || status == ExecutionStatus.IS_SYNCING;
+    }
+
+    private boolean applyRange(PeerSource peer, long from, long to, ExecutionStatus[] rejected) {
         return BodyPipeline.run("rhizome-block-fetch", peer, from, to,
             cause -> {
                 if (cause instanceof RuntimeException runtime) {
@@ -162,7 +172,9 @@ public final class ChainSynchronizer {
             },
             blocks -> {
                 for (Block block : blocks) {
-                    if (applyWithUncleFetch(engine, peer, block, engine::addBlock) != ExecutionStatus.SUCCESS) {
+                    ExecutionStatus status = applyWithUncleFetch(engine, peer, block, engine::addBlock);
+                    if (status != ExecutionStatus.SUCCESS) {
+                        rejected[0] = status;
                         return false;
                     }
                 }
@@ -372,7 +384,8 @@ public final class ChainSynchronizer {
             // ends the best-effort extension early.
             try {
                 applyRange(peer, prefetchEnd + 1,
-                    Math.min(peer.height(), prefetchEnd + HeaderSynchronizer.MAX_HEADER_WINDOW));
+                    Math.min(peer.height(), prefetchEnd + HeaderSynchronizer.MAX_HEADER_WINDOW),
+                    new ExecutionStatus[1]);
             } catch (PeerUnavailableException unavailable) {
                 // The reorg above is COMMITTED and adopted; this tail is best-effort only. Letting a
                 // transport failure here (the peer going 503 mid-extension, likely now that it reorgs

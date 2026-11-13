@@ -38,7 +38,12 @@ final class DifficultyMemo {
                                              long nowMillis) {
         HeaderChain.Result result =
             HeaderChain.validate(params, trustedHeaderAt, forkHeight, candidates, nowMillis, memo);
-        memo.headMap(forkHeight, true).clear();
+        // Keep the floor entry (the greatest checkpoint at or below the fork): it is the resume
+        // point the next round starts from, so dropping it re-folded from genesis every round.
+        Long resume = memo.floorKey(forkHeight);
+        if (resume != null) {
+            memo.headMap(resume, false).clear();
+        }
         return result;
     }
 }

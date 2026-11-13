@@ -175,8 +175,13 @@ public final class HeaderSynchronizer {
 
         // --- Bodies: fetch, verify each against its validated header, apply ---
         if (forkHeight == engine.height()) {
-            return applyBodies(peer, forkHeight, branch)
-                ? ChainSynchronizer.Result.EXTENDED : ChainSynchronizer.Result.PEER_INVALID;
+            ExecutionStatus[] rejected = new ExecutionStatus[1];
+            if (applyBodies(peer, forkHeight, branch, rejected)) {
+                return ChainSynchronizer.Result.EXTENDED;
+            }
+            // Gossip or the local producer landing this height first is a race, not misbehaviour.
+            return ChainSynchronizer.isApplyRace(rejected[0])
+                ? ChainSynchronizer.Result.NO_CHANGE : ChainSynchronizer.Result.PEER_INVALID;
         }
         return reorg(peer, forkHeight, branch);
     }
@@ -231,7 +236,8 @@ public final class HeaderSynchronizer {
         return out;
     }
 
-    private boolean applyBodies(PeerSource peer, long forkHeight, List<BlockHeader> branch) {
+    private boolean applyBodies(PeerSource peer, long forkHeight, List<BlockHeader> branch,
+                                ExecutionStatus[] rejected) {
         return BodyPipeline.run("rhizome-body-fetch", peer, forkHeight + 1, forkHeight + branch.size(),
             cause -> {
                 if (cause instanceof LocalSaturationException saturated) {
@@ -249,7 +255,10 @@ public final class HeaderSynchronizer {
                 for (Block block : blocks) {
                     long idx = block.id() - forkHeight - 1;
                     if (idx < 0 || idx >= branch.size()
-                        || !block.hash().equals(branch.get((int) idx).hash())) {
+                        || !block.hash().equals(branch.get((int) idx).hash())
+                        // The hash does not commit the nonce, and addValidatedBody skips PoW: a
+                        // body carrying a forged nonce under a proven header would be persisted.
+                        || !block.nonce().equals(branch.get((int) idx).nonce())) {
                         return false; // body does not match its validated header
                     }
                     // The header at this index was PoW-verified by HeaderChain.validate and the body's
@@ -262,6 +271,7 @@ public final class HeaderSynchronizer {
                         ChainSynchronizer.applyWithUncleFetch(engine, peer, block, engine::addValidatedBody);
                     if (applyStatus != ExecutionStatus.SUCCESS) {
                         log.warn("body apply rejected at height {}: {}", block.id(), applyStatus);
+                        rejected[0] = applyStatus;
                         return false;
                     }
                 }
@@ -342,7 +352,7 @@ public final class HeaderSynchronizer {
         // Phase 2 — fetch and apply the peer bodies. Network I/O, so deliberately OUTSIDE the lock.
         boolean applied;
         try {
-            applied = applyBodies(peer, forkHeight, branch);
+            applied = applyBodies(peer, forkHeight, branch, new ExecutionStatus[1]);
         } catch (RuntimeException | Error abandoned) {
             // applyBodies RE-THROWS the failures that are not the peer's protocol fault — local
             // transport saturation, and (since the reorg-window 503) a peer that goes mid-reorg
